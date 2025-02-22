@@ -51,48 +51,69 @@ class PegasusApp:
     """
 
     def __init__(self):
-        """
-        Method that initializes the PegasusApp and is used to setup the simulation environment.
-        """
+        """Initialize PegasusApp with enhanced error checking"""
+        try:
+            # Initialize timeline
+            self.timeline = omni.timeline.get_timeline_interface()
+            carb.log_warn("Timeline interface initialized")
 
-        # Acquire the timeline that will be used to start/stop the simulation
-        self.timeline = omni.timeline.get_timeline_interface()
+            # Initialize Pegasus Interface with timeout
+            self.pg = PegasusInterface()
+            carb.log_warn("Pegasus Interface initialized")
 
-        # Start the Pegasus Interface
-        self.pg = PegasusInterface()
+            # Initialize world with error checking
+            try:
+                self.pg._world = World(**self.pg._world_settings)
+                self.world = self.pg.world
+                carb.log_warn("World initialization successful")
+            except Exception as e:
+                carb.log_error(f"World initialization failed: {str(e)}")
+                raise
 
-        # Acquire the World, .i.e, the singleton that controls that is a one stop shop for setting up physics, 
-        # spawning asset primitives, etc.
-        self.pg._world = World(**self.pg._world_settings)
-        self.world = self.pg.world
+            # Load environment with timeout
+            try:
+                self.pg.load_environment(SIMULATION_ENVIRONMENTS["Plane with Light"])
+                carb.log_warn("Environment loaded successfully")
+            except Exception as e:
+                carb.log_error(f"Environment loading failed: {str(e)}")
+                raise
 
-        # Launch one of the worlds provided by NVIDIA
-        self.pg.load_environment(SIMULATION_ENVIRONMENTS["Plane with Light"])
-        # self.pg.load_environment(SIMULATION_ENVIRONMENTS["Flight"])
-        # self.pg.load_environment(SIMULATION_ENVIRONMENTS["Flight Flat"])
-        # self.pg.load_environment(SIMULATION_ENVIRONMENTS["Flight with Collision"])
-        # self.pg.load_asset(SIMULATION_ENVIRONMENTS["Flight Flat"],  "/World/layout")
-        # self.world_offset_x, self.world_offset_y, self.world_offset_z = -599396.0, -120472.0, -71066.0
-        self.world_offset_x = 0.0
-        self.world_offset_y = 0.0
-        self.world_offset_z = 0.0
-        # self.world_offset_x = -606344.799574
-        # self.world_offset_y = -1586.657862
-        # self.world_offset_z = 1395514.256701
-        # self.world.reset()
-        self.create_landmarks()
+            # self.pg.load_environment(SIMULATION_ENVIRONMENTS["Flight"])
+            # self.pg.load_environment(SIMULATION_ENVIRONMENTS["Flight Flat"])
+            # self.pg.load_environment(SIMULATION_ENVIRONMENTS["Flight with Collision"])
+            # self.pg.load_asset(SIMULATION_ENVIRONMENTS["Flight Flat"],  "/World/layout")
+            # self.world_offset_x, self.world_offset_y, self.world_offset_z = -599396.0, -120472.0, -71066.0
+            self.world_offset_x = 0.0
+            self.world_offset_y = 0.0
+            self.world_offset_z = 0.0
+            # self.world_offset_x = -606344.799574
+            # self.world_offset_y = -1586.657862
+            # self.world_offset_z = 1395514.256701
+            # self.world.reset()
+            self.create_landmarks()
         
-        self.namespace = "/px4_"
-        # Spawn 5 vehicles with the PX4 control backend in the simulation, separated by 1.0 m along the x-axis
-        for i in range(3):
-            self.vehicle_factory(i+1, gap_x_axis=1.0)
-        
+            self.namespace = "/px4_"
+            # Spawn 5 vehicles with the PX4 control backend in the simulation, separated by 1.0 m along the x-axis
+            for i in range(3):
+                try:
+                    self.vehicle_factory(i+1, gap_x_axis=1.0)
+                    carb.log_warn(f"Vehicle {i+1} spawned successfully")
+                except Exception as e:
+                    carb.log_error(f"Failed to spawn vehicle {i+1}: {str(e)}")
+                    raise            
 
-        # Reset the simulation environment so that all articulations (aka robots) are initialized
-        self.world.reset()
+            try:
+                self.world.reset()
+                carb.log_warn("World reset successful")
+            except Exception as e:
+                carb.log_error(f"World reset failed: {str(e)}")
+                raise
+        finally:
+            carb.log_warn("PegasusApp initialization complete")
 
-        # Auxiliar variable for the timeline callback example
         self.stop_sim = False
+        carb.log_warn("PegasusApp initialization complete")
+
 
     def create_landmarks(self):
         from omni.isaac.core.objects import DynamicCuboid

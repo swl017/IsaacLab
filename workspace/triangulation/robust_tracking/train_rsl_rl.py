@@ -16,31 +16,37 @@ from omni.isaac.lab.app import AppLauncher
 import cli_args  # isort: skip
 
 
-# add argparse arguments
-parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
-parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
-parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
-parser.add_argument("--video_interval", type=int, default=2000, help="Interval between video recordings (in steps).")
-parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
-parser.add_argument("--task", type=str, default=None, help="Name of the task.")
-parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
-parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
-# append RSL-RL cli arguments
-cli_args.add_rsl_rl_args(parser)
-# append AppLauncher cli args
-AppLauncher.add_app_launcher_args(parser)
-args_cli, hydra_args = parser.parse_known_args()
+# # add argparse arguments
+# parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
+# parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
+# parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
+# parser.add_argument("--video_interval", type=int, default=2000, help="Interval between video recordings (in steps).")
+# parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
+# parser.add_argument("--task", type=str, default=None, help="Name of the task.")
+# parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
+# parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
+# # append RSL-RL cli arguments
+# cli_args.add_rsl_rl_args(parser)
+# # append AppLauncher cli args
+# AppLauncher.add_app_launcher_args(parser)
+# args_cli, hydra_args = parser.parse_known_args()
 
-# always enable cameras to record video
-if args_cli.video:
-    args_cli.enable_cameras = True
+# # always enable cameras to record video
+# if args_cli.video:
+#     args_cli.enable_cameras = True
 
-# clear out sys.argv for Hydra
-sys.argv = [sys.argv[0]] + hydra_args
+# # clear out sys.argv for Hydra
+# sys.argv = [sys.argv[0]] + hydra_args
 
-# launch omniverse app
-app_launcher = AppLauncher(args_cli)
-simulation_app = app_launcher.app
+# # launch omniverse app
+# app_launcher = AppLauncher(args_cli)
+# simulation_app = app_launcher.app
+"""Modified for PegasusApp"""
+from robust_tracking.simulator.launcher import simulation_app, args_cli
+from robust_tracking.simulator.pegasus import PegasusApp
+simulation_app = simulation_app
+args_cli = args_cli
+
 
 """Rest everything follows."""
 
@@ -72,6 +78,20 @@ torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
 
 
+"""Custom code"""
+import omni.timeline
+import robust_tracking.agents as agents
+import robust_tracking.ros2.ros2_node as ros2_node
+from robust_tracking.ros2.ros2_node import ROS2SpinCallback, ISAACStepCallback
+import rclpy
+
+
+num_ego = 2
+num_target = 1
+
+pg_app = PegasusApp()
+rosnode = ros2_node.ROS2Node(num_ego, num_target)
+
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlOnPolicyRunnerCfg):
     """Train with RSL-RL agent."""
@@ -97,8 +117,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         log_dir += f"_{agent_cfg.run_name}"
     log_dir = os.path.join(log_root_path, log_dir)
 
+    ros_kwargs = {
+        "ros2_node": rosnode,
+        "pg_app": pg_app,
+    }
+
     # create isaac environment
-    env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None, **ros_kwargs)
 
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv):

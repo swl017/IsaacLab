@@ -23,21 +23,26 @@ class ROS2Node(Node):
         # self.node = rclpy.create_node("rl_node")
         super().__init__("rl_node")
 
-        qos_profile_trainsient = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
+        self.rate = self.create_rate(10)
+
+        # Create more reliable QoS profile for critical messages
+        self.qos_reliable = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
             history=HistoryPolicy.KEEP_LAST,
-            depth=1
+            depth=10
         )
-        qos_profile_durability = QoSProfile(
+        
+        # Less strict QoS for high-frequency data
+        self.qos_sensor = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
             history=HistoryPolicy.KEEP_LAST,
             depth=1
         )
-
         class ROSAgent:
-            def __init__(self):
+            def __init__(self, id=0):
+                self.id = id
                 self.cmd_vel_pub = None
                 self.cmd_vel = None
                 self.gimbal_command_pub = None
@@ -59,6 +64,7 @@ class ROS2Node(Node):
                 self.gimbal_state = msg
             def odom_sub_callback(self, msg):
                 self.odom = msg
+                carb.log_warn(f"Odom {self.id}: {self.odom.pose.pose.position.x}")
             def detection_sub_callback(self, msg):
                 self.detection = msg
             def camera_info_sub_callback(self, msg):
@@ -86,9 +92,10 @@ class ROS2Node(Node):
                     self.cmd_vel_pub.publish(self.cmd_vel if self.cmd_vel is not None else TwistStamped())
                 if self.gimbal_command_pub is not None:
                     self.gimbal_command_pub.publish(self.gimbal_command if self.cmd_vel is not None else Vector3())
-            def is_ready(self):
-                carb.log_warn(f"Odom: {self.odom.pose.pose.position.x if self.odom is not None else -1}")
-                carb.log_warn(f"Waypoint: {self.waypoint.pose.pose.position.x if self.waypoint is not None else -1}")
+            def is_ready(self, i=0):
+                # carb.log_warn(f"Drone: {i}")
+                # carb.log_warn(f"Odom: {self.odom.pose.pose.position.x if self.odom is not None else -1}")
+                # carb.log_warn(f"Waypoint: {self.waypoint.pose.pose.position.x if self.waypoint is not None else -1}")
                 if self.odom is not None and self.waypoint is not None:
                     dist = np.linalg.norm(np.array([self.odom.pose.pose.position.x, self.odom.pose.pose.position.y, self.odom.pose.pose.position.z]) - np.array([self.waypoint.pose.pose.position.x, self.waypoint.pose.pose.position.y, self.waypoint.pose.pose.position.z]))
                     yaw_error_deg = np.rad2deg(np.arccos(2 * (self.odom.pose.pose.orientation.w**2) - 1)) - np.rad2deg(np.arccos(2 * (self.waypoint.pose.pose.orientation.w**2) - 1))
@@ -105,30 +112,23 @@ class ROS2Node(Node):
         self.num_agents = self.num_ego_agents + self.num_target_agents
         self.drones = []
         for i in range(self.num_agents):
-            self.drones += [ROSAgent()]
-            self.drones[i].cmd_vel_pub = self.create_publisher(TwistStamped, f"/px4_{i+1}/cmd_vel", qos_profile_trainsient)
-            self.drones[i].gimbal_command_pub = self.create_publisher(Vector3, f"/px4_{i+1}/gimbal_command_rpy_deg", qos_profile_trainsient)
-            self.drones[i].gimbal_state_sub = self.create_subscription(Vector3, f"/px4_{i+1}/gimbal_state_rpy_rad", self.drones[i].gimbal_state_sub_callback, qos_profile_durability)
-            self.drones[i].odom_sub = self.create_subscription(Odometry, f"/px4_{i+1}/local_odom", self.drones[i].odom_sub_callback, qos_profile_durability)
-            self.drones[i].waypoint_sub = self.create_subscription(Odometry, f"/px4_{i+1}/initial_waypoint", self.drones[i].waypoint_sub_callback, qos_profile_durability)
-            self.drones[i].detection_sub = self.create_subscription(Detection2DArray, f"/px4_{i+1}/yolo_result_vision", self.drones[i].detection_sub_callback, qos_profile_durability)
-            self.drones[i].camera_info_sub = self.create_subscription(CameraInfo, f"/px4_{i+1}/camera/color/camera_info", self.drones[i].camera_info_sub_callback, qos_profile_durability)
+            self.drones += [ROSAgent(i)]
+            self.drones[i].cmd_vel_pub = self.create_publisher(TwistStamped, f"/px4_{i+1}/cmd_vel", self.qos_reliable)
+            self.drones[i].gimbal_command_pub = self.create_publisher(Vector3, f"/px4_{i+1}/gimbal_command_rpy_deg", self.qos_reliable)
+            self.drones[i].gimbal_state_sub = self.create_subscription(Vector3, f"/px4_{i+1}/gimbal_state_rpy_rad", self.drones[i].gimbal_state_sub_callback, self.qos_sensor)
+            self.drones[i].odom_sub = self.create_subscription(Odometry, f"/px4_{i+1}/local_odom", self.drones[i].odom_sub_callback, self.qos_sensor)
+            self.drones[i].waypoint_sub = self.create_subscription(Odometry, f"/px4_{i+1}/initial_waypoint", self.drones[i].waypoint_sub_callback, self.qos_sensor)
+            self.drones[i].detection_sub = self.create_subscription(Detection2DArray, f"/px4_{i+1}/yolo_result_vision", self.drones[i].detection_sub_callback, self.qos_sensor)
+            self.drones[i].camera_info_sub = self.create_subscription(CameraInfo, f"/px4_{i+1}/camera/color/camera_info", self.drones[i].camera_info_sub_callback, self.qos_sensor)
 
         self.ego_agents = self.drones[:self.num_ego_agents]
         self.target_agents = self.drones[self.num_ego_agents:self.num_agents]
 
-        qos_profile = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            durability=DurabilityPolicy.VOLATILE,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1
-        )
-
-        self.timer = self.create_timer(10.0, self.timer_callback)
-        self.triangulation_sub = self.create_subscription(Odometry, "/target/odom/triangulation", self.triangulation_sub_callback, qos_profile)
+        # self.timer = self.create_timer(10.0, self.timer_callback)
+        self.triangulation_sub = self.create_subscription(Odometry, "/target/odom/triangulation", self.triangulation_sub_callback, self.qos_sensor)
         self.triangulation = None
-        self.clock_sub = self.create_subscription(Clock, "/clock", self.clock_sub_callback, qos_profile)
-        self.clock = Clock()
+        self.clock_sub = self.create_subscription(Clock, "/clock", self.clock_sub_callback, self.qos_sensor)
+        self.clock = None
         self.last_clock = Clock()
         self.last_triangulation = None
         self.target_odom_gt = None
@@ -140,6 +140,7 @@ class ROS2Node(Node):
 
     def clock_sub_callback(self, msg):
         self.clock = msg
+        carb.log_warn(f"Clock: {self.clock.clock.sec + self.clock.clock.nanosec * 1e-9 if self.clock is not None else -1}")
 
     def get_message_age(self, msg):
         if msg is None or msg.header.stamp is None:
@@ -150,6 +151,7 @@ class ROS2Node(Node):
     
     def triangulation_sub_callback(self, msg):
         self.triangulation = msg
+        carb.log_warn(f"triangulation: {self.triangulation.pose.pose.position.x}")
 
     def get_target_odom_gt(self):
         return self.drones[-1].odom
@@ -174,18 +176,23 @@ class ROS2Node(Node):
     def spin_once(self):
         rclpy.spin_once(self)
 
-    def is_node_ready(self, world):
-        while rclpy.ok():
-            rclpy.spin_once(self)
-            world.step(render=True)
-            ready = True
-            for drone in self.drones:
-                if not drone.is_ready():
-                    ready = False 
-            if ready:
-                break
+    def is_node_ready(self):
+        carb.log_warn("Checking if node is ready")
+        # carb.log_warn(f"Curr time: {self.get_clock().now()}")
+        # carb.log_warn(f"Clock: {self.clock.clock.sec + self.clock.clock.nanosec * 1e-9 if self.clock is not None else -1}")
+        ready_drone = False
+        ready_triangulation = False
+        for i in range(len(self.drones)):
+            if not self.drones[i].is_ready(i):
+                pass
             else:
-                continue
+                ready_drone = True
+        ready_triangulation = True if self.triangulation is not None else False
+        return ready_drone and ready_triangulation
+
+
+    def ok(self):
+        return rclpy.ok()
 
     def shutdown(self):
         self.destroy_node()

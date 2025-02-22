@@ -23,18 +23,18 @@ class DroneEnv(gym.Env):
         self.observation_space = spaces.Dict({
             f'drone{i}': spaces.Dict({
                 # Local state observations
-                'orientation': spaces.Box(low=-1.0, high=1.0, shape=(4,)),  # quaternion
-                'angular_velocity': spaces.Box(low=-np.inf, high=np.inf, shape=(3,)),
-                'linear_velocity': spaces.Box(low=-np.inf, high=np.inf, shape=(3,)),
-                'gimbal_orientation': spaces.Box(low=-np.pi, high=np.pi, shape=(3,)),
+                'orientation': spaces.Box(low=-1.0, high=1.0, shape=(4,)),  # quaternion # 4
+                'angular_velocity': spaces.Box(low=-np.inf, high=np.inf, shape=(3,)), # 3
+                'linear_velocity': spaces.Box(low=-np.inf, high=np.inf, shape=(3,)), # 3
+                'gimbal_orientation': spaces.Box(low=-np.pi, high=np.pi, shape=(3,)), # 2
                 
                 # Target-related observations
-                'target_in_camera': spaces.Box(low=-1.0, high=1.0, shape=(2,)),  # Normalized image coordinates
-                'target_visible': spaces.Box(low=0, high=1, shape=(1,)),
-                'target_relative_pos': spaces.Box(low=-np.inf, high=np.inf, shape=(3,)),
+                'target_in_camera': spaces.Box(low=-1.0, high=1.0, shape=(2,)),  # Normalized image coordinates # 2
+                'target_visible': spaces.Box(low=0, high=1, shape=(1,)), # 2
+                'target_relative_pos': spaces.Box(low=-np.inf, high=np.inf, shape=(3,)), # 3
                 
                 # Formation-related observations
-                'other_drone_relative': spaces.Box(low=-np.inf, high=np.inf, shape=(3,)),
+                'other_drone_relative': spaces.Box(low=-np.inf, high=np.inf, shape=(3,)), # 3
             }) for i in range(num_agents)
         })
         # Velocity commands in world frame, gimbal orientation commands
@@ -94,22 +94,27 @@ class DroneEnv(gym.Env):
                     odom.pose.pose.orientation.y,
                     odom.pose.pose.orientation.z,
                     odom.pose.pose.orientation.w,
-                ]),
+                ]), #4
                 'angular_velocity': np.array([
                     odom.twist.twist.angular.x / self.norm_factor.angular_velocity,
                     odom.twist.twist.angular.y / self.norm_factor.angular_velocity,
                     odom.twist.twist.angular.z / self.norm_factor.angular_velocity,
-                ]),
+                ]), #3
                 'linear_velocity': np.array([
                     odom.twist.twist.linear.x / self.norm_factor,
                     odom.twist.twist.linear.y / self.norm_factor,
                     odom.twist.twist.linear.z / self.norm_factor,
-                ]),
+                ]), #3
                 'gimbal_orientation': np.array([
                     gimbal.x / self.norm_factor.gimbal_orientation,  # roll
                     gimbal.y / self.norm_factor.gimbal_orientation,  # pitch
                     gimbal.z / self.norm_factor.gimbal_orientation,  # yaw
-                ]),
+                ]), #3
+                'detections': np.array([me: bool, other: bool]), #2
+                'relative position': np.array([(x, y, z)]), #3
+                # 'targets relative position gt': np.array([(x, y, z)]), #3
+                'estimated target position': np.array([(x, y, z)]), #3
+                'detection pixel' #1
             }
             
             # Process target detection if available
