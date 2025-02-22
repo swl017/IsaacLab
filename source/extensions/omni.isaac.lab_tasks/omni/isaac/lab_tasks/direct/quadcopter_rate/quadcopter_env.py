@@ -95,11 +95,12 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     moment_scale = 0.01
 
     # reward scales
-    lin_vel_reward_scale = -0.05
-    ang_vel_reward_scale = -0.01
+    lin_vel_reward_scale = 0.05
+    ang_vel_reward_scale = 0.0#-0.01
+    action_sum_reward_scale = -0.1
     distance_to_goal_reward_scale = 15.0
     stabilize_reward_scale = -0.0001
-    target_speed = 0.0#3.0
+    target_speed = 0.0
 
 class QuadcopterEnv(DirectRLEnv):
     cfg: QuadcopterEnvCfg
@@ -120,6 +121,7 @@ class QuadcopterEnv(DirectRLEnv):
             for key in [
                 "lin_vel",
                 "ang_vel",
+                "action_sum",
                 "distance_to_goal",
                 "stabilize",
             ]
@@ -157,7 +159,7 @@ class QuadcopterEnv(DirectRLEnv):
         self._desired_pos_w[:, :] += self.target_speed * self.step_dt
 
     def _apply_action(self):
-        self._robot.set_external_force_and_torque(self._thrust, self._moment, body_ids=self._body_id)
+        self._thrust[:, 0, 2] = self.cfg.thrust_to_weight * self._robot_weight * (self._actions[:, 2] + torch.ones_like(self._actions[:, 2])*0.4)
 
     def _get_observations(self) -> dict:
         desired_pos_b, _ = subtract_frame_transforms(
@@ -178,6 +180,7 @@ class QuadcopterEnv(DirectRLEnv):
     def _get_rewards(self) -> torch.Tensor:
         lin_vel = torch.sum(torch.square(self._robot.data.root_lin_vel_b), dim=1)
         ang_vel = torch.sum(torch.square(self._robot.data.root_ang_vel_b), dim=1)
+        action_sum = torch.sum(torch.square(self._actions), dim=1)
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_pos_w, dim=1)
         distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
         roll, pitch, yaw = euler_xyz_from_quat(self._robot.data.root_state_w[:, 3:7])
@@ -185,6 +188,7 @@ class QuadcopterEnv(DirectRLEnv):
         rewards = {
             "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
             "ang_vel": ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
+            "action_sum": action_sum * self.cfg.action_sum_reward_scale * self.step_dt,
             "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
             "stabilize": stabilize * self.cfg.stabilize_reward_scale * self.step_dt,
         }
