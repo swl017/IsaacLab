@@ -17,7 +17,7 @@ class IrisPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     max_iterations = 200
     save_interval = 50
-    experiment_name = "iris_direct"
+    experiment_name = "iris_stabilized_direct"
     empirical_normalization = False
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,

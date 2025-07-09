@@ -58,7 +58,7 @@ class DroneStabilizingController:
         curr_ang_vel_b: torch.Tensor, # Current angular velocity in body frame
         dt: float = 0.02             # Time step
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        batch_size = cmd_lin_vel_w.shape[0]
+        # batch_size = cmd_lin_vel_w.shape[0]
         
         # Extract current roll, pitch, yaw
         roll, pitch, yaw = euler_xyz_from_quat(curr_quat_w)
@@ -73,76 +73,84 @@ class DroneStabilizingController:
         # Compute control outputs with proper broadcasting
         # Linear acceleration in body frame
         if self.cumul_lin_vel_error is None:
-            self.cumul_lin_vel_error = torch.zeros_like(lin_vel_error_b_w)
-        self.cumul_lin_vel_error += lin_vel_error_b_w
-        # self.cumul_lin_vel_error.clamp(-0.1/self.ki_lin, 0.1/self.ki_lin)
+            self.cumul_lin_vel_error = torch.zeros_like(lin_vel_error_w)
+        self.cumul_lin_vel_error += lin_vel_error_w
+        # self.cumul_lin_vel_error.clip(-10.0 * 0.1 / dt, 10.0 * 0.1 / dt)
         if self.last_lin_vel_error is None:
-            self.last_lin_vel_error = lin_vel_error_b_w
-        lin_acc_cmd_b_w = (
-            self.kp_lin * lin_vel_error_b_w +
+            self.last_lin_vel_error = lin_vel_error_w
+        lin_acc_cmd_w = (
+            self.kp_lin * lin_vel_error_w +
             self.kd_lin * (-self.last_lin_vel_error) +
             self.ki_lin * self.cumul_lin_vel_error
         )
-        lin_acc_cmd_b_w.clamp(-3.0, 3.0)
-        lin_acc_cmd_w = quat_rotate(curr_yaw_quat_w, lin_acc_cmd_b_w)
+        # lin_acc_cmd_w = quat_rotate(curr_yaw_quat_w, lin_acc_cmd_w)
+        lin_acc_cmd_w[:, :2] = lin_acc_cmd_w[:, :2].clip(-5.0, 5.0)
+        lin_acc_cmd_w[:, 2] = lin_acc_cmd_w[:, 2].clip(-1.0, 5.0)
 
         # Get desired tilt direction from velocity command
         # Compute xy velocity command magnitude
-        xy_vel_cmd = cmd_lin_vel_w[:, :2]
-        xy_vel_norm = torch.norm(xy_vel_cmd, dim=1)
+        xy_vel_cmd = cmd_lin_vel_w[:2]
+        xy_vel_norm = torch.linalg.norm(xy_vel_cmd)
         
-        desired_thrust_per_weight = ((9.81 + lin_acc_cmd_w[:, 2]) / torch.cos(roll)) / torch.cos(pitch)
 
+
+        # desired_thrust_per_weight = (9.82 + lin_acc_cmd_b_w[2]) / (
+        #     z_w * quat_rotate_inverse(curr_quat_w, z_w))
+
+        desired_thrust_per_weight = ((9.81 + lin_acc_cmd_w[:, 2]) / torch.cos(roll)) / torch.cos(pitch)
+        # desired_thrust_per_weight = desired_thrust_per_weight.clip(0.0, 5.0)
+
+        # desired_thrust_per_weight = torch.sqrt(
+        #     (lin_acc_cmd_b_w[2] + 9.81)**2 * (1.0 + torch.tan(-roll)**2 + torch.tan(pitch)**2))
+
+        # desired_thrust_per_weight = torch.sqrt(lin_acc_cmd_b_w[0]**2 + lin_acc_cmd_b_w[1]**2 + (lin_acc_cmd_b_w[2]-9.81)**2)
 
         # Initialize desired roll and pitch tensors
         desired_roll = torch.zeros_like(roll)
         desired_pitch = torch.zeros_like(pitch)
 
-        # Model from Yang, 2017, ISR
-        # desired_roll_pitch_sin = (1/desired_thrust_per_weight) * torch.linalg.inv(
-        #         torch.Tensor([[torch.cos(roll[:,])*torch.cos(yaw[:,]),  torch.sin(yaw[:,])],
-        #                       [torch.cos(roll[:,])*torch.sin(yaw[:,]), -torch.cos(yaw[:,])]]),
-        #     ) @ torch.Tensor([(lin_acc_cmd_w[:, 0]), (lin_acc_cmd_w[:, 1])])
-        desired_roll_pitch_sin = self.compute_desired_roll_pitch(desired_thrust_per_weight.clamp(min=1.0), roll, yaw, lin_acc_cmd_w)
-        desired_roll = torch.arcsin(desired_roll_pitch_sin[:, 1])
-        desired_pitch = torch.arcsin(desired_roll_pitch_sin[:, 0])
+        # Compute desired roll and pitch only where velocity is significant
+        # tilt_threshold = 0.0
+        # mask = xy_vel_norm > tilt_threshold
+        # angle_limit = torch.pi / 180.0 * 40.0
+        # desired_roll[mask] -= torch.arctan(lin_acc_cmd_b_w[mask, 1])
+        # desired_roll.clip(-angle_limit, angle_limit)
+        # desired_pitch[mask] += torch.arctan(lin_acc_cmd_b_w[mask, 0])
+        # desired_pitch.clip(-angle_limit, angle_limit)
+
+        desired_roll_pitch_sin = (1/desired_thrust_per_weight).view(-1, 1, 1) * (torch.linalg.inv(
+            torch.stack([torch.stack([torch.cos(roll)*torch.cos(yaw), torch.sin(yaw)], dim=1),
+                        torch.stack([torch.cos(roll)*torch.sin(yaw), -torch.cos(yaw)], dim=1)], dim=1)
+            ) @ torch.stack([lin_acc_cmd_w[:, 0], lin_acc_cmd_w[:, 1]], dim=1).unsqueeze(-1))
+
+
+        desired_roll = torch.arcsin(desired_roll_pitch_sin[:,1])
+        desired_pitch = torch.arcsin(desired_roll_pitch_sin[:,0])
         tilt_limit = torch.pi / 180.0 * 35.0
         desired_roll = desired_roll.clip(-tilt_limit, tilt_limit)
         desired_pitch = desired_pitch.clip(-tilt_limit, tilt_limit)
         self.desired_roll = desired_roll
         self.desired_pitch = desired_pitch
 
-
-
-        z_w = torch.tensor([0.0, 0.0, 1.0], device=self.device)
-        # desired_thrust_per_weight = (9.82 + lin_acc_cmd_b_w[:, 2]) / (
-        #     z_w * quat_rotate_inverse(curr_quat_w, z_w))
-
-        desired_thrust_per_weight = ((9.81 + lin_acc_cmd_b_w[:, 2]) / torch.cos(roll)) / torch.cos(pitch)
-
-        # desired_thrust_per_weight = torch.sqrt(
-        #     (lin_acc_cmd_b_w[:, 2] + 9.81)**2 * (1.0 + torch.tan(-roll)**2 + torch.tan(pitch)**2))
-
-        # desired_thrust_per_weight = torch.sqrt(lin_acc_cmd_b_w[:, 0]**2 + lin_acc_cmd_b_w[:, 1]**2 + (lin_acc_cmd_b_w[:, 2]-9.81)**2)
-
-        lin_acc_cmd_b = quat_rotate_inverse(
-            quat_from_euler_xyz(desired_roll, desired_pitch, yaw), 
-            lin_acc_cmd_w)
         
-        # (lin_acc_cmd_b_w[:, 1] / torch.sin(-desired_roll) +
-        #                             lin_acc_cmd_b_w[:, 0] / torch.sin(desired_pitch) +
-        #                             lin_acc_cmd_b[:, 2])
+        # lin_acc_cmd_b = quat_rotate_inverse(
+        #     quat_from_euler_xyz(desired_roll, desired_pitch, yaw), 
+        #     lin_acc_cmd_w)
+        
+        # (lin_acc_cmd_b_w[1] / torch.sin(-desired_roll) +
+        #                             lin_acc_cmd_b_w[0] / torch.sin(desired_pitch) +
+        #                             lin_acc_cmd_b[2])
 
         # Compute attitude error
-        roll_error = (desired_roll - roll)
-        pitch_error = (desired_pitch - pitch)
-        yaw_vel_error = (cmd_yaw_vel - curr_ang_vel_b[:, 2])
+        roll_error = (desired_roll - roll.view(-1,1))
+        pitch_error = (desired_pitch - pitch.view(-1,1))
+        yaw_vel_error = (cmd_yaw_vel[:,] - curr_ang_vel_b[:,2])
         
         # Compute desired body rates with proper broadcasting
         desired_ang_vel_b = torch.zeros_like(curr_ang_vel_b)
-        desired_ang_vel_b[:, 0] = self.kp_att * roll_error
-        desired_ang_vel_b[:, 1] = self.kp_att * pitch_error
-        desired_ang_vel_b[:, 2] = cmd_yaw_vel
+        desired_ang_vel_b[:,0] = self.kp_att * roll_error[:,0]
+        desired_ang_vel_b[:,1] = self.kp_att * pitch_error[:,0]
+        desired_ang_vel_b[:,2] = cmd_yaw_vel
         
         # Angular velocity error in body frame
         ang_vel_error_b = desired_ang_vel_b - curr_ang_vel_b
@@ -150,16 +158,20 @@ class DroneStabilizingController:
         # Angular acceleration in body frame
         ang_acc_cmd_b = torch.zeros_like(curr_ang_vel_b)
         
+        if self.last_ang_vel_error_b is None:
+            self.last_ang_vel_error_b = torch.zeros_like(curr_ang_vel_b)
+
         # Roll and pitch control
-        ang_acc_cmd_b[:, :2] = (
-            self.kp_att * ang_vel_error_b[:, :2] +
-            self.kd_att * (-curr_ang_vel_b[:, :2])
+        ang_acc_cmd_b[:,:2] = (
+            self.kp_att * ang_vel_error_b[:,:2] +
+            self.kd_att * (-self.last_ang_vel_error_b[:,:2])
         )
+        self.last_ang_vel_error_b = ang_vel_error_b
         
         # Yaw control
-        ang_acc_cmd_b[:, 2] = (
+        ang_acc_cmd_b[:,2] = (
             self.kp_yaw * yaw_vel_error +
-            self.kd_yaw * (-curr_ang_vel_b[:, 2])
+            self.kd_yaw * (-curr_ang_vel_b[:,2])
         )
         
         return desired_thrust_per_weight, ang_acc_cmd_b
@@ -225,7 +237,7 @@ class DroneStabilizingController:
 if __name__ == "__main__":
     # Test the controller
     controller = DroneStabilizingController()
-    cmd_lin_vel_w = torch.tensor([[0.0, 0.0, 1.0]], device="cuda")
+    cmd_lin_vel_w = torch.tensor([[0.0, 0.0, 0.0]], device="cuda")
     cmd_yaw_vel = torch.tensor([0.0], device="cuda")
     curr_quat_w = torch.tensor([[0.0, 0.0, 0.0, 1.0]], device="cuda")
     curr_lin_vel_w = torch.tensor([[0.0, 0.0, 0.0]], device="cuda")

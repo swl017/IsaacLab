@@ -14,7 +14,7 @@ from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg
 from isaaclab.envs.ui import BaseEnvWindow
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sim import SimulationCfg, PhysxCfg
+from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.math import subtract_frame_transforms, euler_xyz_from_quat, quat_from_euler_xyz
@@ -70,11 +70,6 @@ class IrisEnvCfg(DirectRLEnvCfg):
             dynamic_friction=1.0,
             restitution=0.0,
         ),
-        # physx=PhysxCfg(
-        #     bounce_threshold_velocity=0.2,
-        #     gpu_max_rigid_contact_count=2**26,
-        #     gpu_max_rigid_patch_count=2**26,
-        # ),
     )
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
@@ -91,23 +86,25 @@ class IrisEnvCfg(DirectRLEnvCfg):
     )
 
     # scene
-    num_envs = 1#4096
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=num_envs, env_spacing=3.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=3.0, replicate_physics=True)
     # robot
     robot: ArticulationCfg = IRIS_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    thrust_to_weight = 4.0
+    moment_scale = 10.0
+    yaw_moment_scale = 1.0
 
     # reward scales
-    lin_vel_reward_scale = 0.0#-0.001
-    ang_vel_reward_scale = 0.0#-0.002 # stability bound [-0.02, -0.04]
-    action_sum_reward_scale = -1.0
-    action_delta_reward_scale = -0.01
+    lin_vel_reward_scale = -0.01
+    ang_vel_reward_scale = -0.02 # stability bound [-0.02, -0.04]
+    action_sum_reward_scale = -1
+    action_delta_reward_scale = -0.1
     distance_to_goal_reward_scale = 30.0
     yaw_reward_scale = -0.2
-    target_speed = 0.0#5.0
+    target_speed = 5.0
     max_lin_vel = 5.0
     max_yaw_rate = 3.0
     max_lin_acc = 3.0
-    max_ang_acc = 3.0
+    max_ang_acc = 30.0
 
 class IrisEnv(DirectRLEnv):
     cfg: IrisEnvCfg
@@ -169,8 +166,11 @@ class IrisEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor):
+        if torch.isnan(actions).any():
+            return
         self._actions = actions.clone().clamp(-1.0, 1.0)
         self._cmd_vel[:, 0, :3] = self._actions[:, :3] * self.max_lin_vel
+        # self._cmd_vel[:, 0, 2] = torch.zeros_like(self._actions[:, 2])
         self._cmd_vel[:, 0, 5] = self._actions[:, 3] * self.max_yaw_rate
         self._cmd_vel_lin = torch.zeros_like(self._cmd_vel[:, 0, :3])
         # self._cmd_vel_lin[:, 0] = torch.ones_like(self._cmd_vel)[:,0]
@@ -180,11 +180,13 @@ class IrisEnv(DirectRLEnv):
             self._cmd_vel[:, 0, :3], self._cmd_vel[:, 0, 5], self._robot.data.root_state_w[:, 3:7],
             self._robot.data.root_lin_vel_w, self._robot.data.root_ang_vel_b, self.step_dt
         )
-        self._thrust[:, 0, 2] = self._robot_weight * desired_thrust_per_weight.clamp(min=0.0)
+        # desired_thrust_per_weight = self._cmd_vel[:, 0, 2]
+        # ang_acc_cmd_b = torch.zeros_like(self._cmd_vel[:, 0, :3])
+        self._thrust[:, 0, 2] = self._robot_weight * desired_thrust_per_weight.clamp(min=0.0) / 14.6
         self._moment[:, 0, 0] = self._moment_of_inertia[0, 0] * (ang_acc_cmd_b[:, 0].clamp(-self.max_ang_acc, self.max_ang_acc))
         self._moment[:, 0, 1] = self._moment_of_inertia[0, 4] * (ang_acc_cmd_b[:, 1].clamp(-self.max_ang_acc, self.max_ang_acc))
         self._moment[:, 0, 2] = self._moment_of_inertia[0, 8] * (ang_acc_cmd_b[:, 2].clamp(-self.max_ang_acc, self.max_ang_acc))
-        self._desired_pos_w[:, :] += self.target_speed[:,:] * self.step_dt
+        # self._desired_pos_w[:, :] += self.target_speed[:,:] * self.step_dt
 
 
     def _apply_action(self):
@@ -217,7 +219,7 @@ class IrisEnv(DirectRLEnv):
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_pos_w, dim=1)
         distance_to_goal_mapped = 1 - torch.tanh((distance_to_goal) / 0.8)
         roll, pitch, yaw = euler_xyz_from_quat(self._robot.data.root_state_w[:, 3:7])
-        stabilize = torch.square(roll) + torch.square(pitch)
+        stabilize = torch.square(roll) + torch.square(pitch) #torch.square(roll / (45.0 / 180.0 * torch.pi)) + torch.square(pitch / (45.0 / 180.0 * torch.pi))
         yaw_error = torch.square(yaw)
         yaw_rate = torch.square(self._robot.data.root_ang_vel_b[:, 2])
         rewards = {
@@ -236,7 +238,7 @@ class IrisEnv(DirectRLEnv):
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        died = torch.logical_or(self._robot.data.root_pos_w[:, 2] < 0.7, self._robot.data.root_pos_w[:, 2] > 3.0)
+        died = torch.logical_or(self._robot.data.root_pos_w[:, 2] < 0.7, self._robot.data.root_pos_w[:, 2] > 10.0)
         return died, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
@@ -268,18 +270,16 @@ class IrisEnv(DirectRLEnv):
 
         self._actions[env_ids] = 0.0
         # Sample new commands
-        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-4.0, 4.0)
+        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2])
         self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
-        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(1.5, 2.0)
+        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2])
         self.target_speed = torch.zeros_like(self._desired_pos_w).uniform_(-self.cfg.target_speed, self.cfg.target_speed)
 
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
         default_root_state = self._robot.data.default_root_state[env_ids]
-        default_root_state[:, :3] += self._terrain.env_origins[env_ids] + 1.75
-        roll, pitch, yaw = euler_xyz_from_quat(default_root_state[:, 3:7])
-        default_root_state[:, 3:7] = quat_from_euler_xyz(roll.uniform_(-0.2,0.2), pitch.uniform_(-0.2,0.2), yaw[:,].uniform_(-torch.pi, torch.pi))
+        default_root_state[:, :3] += self._terrain.env_origins[env_ids] + 4.75
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
