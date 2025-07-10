@@ -284,6 +284,7 @@ class IrisEnv(DirectRLEnv):
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
         self._last_actions[env_ids] = self._actions[env_ids].clone()
+        self._stabilizer.reset(env_ids)
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         # create markers if necessary for the first tome

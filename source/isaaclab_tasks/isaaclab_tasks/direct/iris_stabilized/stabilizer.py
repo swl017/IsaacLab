@@ -230,9 +230,11 @@ class DroneStabilizingController:
         
         return desired_roll_pitch_sin
     
-    def reset(self):
+    def reset(self, env_id):
         """Reset the controller state."""
-        pass  # No internal state to reset in this implementation
+        self.cumul_lin_vel_error[env_id, :] = None
+        self.last_lin_vel_error[env_id, :] = None
+        self.last_ang_vel_error_b[env_id, :] = None
 
 if __name__ == "__main__":
     # Test the controller
