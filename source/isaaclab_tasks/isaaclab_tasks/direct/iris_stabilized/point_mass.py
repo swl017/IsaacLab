@@ -30,13 +30,14 @@ class PointMass:
         curr_quat_w_yaw = quat_from_euler_xyz(torch.zeros_like(roll), torch.zeros_like(pitch), yaw)
         roll_b, pitch_b, _ = euler_xyz_from_quat(quat_mul(curr_quat_w, quat_inv(curr_quat_w_yaw)))
 
-        moment = torch.concat([
-            -roll_b * 0.01 - curr_ang_vel_b[:,0],
-            -pitch_b * 0.01 - curr_ang_vel_b[:,1],
+        moment = torch.stack([
+            -roll_b * 0.1 - curr_ang_vel_b[:,0]*0.1,
+            -pitch_b * 0.1 - curr_ang_vel_b[:,1]*0.1,
             cmd_yaw_vel - curr_ang_vel_b[:,2]
-        ])
+        ], dim=1)
         force = quat_rotate_inverse(curr_quat_w, cmd_lin_vel_w - curr_lin_vel_w)
-        force[:, 2] *= 10
+        force[:, 2] *= 10.0
+        force[:, 2] = torch.clamp(force[:, 2], min=0.0)
         
         return force, moment
         
