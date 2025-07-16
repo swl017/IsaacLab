@@ -27,6 +27,9 @@ from isaaclab_assets import IRIS_CFG  # isort: skip
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
 
 from .stabilizer import DroneStabilizingController
+from .point_mass import PointMass
+
+import carb
 
 class IrisEnvWindow(BaseEnvWindow):
     """Window manager for the Iris environment."""
@@ -96,9 +99,9 @@ class IrisEnvCfg(DirectRLEnvCfg):
     # reward scales
     lin_vel_reward_scale = -0.01
     ang_vel_reward_scale = -0.02 # stability bound [-0.02, -0.04]
-    action_sum_reward_scale = -1
-    action_delta_reward_scale = -0.1
-    distance_to_goal_reward_scale = 30.0
+    action_sum_reward_scale = -0.01
+    action_delta_reward_scale = -0.0001
+    distance_to_goal_reward_scale = 60.0
     yaw_reward_scale = -0.2
     target_speed = 5.0
     max_lin_vel = 5.0
@@ -146,7 +149,8 @@ class IrisEnv(DirectRLEnv):
         self.max_lin_acc = self.cfg.max_lin_acc
         self.max_ang_acc = self.cfg.max_ang_acc
 
-        self._stabilizer = DroneStabilizingController(device=self.device)
+        self._stabilizer = PointMass()
+        # self._stabilizer = DroneStabilizingController(device=self.device)
 
         # add handle for debug visualization (this is set to a valid handle inside set_debug_vis)
         self.set_debug_vis(self.cfg.debug_vis)
@@ -175,17 +179,20 @@ class IrisEnv(DirectRLEnv):
         self._cmd_vel_lin = torch.zeros_like(self._cmd_vel[:, 0, :3])
         # self._cmd_vel_lin[:, 0] = torch.ones_like(self._cmd_vel)[:,0]
         self._cmd_vel_ang = torch.zeros_like(self._cmd_vel[:, 0, 5])
-        desired_thrust_per_weight, ang_acc_cmd_b = self._stabilizer.compute_control(
+        self._thrust[:,0,:], self._moment[:,0,:] = self._stabilizer.compute_control(
+        # desired_thrust_per_weight, ang_acc_cmd_b = self._stabilizer.compute_control(
             # self._cmd_vel_lin, self._cmd_vel_ang, self._robot.data.root_state_w[:, 3:7],
             self._cmd_vel[:, 0, :3], self._cmd_vel[:, 0, 5], self._robot.data.root_state_w[:, 3:7],
             self._robot.data.root_lin_vel_w, self._robot.data.root_ang_vel_b, self.step_dt
         )
+        carb.log_warn(f"thrust: {self._thrust[0, 0, :]}, moment: {self._moment[0, 0, :]}")
         # desired_thrust_per_weight = self._cmd_vel[:, 0, 2]
         # ang_acc_cmd_b = torch.zeros_like(self._cmd_vel[:, 0, :3])
-        self._thrust[:, 0, 2] = self._robot_weight * desired_thrust_per_weight.clamp(min=0.0) / 14.6
-        self._moment[:, 0, 0] = self._moment_of_inertia[0, 0] * (ang_acc_cmd_b[:, 0].clamp(-self.max_ang_acc, self.max_ang_acc))
-        self._moment[:, 0, 1] = self._moment_of_inertia[0, 4] * (ang_acc_cmd_b[:, 1].clamp(-self.max_ang_acc, self.max_ang_acc))
-        self._moment[:, 0, 2] = self._moment_of_inertia[0, 8] * (ang_acc_cmd_b[:, 2].clamp(-self.max_ang_acc, self.max_ang_acc))
+        # carb.log_warn(f"acc_rpyt: {ang_acc_cmd_b[0, 0].item()}, {ang_acc_cmd_b[0, 1].item()}, {ang_acc_cmd_b[0, 2].item()}, {desired_thrust_per_weight[0].item()}")
+        # self._thrust[:, 0, 2] = self._robot_weight * desired_thrust_per_weight.clamp(min=0.0) / 14.6
+        # self._moment[:, 0, 0] = -self._moment_of_inertia[0, 0] * (ang_acc_cmd_b[:, 0].clamp(-self.max_ang_acc, self.max_ang_acc))
+        # self._moment[:, 0, 1] = -self._moment_of_inertia[0, 4] * (ang_acc_cmd_b[:, 1].clamp(-self.max_ang_acc, self.max_ang_acc))
+        # self._moment[:, 0, 2] = self._moment_of_inertia[0, 8] * (ang_acc_cmd_b[:, 2].clamp(-self.max_ang_acc, self.max_ang_acc))
         # self._desired_pos_w[:, :] += self.target_speed[:,:] * self.step_dt
 
 
@@ -270,16 +277,17 @@ class IrisEnv(DirectRLEnv):
 
         self._actions[env_ids] = 0.0
         # Sample new commands
-        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2])
-        self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
-        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2])
+        self._desired_pos_w[env_ids, :3] = torch.zeros_like(self._desired_pos_w[env_ids, :3])
+        self._desired_pos_w[env_ids, :3] += self._terrain.env_origins[env_ids, :3]
+        self._desired_pos_w[env_ids, 2] += torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(1.5, 4.5)
         self.target_speed = torch.zeros_like(self._desired_pos_w).uniform_(-self.cfg.target_speed, self.cfg.target_speed)
 
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
         default_root_state = self._robot.data.default_root_state[env_ids]
-        default_root_state[:, :3] += self._terrain.env_origins[env_ids] + 4.75
+        default_root_state[:, :3] += self._terrain.env_origins[env_ids]
+        default_root_state[:, 2] += torch.zeros_like(default_root_state[:, 2]).uniform_(1.5, 4.5)
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)

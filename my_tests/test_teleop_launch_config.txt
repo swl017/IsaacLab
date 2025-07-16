@@ -1,0 +1,8 @@
+        {
+            "name": "Python: Teleop",
+            "type": "python",
+            "request": "launch",
+            "args" : ["--task", "Isaac-Iris-Stabilized-Direct-v0", "--num_envs", "1", "--teleop_device", "keyboard"],
+            "program": "${workspaceFolder}/scripts/environments/teleoperation/teleop_se3_agent_iris.py",
+            "console": "integratedTerminal"
+        },
