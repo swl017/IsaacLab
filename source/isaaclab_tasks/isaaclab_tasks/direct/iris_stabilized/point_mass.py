@@ -9,8 +9,18 @@ from isaaclab.utils.math import (
     )
 
 class PointMass:
-    def __init__(self):
-        pass
+    def __init__(self, mass: float = 1.0, weight: float | None = None, num_envs: int = 1, device: str = 'cuda:0'):
+        self.mass = mass
+        self.weight = weight if weight is not None else mass * 9.81
+        self.weight_tensor = torch.tensor([0, 0, -self.weight], dtype=torch.float32, device=device).view(1, 3).expand(num_envs, 3) if num_envs > 1 else torch.tensor([0, 0, -self.weight], dtype=torch.float32, device=device).view(1, 3)
+        # self.weight_tensor = torch.tensor(self.weight, dtype=torch.float32).view(1, 1).expand(num_envs, 1) if num_envs > 1 else torch.tensor(self.weight, dtype=torch.float32).view(1, 1)
+        self.num_envs = num_envs
+
+    def wrap_to_pi(self, angle: torch.Tensor) -> torch.Tensor:
+        """
+        Wraps the angle to the range [-pi, pi].
+        """
+        return (angle + torch.pi) % (2 * torch.pi) - torch.pi
 
     def compute_control(        
         self,
@@ -31,13 +41,17 @@ class PointMass:
         roll_b, pitch_b, _ = euler_xyz_from_quat(quat_mul(curr_quat_w, quat_inv(curr_quat_w_yaw)))
 
         moment = torch.stack([
-            -roll_b * 0.1 - curr_ang_vel_b[:,0]*0.1,
-            -pitch_b * 0.1 - curr_ang_vel_b[:,1]*0.1,
-            cmd_yaw_vel - curr_ang_vel_b[:,2]
+            -self.wrap_to_pi(roll_b) * 0.3 - curr_ang_vel_b[:,0]*0.03,
+            -self.wrap_to_pi(pitch_b) * 0.3 - curr_ang_vel_b[:,1]*0.03,
+            (cmd_yaw_vel - curr_ang_vel_b[:,2]) * 0.1
         ], dim=1)
-        force = quat_rotate_inverse(curr_quat_w, cmd_lin_vel_w - curr_lin_vel_w)
-        force[:, 2] *= 10.0
+
+        feedback = cmd_lin_vel_w - curr_lin_vel_w
+        feedforward = -self.weight_tensor
+        force = quat_rotate_inverse(curr_quat_w, feedforward + feedback * 3.0)
+        # force[:, 2] *= 3.0
         force[:, 2] = torch.clamp(force[:, 2], min=0.0)
+        
         
         return force, moment
         

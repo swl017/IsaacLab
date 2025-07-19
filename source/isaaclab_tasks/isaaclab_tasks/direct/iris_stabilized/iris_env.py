@@ -99,10 +99,11 @@ class IrisEnvCfg(DirectRLEnvCfg):
     # reward scales
     lin_vel_reward_scale = -0.01
     ang_vel_reward_scale = -0.02 # stability bound [-0.02, -0.04]
-    action_sum_reward_scale = -1
-    action_delta_reward_scale = -0.1
+    action_sum_reward_scale = -0.1
+    action_delta_reward_scale = -0.01
     distance_to_goal_reward_scale = 60.0
-    yaw_reward_scale = -2
+    yaw_reward_scale = -1
+    yaw_rate_reward_scale = -0.1
     target_speed = 5.0
     max_lin_vel = 15.0
     max_yaw_rate = 10.0
@@ -123,6 +124,7 @@ class IrisEnv(DirectRLEnv):
         self._cmd_vel = torch.zeros(self.num_envs, 1, 6, device=self.device)
         # Goal position
         self._desired_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
+        self._desired_yaw_w = torch.zeros(self.num_envs, 1, device=self.device)
 
         # Logging
         self._episode_sums = {
@@ -149,8 +151,8 @@ class IrisEnv(DirectRLEnv):
         self.max_lin_acc = self.cfg.max_lin_acc
         self.max_ang_acc = self.cfg.max_ang_acc
 
-        self._stabilizer = PointMass()
-        # self._stabilizer = DroneStabilizingController(device=self.device)
+        self._stabilizer = PointMass(0, self._robot_weight, self.num_envs, self.device)
+        # self._stabilizer = DroneStabilizingController(self._robot_mass, device=self.device)
 
         # add handle for debug visualization (this is set to a valid handle inside set_debug_vis)
         self.set_debug_vis(self.cfg.debug_vis)
@@ -188,7 +190,8 @@ class IrisEnv(DirectRLEnv):
         # carb.log_warn(f"thrust: {self._thrust[0, 0, :]}, moment: {self._moment[0, 0, :]}")
         # desired_thrust_per_weight = self._cmd_vel[:, 0, 2]
         # ang_acc_cmd_b = torch.zeros_like(self._cmd_vel[:, 0, :3])
-        # carb.log_warn(f"acc_rpyt: {ang_acc_cmd_b[0, 0].item()}, {ang_acc_cmd_b[0, 1].item()}, {ang_acc_cmd_b[0, 2].item()}, {desired_thrust_per_weight[0].item()}")
+        # carb.log_warn(f"acc_rpy: {self._moment[:,0,0].item():.5f}, {self._moment[:,0,1].item():.5f}, {self._moment[:,0,2].item():.5f}")
+        # carb.log_warn(f"thrust: {self._thrust[:,0,0].item():.2f}, {self._thrust[:,0,1].item():.2f}, {self._thrust[:,0,2].item():.2f}")
         # self._thrust[:, 0, 2] = self._robot_weight * desired_thrust_per_weight.clamp(min=0.0) / 14.6
         # self._moment[:, 0, 0] = -self._moment_of_inertia[0, 0] * (ang_acc_cmd_b[:, 0].clamp(-self.max_ang_acc, self.max_ang_acc))
         # self._moment[:, 0, 1] = -self._moment_of_inertia[0, 4] * (ang_acc_cmd_b[:, 1].clamp(-self.max_ang_acc, self.max_ang_acc))
@@ -212,6 +215,7 @@ class IrisEnv(DirectRLEnv):
                 self._robot.data.body_ang_acc_w[:,0],
                 # self._robot.data.projected_gravity_b,
                 desired_pos_b,
+                # self._desired_yaw_w,
             ],
             dim=-1,
         )
@@ -221,13 +225,16 @@ class IrisEnv(DirectRLEnv):
     def _get_rewards(self) -> torch.Tensor:
         lin_vel = torch.sum(torch.square(self._robot.data.root_lin_vel_b), dim=1)
         ang_vel = torch.sum(torch.square(self._robot.data.root_ang_vel_b), dim=1)
-        action_sum = torch.sum(torch.square(self._actions), dim=1)
+        action_sum = torch.sum(torch.square(self._actions[:,:3]), dim=1)
         action_delta = torch.sum(torch.square(self._actions - self._last_actions), dim=1)
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_pos_w, dim=1)
         distance_to_goal_mapped = 1 - torch.tanh((distance_to_goal) / 0.8)
         roll, pitch, yaw = euler_xyz_from_quat(self._robot.data.root_state_w[:, 3:7])
+        roll = self._stabilizer.wrap_to_pi(roll)
+        pitch = self._stabilizer.wrap_to_pi(pitch)
+        yaw = self._stabilizer.wrap_to_pi(yaw)
         stabilize = torch.square(roll) + torch.square(pitch) #torch.square(roll / (45.0 / 180.0 * torch.pi)) + torch.square(pitch / (45.0 / 180.0 * torch.pi))
-        yaw_error = torch.square(torch.zeros_like(yaw).uniform_(-3.14, 3.14) - yaw)
+        yaw_error = torch.square(self._desired_yaw_w[:, 0] - yaw)
         yaw_rate = torch.square(self._robot.data.root_ang_vel_b[:, 2])
         rewards = {
             "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
@@ -236,8 +243,10 @@ class IrisEnv(DirectRLEnv):
             "action_delta": action_delta * self.cfg.action_delta_reward_scale * self.step_dt,
             "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
             "yaw": yaw_error * self.cfg.yaw_reward_scale * self.step_dt,
+            # "yaw_rate": yaw_rate * self.cfg.yaw_rate_reward_scale * self.step_dt,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
+        self._last_actions = self._actions.clone()
         # Logging
         for key, value in rewards.items():
             self._episode_sums[key] += value
@@ -280,6 +289,7 @@ class IrisEnv(DirectRLEnv):
         self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
         self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(1.5, 4.5)
         self._desired_pos_w[env_ids, :3] += self._terrain.env_origins[env_ids, :3]
+        self._desired_yaw_w[env_ids, 0] = torch.zeros_like(self._desired_yaw_w[env_ids, 0]).uniform_(-3.14, 3.14)
         self.target_speed = torch.zeros_like(self._desired_pos_w).uniform_(-self.cfg.target_speed, self.cfg.target_speed)
 
         # Reset robot state
@@ -292,7 +302,7 @@ class IrisEnv(DirectRLEnv):
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
-        self._last_actions[env_ids] = self._actions[env_ids].clone()
+        self._last_actions[env_ids] = torch.zeros_like(self._actions[env_ids])
         self._stabilizer.reset(env_ids)
 
     def _set_debug_vis_impl(self, debug_vis: bool):
