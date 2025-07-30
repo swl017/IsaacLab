@@ -41,9 +41,9 @@ class PointMass:
         roll_b, pitch_b, _ = euler_xyz_from_quat(quat_mul(curr_quat_w, quat_inv(curr_quat_w_yaw)))
 
         moment = torch.stack([
-            -self.wrap_to_pi(roll_b) * 0.2 - curr_ang_vel_b[:,0]*0.07,
-            -self.wrap_to_pi(pitch_b) * 0.2 - curr_ang_vel_b[:,1]*0.07,
-            (cmd_yaw_vel - curr_ang_vel_b[:,2]) * 0.1
+            -self.wrap_to_pi(roll_b) * 0.3 - curr_ang_vel_b[:,0]*0.1,
+            -self.wrap_to_pi(pitch_b) * 0.3 - curr_ang_vel_b[:,1]*0.1,
+            (cmd_yaw_vel - curr_ang_vel_b[:,2])
         ], dim=1)
 
         feedback = cmd_lin_vel_w - curr_lin_vel_w

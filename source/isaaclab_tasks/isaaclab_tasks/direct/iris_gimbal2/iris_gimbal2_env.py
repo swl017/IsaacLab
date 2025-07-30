@@ -17,13 +17,18 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.math import subtract_frame_transforms, euler_xyz_from_quat, quat_from_euler_xyz
+from isaaclab.utils.math import (
+    subtract_frame_transforms, 
+    euler_xyz_from_quat, 
+    quat_from_euler_xyz,
+    quat_mul
+)
 
 ##
 # Pre-defined configs
 ##
 from isaaclab_assets import CRAZYFLIE_CFG  # isort: skip
-from isaaclab_assets import IRIS_CFG  # isort: skip
+from isaaclab_assets import IRIS_GIMBAL2_CFG  # isort: skip
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
 
 from .stabilizer import DroneStabilizingController
@@ -33,10 +38,10 @@ import carb
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.markers.config import FRAME_MARKER_CFG 
 
-class IrisEnvWindow(BaseEnvWindow):
+class IrisGimbal2EnvWindow(BaseEnvWindow):
     """Window manager for the Iris environment."""
 
-    def __init__(self, env: IrisEnv, window_name: str = "IsaacLab"):
+    def __init__(self, env: IrisGimbal2Env, window_name: str = "IsaacLab"):
         """Initialize the window.
 
         Args:
@@ -53,16 +58,16 @@ class IrisEnvWindow(BaseEnvWindow):
                     self._create_debug_vis_ui_element("targets", self.env)
 
 @configclass
-class IrisEnvCfg(DirectRLEnvCfg):
+class IrisGimbal2EnvCfg(DirectRLEnvCfg):
     # env
     episode_length_s = 20.0
     decimation = 2
     action_space = 4
-    observation_space = 21
+    observation_space = 19
     state_space = 0
     debug_vis = True
 
-    ui_window_class_type = IrisEnvWindow
+    ui_window_class_type = IrisGimbal2EnvWindow
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -93,7 +98,7 @@ class IrisEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=3.0, replicate_physics=True)
     # robot
-    robot: ArticulationCfg = IRIS_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    robot: ArticulationCfg = IRIS_GIMBAL2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     thrust_to_weight = 4.0
     moment_scale = 10.0
     yaw_moment_scale = 1.0
@@ -102,9 +107,9 @@ class IrisEnvCfg(DirectRLEnvCfg):
     lin_vel_reward_scale = -0.01
     ang_vel_reward_scale = -0.02 # stability bound [-0.02, -0.04]
     action_sum_reward_scale = -0.1
-    action_delta_reward_scale = -0.1
+    action_delta_reward_scale = -0.01
     distance_to_goal_reward_scale = 60.0
-    yaw_reward_scale = -10
+    yaw_reward_scale = -1
     yaw_rate_reward_scale = -0.1
     target_speed = 5.0
     max_lin_vel = 15.0
@@ -112,10 +117,10 @@ class IrisEnvCfg(DirectRLEnvCfg):
     max_lin_acc = 3.0
     max_ang_acc = 30.0
 
-class IrisEnv(DirectRLEnv):
-    cfg: IrisEnvCfg
+class IrisGimbal2Env(DirectRLEnv):
+    cfg: IrisGimbal2EnvCfg
 
-    def __init__(self, cfg: IrisEnvCfg, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: IrisGimbal2EnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
         # Total thrust and moment applied to the base of the quadcopter
@@ -137,8 +142,8 @@ class IrisEnv(DirectRLEnv):
                 "action_sum",
                 "action_delta",
                 "distance_to_goal",
-                "yaw",
-                "yaw_rate"
+                "yaw"
+                # "yaw_rate"
             ]
         }
         # Get specific body indices
@@ -187,28 +192,22 @@ class IrisEnv(DirectRLEnv):
         self._cmd_vel_lin = torch.zeros_like(self._cmd_vel[:, 0, :3])
         # self._cmd_vel_lin[:, 0] = torch.ones_like(self._cmd_vel)[:,0]
         self._cmd_vel_ang = torch.zeros_like(self._cmd_vel[:, 0, 5])
+
         self._thrust[:,0,:], self._moment[:,0,:] = self._stabilizer.compute_control(
-        # desired_thrust_per_weight, ang_acc_cmd_b = self._stabilizer.compute_control(
-            # self._cmd_vel_lin, self._cmd_vel_ang, self._robot.data.root_state_w[:, 3:7],
-            self._cmd_vel[:, 0, :3], self._cmd_vel[:, 0, 5], self._robot.data.root_state_w[:, 3:7],
+            self._cmd_vel[:, 0, :3], self._cmd_vel[:, 0, 5], 
+            self._robot.data.root_state_w[:, 3:7],
             self._robot.data.root_lin_vel_w, self._robot.data.root_ang_vel_b, self.step_dt
         )
-        # carb.log_warn(f"thrust: {self._thrust[0, 0, :]}, moment: {self._moment[0, 0, :]}")
-        # desired_thrust_per_weight = self._cmd_vel[:, 0, 2]
-        # ang_acc_cmd_b = torch.zeros_like(self._cmd_vel[:, 0, :3])
-        # carb.log_warn(f"acc_rpy: {self._moment[:,0,0].item():.5f}, {self._moment[:,0,1].item():.5f}, {self._moment[:,0,2].item():.5f}")
-        # carb.log_warn(f"thrust: {self._thrust[:,0,0].item():.2f}, {self._thrust[:,0,1].item():.2f}, {self._thrust[:,0,2].item():.2f}")
-        # self._thrust[:, 0, 2] = self._robot_weight * desired_thrust_per_weight.clamp(min=0.0) / 14.6
-        # self._moment[:, 0, 0] = -self._moment_of_inertia[0, 0] * (ang_acc_cmd_b[:, 0].clamp(-self.max_ang_acc, self.max_ang_acc))
-        # self._moment[:, 0, 1] = -self._moment_of_inertia[0, 4] * (ang_acc_cmd_b[:, 1].clamp(-self.max_ang_acc, self.max_ang_acc))
-        # self._moment[:, 0, 2] = self._moment_of_inertia[0, 8] * (ang_acc_cmd_b[:, 2].clamp(-self.max_ang_acc, self.max_ang_acc))
-        # self._desired_pos_w[:, :] += self.target_speed[:,:] * self.step_dt
+        
+        # self._robot.write_joint_position_to_sim(
+        #     self._robot.data.default_joint_pos[:, :3], joint_ids=[0,1,2]
+        # )
 
 
     def _apply_action(self):
         # self._robot.write_root_link_velocity_to_sim(self._cmd_vel[self._body_id, 0, :6], env_ids=self._body_id)
         self._robot.set_external_force_and_torque(self._thrust, self._moment, body_ids=self._body_id)
-        self.frame_visualizer.visualize(self._robot.data.root_state_w[:, :3], self._robot.data.root_state_w[:, 3:7])
+        # self.frame_visualizer.visualize(self._robot.data.root_state_w[:, :3], self._robot.data.root_state_w[:, 3:7])
 
     def _get_observations(self) -> dict:
         desired_pos_b, _ = subtract_frame_transforms(
@@ -217,13 +216,12 @@ class IrisEnv(DirectRLEnv):
         obs = torch.cat(
             [
                 self._robot.data.root_state_w[:, :10],
-                self._robot.data.root_ang_vel_b[:, 2:3],
                 # self._robot.data.root_ang_vel_b,
                 self._robot.data.body_lin_acc_w[:,0],
                 self._robot.data.body_ang_acc_w[:,0],
                 # self._robot.data.projected_gravity_b,
                 desired_pos_b,
-                self._desired_yaw_w,
+                # self._desired_yaw_w,
             ],
             dim=-1,
         )
@@ -234,7 +232,7 @@ class IrisEnv(DirectRLEnv):
         lin_vel = torch.sum(torch.square(self._robot.data.root_lin_vel_b), dim=1)
         ang_vel = torch.sum(torch.square(self._robot.data.root_ang_vel_b), dim=1)
         action_sum = torch.sum(torch.square(self._actions[:,:3]), dim=1)
-        action_delta = torch.sum(torch.square(self._actions[:,:3] - self._last_actions[:,:3]), dim=1)
+        action_delta = torch.sum(torch.square(self._actions - self._last_actions), dim=1)
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_pos_w, dim=1)
         distance_to_goal_mapped = 1 - torch.tanh((distance_to_goal) / 0.8)
         roll, pitch, yaw = euler_xyz_from_quat(self._robot.data.root_state_w[:, 3:7])
@@ -251,7 +249,7 @@ class IrisEnv(DirectRLEnv):
             "action_delta": action_delta * self.cfg.action_delta_reward_scale * self.step_dt,
             "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
             "yaw": yaw_error * self.cfg.yaw_reward_scale * self.step_dt,
-            "yaw_rate": yaw_rate * self.cfg.yaw_rate_reward_scale * self.step_dt,
+            # "yaw_rate": yaw_rate * self.cfg.yaw_rate_reward_scale * self.step_dt,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         self._last_actions = self._actions.clone()
@@ -307,16 +305,17 @@ class IrisEnv(DirectRLEnv):
         default_root_state[:, :2] = torch.zeros_like(default_root_state[:, :2])
         default_root_state[:, :3] += self._terrain.env_origins[env_ids]
         default_root_state[:, 2] += torch.zeros_like(default_root_state[:, 2]).uniform_(1.5, 4.5)
-        default_root_state[:, 3:7] = quat_from_euler_xyz(
-            torch.zeros_like(default_root_state[:, 0]),
-            torch.zeros_like(default_root_state[:, 0]),
-            torch.zeros_like(default_root_state[:, 0]).uniform_(-3.14, 3.14),
-        )
+        # default_root_state[:, 3:7] = quat_from_euler_xyz(
+        #     torch.zeros_like(default_root_state[:, 3]), 
+        #     torch.zeros_like(default_root_state[:, 4]), 
+        #     torch.ones_like(default_root_state[:, 5]) * 3.14/2
+        # )
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
         self._last_actions[env_ids] = torch.zeros_like(self._actions[env_ids])
         self._stabilizer.reset(env_ids)
+        self.frame_visualizer.visualize(self._robot.data.root_state_w[:, :3], self._robot.data.root_state_w[:, 3:7])
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         # create markers if necessary for the first tome

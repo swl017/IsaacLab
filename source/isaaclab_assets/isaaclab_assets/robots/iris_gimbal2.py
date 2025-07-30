@@ -16,11 +16,10 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 # Configuration
 ##
 
-IRIS_GIMBAL_CFG = ArticulationCfg(
+IRIS_GIMBAL2_CFG = ArticulationCfg(
     prim_path="{ENV_REGEX_NS}/Robot",
     spawn=sim_utils.UsdFileCfg(
-        # usd_path="/home/usrg/IsaacPX4/PegasusSimulator/extensions/pegasus.simulator/pegasus/simulator/assets/Robots/Iris/iris.usd",
-        usd_path="/home/usrg/IsaacPX4/PegasusSimulator/extensions/pegasus.simulator/pegasus/simulator/assets/Robots/Iris/iris_gimbal.usda",
+        usd_path="/home/usrg/IsaacPX4/PegasusSimulator/extensions/pegasus.simulator/pegasus/simulator/assets/Robots/Iris/iris_gimbal2.usda",
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
             max_depenetration_velocity=10.0,
@@ -44,9 +43,9 @@ IRIS_GIMBAL_CFG = ArticulationCfg(
             # "cgo3_camera_joint": 0.0,
         },
         joint_vel={
-            "cgo3_vertical_arm_joint": 0.0,
-            "cgo3_horizontal_arm_joint": 0.0,
-            "cgo3_camera_joint": 0.0,
+            "pitch_joint": 0.0,
+            "roll_joint": 0.0,
+            "yaw_joint": 0.0,
             "joint0": 200.0,
             "joint1": -200.0,
             "joint2": 200.0,
@@ -54,10 +53,31 @@ IRIS_GIMBAL_CFG = ArticulationCfg(
         },
     ),
     actuators={
-        "dummy": ImplicitActuatorCfg(
-            joint_names_expr=[".*"],
-            stiffness=0.0,
-            damping=0.0,
+        # "dummy": ImplicitActuatorCfg(
+        #     joint_names_expr=[".*"],
+        #     stiffness=0.0,
+        #     damping=0.0,
+        # ),
+        "pitch": ImplicitActuatorCfg(
+            joint_names_expr=["pitch_joint"],
+            effort_limit=200.0,
+            velocity_limit=0.2,
+            stiffness=2e3,
+            damping=1e2,
+        ),
+        "roll": ImplicitActuatorCfg(
+            joint_names_expr=["roll_joint"],
+            effort_limit=200.0,
+            velocity_limit=0.2,
+            stiffness=2e3,
+            damping=1e2,
+        ),
+        "yaw": ImplicitActuatorCfg(
+            joint_names_expr=["yaw_joint"],
+            effort_limit=200.0,
+            velocity_limit=0.2,
+            stiffness=2e3,
+            damping=1e2,
         ),
     },
 )

@@ -66,7 +66,7 @@ agent:
   time_limit_bootstrap: False
   # logging and checkpoint
   experiment:
-    directory: "iris_stabilized_direct"
+    directory: "iris_gimbal2_direct"
     experiment_name: ""
     write_interval: auto
     checkpoint_interval: auto
@@ -76,5 +76,5 @@ agent:
 # https://skrl.readthedocs.io/en/latest/api/trainers/sequential.html
 trainer:
   class: SequentialTrainer
-  timesteps: 12800
+  timesteps: 8800
   environment_info: log

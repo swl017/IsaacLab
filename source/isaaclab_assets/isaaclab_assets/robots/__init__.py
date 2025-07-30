@@ -26,3 +26,4 @@ from .unitree import *
 from .universal_robots import *
 from .iris import *
 from .iris_gimbal import *
+from .iris_gimbal2 import *
