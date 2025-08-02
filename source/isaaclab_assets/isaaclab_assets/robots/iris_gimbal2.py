@@ -21,7 +21,7 @@ IRIS_GIMBAL2_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
         usd_path="/home/usrg/IsaacPX4/PegasusSimulator/extensions/pegasus.simulator/pegasus/simulator/assets/Robots/Iris/iris_gimbal2.usda",
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
-            disable_gravity=False,
+            disable_gravity=True,
             max_depenetration_velocity=10.0,
             enable_gyroscopic_forces=True,
         ),
@@ -38,9 +38,6 @@ IRIS_GIMBAL2_CFG = ArticulationCfg(
         pos=(0.0, 0.0, 0.5),
         joint_pos={
             ".*": 0.0,
-            # "cgo3_vertical_arm_joint": 0.0,
-            # "cgo3_horizontal_arm_joint": 0.0,
-            # "cgo3_camera_joint": 0.0,
         },
         joint_vel={
             "pitch_joint": 0.0,
@@ -53,28 +50,30 @@ IRIS_GIMBAL2_CFG = ArticulationCfg(
         },
     ),
     actuators={
-        # "dummy": ImplicitActuatorCfg(
-        #     joint_names_expr=[".*"],
-        #     stiffness=0.0,
-        #     damping=0.0,
-        # ),
         "pitch": ImplicitActuatorCfg(
             joint_names_expr=["pitch_joint"],
-            effort_limit=200.0,
+            effort_limit_sim=200.0,
             velocity_limit=0.2,
             stiffness=2e3,
             damping=1e2,
         ),
         "roll": ImplicitActuatorCfg(
             joint_names_expr=["roll_joint"],
-            effort_limit=200.0,
+            effort_limit_sim=200.0,
             velocity_limit=0.2,
             stiffness=2e3,
             damping=1e2,
         ),
         "yaw": ImplicitActuatorCfg(
             joint_names_expr=["yaw_joint"],
-            effort_limit=200.0,
+            effort_limit_sim=200.0,
+            velocity_limit=0.2,
+            stiffness=2e3,
+            damping=1e2,
+        ),
+        "propeller": ImplicitActuatorCfg(
+            joint_names_expr=["joint[0-3]"],
+            effort_limit_sim=200.0,
             velocity_limit=0.2,
             stiffness=2e3,
             damping=1e2,

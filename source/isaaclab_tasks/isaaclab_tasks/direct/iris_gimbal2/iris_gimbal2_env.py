@@ -21,7 +21,9 @@ from isaaclab.utils.math import (
     subtract_frame_transforms, 
     euler_xyz_from_quat, 
     quat_from_euler_xyz,
-    quat_mul
+    quat_mul,
+    quat_inv,
+    quat_rotate
 )
 
 ##
@@ -62,8 +64,8 @@ class IrisGimbal2EnvCfg(DirectRLEnvCfg):
     # env
     episode_length_s = 20.0
     decimation = 2
-    action_space = 4
-    observation_space = 19
+    action_space = 5
+    observation_space = 21
     state_space = 0
     debug_vis = True
 
@@ -109,11 +111,11 @@ class IrisGimbal2EnvCfg(DirectRLEnvCfg):
     action_sum_reward_scale = -0.1
     action_delta_reward_scale = -0.01
     distance_to_goal_reward_scale = 60.0
-    yaw_reward_scale = -1
-    yaw_rate_reward_scale = -0.1
+    yaw_reward_scale = -10
+    yaw_rate_reward_scale = -0.001
     target_speed = 5.0
     max_lin_vel = 15.0
-    max_yaw_rate = 10.0
+    max_yaw_rate = 20.0
     max_lin_acc = 3.0
     max_ang_acc = 30.0
 
@@ -142,12 +144,19 @@ class IrisGimbal2Env(DirectRLEnv):
                 "action_sum",
                 "action_delta",
                 "distance_to_goal",
-                "yaw"
-                # "yaw_rate"
+                "yaw",
+                "yaw_rate"
             ]
         }
         # Get specific body indices
         self._body_id = self._robot.find_bodies("body")[0]
+        self.gimbal_yaw_joint_idx = self._robot.find_joints("yaw_joint")[0][0]
+        self.gimbal_roll_joint_idx = self._robot.find_joints("roll_joint")[0][0]
+        self.gimbal_pitch_joint_idx = self._robot.find_joints("pitch_joint")[0][0]
+        self.gimbal_dof_targets = torch.zeros(self.num_envs, self._robot.num_joints, device=self.device)
+        self.gimbal_dof_targets[:, self.gimbal_yaw_joint_idx] = 0
+        self.gimbal_dof_targets[:, self.gimbal_roll_joint_idx] = 0
+        self.gimbal_dof_targets[:, self.gimbal_pitch_joint_idx] = 0
         self._robot_mass = self._robot.root_physx_view.get_masses()[0].sum()
         self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
         self._robot_weight = (self._robot_mass * self._gravity_magnitude).item()
@@ -167,6 +176,8 @@ class IrisGimbal2Env(DirectRLEnv):
         # frame_cfg = FRAME_MARKER_CFG.replace(prim_path="/World/envs/.*")
         frame_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
         self.frame_visualizer = VisualizationMarkers(frame_cfg)
+
+        self.step_count = 0
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
@@ -198,16 +209,32 @@ class IrisGimbal2Env(DirectRLEnv):
             self._robot.data.root_state_w[:, 3:7],
             self._robot.data.root_lin_vel_w, self._robot.data.root_ang_vel_b, self.step_dt
         )
-        
-        # self._robot.write_joint_position_to_sim(
-        #     self._robot.data.default_joint_pos[:, :3], joint_ids=[0,1,2]
-        # )
 
+        self.new_vel_lin_w = self._robot.data.root_lin_vel_w + quat_rotate(
+            self._robot.data.root_state_w[:, 3:7], self._thrust[:, 0, :]) * self.step_dt
+        self.new_vel_lin_w[:, 2] = torch.clamp(self.new_vel_lin_w[:, 2], min=-self.max_lin_vel, max=self.max_lin_vel)
+        self.new_vel_ang_w = self._robot.data.root_ang_vel_w + quat_rotate(
+            self._robot.data.root_state_w[:, 3:7], self._moment[:, 0, :]) * self.step_dt
+        self.new_vel_ang_w[:, 0] = torch.zeros_like(self.new_vel_ang_w[:, 0])
+        self.new_vel_ang_w[:, 1] = torch.zeros_like(self.new_vel_ang_w[:, 1])
+        self.new_vel_ang_w[:, 2] = torch.clamp(self.new_vel_ang_w[:, 2], -self.max_yaw_rate, self.max_yaw_rate)
+        
+        roll, pitch, yaw = euler_xyz_from_quat(self._robot.data.root_state_w[:, 3:7])
+        curr_quat_w_yaw = quat_from_euler_xyz(torch.zeros_like(roll), torch.zeros_like(pitch), yaw)
+        roll_b, pitch_b, _ = euler_xyz_from_quat(quat_mul(self._robot.data.root_state_w[:, 3:7], quat_inv(curr_quat_w_yaw)))
+        self.gimbal_dof_targets[:, self.gimbal_yaw_joint_idx] = torch.zeros_like(yaw)
+        self.gimbal_dof_targets[:, self.gimbal_roll_joint_idx] = self._stabilizer.wrap_to_pi(-roll_b)
+        self.gimbal_dof_targets[:, self.gimbal_pitch_joint_idx] = self._actions[:, 4] #self._stabilizer.wrap_to_pi(-pitch_b*(1+self.step_count*0.001))
 
     def _apply_action(self):
         # self._robot.write_root_link_velocity_to_sim(self._cmd_vel[self._body_id, 0, :6], env_ids=self._body_id)
-        self._robot.set_external_force_and_torque(self._thrust, self._moment, body_ids=self._body_id)
-        # self.frame_visualizer.visualize(self._robot.data.root_state_w[:, :3], self._robot.data.root_state_w[:, 3:7])
+        # self._robot.set_external_force_and_torque(self._thrust, self._moment, body_ids=self._body_id)
+        self._robot.write_root_velocity_to_sim(
+            torch.cat((self.new_vel_lin_w, self.new_vel_ang_w), dim=1), env_ids=self._robot._ALL_INDICES
+        )
+        self._robot.set_joint_position_target(self.gimbal_dof_targets)
+        self.frame_visualizer.visualize(self._robot.data.root_state_w[:, :3], self.target_quat)
+        # self.frame_visualizer.visualize(self._robot.data.default_root_state[:, :3], self._robot.data.root_state_w[:, 3:7], marker_indices=self._body_id)
 
     def _get_observations(self) -> dict:
         desired_pos_b, _ = subtract_frame_transforms(
@@ -216,12 +243,12 @@ class IrisGimbal2Env(DirectRLEnv):
         obs = torch.cat(
             [
                 self._robot.data.root_state_w[:, :10],
-                # self._robot.data.root_ang_vel_b,
+                self._robot.data.root_ang_vel_b[:, 2:3],
                 self._robot.data.body_lin_acc_w[:,0],
                 self._robot.data.body_ang_acc_w[:,0],
                 # self._robot.data.projected_gravity_b,
                 desired_pos_b,
-                # self._desired_yaw_w,
+                self._desired_yaw_w,
             ],
             dim=-1,
         )
@@ -232,7 +259,7 @@ class IrisGimbal2Env(DirectRLEnv):
         lin_vel = torch.sum(torch.square(self._robot.data.root_lin_vel_b), dim=1)
         ang_vel = torch.sum(torch.square(self._robot.data.root_ang_vel_b), dim=1)
         action_sum = torch.sum(torch.square(self._actions[:,:3]), dim=1)
-        action_delta = torch.sum(torch.square(self._actions - self._last_actions), dim=1)
+        action_delta = torch.sum(torch.square(self._actions[:,:3] - self._last_actions[:,:3]), dim=1)
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_pos_w, dim=1)
         distance_to_goal_mapped = 1 - torch.tanh((distance_to_goal) / 0.8)
         roll, pitch, yaw = euler_xyz_from_quat(self._robot.data.root_state_w[:, 3:7])
@@ -249,7 +276,7 @@ class IrisGimbal2Env(DirectRLEnv):
             "action_delta": action_delta * self.cfg.action_delta_reward_scale * self.step_dt,
             "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
             "yaw": yaw_error * self.cfg.yaw_reward_scale * self.step_dt,
-            # "yaw_rate": yaw_rate * self.cfg.yaw_rate_reward_scale * self.step_dt,
+            "yaw_rate": yaw_rate * self.cfg.yaw_rate_reward_scale * self.step_dt,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         self._last_actions = self._actions.clone()
@@ -315,7 +342,11 @@ class IrisGimbal2Env(DirectRLEnv):
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
         self._last_actions[env_ids] = torch.zeros_like(self._actions[env_ids])
         self._stabilizer.reset(env_ids)
-        self.frame_visualizer.visualize(self._robot.data.root_state_w[:, :3], self._robot.data.root_state_w[:, 3:7])
+        self.target_quat = quat_from_euler_xyz(
+            torch.zeros_like(self._desired_yaw_w[:, 0]), 
+            torch.zeros_like(self._desired_yaw_w[:, 0]), 
+            self._desired_yaw_w[:, 0]
+        )
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         # create markers if necessary for the first tome
@@ -328,9 +359,11 @@ class IrisGimbal2Env(DirectRLEnv):
                 self.goal_pos_visualizer = VisualizationMarkers(marker_cfg)
             # set their visibility to true
             self.goal_pos_visualizer.set_visibility(True)
+            # self.frame_visualizer.set_visibility(True)
         else:
             if hasattr(self, "goal_pos_visualizer"):
                 self.goal_pos_visualizer.set_visibility(False)
+                # self.frame_visualizer.set_visibility(False)
 
     def _debug_vis_callback(self, event):
         # update the markers

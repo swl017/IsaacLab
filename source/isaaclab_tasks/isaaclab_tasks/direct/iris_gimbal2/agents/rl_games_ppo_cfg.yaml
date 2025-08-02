@@ -39,7 +39,7 @@ params:
   load_path: '' # path to the checkpoint to load
 
   config:
-    name: iris_stabilized_direct
+    name: iris_gimbal2_direct
     env_name: rlgpu
     device: 'cuda:0'
     device_name: 'cuda:0'
@@ -60,7 +60,7 @@ params:
     schedule_type: legacy
     kl_threshold: 0.016
     score_to_win: 20000
-    max_epochs: 200
+    max_epochs: 600
     save_best_after: 100
     save_frequency: 25
     grad_norm: 1.0

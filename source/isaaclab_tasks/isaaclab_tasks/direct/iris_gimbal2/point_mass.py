@@ -41,15 +41,15 @@ class PointMass:
         moment_w = torch.stack([
             -self.wrap_to_pi(roll) * 2 - curr_ang_vel_w[:,0]*1.3,
             -self.wrap_to_pi(pitch) * 2 - curr_ang_vel_w[:,1]*1.3,
-            (cmd_yaw_vel - curr_ang_vel_w[:,2]) * 0.1
+            (cmd_yaw_vel - curr_ang_vel_w[:,2]) * 10
         ], dim=1)
         moment = quat_rotate_inverse(curr_quat_w, moment_w)
 
         feedback = cmd_lin_vel_w - curr_lin_vel_w
         feedforward = -self.weight_tensor
-        force = quat_rotate_inverse(curr_quat_w, feedforward + feedback * 3.0)
+        force = quat_rotate_inverse(curr_quat_w, feedback * 3.0)
         # force[:, 2] *= 3.0
-        force[:, 2] = torch.clamp(force[:, 2], min=0.0)
+        # force[:, 2] = torch.clamp(force[:, 2], min=0.0)
         
         
         return force, moment
