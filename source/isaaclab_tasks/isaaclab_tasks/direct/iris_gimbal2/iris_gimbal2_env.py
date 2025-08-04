@@ -9,11 +9,12 @@ import gymnasium as gym
 import torch
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import Articulation, ArticulationCfg
+from isaaclab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg
 from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg
 from isaaclab.envs.ui import BaseEnvWindow
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import Camera, CameraCfg, TiledCamera, TiledCameraCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
@@ -29,6 +30,7 @@ from isaaclab.utils.math import (
 ##
 # Pre-defined configs
 ##
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab_assets import CRAZYFLIE_CFG  # isort: skip
 from isaaclab_assets import IRIS_GIMBAL2_CFG  # isort: skip
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
@@ -39,6 +41,12 @@ from .point_mass import PointMass
 import carb
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.markers.config import FRAME_MARKER_CFG 
+
+import isaaclab.sim as sim_utils
+import numpy as np
+
+import omni.usd
+import Semantics
 
 class IrisGimbal2EnvWindow(BaseEnvWindow):
     """Window manager for the Iris environment."""
@@ -83,18 +91,66 @@ class IrisGimbal2EnvCfg(DirectRLEnvCfg):
             restitution=0.0,
         ),
     )
-    terrain = TerrainImporterCfg(
-        prim_path="/World/ground",
-        terrain_type="plane",
-        collision_group=-1,
-        physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
-            static_friction=1.0,
-            dynamic_friction=1.0,
-            restitution=0.0,
+
+    terrain = None
+    # terrain = TerrainImporterCfg(
+    #     prim_path="/World/ground",
+    #     terrain_type="plane",
+    #     collision_group=-1,
+    #     physics_material=sim_utils.RigidBodyMaterialCfg(
+    #         friction_combine_mode="multiply",
+    #         restitution_combine_mode="multiply",
+    #         static_friction=1.0,
+    #         dynamic_friction=1.0,
+    #         restitution=0.0,
+    #     ),
+    #     debug_vis= False,
+    # )
+
+    camera_cfg = TiledCameraCfg(
+            prim_path="/World/envs/env_.*/Robot/iris/pitch_link/camera",
+            update_period=0.1,
+            height=480,
+            width=640,
+            data_types=[
+                "rgb",
+                "semantic_segmentation",
+                "instance_segmentation_fast", 
+                "instance_id_segmentation_fast"
+            ],
+            colorize_semantic_segmentation=True,
+            colorize_instance_segmentation=True,
+            colorize_instance_id_segmentation=True,
+            semantic_segmentation_mapping={
+                "class:1": (255, 36, 66, 255)
+            },
+            spawn=sim_utils.PinholeCameraCfg(
+                focal_length=24.0, 
+                focus_distance=400.0, 
+                horizontal_aperture=20.955, 
+                clipping_range=(0.1, 1.0e5)
+            ),
+            offset=TiledCameraCfg.OffsetCfg(
+                pos=(0.2, 0.0, -0.1), 
+                rot=(0.5, -0.5, 0.5, -0.5), 
+                convention="ros"
+            ),
+        )
+
+    target_cfg: RigidObjectCfg = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/target",
+        spawn=sim_utils.UsdFileCfg(
+            # usd_path=f"{ISAAC_NUCLEUS_DIR}/Robots/Crazyflie/cf2x.usd",
+            usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd",
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=False,
+                disable_gravity=True,
+                enable_gyroscopic_forces=False,
+                rigid_body_enabled=True,
+            ),
+            copy_from_source=False,
         ),
-        debug_vis=False,
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(1.0, 0.0, 3.5), rot=(1.0, 0.0, 0.0, 0.0)),
     )
 
     # scene
@@ -176,19 +232,60 @@ class IrisGimbal2Env(DirectRLEnv):
         # frame_cfg = FRAME_MARKER_CFG.replace(prim_path="/World/envs/.*")
         frame_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
         self.frame_visualizer = VisualizationMarkers(frame_cfg)
+        marker_cfg = CUBOID_MARKER_CFG.copy()
+        marker_cfg.markers["cuboid"].size = (0.05, 0.05, 0.05)
+        marker_cfg.markers["cuboid"].semantic_tags = [("class", "1")]
+        # -- goal pose
+        marker_cfg.prim_path = "/Visuals/FrameVisualizer/goal_position"
+        self.goal_visualizer = VisualizationMarkers(marker_cfg)
 
         self.step_count = 0
+        self._env_origins = self._compute_env_origins_grid(self.num_envs, self.cfg.scene.env_spacing)
 
+    def _compute_env_origins_grid(self, num_envs: int, env_spacing: float) -> torch.Tensor:
+        """Compute the origins of the environments in a grid based on configured spacing."""
+        # create tensor based on number of environments
+        env_origins = torch.zeros(num_envs, 3, device=self.device)
+        # create a grid of origins
+        num_rows = np.ceil(num_envs / int(np.sqrt(num_envs)))
+        num_cols = np.ceil(num_envs / num_rows)
+        ii, jj = torch.meshgrid(
+            torch.arange(num_rows, device=self.device), torch.arange(num_cols, device=self.device), indexing="ij"
+        )
+        env_origins[:, 0] = -(ii.flatten()[:num_envs] - (num_rows - 1) / 2) * env_spacing
+        env_origins[:, 1] = (jj.flatten()[:num_envs] - (num_cols - 1) / 2) * env_spacing
+        env_origins[:, 2] = 0.0
+        return env_origins
+    
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self._robot
 
-        self.cfg.terrain.num_envs = self.scene.cfg.num_envs
-        self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
-        self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
+        if self.cfg.terrain is not None:
+            self.cfg.terrain.num_envs = self.scene.cfg.num_envs
+            self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
+            self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
+        else:
+            self._terrain = None
+
+        self._camera = TiledCamera(self.cfg.camera_cfg)
+        self.scene.sensors["tiled_camera"] = self._camera
+
+        self.target = RigidObject(self.cfg.target_cfg)
+        stage = omni.usd.get_context().get_stage()
+        # add semantics for in-hand target
+        prim = stage.GetPrimAtPath("/World/envs/env_0/target")
+        sem = Semantics.SemanticsAPI.Apply(prim, "Semantics")
+        sem.CreateSemanticTypeAttr()
+        sem.CreateSemanticDataAttr()
+        sem.GetSemanticTypeAttr().Set("class")
+        sem.GetSemanticDataAttr().Set("target")
+        self.scene.rigid_objects["target"] = self.target
+
         # clone, filter, and replicate
         self.scene.clone_environments(copy_from_source=False)
-        self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
+        if self.cfg.terrain is not None:
+            self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
@@ -226,6 +323,11 @@ class IrisGimbal2Env(DirectRLEnv):
         self.gimbal_dof_targets[:, self.gimbal_roll_joint_idx] = self._stabilizer.wrap_to_pi(-roll_b)
         self.gimbal_dof_targets[:, self.gimbal_pitch_joint_idx] = self._actions[:, 4] #self._stabilizer.wrap_to_pi(-pitch_b*(1+self.step_count*0.001))
 
+        # segmentation_data = self.scene["camera"].data.output["semantic_segmentation"][0].cpu().numpy()
+        # Print unique values in segmentation_data
+        # unique_values = torch.unique(self.scene["camera"].data.output["semantic_segmentation"][0])
+        # carb.log_warn(f"Unique segmentation values: {unique_values.cpu().tolist()}")
+
     def _apply_action(self):
         # self._robot.write_root_link_velocity_to_sim(self._cmd_vel[self._body_id, 0, :6], env_ids=self._body_id)
         # self._robot.set_external_force_and_torque(self._thrust, self._moment, body_ids=self._body_id)
@@ -234,6 +336,7 @@ class IrisGimbal2Env(DirectRLEnv):
         )
         self._robot.set_joint_position_target(self.gimbal_dof_targets)
         self.frame_visualizer.visualize(self._robot.data.root_state_w[:, :3], self.target_quat)
+        self.goal_visualizer.visualize(self._desired_pos_w)
         # self.frame_visualizer.visualize(self._robot.data.default_root_state[:, :3], self._robot.data.root_state_w[:, 3:7], marker_indices=self._body_id)
 
     def _get_observations(self) -> dict:
@@ -319,9 +422,12 @@ class IrisGimbal2Env(DirectRLEnv):
 
         self._actions[env_ids] = 0.0
         # Sample new commands
-        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
-        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(1.5, 4.5)
-        self._desired_pos_w[env_ids, :3] += self._terrain.env_origins[env_ids, :3]
+        default_root_state = self._robot.data.default_root_state[env_ids]
+        self._desired_pos_w[env_ids, :2] = torch.zeros_like(default_root_state[:, :2])
+        self._desired_pos_w[env_ids, 2] = torch.ones_like(default_root_state[:, 2]) * 3.5
+        # self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
+        # self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(1.5, 4.5)
+        self._desired_pos_w[env_ids, :3] += self._env_origins[env_ids, :3]
         self._desired_yaw_w[env_ids, 0] = torch.zeros_like(self._desired_yaw_w[env_ids, 0]).uniform_(-3.14, 3.14)
         self.target_speed = torch.zeros_like(self._desired_pos_w).uniform_(-self.cfg.target_speed, self.cfg.target_speed)
 
@@ -330,8 +436,9 @@ class IrisGimbal2Env(DirectRLEnv):
         joint_vel = self._robot.data.default_joint_vel[env_ids]
         default_root_state = self._robot.data.default_root_state[env_ids]
         default_root_state[:, :2] = torch.zeros_like(default_root_state[:, :2])
-        default_root_state[:, :3] += self._terrain.env_origins[env_ids]
-        default_root_state[:, 2] += torch.zeros_like(default_root_state[:, 2]).uniform_(1.5, 4.5)
+        default_root_state[:, :3] += self._env_origins[env_ids]
+        default_root_state[:, 2] += torch.ones_like(default_root_state[:, 2]) * 3.0
+        # default_root_state[:, 2] += torch.zeros_like(default_root_state[:, 2]).uniform_(1.5, 4.5)
         # default_root_state[:, 3:7] = quat_from_euler_xyz(
         #     torch.zeros_like(default_root_state[:, 3]), 
         #     torch.zeros_like(default_root_state[:, 4]), 
