@@ -45,8 +45,8 @@ from isaaclab.markers.config import FRAME_MARKER_CFG
 import isaaclab.sim as sim_utils
 import numpy as np
 
-import omni.usd
-import Semantics
+from .bbox_generator import BBoxGenerator
+
 
 class IrisGimbal2EnvWindow(BaseEnvWindow):
     """Window manager for the Iris environment."""
@@ -70,10 +70,10 @@ class IrisGimbal2EnvWindow(BaseEnvWindow):
 @configclass
 class IrisGimbal2EnvCfg(DirectRLEnvCfg):
     # env
-    episode_length_s = 20.0
+    episode_length_s = 30.0
     decimation = 2
     action_space = 5
-    observation_space = 21
+    observation_space = 23
     state_space = 0
     debug_vis = True
 
@@ -81,7 +81,7 @@ class IrisGimbal2EnvCfg(DirectRLEnvCfg):
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
-        dt=1 / 100,
+        dt=2 / 100,
         render_interval=decimation,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -115,14 +115,13 @@ class IrisGimbal2EnvCfg(DirectRLEnvCfg):
             data_types=[
                 "rgb",
                 "semantic_segmentation",
-                "instance_segmentation_fast", 
-                "instance_id_segmentation_fast"
             ],
             colorize_semantic_segmentation=True,
             colorize_instance_segmentation=True,
             colorize_instance_id_segmentation=True,
             semantic_segmentation_mapping={
-                "class:1": (255, 36, 66, 255)
+                "class:target": (255, 36, 66, 255),
+                "class:robot": (255, 36, 255, 255),
             },
             spawn=sim_utils.PinholeCameraCfg(
                 focal_length=24.0, 
@@ -150,11 +149,11 @@ class IrisGimbal2EnvCfg(DirectRLEnvCfg):
             ),
             copy_from_source=False,
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(1.0, 0.0, 3.5), rot=(1.0, 0.0, 0.0, 0.0)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(5.0, 0.0, 3.5), rot=(1.0, 0.0, 0.0, 0.0)),
     )
 
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=3.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=300.0, replicate_physics=True)
     # robot
     robot: ArticulationCfg = IRIS_GIMBAL2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     thrust_to_weight = 4.0
@@ -169,6 +168,9 @@ class IrisGimbal2EnvCfg(DirectRLEnvCfg):
     distance_to_goal_reward_scale = 60.0
     yaw_reward_scale = -10
     yaw_rate_reward_scale = -0.001
+
+    bbox_center_reward_scale = 60
+
     target_speed = 5.0
     max_lin_vel = 15.0
     max_yaw_rate = 20.0
@@ -190,18 +192,21 @@ class IrisGimbal2Env(DirectRLEnv):
         # Goal position
         self._desired_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
         self._desired_yaw_w = torch.zeros(self.num_envs, 1, device=self.device)
+        self.bboxes = torch.zeros(self.num_envs, 4, device=self.device)  # (num_envs, 4 corners, 2D coordinates)
+        self.bboxes_normalized = torch.zeros(self.num_envs, 4, device=self.device)  # (num_envs, 4 corners, 2D coordinates)
+        self.bbox_valid_mask = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.bool)
 
         # Logging
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             for key in [
                 "lin_vel",
-                # "ang_vel",
                 "action_sum",
                 "action_delta",
-                "distance_to_goal",
-                "yaw",
-                "yaw_rate"
+                # "distance_to_goal",
+                # "yaw",
+                # "yaw_rate",
+                "bbox_center",
             ]
         }
         # Get specific body indices
@@ -258,8 +263,8 @@ class IrisGimbal2Env(DirectRLEnv):
         return env_origins
     
     def _setup_scene(self):
+        self.cfg.robot.spawn.semantic_tags = [("class", "robot")]
         self._robot = Articulation(self.cfg.robot)
-        self.scene.articulations["robot"] = self._robot
 
         if self.cfg.terrain is not None:
             self.cfg.terrain.num_envs = self.scene.cfg.num_envs
@@ -269,23 +274,17 @@ class IrisGimbal2Env(DirectRLEnv):
             self._terrain = None
 
         self._camera = TiledCamera(self.cfg.camera_cfg)
-        self.scene.sensors["tiled_camera"] = self._camera
 
+        self.cfg.target_cfg.spawn.semantic_tags = [("class", "target")]
         self.target = RigidObject(self.cfg.target_cfg)
-        stage = omni.usd.get_context().get_stage()
-        # add semantics for in-hand target
-        prim = stage.GetPrimAtPath("/World/envs/env_0/target")
-        sem = Semantics.SemanticsAPI.Apply(prim, "Semantics")
-        sem.CreateSemanticTypeAttr()
-        sem.CreateSemanticDataAttr()
-        sem.GetSemanticTypeAttr().Set("class")
-        sem.GetSemanticDataAttr().Set("target")
-        self.scene.rigid_objects["target"] = self.target
 
         # clone, filter, and replicate
         self.scene.clone_environments(copy_from_source=False)
         if self.cfg.terrain is not None:
             self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
+        self.scene.articulations["robot"] = self._robot
+        self.scene.sensors["tiled_camera"] = self._camera
+        self.scene.rigid_objects["target"] = self.target
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
@@ -328,6 +327,50 @@ class IrisGimbal2Env(DirectRLEnv):
         # unique_values = torch.unique(self.scene["camera"].data.output["semantic_segmentation"][0])
         # carb.log_warn(f"Unique segmentation values: {unique_values.cpu().tolist()}")
 
+        # Compute actual camera position based on robot state and gimbal orientation
+        # Get robot base position and orientation
+        robot_pos = self._robot.data.root_pos_w
+        robot_quat = self._robot.data.root_state_w[:, 3:7]
+        
+        # Get gimbal joint positions
+        gimbal_yaw = self._robot.data.joint_pos[:, self.gimbal_yaw_joint_idx]
+        gimbal_roll = self._robot.data.joint_pos[:, self.gimbal_roll_joint_idx] 
+        gimbal_pitch = self._robot.data.joint_pos[:, self.gimbal_pitch_joint_idx]
+        
+        # Create gimbal orientation quaternion (yaw -> roll -> pitch)
+        gimbal_quat = quat_mul(
+            quat_mul(
+                quat_from_euler_xyz(torch.zeros_like(gimbal_yaw), torch.zeros_like(gimbal_yaw), gimbal_yaw),
+                quat_from_euler_xyz(gimbal_roll, torch.zeros_like(gimbal_roll), torch.zeros_like(gimbal_roll))
+            ),
+            quat_from_euler_xyz(torch.zeros_like(gimbal_pitch), gimbal_pitch, torch.zeros_like(gimbal_pitch))
+        )
+        
+        # Combine robot and gimbal orientations
+        # Convert camera offset rotation from tuple to tensor and expand to match gimbal_quat shape
+        camera_offset_rot = torch.tensor(self._camera.cfg.offset.rot, device=self.device).expand(self.num_envs, -1)
+        camera_quat_world = quat_mul(robot_quat, quat_mul(gimbal_quat, camera_offset_rot))
+        
+        # Apply camera offset from configuration (pos=(0.2, 0.0, -0.1))
+        camera_offset = torch.tensor(self._camera.cfg.offset.pos, device=self.device).expand(self.num_envs, -1)
+        camera_pos_world = robot_pos + quat_rotate(camera_quat_world, camera_offset)
+        
+        bbox_gen = BBoxGenerator(camera_width=self._camera.cfg.width, camera_height=self._camera.cfg.height,
+                                focal_length=self._camera.cfg.spawn.focal_length, horizontal_aperture= self._camera.cfg.spawn.horizontal_aperture)
+        self.bboxes, self.bbox_valid_mask[:, 0] = bbox_gen.generate_2d_bbox(
+            self.target.data.root_state_w[:, :3], self.target.data.root_state_w[:, 3:7],
+            camera_pos_world, camera_quat_world
+        )
+        self.bboxes_normalized = self.bboxes.clone()
+        self.bboxes_normalized[:, 0] = torch.where(self.bbox_valid_mask.squeeze(-1), self.bboxes[:, 0] / self._camera.cfg.width, torch.ones_like(self.bboxes[:, 0]) * (-1.0))
+        self.bboxes_normalized[:, 1] = torch.where(self.bbox_valid_mask.squeeze(-1), self.bboxes[:, 1] / self._camera.cfg.height, torch.ones_like(self.bboxes[:, 1]) * (-1.0))
+        self.bboxes_normalized[:, 2] = torch.where(self.bbox_valid_mask.squeeze(-1), self.bboxes[:, 2] / self._camera.cfg.width, torch.ones_like(self.bboxes[:, 2]) * (-1.0))
+        self.bboxes_normalized[:, 3] = torch.where(self.bbox_valid_mask.squeeze(-1), self.bboxes[:, 3] / self._camera.cfg.height, torch.ones_like(self.bboxes[:, 3]) * (-1.0))
+        # carb.log_warn(f"camera pose: {[f'{x:.2f}' for x in camera_pos_world[0].cpu().tolist()]}, target pose: {[f'{x:.2f}' for x in self.target.data.root_state_w[0, :3].cpu().tolist()]}")
+        # carb.log_warn(f"gimbal yaw: {self._robot.data.joint_pos[0, self.gimbal_yaw_joint_idx].item():.2f}, gimbal roll: {self._robot.data.joint_pos[0, self.gimbal_roll_joint_idx].item():.2f}, gimbal pitch: {self._robot.data.joint_pos[0, self.gimbal_pitch_joint_idx].item():.2f}")
+        # carb.log_warn(f"bboxes: {[f'{x:.0f}' for x in bboxes[0].flatten().cpu().tolist()]}, valid_mask: {valid_mask[0].cpu().tolist()}")
+
+
     def _apply_action(self):
         # self._robot.write_root_link_velocity_to_sim(self._cmd_vel[self._body_id, 0, :6], env_ids=self._body_id)
         # self._robot.set_external_force_and_torque(self._thrust, self._moment, body_ids=self._body_id)
@@ -345,13 +388,14 @@ class IrisGimbal2Env(DirectRLEnv):
         )
         obs = torch.cat(
             [
-                self._robot.data.root_state_w[:, :10],
-                self._robot.data.root_ang_vel_b[:, 2:3],
-                self._robot.data.body_lin_acc_w[:,0],
-                self._robot.data.body_ang_acc_w[:,0],
-                # self._robot.data.projected_gravity_b,
-                desired_pos_b,
-                self._desired_yaw_w,
+                self._robot.data.root_state_w[:, :10], # 10
+                self._robot.data.root_ang_vel_b[:, 2:3], # 1
+                self._robot.data.body_lin_acc_w[:,0], # 3
+                self._robot.data.body_ang_acc_w[:,0], # 3
+                # desired_pos_b,
+                self._robot.data.joint_pos[:, self.gimbal_pitch_joint_idx:self.gimbal_pitch_joint_idx + 1], # 1
+                self.bboxes_normalized, # 4
+                self.bbox_valid_mask.float(), # 1
             ],
             dim=-1,
         )
@@ -372,14 +416,15 @@ class IrisGimbal2Env(DirectRLEnv):
         stabilize = torch.square(roll) + torch.square(pitch) #torch.square(roll / (45.0 / 180.0 * torch.pi)) + torch.square(pitch / (45.0 / 180.0 * torch.pi))
         yaw_error = torch.square(self._desired_yaw_w[:, 0] - yaw)
         yaw_rate = torch.square(self._robot.data.root_ang_vel_b[:, 2])
+        bbox = torch.square((self.bboxes[:, 0] + self.bboxes[:, 2])/2) / self._camera.cfg.width**2 + torch.square((self.bboxes[:, 1] + self.bboxes[:, 3])/2) / self._camera.cfg.height**2
+        bbox_mapped = (1 - torch.tanh(bbox / 0.8)) * self.bbox_valid_mask.squeeze(-1).float()
         rewards = {
             "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
-            # "ang_vel": ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
             "action_sum": action_sum * self.cfg.action_sum_reward_scale * self.step_dt,
             "action_delta": action_delta * self.cfg.action_delta_reward_scale * self.step_dt,
-            "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
-            "yaw": yaw_error * self.cfg.yaw_reward_scale * self.step_dt,
-            "yaw_rate": yaw_rate * self.cfg.yaw_rate_reward_scale * self.step_dt,
+            # "yaw": yaw_error * self.cfg.yaw_reward_scale * self.step_dt,
+            # "yaw_rate": yaw_rate * self.cfg.yaw_rate_reward_scale * self.step_dt,
+            "bbox_center": bbox_mapped * self.cfg.bbox_center_reward_scale * self.step_dt,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         self._last_actions = self._actions.clone()
@@ -401,6 +446,10 @@ class IrisGimbal2Env(DirectRLEnv):
         final_distance_to_goal = torch.linalg.norm(
             self._desired_pos_w[env_ids] - self._robot.data.root_pos_w[env_ids], dim=1
         ).mean()
+        final_bbox_center = torch.mean(
+            (self.bboxes[env_ids, 0] + self.bboxes[env_ids, 2]) / 2 / self._camera.cfg.width
+            + (self.bboxes[env_ids, 1] + self.bboxes[env_ids, 3]) / 2 / self._camera.cfg.height
+        )
         extras = dict()
         for key in self._episode_sums.keys():
             episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
@@ -412,6 +461,7 @@ class IrisGimbal2Env(DirectRLEnv):
         extras["Episode_Termination/died"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         extras["Metrics/final_distance_to_goal"] = final_distance_to_goal.item()
+        extras["Metrics/final_bbox_center"] = final_bbox_center.item()
         self.extras["log"].update(extras)
 
         self._robot.reset(env_ids)
@@ -425,11 +475,12 @@ class IrisGimbal2Env(DirectRLEnv):
         default_root_state = self._robot.data.default_root_state[env_ids]
         self._desired_pos_w[env_ids, :2] = torch.zeros_like(default_root_state[:, :2])
         self._desired_pos_w[env_ids, 2] = torch.ones_like(default_root_state[:, 2]) * 3.5
-        # self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
-        # self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(1.5, 4.5)
+        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
+        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(1.5, 4.5)
         self._desired_pos_w[env_ids, :3] += self._env_origins[env_ids, :3]
         self._desired_yaw_w[env_ids, 0] = torch.zeros_like(self._desired_yaw_w[env_ids, 0]).uniform_(-3.14, 3.14)
         self.target_speed = torch.zeros_like(self._desired_pos_w).uniform_(-self.cfg.target_speed, self.cfg.target_speed)
+        self.target.data.root_state_w[env_ids, :3] = self._desired_pos_w[env_ids, :3]
 
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
@@ -442,7 +493,7 @@ class IrisGimbal2Env(DirectRLEnv):
         # default_root_state[:, 3:7] = quat_from_euler_xyz(
         #     torch.zeros_like(default_root_state[:, 3]), 
         #     torch.zeros_like(default_root_state[:, 4]), 
-        #     torch.ones_like(default_root_state[:, 5]) * 3.14/2
+        #     torch.ones_like(default_root_state[:, 5]) * 3.14
         # )
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
