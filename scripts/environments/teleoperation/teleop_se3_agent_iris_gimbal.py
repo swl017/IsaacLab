@@ -68,11 +68,6 @@ from isaaclab_tasks.utils import parse_env_cfg
 
 import carb
 
-import matplotlib.pyplot as plt
-from bbox_extractor import BBoxExtractor, extract_bboxes_from_camera
-from isaaclab.utils.dict import print_dict
-
-
 def pre_process_actions(
     teleop_data: tuple[np.ndarray, bool] | list[tuple[np.ndarray, np.ndarray, np.ndarray]], num_envs: int, device: str
 ) -> torch.Tensor:
@@ -121,7 +116,7 @@ def pre_process_actions(
         gimbal_yaw = torch.tensor(-roll * 20, dtype=torch.float, device=device)
         gimbal_pitch = torch.tensor(pitch * 20, dtype=torch.float, device=device)
         actions = torch.tensor(
-            [pitch_moment, roll_moment, total_thrust, yaw_moment, gimbal_pitch, gimbal_yaw],
+            [pitch_moment, roll_moment, total_thrust, yaw_moment, gimbal_pitch],
             dtype=torch.float,
             device=device,
         ).repeat(num_envs, 1)
@@ -272,32 +267,9 @@ def main():
     teleop_interface.add_callback("R", reset_recording_instance)
     print(teleop_interface)
 
-    # bbox_video_kwargs = {
-    #     "video_folder": None,
-    #     "step_trigger": lambda step: step % args_cli.video_interval == 0,
-    #     "video_length": args_cli.video_length,
-    #     "camera_name": "camera",
-    #     "bbox_type": args_cli.bbox_type,
-    #     "min_area": args_cli.min_area,
-    #     "class_filter": args_cli.class_filter,
-    #     "fps": 30,
-    #     "save_bbox_data": args_cli.save_bbox_data,
-    #     "overlay_bboxes": args_cli.overlay_bboxes,
-    #     "disable_logger": True,
-    # }
-    # print(f"[INFO] Recording {args_cli.bbox_type} bounding box videos during training.")
-    # print_dict(bbox_video_kwargs, nesting=4)
-    # env = BBoxVideoWrapper(env, **bbox_video_kwargs)
-
     # reset environment
     env.reset()
     teleop_interface.reset()
-
-    plt.ion()
-    fig, ax = plt.subplots()
-    fig2, ax2 = plt.subplots()
-    image_display = None
-    image_display2 = None
 
     # simulate environment
     while simulation_app.is_running():
@@ -315,32 +287,6 @@ def main():
             else:
                 env.sim.render()
 
-            # Display segmentation data
-            segmentation_data = env.scene["tiled_camera"].data.output["semantic_segmentation"][0].cpu().numpy()
-            segmentation_data2 = env.scene["tiled_camera"].data.output["semantic_segmentation"][1].cpu().numpy()
-            # Extract bounding boxes if bbox extractor is enabled
-            class_filter=list(range(0, 254))
-            bbox_extractor = BBoxExtractor(
-                min_area=0,
-                class_filter=class_filter,
-            )
-            bboxes = extract_bboxes_from_camera(env.scene["tiled_camera"].data.output, bbox_type="semantic", min_area=0, class_filter=class_filter)
-            # Draw bounding boxes on the segmentation data
-            if image_display is None or image_display2 is None:
-                image_display = ax.imshow(segmentation_data)
-                image_display2 = ax2.imshow(segmentation_data2)
-                ax.set_title("Segmentation")
-                ax2.set_title("Segmentation 2")
-                plt.show(block=False)
-            else:
-                # image_display = ax.imshow(bbox_extractor.visualize_bboxes(
-                #     image=segmentation_data, bboxes=bboxes, bbox_type="semantic"))
-                image_display.set_data(segmentation_data)
-                image_display2.set_data(segmentation_data2)
-
-            fig.canvas.draw()
-            fig.canvas.flush_events()
-            
             if should_reset_recording_instance:
                 env.reset()
                 should_reset_recording_instance = False

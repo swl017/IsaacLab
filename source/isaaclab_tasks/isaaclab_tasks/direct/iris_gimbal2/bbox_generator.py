@@ -151,7 +151,7 @@ class BBoxGenerator:
         target_quat_world: torch.Tensor,
         camera_pos_world: torch.Tensor,
         camera_quat_world: torch.Tensor,
-        target_size: Tuple[float, float, float] = (0.5, 0.5, 0.5),
+        target_size: Tuple[float, float, float] = (0.2, 0.2, 0.2),
         min_bbox_size: int = 5
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Generate 2D bounding boxes for 3D targets.

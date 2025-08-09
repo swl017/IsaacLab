@@ -66,8 +66,10 @@ class BBoxExtractor:
         
         # Handle different data formats
         if seg_data.ndim == 3:
-            # If RGB format, convert to single channel
-            if seg_data.shape[2] == 3:
+            # If multi-channel format, convert to single channel
+            if seg_data.shape[2] == 4:  # RGBA format
+                seg_data = seg_data[:, :, 2]  # Take first channel
+            elif seg_data.shape[2] == 3:  # RGB format
                 seg_data = seg_data[:, :, 0]  # Take first channel
             elif seg_data.shape[2] == 1:
                 seg_data = seg_data[:, :, 0]
@@ -75,8 +77,8 @@ class BBoxExtractor:
         # Get unique class IDs (excluding background/0)
         unique_classes = np.unique(seg_data)
         unique_classes = unique_classes[unique_classes > 0]  # Remove background
-        print(f"[INFO]: Found {len(unique_classes)} unique classes in segmentation data.")
-        print(f"[INFO]: Unique classes: {unique_classes}")
+        # print(f"[INFO]: Found {len(unique_classes)} unique classes in segmentation data.")
+        # print(f"[INFO]: Unique classes: {unique_classes}")
 
         # Filter classes if specified
         if self.class_filter is not None:
@@ -84,7 +86,10 @@ class BBoxExtractor:
         
         for class_id in unique_classes:
             # Create binary mask for this class
-            mask = (seg_data == class_id).astype(np.uint8)
+            mask = (seg_data == class_id)
+            
+            # Filter out invalid values and ensure binary format
+            mask = mask.astype(np.uint8) * 255
             
             # Find contours
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -162,7 +167,10 @@ class BBoxExtractor:
         
         # Handle different data formats
         if seg_data.ndim == 3:
-            if seg_data.shape[2] == 3:
+            # If multi-channel format, convert to single channel
+            if seg_data.shape[2] == 4:  # RGBA format
+                seg_data = seg_data[:, :, 0]  # Take first channel
+            elif seg_data.shape[2] == 3:  # RGB format
                 seg_data = seg_data[:, :, 0]  # Take first channel
             elif seg_data.shape[2] == 1:
                 seg_data = seg_data[:, :, 0]
@@ -173,7 +181,10 @@ class BBoxExtractor:
         
         for instance_id in unique_instances:
             # Create binary mask for this instance
-            mask = (seg_data == instance_id).astype(np.uint8)
+            mask = (seg_data == instance_id)
+            
+            # Filter out invalid values and ensure binary format
+            mask = mask.astype(np.uint8) * 255
             
             # Find contours
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
