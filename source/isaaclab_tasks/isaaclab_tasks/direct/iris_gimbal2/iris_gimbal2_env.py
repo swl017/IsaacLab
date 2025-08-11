@@ -41,12 +41,16 @@ from .point_mass import PointMass
 import carb
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.markers.config import FRAME_MARKER_CFG 
+from isaaclab.sensors import FrameTransformer, FrameTransformerCfg, OffsetCfg
+DEBUG_DRAW = True
+if DEBUG_DRAW:
+    import isaacsim.util.debug_draw._debug_draw as omni_debug_draw
 
 import isaaclab.sim as sim_utils
 import numpy as np
 
 from .bbox_generator import BBoxGenerator
-
+from .camera_frustrum import CameraFrustrum
 
 class IrisGimbal2EnvWindow(BaseEnvWindow):
     """Window manager for the Iris environment."""
@@ -92,20 +96,20 @@ class IrisGimbal2EnvCfg(DirectRLEnvCfg):
         ),
     )
 
-    terrain = None
-    # terrain = TerrainImporterCfg(
-    #     prim_path="/World/ground",
-    #     terrain_type="plane",
-    #     collision_group=-1,
-    #     physics_material=sim_utils.RigidBodyMaterialCfg(
-    #         friction_combine_mode="multiply",
-    #         restitution_combine_mode="multiply",
-    #         static_friction=1.0,
-    #         dynamic_friction=1.0,
-    #         restitution=0.0,
-    #     ),
-    #     debug_vis= False,
-    # )
+    # terrain = None
+    terrain = TerrainImporterCfg(
+        prim_path="/World/ground",
+        terrain_type="plane",
+        collision_group=-1,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
+        ),
+        debug_vis= False,
+    )
 
     camera_cfg = TiledCameraCfg(
             prim_path="/World/envs/env_.*/Robot/pitch_link/camera",
@@ -130,7 +134,7 @@ class IrisGimbal2EnvCfg(DirectRLEnvCfg):
                 clipping_range=(0.1, 1.0e5)
             ),
             offset=TiledCameraCfg.OffsetCfg(
-                pos=(0.2, 0.0, -0.1), 
+                pos=(0.0, 0.0, 0.0), 
                 rot=(0.5, -0.5, 0.5, -0.5), 
                 convention="ros"
             ),
@@ -150,6 +154,15 @@ class IrisGimbal2EnvCfg(DirectRLEnvCfg):
             copy_from_source=False,
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(5.0, 0.0, 3.5), rot=(1.0, 0.0, 0.0, 0.0)),
+    )
+
+    frame_transformer_cfg: FrameTransformerCfg = FrameTransformerCfg(
+        prim_path="/World/envs/env_.*/Robot/body",
+        target_frames=[
+            FrameTransformerCfg.FrameCfg(prim_path="/World/envs/env_.*/Robot/pitch_link"),
+            FrameTransformerCfg.FrameCfg(prim_path="/World/envs/env_.*/target"),
+        ],
+        debug_vis=True,
     )
 
     # scene
@@ -190,12 +203,20 @@ class IrisGimbal2Env(DirectRLEnv):
         self._thrust = torch.zeros(self.num_envs, 1, 3, device=self.device)
         self._moment = torch.zeros(self.num_envs, 1, 3, device=self.device)
         self._cmd_vel = torch.zeros(self.num_envs, 1, 6, device=self.device)
-        # Goal position
+
+        self.camera_pos_world = torch.zeros(self.num_envs, 3, device=self.device)
+        self.camera_quat_world = torch.zeros(self.num_envs, 4, device=self.device)
         self._desired_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
         self._desired_yaw_w = torch.zeros(self.num_envs, 1, device=self.device)
         self.bboxes = torch.zeros(self.num_envs, 4, device=self.device)  # (num_envs, 4 corners, 2D coordinates)
         self.bboxes_normalized = torch.zeros(self.num_envs, 4, device=self.device)  # (num_envs, 4 corners, 2D coordinates)
         self.bbox_valid_mask = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.bool)
+        self.camera_frustrum = CameraFrustrum()
+        self.camera_cfg_batch = self.camera_frustrum.create_camera_cfg_tensor(self.cfg.camera_cfg, self.num_envs, device=self.device)
+        camera_offset_rot_single = torch.tensor(cfg.camera_cfg.offset.rot, device=self.device)
+        self.camera_offset_rot_batch = camera_offset_rot_single.unsqueeze(0).expand(self.num_envs, -1)
+        camera_offset_pos_single = torch.tensor(cfg.camera_cfg.offset.pos, device=self.device)
+        self.camera_offset_pos_batch = camera_offset_pos_single.unsqueeze(0).expand(self.num_envs, -1)
 
         # Logging
         self._episode_sums = {
@@ -236,8 +257,7 @@ class IrisGimbal2Env(DirectRLEnv):
         # add handle for debug visualization (this is set to a valid handle inside set_debug_vis)
         self.set_debug_vis(self.cfg.debug_vis)
         frame_cfg = FRAME_MARKER_CFG.replace(prim_path="/Visuals/FrameVisualizer")
-        # frame_cfg = FRAME_MARKER_CFG.replace(prim_path="/World/envs/.*")
-        frame_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
+        frame_cfg.markers["frame"].scale = (0.2, 0.2, 0.2)
         self.frame_visualizer = VisualizationMarkers(frame_cfg)
         marker_cfg = CUBOID_MARKER_CFG.copy()
         marker_cfg.markers["cuboid"].size = (0.05, 0.05, 0.05)
@@ -245,6 +265,8 @@ class IrisGimbal2Env(DirectRLEnv):
         # -- goal pose
         marker_cfg.prim_path = "/Visuals/FrameVisualizer/goal_position"
         self.goal_visualizer = VisualizationMarkers(marker_cfg)
+        if DEBUG_DRAW:
+            self.draw_interface = omni_debug_draw.acquire_debug_draw_interface()
 
         self.step_count = 0
         self._env_origins = self._compute_env_origins_grid(self.num_envs, self.cfg.scene.env_spacing)
@@ -276,10 +298,13 @@ class IrisGimbal2Env(DirectRLEnv):
             self._terrain = None
 
         self._camera = None
-        self._camera = TiledCamera(self.cfg.camera_cfg)
+        if DEBUG_DRAW:
+            self._camera = TiledCamera(self.cfg.camera_cfg)
 
         self.cfg.target_cfg.spawn.semantic_tags = [("class", "target")]
         self.target = RigidObject(self.cfg.target_cfg)
+
+        self.frame_transformer = FrameTransformer(self.cfg.frame_transformer_cfg)
 
         # clone, filter, and replicate
         self.scene.clone_environments(copy_from_source=False)
@@ -289,6 +314,9 @@ class IrisGimbal2Env(DirectRLEnv):
         if self._camera is not None:
             self.scene.sensors["tiled_camera"] = self._camera
         self.scene.rigid_objects["target"] = self.target
+
+        # self.frame_transformer = FrameTransformer(self.scene["frame_transformer"])
+        self.scene.sensors["frame_transformer"] = self.frame_transformer
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
@@ -322,14 +350,9 @@ class IrisGimbal2Env(DirectRLEnv):
         roll, pitch, yaw = euler_xyz_from_quat(self._robot.data.root_state_w[:, 3:7])
         curr_quat_w_yaw = quat_from_euler_xyz(torch.zeros_like(roll), torch.zeros_like(pitch), yaw)
         roll_b, pitch_b, _ = euler_xyz_from_quat(quat_mul(self._robot.data.root_state_w[:, 3:7], quat_inv(curr_quat_w_yaw)))
-        self.gimbal_dof_targets[:, self.gimbal_yaw_joint_idx] = self._actions[:, 4]
+        self.gimbal_dof_targets[:, self.gimbal_yaw_joint_idx] = self._actions[:, 4] * 2
         self.gimbal_dof_targets[:, self.gimbal_roll_joint_idx] = self._stabilizer.wrap_to_pi(-roll_b)
         self.gimbal_dof_targets[:, self.gimbal_pitch_joint_idx] = self._actions[:, 5] #self._stabilizer.wrap_to_pi(-pitch_b*(1+self.step_count*0.001))
-
-        # segmentation_data = self.scene["camera"].data.output["semantic_segmentation"][0].cpu().numpy()
-        # Print unique values in segmentation_data
-        # unique_values = torch.unique(self.scene["camera"].data.output["semantic_segmentation"][0])
-        # carb.log_warn(f"Unique segmentation values: {unique_values.cpu().tolist()}")
 
         # Compute actual camera position based on robot state and gimbal orientation
         # Get robot base position and orientation
@@ -349,30 +372,34 @@ class IrisGimbal2Env(DirectRLEnv):
             ),
             quat_from_euler_xyz(torch.zeros_like(gimbal_pitch), gimbal_pitch, torch.zeros_like(gimbal_pitch))
         )
-        
-        # Combine robot and gimbal orientations
-        # Convert camera offset rotation from tuple to tensor and expand to match gimbal_quat shape
-        camera_offset_rot = torch.tensor(self.cfg.camera_cfg.offset.rot, device=self.device).expand(self.num_envs, -1)
-        camera_quat_world = quat_mul(robot_quat, quat_mul(gimbal_quat, camera_offset_rot))
+
+        self.camera_quat_world = quat_mul(robot_quat, quat_mul(gimbal_quat, self.camera_offset_rot_batch))
         
         # Apply camera offset from configuration (pos=(0.2, 0.0, -0.1))
-        camera_offset = torch.tensor(self.cfg.camera_cfg.offset.pos, device=self.device).expand(self.num_envs, -1)
-        camera_pos_world = robot_pos + quat_rotate(camera_quat_world, camera_offset)
+        # camera_offset = torch.tensor(self.cfg.camera_cfg.offset.pos, device=self.device).expand(self.num_envs, -1)
+        camera_offset = torch.tensor((0, 0, 0.1), device=self.device).expand(self.num_envs, -1)
+        # self.camera_pos_world = robot_pos + quat_rotate(self.camera_quat_world, camera_offset)
+        self.camera_pos_world = self.frame_transformer.data.target_pos_w[:,0]
         
         bbox_gen = BBoxGenerator(camera_width=self.cfg.camera_cfg.width, camera_height=self.cfg.camera_cfg.height,
                                 focal_length=self.cfg.camera_cfg.spawn.focal_length, horizontal_aperture= self.cfg.camera_cfg.spawn.horizontal_aperture)
         self.bboxes, self.bbox_valid_mask[:, 0] = bbox_gen.generate_2d_bbox(
             self.target.data.root_state_w[:, :3], self.target.data.root_state_w[:, 3:7],
-            camera_pos_world, camera_quat_world, min_bbox_size=int(0.1*self.cfg.camera_cfg.width),
+            self.frame_transformer.data.target_pos_w[:,0], self.camera_quat_world, min_bbox_size=int(0.1*self.cfg.camera_cfg.width),
         )
         self.bboxes_normalized = self.bboxes.clone()
         self.bboxes_normalized[:, 0] = torch.where(self.bbox_valid_mask.squeeze(-1), self.bboxes[:, 0] / self.cfg.camera_cfg.width, torch.ones_like(self.bboxes[:, 0]) * (-1.0))
         self.bboxes_normalized[:, 1] = torch.where(self.bbox_valid_mask.squeeze(-1), self.bboxes[:, 1] / self.cfg.camera_cfg.height, torch.ones_like(self.bboxes[:, 1]) * (-1.0))
         self.bboxes_normalized[:, 2] = torch.where(self.bbox_valid_mask.squeeze(-1), self.bboxes[:, 2] / self.cfg.camera_cfg.width, torch.ones_like(self.bboxes[:, 2]) * (-1.0))
         self.bboxes_normalized[:, 3] = torch.where(self.bbox_valid_mask.squeeze(-1), self.bboxes[:, 3] / self.cfg.camera_cfg.height, torch.ones_like(self.bboxes[:, 3]) * (-1.0))
-        # carb.log_warn(f"camera pose: {[f'{x:.2f}' for x in camera_pos_world[0].cpu().tolist()]}, target pose: {[f'{x:.2f}' for x in self.target.data.root_state_w[0, :3].cpu().tolist()]}")
+        # carb.log_warn(f"body pose: {[f'{x:.2f}' for x in self._robot.data.root_state_w[0, :3].cpu().tolist()]}")
+        # carb.log_warn(f"camera pose: {[f'{x:.2f}' for x in self.camera_pos_world[0].cpu().tolist()]}, target pose: {[f'{x:.2f}' for x in self.target.data.root_state_w[0, :3].cpu().tolist()]}")
+        # carb.log_warn(f"camera ftp: {[f'{x:.2f}' for x in self.frame_transformer.data.target_pos_w[0, 0].tolist()]}")
+        # r, p, y = euler_xyz_from_quat(self.frame_transformer.data.target_quat_w[:1, 0])
+        # carb.log_warn(f"camera ftq: {[f'{x:.2f}' for x in [self._stabilizer.wrap_to_pi(r).tolist()[0], self._stabilizer.wrap_to_pi(p).tolist()[0], self._stabilizer.wrap_to_pi(y).tolist()[0]]]}")
         # carb.log_warn(f"gimbal yaw: {self._robot.data.joint_pos[0, self.gimbal_yaw_joint_idx].item():.2f}, gimbal roll: {self._robot.data.joint_pos[0, self.gimbal_roll_joint_idx].item():.2f}, gimbal pitch: {self._robot.data.joint_pos[0, self.gimbal_pitch_joint_idx].item():.2f}")
-        # carb.log_warn(f"bboxes: {[f'{x:.0f}' for x in self.bboxes[0].flatten().cpu().tolist()]}, valid_mask: {self.bbox_valid_mask[0].cpu().tolist()}")
+        # bb = self.bboxes[0].cpu().tolist()
+        # carb.log_warn(f"bboxes: [f'{(bb[0]+bb[2])/2:.0f}', f'{(bb[1]+bb[3])/2:.0f}], valid_mask: {self.bbox_valid_mask[0].cpu().tolist()}]")
 
 
     def _apply_action(self):
@@ -382,8 +409,22 @@ class IrisGimbal2Env(DirectRLEnv):
             torch.cat((self.new_vel_lin_w, self.new_vel_ang_w), dim=1), env_ids=self._robot._ALL_INDICES
         )
         self._robot.set_joint_position_target(self.gimbal_dof_targets)
-        self.frame_visualizer.visualize(self._robot.data.root_state_w[:, :3], self.target_quat)
+        # self.frame_visualizer.visualize(self.camera_pos_world, self.camera_quat_world)
+        robot_pos_w = self.frame_transformer.data.source_pos_w
+        robot_quat_w = self.frame_transformer.data.source_quat_w
+        camera_pos_w = self.frame_transformer.data.target_pos_w[:, 0]
+        camera_quat_w = self.frame_transformer.data.target_quat_w[:, 0]
+        self.frame_transformer.update(dt=self.cfg.sim.dt)
+        self.frame_visualizer.visualize(
+            torch.cat([robot_pos_w, camera_pos_w], dim=0), torch.cat([robot_quat_w, camera_quat_w], dim=0)
+        )
         self.goal_visualizer.visualize(self._desired_pos_w)
+        if DEBUG_DRAW:
+            self.draw_interface.clear_lines()
+            line_colors = [[1.0, 1.0, 0.0, 1.0]] * self.camera_pos_world.shape[0]
+            line_thicknesses = [5.0] * self.camera_pos_world.shape[0]
+            self.draw_interface.draw_lines(self.camera_pos_world.tolist(), self.target.data.root_pos_w.tolist(), line_colors, line_thicknesses)
+            self.camera_frustrum.draw_frustrum(self.camera_pos_world, self.camera_quat_world, self.camera_cfg_batch, self.device)
         # self.frame_visualizer.visualize(self._robot.data.default_root_state[:, :3], self._robot.data.root_state_w[:, 3:7], marker_indices=self._body_id)
 
     def _get_observations(self) -> dict:
