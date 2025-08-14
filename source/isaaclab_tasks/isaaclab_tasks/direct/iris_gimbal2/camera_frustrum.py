@@ -1,4 +1,3 @@
-import isaacsim.util.debug_draw._debug_draw as omni_debug_draw
 from isaaclab.sensors import Camera, CameraCfg, TiledCamera, TiledCameraCfg
 import torch
 import math
@@ -12,12 +11,14 @@ from isaaclab.utils.math import (
 )
 
 class CameraFrustrum:
+    
     def __init__(self):
         self.camera_name = None
         self.camera_position = None
         self.camera_orientation = None
         self.camera_intrinsics = None
 
+        import isaacsim.util.debug_draw._debug_draw as omni_debug_draw
         self.draw_interface = omni_debug_draw.acquire_debug_draw_interface()
 
     def draw_frustrum(self, camera_position, camera_orientation, camera_intrinsics: torch.tensor, device='cpu'):
@@ -165,24 +166,149 @@ class CameraFrustrum:
             'principal_point': torch.stack([c_x, c_y], dim=1),      # [n, 2]
         }
 
-    def create_camera_cfg_tensor(self, camera_cfg: CameraCfg, num_envs: int, device='cpu', dtype=torch.float32):
-        """
-        Helper function to create batched tensor from list of camera configurations.
-        
-        Args:
-            camera_cfg: A TiledCameraCfg object
-            device: Device to create tensors on
-            dtype: Data type for tensors
-        
-        Returns:
-            torch.Tensor: Batched tensor of shape [n, 6] containing camera parameters
-        """
-        camera_params = [
-            (camera_cfg.width, camera_cfg.height, camera_cfg.spawn.focal_length,
-            camera_cfg.spawn.horizontal_aperture, camera_cfg.spawn.clipping_range[0],
-            camera_cfg.spawn.clipping_range[1])
-        ] * num_envs  # Repeat for each environment
+def project_2d_to_3d(camera_cfg_tensor, pixel_coords, distances, camera_pos_world, camera_quat_world, device='cpu', dtype=torch.float32):
+    """
+    Project batched 2D pixel coordinates to 3D world coordinates given distances.
+    
+    Args:
+        camera_cfg_tensor: Batched camera config tensor [n, 6] containing camera parameters
+        pixel_coords: Pixel coordinates [n, 2] where each row is [u, v] (x, y in image)
+        distances: Distance from camera to 3D point [n] or [n, 1]
+        camera_pos_world: Camera positions in world frame [n, 3]
+        camera_quat_world: Camera orientations in world frame [n, 4] (quaternions)
+        device: Device to create tensors on
+        dtype: Data type for tensors
+    
+    Returns:
+        torch.Tensor: 3D world coordinates [n, 3]
+    """
+    # Ensure all inputs are on correct device and dtype
+    camera_cfg_tensor = camera_cfg_tensor.to(device=device, dtype=dtype)
+    pixel_coords = pixel_coords.to(device=device, dtype=dtype)
+    distances = distances.to(device=device, dtype=dtype)
+    camera_pos_world = camera_pos_world.to(device=device, dtype=dtype)
+    camera_quat_world = camera_quat_world.to(device=device, dtype=dtype)
+    
+    # Handle distance dimensions
+    if distances.dim() == 1:
+        distances = distances.unsqueeze(1)  # [n, 1]
+    
+    n = camera_cfg_tensor.shape[0]
+    
+    # Extract camera parameters
+    width = camera_cfg_tensor[:, 0]          # [n]
+    height = camera_cfg_tensor[:, 1]         # [n]
+    focal_length = camera_cfg_tensor[:, 2]   # [n] in mm
+    horizontal_aperture = camera_cfg_tensor[:, 3]  # [n] in mm
+    
+    # Calculate focal length in pixels
+    vertical_aperture = horizontal_aperture / (width / height)  # [n]
+    f_x = focal_length / horizontal_aperture * width   # [n]
+    f_y = focal_length / vertical_aperture * height    # [n]
+    
+    # Principal point (assuming centered)
+    c_x = width / 2   # [n]
+    c_y = height / 2  # [n]
+    
+    # Convert pixel coordinates to normalized camera coordinates
+    # Normalized coordinates: (pixel - principal_point) / focal_length
+    x_norm = (pixel_coords[:, 0] - c_x) / f_x  # [n]
+    y_norm = (pixel_coords[:, 1] - c_y) / f_y  # [n]
+    
+    # Create 3D points in camera coordinate system
+    # Camera coordinates: X = x_norm * Z, Y = y_norm * Z, Z = distance
+    points_camera = torch.stack([
+        x_norm * distances.squeeze(-1),  # X in camera frame
+        y_norm * distances.squeeze(-1),  # Y in camera frame
+        distances.squeeze(-1)            # Z in camera frame (distance)
+    ], dim=1)  # [n, 3]
+    
+    # Transform from camera coordinates to world coordinates
+    # Apply camera rotation and then translation
+    points_world = camera_pos_world + quat_rotate(camera_quat_world, points_camera)
+    
+    return points_world
 
-        camera_cfg_batch = torch.tensor(camera_params, device=device, dtype=dtype)
+def project_2d_to_3d_ray(camera_cfg_tensor, pixel_coords, camera_pos_world, camera_quat_world, device='cpu', dtype=torch.float32):
+    """
+    Project batched 2D pixel coordinates to 3D rays in world coordinates.
+    
+    Args:
+        camera_cfg_tensor: Batched camera config tensor [n, 6] containing camera parameters
+        pixel_coords: Pixel coordinates [n, 2] where each row is [u, v] (x, y in image)
+        camera_pos_world: Camera positions in world frame [n, 3]
+        camera_quat_world: Camera orientations in world frame [n, 4] (quaternions)
+        device: Device to create tensors on
+        dtype: Data type for tensors
+    
+    Returns:
+        dict: Dictionary containing:
+            - 'ray_origins': Ray origins in world coordinates [n, 3]
+            - 'ray_directions': Normalized ray directions in world coordinates [n, 3]
+    """
+    # Ensure all inputs are on correct device and dtype
+    camera_cfg_tensor = camera_cfg_tensor.to(device=device, dtype=dtype)
+    pixel_coords = pixel_coords.to(device=device, dtype=dtype)
+    camera_pos_world = camera_pos_world.to(device=device, dtype=dtype)
+    camera_quat_world = camera_quat_world.to(device=device, dtype=dtype)
+    
+    n = camera_cfg_tensor.shape[0]
+    
+    # Extract camera parameters
+    width = camera_cfg_tensor[:, 0]          # [n]
+    height = camera_cfg_tensor[:, 1]         # [n]
+    focal_length = camera_cfg_tensor[:, 2]   # [n] in mm
+    horizontal_aperture = camera_cfg_tensor[:, 3]  # [n] in mm
+    
+    # Calculate focal length in pixels
+    vertical_aperture = horizontal_aperture / (width / height)  # [n]
+    f_x = focal_length / horizontal_aperture * width   # [n]
+    f_y = focal_length / vertical_aperture * height    # [n]
+    
+    # Principal point (assuming centered)
+    c_x = width / 2   # [n]
+    c_y = height / 2  # [n]
+    
+    # Convert pixel coordinates to normalized camera coordinates
+    x_norm = (pixel_coords[:, 0] - c_x) / f_x  # [n]
+    y_norm = (pixel_coords[:, 1] - c_y) / f_y  # [n]
+    
+    # Create ray directions in camera coordinate system (normalized)
+    ray_dirs_camera = torch.stack([
+        x_norm,                          # X direction
+        y_norm,                          # Y direction  
+        torch.ones_like(x_norm)          # Z direction (into the scene)
+    ], dim=1)  # [n, 3]
+    
+    # Normalize ray directions
+    ray_dirs_camera = ray_dirs_camera / torch.norm(ray_dirs_camera, dim=1, keepdim=True)
+    
+    # Transform ray directions from camera to world coordinates
+    ray_dirs_world = quat_rotate(camera_quat_world, ray_dirs_camera)
+    
+    return {
+        'ray_origins': camera_pos_world,      # [n, 3] - rays start at camera positions
+        'ray_directions': ray_dirs_world      # [n, 3] - ray directions in world frame
+    }
 
-        return camera_cfg_batch
+def create_camera_cfg_tensor(camera_cfg: CameraCfg, num_envs: int, device='cpu', dtype=torch.float32):
+    """
+    Helper function to create batched tensor from list of camera configurations.
+    
+    Args:
+        camera_cfg: A TiledCameraCfg object
+        device: Device to create tensors on
+        dtype: Data type for tensors
+    
+    Returns:
+        torch.Tensor: Batched tensor of shape [n, 6] containing camera parameters
+    """
+    camera_params = [
+        (camera_cfg.width, camera_cfg.height, camera_cfg.spawn.focal_length,
+        camera_cfg.spawn.horizontal_aperture, camera_cfg.spawn.clipping_range[0],
+        camera_cfg.spawn.clipping_range[1])
+    ] * num_envs  # Repeat for each environment
+
+    camera_cfg_batch = torch.tensor(camera_params, device=device, dtype=dtype)
+
+    return camera_cfg_batch

@@ -41,7 +41,7 @@ class PointMass:
         moment_w = torch.stack([
             -self.wrap_to_pi(roll) * 2 - curr_ang_vel_w[:,0]*1.3,
             -self.wrap_to_pi(pitch) * 2 - curr_ang_vel_w[:,1]*1.3,
-            (cmd_yaw_vel - curr_ang_vel_w[:,2]) * 10
+            (cmd_yaw_vel - curr_ang_vel_w[:,2])
         ], dim=1)
         moment = quat_rotate_inverse(curr_quat_w, moment_w)
 

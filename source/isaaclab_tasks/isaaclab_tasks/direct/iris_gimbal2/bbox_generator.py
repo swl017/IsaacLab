@@ -110,7 +110,7 @@ class BBoxGenerator:
         self,
         target_pos: torch.Tensor,
         target_quat: torch.Tensor,
-        target_size: Tuple[float, float, float] = (0.1, 0.1, 0.1)
+        target_size: Tuple[float, float, float] = (0.4, 0.4, 0.4)
     ) -> torch.Tensor:
         """Get 3D bounding box corners for a target.
         
@@ -151,7 +151,7 @@ class BBoxGenerator:
         target_quat_world: torch.Tensor,
         camera_pos_world: torch.Tensor,
         camera_quat_world: torch.Tensor,
-        target_size: Tuple[float, float, float] = (0.2, 0.2, 0.2),
+        target_size: Tuple[float, float, float] = (0.4, 0.4, 0.4),
         min_bbox_size: int = 5
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Generate 2D bounding boxes for 3D targets.

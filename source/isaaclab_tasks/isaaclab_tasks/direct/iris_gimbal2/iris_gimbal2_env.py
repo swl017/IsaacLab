@@ -24,8 +24,9 @@ from isaaclab.utils.math import (
     quat_from_euler_xyz,
     quat_mul,
     quat_inv,
-    quat_rotate
+    quat_rotate,
 )
+import math
 
 ##
 # Pre-defined configs
@@ -50,7 +51,7 @@ import isaaclab.sim as sim_utils
 import numpy as np
 
 from .bbox_generator import BBoxGenerator
-from .camera_frustrum import CameraFrustrum
+from .camera_frustrum import CameraFrustrum, create_camera_cfg_tensor, project_2d_to_3d
 
 class IrisGimbal2EnvWindow(BaseEnvWindow):
     """Window manager for the Iris environment."""
@@ -177,7 +178,9 @@ class IrisGimbal2EnvCfg(DirectRLEnvCfg):
     lin_vel_reward_scale = -0.01
     ang_vel_reward_scale = -0.02 # stability bound [-0.02, -0.04]
     action_sum_reward_scale = -0.1
+    action_weight = [1, 1, 1, 1, 0.1, 0.1]
     action_delta_reward_scale = -0.01
+    action_delta_weight = [1, 1, 1, 1, 0.1, 0.1]
     distance_to_goal_reward_scale = 60.0
     yaw_reward_scale = -10
     yaw_rate_reward_scale = -0.001
@@ -185,7 +188,7 @@ class IrisGimbal2EnvCfg(DirectRLEnvCfg):
     bbox_center_reward_scale = 60
     bbox_size_reward_scale = 60
     
-    target_speed = 5.0
+    max_target_speed = 5.0
     max_lin_vel = 15.0
     max_yaw_rate = 20.0
     max_lin_acc = 3.0
@@ -203,6 +206,8 @@ class IrisGimbal2Env(DirectRLEnv):
         self._thrust = torch.zeros(self.num_envs, 1, 3, device=self.device)
         self._moment = torch.zeros(self.num_envs, 1, 3, device=self.device)
         self._cmd_vel = torch.zeros(self.num_envs, 1, 6, device=self.device)
+        self.target_vel = torch.ones(self.num_envs, 1, 6, device=self.device) * 0.01
+        self.last_target_vel = self.target_vel.clone()
 
         self.camera_pos_world = torch.zeros(self.num_envs, 3, device=self.device)
         self.camera_quat_world = torch.zeros(self.num_envs, 4, device=self.device)
@@ -211,12 +216,14 @@ class IrisGimbal2Env(DirectRLEnv):
         self.bboxes = torch.zeros(self.num_envs, 4, device=self.device)  # (num_envs, 4 corners, 2D coordinates)
         self.bboxes_normalized = torch.zeros(self.num_envs, 4, device=self.device)  # (num_envs, 4 corners, 2D coordinates)
         self.bbox_valid_mask = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.bool)
-        self.camera_frustrum = CameraFrustrum()
-        self.camera_cfg_batch = self.camera_frustrum.create_camera_cfg_tensor(self.cfg.camera_cfg, self.num_envs, device=self.device)
+        self.camera_cfg_batch = create_camera_cfg_tensor(self.cfg.camera_cfg, self.num_envs, device=self.device)
         camera_offset_rot_single = torch.tensor(cfg.camera_cfg.offset.rot, device=self.device)
         self.camera_offset_rot_batch = camera_offset_rot_single.unsqueeze(0).expand(self.num_envs, -1)
         camera_offset_pos_single = torch.tensor(cfg.camera_cfg.offset.pos, device=self.device)
         self.camera_offset_pos_batch = camera_offset_pos_single.unsqueeze(0).expand(self.num_envs, -1)
+
+        self.action_weight = torch.tensor(self.cfg.action_weight, device=self.device).repeat(self.num_envs, 1)
+        self.action_delta_weight = torch.tensor(self.cfg.action_delta_weight, device=self.device).repeat(self.num_envs, 1)
 
         # Logging
         self._episode_sums = {
@@ -266,10 +273,12 @@ class IrisGimbal2Env(DirectRLEnv):
         marker_cfg.prim_path = "/Visuals/FrameVisualizer/goal_position"
         self.goal_visualizer = VisualizationMarkers(marker_cfg)
         if DEBUG_DRAW:
+            self.camera_frustrum = CameraFrustrum()
             self.draw_interface = omni_debug_draw.acquire_debug_draw_interface()
 
         self.step_count = 0
         self._env_origins = self._compute_env_origins_grid(self.num_envs, self.cfg.scene.env_spacing)
+        self.last_curriculum = None
 
     def _compute_env_origins_grid(self, num_envs: int, env_spacing: float) -> torch.Tensor:
         """Compute the origins of the environments in a grid based on configured spacing."""
@@ -401,6 +410,12 @@ class IrisGimbal2Env(DirectRLEnv):
         # bb = self.bboxes[0].cpu().tolist()
         # carb.log_warn(f"bboxes: [f'{(bb[0]+bb[2])/2:.0f}', f'{(bb[1]+bb[3])/2:.0f}], valid_mask: {self.bbox_valid_mask[0].cpu().tolist()}]")
 
+        # Bounce up when target is too low
+        up_vel = self.target_vel.clone()
+        up_vel[..., 2] = -self.target_vel[..., 2]
+        target_lower_bound = torch.ones_like(self.target.data.root_state_w, device=self.device) * 1.0
+        self.target_vel[:, 0, 2] = torch.where(self.target.data.root_state_w[:, 2] < target_lower_bound[:, 2], up_vel[:, 0, 2], self.target_vel[:, 0, 2])
+
 
     def _apply_action(self):
         # self._robot.write_root_link_velocity_to_sim(self._cmd_vel[self._body_id, 0, :6], env_ids=self._body_id)
@@ -409,19 +424,26 @@ class IrisGimbal2Env(DirectRLEnv):
             torch.cat((self.new_vel_lin_w, self.new_vel_ang_w), dim=1), env_ids=self._robot._ALL_INDICES
         )
         self._robot.set_joint_position_target(self.gimbal_dof_targets)
+
+        self.target.write_root_com_velocity_to_sim(self.target_vel[:, 0])
+
         # self.frame_visualizer.visualize(self.camera_pos_world, self.camera_quat_world)
         robot_pos_w = self.frame_transformer.data.source_pos_w
         robot_quat_w = self.frame_transformer.data.source_quat_w
         camera_pos_w = self.frame_transformer.data.target_pos_w[:, 0]
         camera_quat_w = self.frame_transformer.data.target_quat_w[:, 0]
         self.frame_transformer.update(dt=self.cfg.sim.dt)
-        self.frame_visualizer.visualize(
-            torch.cat([robot_pos_w, camera_pos_w], dim=0), torch.cat([robot_quat_w, camera_quat_w], dim=0)
-        )
+        # self.frame_visualizer.visualize(
+        #     torch.cat([robot_pos_w, camera_pos_w], dim=0), torch.cat([robot_quat_w, camera_quat_w], dim=0)
+        # )
         self.goal_visualizer.visualize(self._desired_pos_w)
         if DEBUG_DRAW:
             self.draw_interface.clear_lines()
-            line_colors = [[1.0, 1.0, 0.0, 1.0]] * self.camera_pos_world.shape[0]
+            # line_colors_yellow = [[1.0, 1.0, 0.0, 1.0]] * self.camera_pos_world.shape[0]
+            # line_colors_green = [[0.0, 1.0, 0.0, 1.0]] * self.camera_pos_world.shape[0]
+            line_colors_yellow = torch.tensor([[1.0, 1.0, 0.0, 1.0]], device=self.device).repeat(self.num_envs, 1)
+            line_colors_green = torch.tensor([[0.0, 1.0, 0.0, 1.0]], device=self.device).repeat(self.num_envs, 1)
+            line_colors = torch.where(self.bbox_valid_mask, line_colors_green, line_colors_yellow).tolist()
             line_thicknesses = [5.0] * self.camera_pos_world.shape[0]
             self.draw_interface.draw_lines(self.camera_pos_world.tolist(), self.target.data.root_pos_w.tolist(), line_colors, line_thicknesses)
             self.camera_frustrum.draw_frustrum(self.camera_pos_world, self.camera_quat_world, self.camera_cfg_batch, self.device)
@@ -450,8 +472,8 @@ class IrisGimbal2Env(DirectRLEnv):
     def _get_rewards(self) -> torch.Tensor:
         lin_vel = torch.sum(torch.square(self._robot.data.root_lin_vel_b), dim=1)
         ang_vel = torch.sum(torch.square(self._robot.data.root_ang_vel_b), dim=1)
-        action_sum = torch.sum(torch.square(self._actions[:,:4]), dim=1)
-        action_delta = torch.sum(torch.square(self._actions[:,] - self._last_actions[:,]), dim=1)
+        action_sum = torch.sum(torch.square(self.action_weight * self._actions), dim=1)
+        action_delta = torch.sum(torch.square(self.action_delta_weight * (self._actions - self._last_actions)), dim=1)
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_pos_w, dim=1)
         distance_to_goal_mapped = 1 - torch.tanh((distance_to_goal) / 0.8)
         roll, pitch, yaw = euler_xyz_from_quat(self._robot.data.root_state_w[:, 3:7])
@@ -529,14 +551,22 @@ class IrisGimbal2Env(DirectRLEnv):
         default_root_state = self._robot.data.default_root_state[env_ids]
         self._desired_pos_w[env_ids, :2] = torch.zeros_like(default_root_state[:, :2])
         self._desired_pos_w[env_ids, 2] = torch.ones_like(default_root_state[:, 2]) * 3.5
-        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
+        bbox_reward = (1 - torch.tanh(final_bbox_center / 0.8)) * self.cfg.bbox_center_reward_scale
+        curriculum_rate = 0.01
+        if self.last_curriculum is None:
+            self.curriculum = torch.ones_like(bbox_reward)
+        else:
+            self.curriculum = torch.where(bbox_reward > 20, self.last_curriculum * (1+curriculum_rate), self.last_curriculum * (1-curriculum_rate))
+        # self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
+        self._desired_pos_w[env_ids, 0] = torch.zeros_like(self._desired_pos_w[env_ids, 0]).uniform_(2.0, 5.0)
+        self._desired_pos_w[env_ids, 1] = torch.zeros_like(self._desired_pos_w[env_ids, 1]).uniform_(-1.0, 1.0)
         self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(1.5, 4.5)
         self._desired_pos_w[env_ids, :3] += self._env_origins[env_ids, :3]
         self._desired_yaw_w[env_ids, 0] = torch.zeros_like(self._desired_yaw_w[env_ids, 0]).uniform_(-3.14, 3.14)
-        self.target_speed = torch.zeros_like(self._desired_pos_w).uniform_(-self.cfg.target_speed, self.cfg.target_speed)
         self.target.data.root_state_w[env_ids, :3] = self._desired_pos_w[env_ids, :3]
         self.target.data.root_state_w[env_ids, 7:] = torch.zeros_like(self.target.data.root_state_w[env_ids, 7:])
         self.target.write_root_pose_to_sim(self.target.data.root_state_w[env_ids, :7], env_ids)
+        self.target_vel[env_ids, 0] = torch.zeros(self.num_envs, 6, device=self.device).uniform_(-1.0, 1.0)[env_ids] * self.last_target_vel[env_ids, 0] * (1+curriculum_rate)
 
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
@@ -561,6 +591,8 @@ class IrisGimbal2Env(DirectRLEnv):
             torch.zeros_like(self._desired_yaw_w[:, 0]), 
             self._desired_yaw_w[:, 0]
         )
+        self.last_curriculum = self.curriculum.clone()
+        self.last_target_vel = self.target_vel.clone()
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         # create markers if necessary for the first tome
