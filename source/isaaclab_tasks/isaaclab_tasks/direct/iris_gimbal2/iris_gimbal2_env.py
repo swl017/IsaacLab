@@ -206,7 +206,7 @@ class IrisGimbal2Env(DirectRLEnv):
         self._thrust = torch.zeros(self.num_envs, 1, 3, device=self.device)
         self._moment = torch.zeros(self.num_envs, 1, 3, device=self.device)
         self._cmd_vel = torch.zeros(self.num_envs, 1, 6, device=self.device)
-        self.target_vel = torch.ones(self.num_envs, 1, 6, device=self.device) * 0.01
+        self.target_vel = torch.zeros(self.num_envs, 6, device=self.device).uniform_(-1.0, 1.0)
         self.last_target_vel = self.target_vel.clone()
 
         self.camera_pos_world = torch.zeros(self.num_envs, 3, device=self.device)
@@ -414,7 +414,7 @@ class IrisGimbal2Env(DirectRLEnv):
         up_vel = self.target_vel.clone()
         up_vel[..., 2] = -self.target_vel[..., 2]
         target_lower_bound = torch.ones_like(self.target.data.root_state_w, device=self.device) * 1.0
-        self.target_vel[:, 0, 2] = torch.where(self.target.data.root_state_w[:, 2] < target_lower_bound[:, 2], up_vel[:, 0, 2], self.target_vel[:, 0, 2])
+        self.target_vel[..., 2] = torch.where(self.target.data.root_state_w[:, 2] < target_lower_bound[:, 2], up_vel[..., 2], self.target_vel[..., 2])
 
 
     def _apply_action(self):
@@ -425,7 +425,7 @@ class IrisGimbal2Env(DirectRLEnv):
         )
         self._robot.set_joint_position_target(self.gimbal_dof_targets)
 
-        self.target.write_root_com_velocity_to_sim(self.target_vel[:, 0])
+        self.target.write_root_com_velocity_to_sim(self.target_vel)
 
         # self.frame_visualizer.visualize(self.camera_pos_world, self.camera_quat_world)
         robot_pos_w = self.frame_transformer.data.source_pos_w
@@ -566,7 +566,10 @@ class IrisGimbal2Env(DirectRLEnv):
         self.target.data.root_state_w[env_ids, :3] = self._desired_pos_w[env_ids, :3]
         self.target.data.root_state_w[env_ids, 7:] = torch.zeros_like(self.target.data.root_state_w[env_ids, 7:])
         self.target.write_root_pose_to_sim(self.target.data.root_state_w[env_ids, :7], env_ids)
-        self.target_vel[env_ids, 0] = torch.zeros(self.num_envs, 6, device=self.device).uniform_(-1.0, 1.0)[env_ids] * self.last_target_vel[env_ids, 0] * (1+curriculum_rate)
+        new_target_vel = self.last_target_vel[env_ids] * (1+curriculum_rate)
+        self.target_vel[env_ids] = torch.where(new_target_vel > self.cfg.max_target_speed,
+                                                new_target_vel,
+                                                self.last_target_vel[env_ids])
 
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]

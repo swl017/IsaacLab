@@ -116,7 +116,7 @@ def pre_process_actions(
         gimbal_yaw = torch.tensor(-roll * 20, dtype=torch.float, device=device)
         gimbal_pitch = torch.tensor(pitch * 20, dtype=torch.float, device=device)
         actions = torch.tensor(
-            [pitch_moment, roll_moment, total_thrust, yaw_moment, gimbal_pitch],
+            [pitch_moment, roll_moment, total_thrust, yaw_moment, gimbal_pitch, gimbal_yaw],
             dtype=torch.float,
             device=device,
         ).repeat(num_envs, 1)
