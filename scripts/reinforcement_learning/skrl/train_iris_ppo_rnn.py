@@ -33,6 +33,13 @@ class Policy(GaussianMixin, Model):
         self.log_std_parameter = nn.Parameter(torch.zeros(self.num_actions, device=device))
         self.num_envs = num_envs
 
+    def act(self, inputs, role):
+        if role == "policy":
+            return GaussianMixin.act(self, inputs, role)
+        elif role == "value":
+            values, _, outputs = self.compute(inputs, role)
+            return values, None, outputs
+          
     def get_specification(self):
         # The agent will look for the "rnn" key to setup the recurrent states
         # and "sequence_length" for the sampler
@@ -47,7 +54,12 @@ class Policy(GaussianMixin, Model):
         gru_output, hidden_states = self.gru(gru_input, hidden_states)
         # view shape: (batch_size, hidden_size)
         output = gru_output.view(-1, self.gru.hidden_size)
-        return self.policy_layer(output), self.log_std_parameter, self.value_layer(output), [hidden_states]
+        # return self.policy_layer(output), self.log_std_parameter, self.value_layer(output), [hidden_states]
+        if role == "policy":
+            return self.policy_layer(output), self.log_std_parameter, {"rnn": [hidden_states]}
+        elif role == "value":
+            return self.value_layer(output), None, {"rnn": [hidden_states]}
+
 
 
 # load and wrap the Isaac Lab environment
@@ -69,11 +81,13 @@ memory = RandomMemory(**memory_cfg)
 # instantiate the agent's models (function approximators).
 # PPO_RNN requires 2 models, visit its documentation for more details
 # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html#models
-models = {
-    "policy": Policy(env.observation_space, env.action_space, device, num_envs=env.num_envs),
-    "value": Policy(env.observation_space, env.action_space, device, num_envs=env.num_envs),
-}
-
+# models = {
+#     "policy": Policy(env.observation_space, env.action_space, device, num_envs=env.num_envs),
+#     "value": Policy(env.observation_space, env.action_space, device, num_envs=env.num_envs),
+# }
+models = {}
+models["policy"] = Policy(env.observation_space, env.action_space, device, num_envs=env.num_envs)
+models["value"] = models["policy"]
 
 # configure and instantiate the agent (visit its documentation to see all the options)
 # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html#configuration-and-hyperparameters
@@ -134,3 +148,5 @@ trainer.train()
 
 # # start evaluation
 # trainer.eval()
+
+
