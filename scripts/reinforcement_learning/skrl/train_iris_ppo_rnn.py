@@ -1,5 +1,8 @@
 import torch
 import torch.nn as nn
+import os
+import shutil
+from datetime import datetime
 
 # import the skrl components to build the RL system
 from skrl.agents.torch.ppo import PPO_RNN, PPO_DEFAULT_CONFIG
@@ -43,7 +46,7 @@ class Policy(GaussianMixin, Model):
     def get_specification(self):
         # The agent will look for the "rnn" key to setup the recurrent states
         # and "sequence_length" for the sampler
-        return {"rnn": {"sequence_length": 10,
+        return {"rnn": {"sequence_length": 20,
                         "sizes": [(self.gru.num_layers, self.num_envs, self.gru.hidden_size)]}}
 
     def compute(self, inputs, role):
@@ -63,7 +66,7 @@ class Policy(GaussianMixin, Model):
 
 
 # load and wrap the Isaac Lab environment
-env = load_isaaclab_env(task_name="Isaac-Iris-Gimbal2-Direct-v0", num_envs=1024, headless=True)
+env = load_isaaclab_env(task_name="Isaac-Iris-Gimbal2-Direct-v0", num_envs=4096, headless=True)
 env = wrap_env(env)
 
 device = env.device
@@ -71,7 +74,7 @@ device = env.device
 
 # instantiate a memory as rollout buffer (any memory can be used for this)
 memory_cfg = {
-    "memory_size": 16,  # rollouts
+    "memory_size": 32,  # rollouts
     "num_envs": env.num_envs,
     "device": device,
 }
@@ -92,9 +95,9 @@ models["value"] = models["policy"]
 # configure and instantiate the agent (visit its documentation to see all the options)
 # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html#configuration-and-hyperparameters
 cfg = PPO_DEFAULT_CONFIG.copy()
-cfg["rollouts"] = 16  # memory_size
+cfg["rollouts"] = 32  # memory_size
 cfg["learning_epochs"] = 8
-cfg["mini_batches"] = 1  # 16 * 512 / 8192
+cfg["mini_batches"] = 4  # 16 * 512 / 8192
 cfg["discount_factor"] = 0.99
 cfg["lambda"] = 0.95
 cfg["learning_rate"] = 3e-4
@@ -106,8 +109,8 @@ cfg["grad_norm_clip"] = 1.0
 cfg["ratio_clip"] = 0.2
 cfg["value_clip"] = 0.2
 cfg["clip_predicted_values"] = True
-cfg["entropy_loss_scale"] = 0.0
-cfg["value_loss_scale"] = 2.0
+cfg["entropy_loss_scale"] = 0.01
+cfg["value_loss_scale"] = 1.0
 cfg["kl_threshold"] = 0
 cfg["rewards_shaper"] = None
 cfg["time_limit_bootstrap"] = True
@@ -116,9 +119,20 @@ cfg["state_preprocessor_kwargs"] = {"size": env.observation_space, "device": dev
 cfg["value_preprocessor"] = RunningStandardScaler
 cfg["value_preprocessor_kwargs"] = {"size": 1, "device": device}
 # logging to TensorBoard and write checkpoints (in timesteps)
-cfg["experiment"]["write_interval"] = 16
-cfg["experiment"]["checkpoint_interval"] = 80
-cfg["experiment"]["directory"] = "runs/torch/Isaac-Cartpole-v0"
+task_name = "Isaac-Iris-Gimbal2-v0"
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+experiment_dir = f"logs/skrl/{task_name}/{timestamp}"
+os.makedirs(experiment_dir, exist_ok=True)
+
+# Copy the current training script to the experiment directory for reproducibility
+current_script = __file__
+script_backup_path = os.path.join(experiment_dir, "train_script.py")
+shutil.copy2(current_script, script_backup_path)
+print(f"Training script copied to: {script_backup_path}")
+
+cfg["experiment"]["directory"] = experiment_dir
+cfg["experiment"]["experiment_name"] = f"{task_name}_PPO_RNN"
+cfg["experiment"]["wandb"] = False  # disable wandb by default
 
 agent = PPO_RNN(models=models,
                 memory=memory,
@@ -129,11 +143,36 @@ agent = PPO_RNN(models=models,
 
 
 # configure and instantiate the RL trainer
-cfg_trainer = {"timesteps": 1600, "headless": True}
+cfg_trainer = {
+    "timesteps": 80800, 
+    "headless": True,
+    "environment_info": "log"  # Enable logging of environment extras
+}
 trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=agent)
 
 # start training
+print(f"Starting training...")
+print(f"Experiment directory: {experiment_dir}")
+print(f"Logging interval: {cfg['experiment']['write_interval']} timesteps")
+print(f"Checkpoint interval: {cfg['experiment']['checkpoint_interval']} timesteps")
+
 trainer.train()
+
+# save the trained agent
+agent_path = os.path.join(experiment_dir, "final_agent.pt")
+agent.save(agent_path)
+print(f"Training completed. Final agent saved to: {agent_path}")
+
+# save training configuration for reproducibility
+config_path = os.path.join(experiment_dir, "training_config.pt")
+torch.save({
+    "agent_config": cfg,
+    "trainer_config": cfg_trainer,
+    "task_name": task_name,
+    "timestamp": timestamp,
+    "device": str(device)
+}, config_path)
+print(f"Training configuration saved to: {config_path}")
 
 
 # # ---------------------------------------------------------

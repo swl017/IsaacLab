@@ -45,7 +45,15 @@ from isaaclab.markers.config import FRAME_MARKER_CFG
 from isaaclab.sensors import FrameTransformer, FrameTransformerCfg, OffsetCfg
 DEBUG_DRAW = True
 if DEBUG_DRAW:
-    import isaacsim.util.debug_draw._debug_draw as omni_debug_draw
+    try:
+        import isaacsim.util.debug_draw._debug_draw as omni_debug_draw
+    except ImportError:
+        try:
+            from omni.isaac.debug_draw import _debug_draw as omni_debug_draw
+        except ImportError:
+            print("Warning: Debug draw module not available. Disabling debug visualization.")
+            DEBUG_DRAW = False
+            omni_debug_draw = None
 
 import isaaclab.sim as sim_utils
 import numpy as np
@@ -188,7 +196,7 @@ class IrisGimbal2EnvCfg(DirectRLEnvCfg):
     bbox_center_reward_scale = 60
     bbox_size_reward_scale = 60
     
-    max_target_speed = 5.0
+    max_target_speed = 15.0
     max_lin_vel = 15.0
     max_yaw_rate = 20.0
     max_lin_acc = 3.0
@@ -272,7 +280,7 @@ class IrisGimbal2Env(DirectRLEnv):
         # -- goal pose
         marker_cfg.prim_path = "/Visuals/FrameVisualizer/goal_position"
         self.goal_visualizer = VisualizationMarkers(marker_cfg)
-        if DEBUG_DRAW:
+        if DEBUG_DRAW and omni_debug_draw is not None:
             self.camera_frustrum = CameraFrustrum()
             self.draw_interface = omni_debug_draw.acquire_debug_draw_interface()
 
@@ -437,7 +445,7 @@ class IrisGimbal2Env(DirectRLEnv):
         #     torch.cat([robot_pos_w, camera_pos_w], dim=0), torch.cat([robot_quat_w, camera_quat_w], dim=0)
         # )
         self.goal_visualizer.visualize(self._desired_pos_w)
-        if DEBUG_DRAW:
+        if DEBUG_DRAW and hasattr(self, 'draw_interface'):
             self.draw_interface.clear_lines()
             # line_colors_yellow = [[1.0, 1.0, 0.0, 1.0]] * self.camera_pos_world.shape[0]
             # line_colors_green = [[0.0, 1.0, 0.0, 1.0]] * self.camera_pos_world.shape[0]
@@ -459,7 +467,6 @@ class IrisGimbal2Env(DirectRLEnv):
                 self._robot.data.root_ang_vel_b[:, 2:3], # 1
                 self._robot.data.body_lin_acc_w[:,0], # 3
                 self._robot.data.body_ang_acc_w[:,0], # 3
-                # desired_pos_b,
                 self._robot.data.joint_pos[:, self.gimbal_pitch_joint_idx:self.gimbal_pitch_joint_idx + 1], # 1
                 self.bboxes_normalized, # 4
                 self.bbox_valid_mask.float(), # 1
@@ -506,7 +513,8 @@ class IrisGimbal2Env(DirectRLEnv):
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        died = torch.logical_or(self._robot.data.root_pos_w[:, 2] < 0.7, self._robot.data.root_pos_w[:, 2] > 10.0)
+        died = self._robot.data.root_pos_w[:, 2] < 0.7
+        # died = torch.logical_or(self._robot.data.root_pos_w[:, 2] < 0.7, self._robot.data.root_pos_w[:, 2] > 10.0)
         return died, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
