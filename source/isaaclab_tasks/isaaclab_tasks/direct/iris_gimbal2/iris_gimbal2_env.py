@@ -201,6 +201,12 @@ class IrisGimbal2EnvCfg(DirectRLEnvCfg):
     max_yaw_rate = 20.0
     max_lin_acc = 3.0
     max_ang_acc = 30.0
+    
+    # target movement parameters
+    target_acceleration_scale = 2.0
+    target_velocity_damping = 0.95
+    target_direction_change_prob = 0.01
+    target_max_acceleration = 1.0
 
 class IrisGimbal2Env(DirectRLEnv):
     cfg: IrisGimbal2EnvCfg
@@ -216,6 +222,11 @@ class IrisGimbal2Env(DirectRLEnv):
         self._cmd_vel = torch.zeros(self.num_envs, 1, 6, device=self.device)
         self.target_vel = torch.zeros(self.num_envs, 6, device=self.device).uniform_(-1.0, 1.0)
         self.last_target_vel = self.target_vel.clone()
+        
+        # Smooth movement variables
+        self.target_acceleration = torch.zeros(self.num_envs, 6, device=self.device)
+        self.target_desired_vel = torch.zeros(self.num_envs, 6, device=self.device).uniform_(-1.0, 1.0)
+        self.target_vel_change_timer = torch.zeros(self.num_envs, device=self.device)
 
         self.camera_pos_world = torch.zeros(self.num_envs, 3, device=self.device)
         self.camera_quat_world = torch.zeros(self.num_envs, 4, device=self.device)
@@ -232,6 +243,9 @@ class IrisGimbal2Env(DirectRLEnv):
 
         self.action_weight = torch.tensor(self.cfg.action_weight, device=self.device).repeat(self.num_envs, 1)
         self.action_delta_weight = torch.tensor(self.cfg.action_delta_weight, device=self.device).repeat(self.num_envs, 1)
+
+        self.curriculum = torch.tensor(-1, device=self.device).repeat(self.num_envs, 1)
+        self.last_curriculum = self.curriculum.clone()
 
         # Logging
         self._episode_sums = {
@@ -286,7 +300,6 @@ class IrisGimbal2Env(DirectRLEnv):
 
         self.step_count = 0
         self._env_origins = self._compute_env_origins_grid(self.num_envs, self.cfg.scene.env_spacing)
-        self.last_curriculum = None
 
     def _compute_env_origins_grid(self, num_envs: int, env_spacing: float) -> torch.Tensor:
         """Compute the origins of the environments in a grid based on configured spacing."""
@@ -367,7 +380,7 @@ class IrisGimbal2Env(DirectRLEnv):
         roll, pitch, yaw = euler_xyz_from_quat(self._robot.data.root_state_w[:, 3:7])
         curr_quat_w_yaw = quat_from_euler_xyz(torch.zeros_like(roll), torch.zeros_like(pitch), yaw)
         roll_b, pitch_b, _ = euler_xyz_from_quat(quat_mul(self._robot.data.root_state_w[:, 3:7], quat_inv(curr_quat_w_yaw)))
-        self.gimbal_dof_targets[:, self.gimbal_yaw_joint_idx] = self._actions[:, 4] * 2
+        self.gimbal_dof_targets[:, self.gimbal_yaw_joint_idx] = self._actions[:, 4] * 3.14 * 2 / 3
         self.gimbal_dof_targets[:, self.gimbal_roll_joint_idx] = self._stabilizer.wrap_to_pi(-roll_b)
         self.gimbal_dof_targets[:, self.gimbal_pitch_joint_idx] = self._actions[:, 5] #self._stabilizer.wrap_to_pi(-pitch_b*(1+self.step_count*0.001))
 
@@ -418,12 +431,16 @@ class IrisGimbal2Env(DirectRLEnv):
         # bb = self.bboxes[0].cpu().tolist()
         # carb.log_warn(f"bboxes: [f'{(bb[0]+bb[2])/2:.0f}', f'{(bb[1]+bb[3])/2:.0f}], valid_mask: {self.bbox_valid_mask[0].cpu().tolist()}]")
 
+        # Smooth target movement with continuous acceleration
+        if self.step_count > 14000:
+            self._update_target_movement()
+
         # Bounce up when target is too low
         up_vel = self.target_vel.clone()
         up_vel[..., 2] = -self.target_vel[..., 2]
         target_lower_bound = torch.ones_like(self.target.data.root_state_w, device=self.device) * 1.0
         self.target_vel[..., 2] = torch.where(self.target.data.root_state_w[:, 2] < target_lower_bound[:, 2], up_vel[..., 2], self.target_vel[..., 2])
-
+        self.step_count += 1
 
     def _apply_action(self):
         # self._robot.write_root_link_velocity_to_sim(self._cmd_vel[self._body_id, 0, :6], env_ids=self._body_id)
@@ -561,10 +578,7 @@ class IrisGimbal2Env(DirectRLEnv):
         self._desired_pos_w[env_ids, 2] = torch.ones_like(default_root_state[:, 2]) * 3.5
         bbox_reward = (1 - torch.tanh(final_bbox_center / 0.8)) * self.cfg.bbox_center_reward_scale
         curriculum_rate = 0.01
-        if self.last_curriculum is None:
-            self.curriculum = torch.ones_like(bbox_reward)
-        else:
-            self.curriculum = torch.where(bbox_reward > 20, self.last_curriculum * (1+curriculum_rate), self.last_curriculum * (1-curriculum_rate))
+        self.curriculum = torch.where(bbox_reward > 20, torch.ones_like(self.curriculum), self.last_curriculum)
         # self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
         self._desired_pos_w[env_ids, 0] = torch.zeros_like(self._desired_pos_w[env_ids, 0]).uniform_(2.0, 5.0)
         self._desired_pos_w[env_ids, 1] = torch.zeros_like(self._desired_pos_w[env_ids, 1]).uniform_(-1.0, 1.0)
@@ -621,6 +635,57 @@ class IrisGimbal2Env(DirectRLEnv):
             if hasattr(self, "goal_pos_visualizer"):
                 self.goal_pos_visualizer.set_visibility(False)
                 # self.frame_visualizer.set_visibility(False)
+
+    def _update_target_movement(self):
+        """Update target movement with smooth acceleration-based motion."""
+        # Update timer for direction changes
+        self.target_vel_change_timer += self.step_dt
+        
+        # Randomly change desired velocity with some probability
+        change_mask = torch.rand(self.num_envs, device=self.device) < self.cfg.target_direction_change_prob
+        
+        # Generate new random desired velocities for targets that need to change
+        new_desired_vel = torch.zeros_like(self.target_desired_vel)
+        new_desired_vel[:, :3] = torch.rand(self.num_envs, 3, device=self.device) * 2.0 - 1.0  # [-1, 1]
+        new_desired_vel[:, 3:] = torch.rand(self.num_envs, 3, device=self.device) * 0.2 - 0.1  # small angular velocities
+        
+        # Scale by max speed
+        if self.step_count > 14000:
+            new_desired_vel[:, :3] *= self.cfg.max_target_speed * 0.3  # use 30% of max speed for smoother motion
+        
+        # Update desired velocity where mask is true
+        self.target_desired_vel = torch.where(
+            change_mask.unsqueeze(-1).expand(-1, 6),
+            new_desired_vel,
+            self.target_desired_vel
+        )
+        
+        # Reset timer for environments that changed direction
+        self.target_vel_change_timer = torch.where(change_mask, torch.zeros_like(self.target_vel_change_timer), self.target_vel_change_timer)
+        
+        # Compute acceleration towards desired velocity
+        vel_error = self.target_desired_vel - self.target_vel
+        self.target_acceleration = vel_error * self.cfg.target_acceleration_scale
+        
+        # Clamp acceleration
+        self.target_acceleration = torch.clamp(
+            self.target_acceleration, 
+            -self.cfg.target_max_acceleration, 
+            self.cfg.target_max_acceleration
+        )
+        
+        # Update velocity with acceleration and damping
+        self.target_vel += torch.where(self.curriculum > 0, self.target_acceleration * self.step_dt, torch.zeros_like(self.target_acceleration))
+        self.target_vel *= torch.where(self.curriculum > 0, self.cfg.target_velocity_damping, 1.0)
+        # self.target_vel += self.target_acceleration * self.step_dt
+        # self.target_vel *= self.cfg.target_velocity_damping
+        
+        # Clamp final velocity
+        self.target_vel[:, :3] = torch.clamp(
+            self.target_vel[:, :3], 
+            -self.cfg.max_target_speed, 
+            self.cfg.max_target_speed
+        )
 
     def _debug_vis_callback(self, event):
         # update the markers

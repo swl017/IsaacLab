@@ -119,7 +119,7 @@ cfg["state_preprocessor_kwargs"] = {"size": env.observation_space, "device": dev
 cfg["value_preprocessor"] = RunningStandardScaler
 cfg["value_preprocessor_kwargs"] = {"size": 1, "device": device}
 # logging to TensorBoard and write checkpoints (in timesteps)
-task_name = "Isaac-Iris-Gimbal2-v0"
+task_name = "Isaac-Iris-Gimbal2-Direct-v0"
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 experiment_dir = f"logs/skrl/{task_name}/{timestamp}"
 os.makedirs(experiment_dir, exist_ok=True)
@@ -129,6 +129,10 @@ current_script = __file__
 script_backup_path = os.path.join(experiment_dir, "train_script.py")
 shutil.copy2(current_script, script_backup_path)
 print(f"Training script copied to: {script_backup_path}")
+env_file = "/home/usrg/IsaacPX4/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/iris_gimbal2/iris_gimbal2_env.py"
+env_backup_path = os.path.join(experiment_dir, "env_script.py")
+shutil.copy2(env_file, env_backup_path)
+print(f"Env script copied to: {env_backup_path}")
 
 cfg["experiment"]["directory"] = experiment_dir
 cfg["experiment"]["experiment_name"] = f"{task_name}_PPO_RNN"
