@@ -146,7 +146,7 @@ def find_model_checkpoint(experiment_dir):
         return final_agent_path
     
     # Look for checkpoint files
-    checkpoint_pattern = os.path.join(experiment_dir, "checkpoints", "agent_*.pt")
+    checkpoint_pattern = os.path.join(experiment_dir, "*", "checkpoints", "agent_*.pt")
     checkpoints = glob.glob(checkpoint_pattern)
     
     if checkpoints:

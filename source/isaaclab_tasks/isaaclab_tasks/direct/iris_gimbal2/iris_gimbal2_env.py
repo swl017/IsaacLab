@@ -86,7 +86,7 @@ class IrisGimbal2EnvCfg(DirectRLEnvCfg):
     episode_length_s = 30.0
     decimation = 2
     action_space = 6
-    observation_space = 23
+    observation_space = 21
     state_space = 0
     debug_vis = True
 
@@ -184,9 +184,9 @@ class IrisGimbal2EnvCfg(DirectRLEnvCfg):
 
     # reward scales
     lin_vel_reward_scale = -0.01
-    ang_vel_reward_scale = -0.02 # stability bound [-0.02, -0.04]
+    ang_vel_reward_scale = -0.02
     action_sum_reward_scale = -0.1
-    action_weight = [1, 1, 1, 1, 0.1, 0.1]
+    action_weight = [1, 1, 1, 1, 0, 0]
     action_delta_reward_scale = -0.01
     action_delta_weight = [1, 1, 1, 1, 0.1, 0.1]
     distance_to_goal_reward_scale = 60.0
@@ -368,10 +368,10 @@ class IrisGimbal2Env(DirectRLEnv):
             self._robot.data.root_lin_vel_w, self._robot.data.root_ang_vel_b, self.step_dt
         )
 
-        self.new_vel_lin_w = self._robot.data.root_lin_vel_w + quat_rotate(
+        self.new_vel_lin_w = self._robot.data.root_lin_vel_w * (1 - self.step_dt) + quat_rotate(
             self._robot.data.root_state_w[:, 3:7], self._thrust[:, 0, :]) * self.step_dt
         self.new_vel_lin_w[:, 2] = torch.clamp(self.new_vel_lin_w[:, 2], min=-self.max_lin_vel, max=self.max_lin_vel)
-        self.new_vel_ang_w = self._robot.data.root_ang_vel_w + quat_rotate(
+        self.new_vel_ang_w = self._robot.data.root_ang_vel_w * (1 - 3 * self.step_dt) + quat_rotate(
             self._robot.data.root_state_w[:, 3:7], self._moment[:, 0, :]) * self.step_dt
         self.new_vel_ang_w[:, 0] = torch.zeros_like(self.new_vel_ang_w[:, 0])
         self.new_vel_ang_w[:, 1] = torch.zeros_like(self.new_vel_ang_w[:, 1])
@@ -432,8 +432,8 @@ class IrisGimbal2Env(DirectRLEnv):
         # carb.log_warn(f"bboxes: [f'{(bb[0]+bb[2])/2:.0f}', f'{(bb[1]+bb[3])/2:.0f}], valid_mask: {self.bbox_valid_mask[0].cpu().tolist()}]")
 
         # Smooth target movement with continuous acceleration
-        if self.step_count > 14000:
-            self._update_target_movement()
+        # if self.step_count > 14000:
+        self._update_target_movement()
 
         # Bounce up when target is too low
         up_vel = self.target_vel.clone()
@@ -483,8 +483,8 @@ class IrisGimbal2Env(DirectRLEnv):
                 self._robot.data.root_state_w[:, :10], # 10
                 self._robot.data.root_ang_vel_b[:, 2:3], # 1
                 self._robot.data.body_lin_acc_w[:,0], # 3
-                self._robot.data.body_ang_acc_w[:,0], # 3
                 self._robot.data.joint_pos[:, self.gimbal_pitch_joint_idx:self.gimbal_pitch_joint_idx + 1], # 1
+                self._robot.data.joint_pos[:, self.gimbal_yaw_joint_idx:self.gimbal_yaw_joint_idx + 1], # 1
                 self.bboxes_normalized, # 4
                 self.bbox_valid_mask.float(), # 1
             ],
@@ -585,16 +585,11 @@ class IrisGimbal2Env(DirectRLEnv):
         self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(1.5, 4.5)
         self._desired_pos_w[env_ids, :3] += self._env_origins[env_ids, :3]
         self._desired_yaw_w[env_ids, 0] = torch.zeros_like(self._desired_yaw_w[env_ids, 0]).uniform_(-3.14, 3.14)
-        self.target.data.root_state_w[env_ids, :3] = self._desired_pos_w[env_ids, :3]
-        self.target.data.root_state_w[env_ids, 7:] = torch.zeros_like(self.target.data.root_state_w[env_ids, 7:])
-        self.target.write_root_pose_to_sim(self.target.data.root_state_w[env_ids, :7], env_ids)
-        new_target_vel = self.last_target_vel[env_ids] * (1+curriculum_rate)
-        self.target_vel[env_ids] = torch.where(new_target_vel > self.cfg.max_target_speed,
-                                                new_target_vel,
-                                                self.last_target_vel[env_ids])
 
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
+        joint_pos[:, self.gimbal_yaw_joint_idx] = torch.zeros_like(joint_pos[:, self.gimbal_yaw_joint_idx]).uniform_(-3.14 * 2 / 3, 3.14 * 2 / 3)
+        joint_pos[:, self.gimbal_pitch_joint_idx] = torch.zeros_like(joint_pos[:, self.gimbal_pitch_joint_idx]).uniform_(-1.0, 1.0)
         joint_vel = self._robot.data.default_joint_vel[env_ids]
         default_root_state = self._robot.data.default_root_state[env_ids]
         default_root_state[:, :2] = torch.zeros_like(default_root_state[:, :2])
@@ -609,6 +604,41 @@ class IrisGimbal2Env(DirectRLEnv):
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+
+        # --- Project target from 2d to 3d position --- #
+        robot_pos = default_root_state[:, :3]
+        robot_quat = default_root_state[:, 3:7]
+        gimbal_yaw = joint_pos[:, self.gimbal_yaw_joint_idx]
+        gimbal_roll = joint_pos[:, self.gimbal_roll_joint_idx] 
+        gimbal_pitch = joint_pos[:, self.gimbal_pitch_joint_idx]
+        
+        # Create gimbal orientation quaternion (yaw -> roll -> pitch)
+        gimbal_quat = quat_mul(
+            quat_mul(
+                quat_from_euler_xyz(torch.zeros_like(gimbal_yaw), torch.zeros_like(gimbal_yaw), gimbal_yaw),
+                quat_from_euler_xyz(gimbal_roll, torch.zeros_like(gimbal_roll), torch.zeros_like(gimbal_roll))
+            ),
+            quat_from_euler_xyz(torch.zeros_like(gimbal_pitch), gimbal_pitch, torch.zeros_like(gimbal_pitch))
+        )
+
+        camera_quat_world = quat_mul(robot_quat, quat_mul(gimbal_quat, self.camera_offset_rot_batch[env_ids]))
+        camera_offset = torch.tensor((0, 0, 0.1), device=self.device).expand(len(env_ids), -1)
+        camera_pos_world = robot_pos + quat_rotate(camera_quat_world, camera_offset)
+        # --- sample random pixels --- #
+        sampled_box_center = torch.zeros(len(env_ids), 2, device=self.device)
+        sampled_box_center[:, 0] = torch.randint(0, self.cfg.camera_cfg.width, (len(env_ids),), device=self.device).float()
+        sampled_box_center[:, 1] = torch.randint(0, self.cfg.camera_cfg.height, (len(env_ids),), device=self.device).float()
+        sampled_distances = torch.zeros(len(env_ids), 1, device=self.device).uniform_(8.0, 12.0)
+        target_pos = project_2d_to_3d(self.camera_cfg_batch[env_ids], sampled_box_center, sampled_distances, camera_pos_world, camera_quat_world, device=self.device)
+
+        self.target.data.root_state_w[env_ids, :3] = target_pos
+        self.target.data.root_state_w[env_ids, 7:] = torch.zeros_like(self.target.data.root_state_w[env_ids, 7:])
+        self.target.write_root_pose_to_sim(self.target.data.root_state_w[env_ids, :7], env_ids)
+        new_target_vel = self.last_target_vel[env_ids] * (1+curriculum_rate)
+        self.target_vel[env_ids] = torch.where(new_target_vel > self.cfg.max_target_speed,
+                                                new_target_vel,
+                                                self.last_target_vel[env_ids])
+        
         self._last_actions[env_ids] = torch.zeros_like(self._actions[env_ids])
         self._stabilizer.reset(env_ids)
         self.target_quat = quat_from_euler_xyz(
@@ -650,8 +680,8 @@ class IrisGimbal2Env(DirectRLEnv):
         new_desired_vel[:, 3:] = torch.rand(self.num_envs, 3, device=self.device) * 0.2 - 0.1  # small angular velocities
         
         # Scale by max speed
-        if self.step_count > 14000:
-            new_desired_vel[:, :3] *= self.cfg.max_target_speed * 0.3  # use 30% of max speed for smoother motion
+        # if self.step_count > 14000:
+        new_desired_vel[:, :3] *= self.cfg.max_target_speed * 0.3  # use 30% of max speed for smoother motion
         
         # Update desired velocity where mask is true
         self.target_desired_vel = torch.where(
