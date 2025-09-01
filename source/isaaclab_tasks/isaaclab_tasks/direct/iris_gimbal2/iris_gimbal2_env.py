@@ -186,9 +186,9 @@ class IrisGimbal2EnvCfg(DirectRLEnvCfg):
     lin_vel_reward_scale = -0.01
     ang_vel_reward_scale = -0.02
     action_sum_reward_scale = -0.1
-    action_weight = [1, 1, 1, 1, 0, 0]
+    action_weight = [1, 1, 2, 0.1, 0.03, 0.03]
     action_delta_reward_scale = -0.01
-    action_delta_weight = [1, 1, 1, 1, 0.1, 0.1]
+    action_delta_weight = [1, 1, 2, 0.1, 0.03, 0.03]
     distance_to_goal_reward_scale = 60.0
     yaw_reward_scale = -10
     yaw_rate_reward_scale = -0.001
@@ -380,9 +380,11 @@ class IrisGimbal2Env(DirectRLEnv):
         roll, pitch, yaw = euler_xyz_from_quat(self._robot.data.root_state_w[:, 3:7])
         curr_quat_w_yaw = quat_from_euler_xyz(torch.zeros_like(roll), torch.zeros_like(pitch), yaw)
         roll_b, pitch_b, _ = euler_xyz_from_quat(quat_mul(self._robot.data.root_state_w[:, 3:7], quat_inv(curr_quat_w_yaw)))
-        self.gimbal_dof_targets[:, self.gimbal_yaw_joint_idx] = self._actions[:, 4] * 3.14 * 2 / 3
+        self.gimbal_dof_targets[:, self.gimbal_yaw_joint_idx] += self._actions[:, 4] * self.step_dt * 2 * math.pi
+        self.gimbal_dof_targets[:, self.gimbal_yaw_joint_idx] = torch.clamp(self.gimbal_dof_targets[:, self.gimbal_yaw_joint_idx], -math.pi*2/3, math.pi*2/3)
         self.gimbal_dof_targets[:, self.gimbal_roll_joint_idx] = self._stabilizer.wrap_to_pi(-roll_b)
-        self.gimbal_dof_targets[:, self.gimbal_pitch_joint_idx] = self._actions[:, 5] #self._stabilizer.wrap_to_pi(-pitch_b*(1+self.step_count*0.001))
+        self.gimbal_dof_targets[:, self.gimbal_pitch_joint_idx] += self._actions[:, 5] * self.step_dt * 2 * math.pi
+        self.gimbal_dof_targets[:, self.gimbal_pitch_joint_idx] = torch.clamp(self.gimbal_dof_targets[:, self.gimbal_pitch_joint_idx], -math.pi*1/3, math.pi*1/3)
 
         # Compute actual camera position based on robot state and gimbal orientation
         # Get robot base position and orientation
@@ -589,7 +591,9 @@ class IrisGimbal2Env(DirectRLEnv):
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_pos[:, self.gimbal_yaw_joint_idx] = torch.zeros_like(joint_pos[:, self.gimbal_yaw_joint_idx]).uniform_(-3.14 * 2 / 3, 3.14 * 2 / 3)
-        joint_pos[:, self.gimbal_pitch_joint_idx] = torch.zeros_like(joint_pos[:, self.gimbal_pitch_joint_idx]).uniform_(-1.0, 1.0)
+        joint_pos[:, self.gimbal_pitch_joint_idx] = torch.zeros_like(joint_pos[:, self.gimbal_pitch_joint_idx]).uniform_(-3.14*1/3, 3.14*1/3)
+        joint_pos[:, self.gimbal_roll_joint_idx] = torch.zeros_like(joint_pos[:, self.gimbal_roll_joint_idx])
+        self.gimbal_dof_targets[env_ids] = joint_pos
         joint_vel = self._robot.data.default_joint_vel[env_ids]
         default_root_state = self._robot.data.default_root_state[env_ids]
         default_root_state[:, :2] = torch.zeros_like(default_root_state[:, :2])
