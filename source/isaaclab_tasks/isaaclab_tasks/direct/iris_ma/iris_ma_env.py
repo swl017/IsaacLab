@@ -679,18 +679,16 @@ class IrisMAEnv(DirectMARLEnv):
             env_ids = self._robots["drone_0"]._ALL_INDICES
         
         # Logging
+        all_extras = {}
         for agent_id in self.cfg.possible_agents:
-            extras = {}
-            for key in self._episode_sums[agent_id].keys():
-                episodic_sum_avg = torch.mean(self._episode_sums[agent_id][key][env_ids])
-                extras[f"Episode_Reward/{key}"] = episodic_sum_avg / self.max_episode_length_s
+            for key, value in self._episode_sums[agent_id].items():
+                episodic_sum_avg = torch.mean(value[env_ids])
+                all_extras[f"Episode_Reward/{agent_id}_{key}"] = episodic_sum_avg / self.max_episode_length_s
                 self._episode_sums[agent_id][key][env_ids] = 0.0
-            
-            if agent_id not in self.extras:
-                self.extras[agent_id] = {}
-            if "log" not in self.extras[agent_id]:
-                self.extras[agent_id]["log"] = {}
-            self.extras[agent_id]["log"].update(extras)
+        
+        if "log" not in self.extras:
+            self.extras["log"] = {}
+        self.extras["log"].update(all_extras)
         
         # Reset robots
         for idx, agent_id in enumerate(self.cfg.possible_agents):
