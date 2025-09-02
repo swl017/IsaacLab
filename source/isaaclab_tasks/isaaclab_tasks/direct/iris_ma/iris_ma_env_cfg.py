@@ -3,223 +3,73 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
 
-from isaaclab_assets.shadow_hand import SHADOW_HAND_CFG
+import math
 
-import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, RigidObjectCfg
-from isaaclab.envs import DirectMARLEnvCfg, DirectRLEnvCfg
-from isaaclab.managers import EventTermCfg as EventTerm
-from isaaclab.managers import SceneEntityCfg
-from isaaclab.markers import VisualizationMarkersCfg
-from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sim import PhysxCfg, SimulationCfg
-from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
-from isaaclab.utils import configclass
-from isaaclab_assets import IRIS_CFG  # isort: skip
+from isaaclab.envs import DirectMARLEnvCfg
 from isaaclab.envs.ui import BaseEnvWindow
+from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import TiledCameraCfg, FrameTransformerCfg, OffsetCfg
+from isaaclab.sim import SimulationCfg, PhysxCfg
 from isaaclab.terrains import TerrainImporterCfg
-import numpy as np
+from isaaclab.utils import configclass
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
-@configclass
-class EventCfg:
-    """Configuration for randomization."""
+from isaaclab_assets import IRIS_GIMBAL2_CFG
 
-    # -- robot
-    # robot_physics_material = EventTerm(
-    #     func=mdp.randomize_rigid_body_material,
-    #     mode="reset",
-    #     min_step_count_between_reset=720,
-    #     params={
-    #         "asset_cfg": SceneEntityCfg("right_hand"),
-    #         "static_friction_range": (0.7, 1.3),
-    #         "dynamic_friction_range": (1.0, 1.0),
-    #         "restitution_range": (1.0, 1.0),
-    #         "num_buckets": 250,
-    #     },
-    # )
-    # robot_joint_stiffness_and_damping = EventTerm(
-    #     func=mdp.randomize_actuator_gains,
-    #     min_step_count_between_reset=720,
-    #     mode="reset",
-    #     params={
-    #         "asset_cfg": SceneEntityCfg("right_hand", joint_names=".*"),
-    #         "stiffness_distribution_params": (0.75, 1.5),
-    #         "damping_distribution_params": (0.3, 3.0),
-    #         "operation": "scale",
-    #         "distribution": "log_uniform",
-    #     },
-    # )
-    # robot_joint_limits = EventTerm(
-    #     func=mdp.randomize_joint_parameters,
-    #     min_step_count_between_reset=720,
-    #     mode="reset",
-    #     params={
-    #         "asset_cfg": SceneEntityCfg("right_hand", joint_names=".*"),
-    #         "lower_limit_distribution_params": (0.00, 0.01),
-    #         "upper_limit_distribution_params": (0.00, 0.01),
-    #         "operation": "add",
-    #         "distribution": "gaussian",
-    #     },
-    # )
-    # robot_tendon_properties = EventTerm(
-    #     func=mdp.randomize_fixed_tendon_parameters,
-    #     min_step_count_between_reset=720,
-    #     mode="reset",
-    #     params={
-    #         "asset_cfg": SceneEntityCfg("right_hand", fixed_tendon_names=".*"),
-    #         "stiffness_distribution_params": (0.75, 1.5),
-    #         "damping_distribution_params": (0.3, 3.0),
-    #         "operation": "scale",
-    #         "distribution": "log_uniform",
-    #     },
-    # )
 
-    # -- object
-    # object_physics_material = EventTerm(
-    #     func=mdp.randomize_rigid_body_material,
-    #     min_step_count_between_reset=720,
-    #     mode="reset",
-    #     params={
-    #         "asset_cfg": SceneEntityCfg("object"),
-    #         "static_friction_range": (0.7, 1.3),
-    #         "dynamic_friction_range": (1.0, 1.0),
-    #         "restitution_range": (1.0, 1.0),
-    #         "num_buckets": 250,
-    #     },
-    # )
-    # object_scale_mass = EventTerm(
-    #     func=mdp.randomize_rigid_body_mass,
-    #     min_step_count_between_reset=720,
-    #     mode="reset",
-    #     params={
-    #         "asset_cfg": SceneEntityCfg("object"),
-    #         "mass_distribution_params": (0.5, 1.5),
-    #         "operation": "scale",
-    #         "distribution": "uniform",
-    #     },
-    # )
+class IrisMaEnvWindow(BaseEnvWindow):
+    """Window manager for the Iris Multi-Agent environment."""
 
-    # -- scene
-    reset_gravity = EventTerm(
-        func=mdp.randomize_physics_scene_gravity,
-        mode="interval",
-        is_global_time=True,
-        interval_range_s=(36.0, 36.0),  # time_s = num_steps * (decimation * dt)
-        params={
-            "gravity_distribution_params": ([0.0, 0.0, 0.0], [0.0, 0.0, 0.4]),
-            "operation": "add",
-            "distribution": "gaussian",
-        },
-    )
+    def __init__(self, env, window_name: str = "IsaacLab"):
+        """Initialize the window.
+
+        Args:
+            env: The environment object.
+            window_name: The name of the window. Defaults to "IsaacLab".
+        """
+        super().__init__(env, window_name)
+        with self.ui_window_elements["main_vstack"]:
+            with self.ui_window_elements["debug_frame"]:
+                with self.ui_window_elements["debug_vstack"]:
+                    self._create_debug_vis_ui_element("targets", self.env)
 
 
 @configclass
-class IrisEnvCfg(DirectMARLEnvCfg):
-    # env
+class IrisMaEnvCfg(DirectMARLEnvCfg):
+    # Environment configuration
+    episode_length_s = 30.0
     decimation = 2
-    episode_length_s = 7.5
-    possible_agents = ["right_hand", "left_hand"]
-    action_spaces = {"right_hand": 6, "left_hand": 6}
-    observation_spaces = {"right_hand": 22, "left_hand": 22}
-    state_space = 39
     debug_vis = True
+    ui_window_class_type = IrisMaEnvWindow
+    
+    # Multi-agent setup
+    possible_agents = ["drone_0", "drone_1"]
+    action_spaces = {"drone_0": 7, "drone_1": 7}  # [vx, vy, vz, vyaw, gimbal_yaw, gimbal_pitch, zoom]
+    observation_spaces = {"drone_0": 25, "drone_1": 25}
+    state_space = 0
 
-    # simulation
+    # Simulation
     sim: SimulationCfg = SimulationCfg(
-        dt=1 / 120,
+        dt=2 / 100,
         render_interval=decimation,
-        physics_material=RigidBodyMaterialCfg(
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
             static_friction=1.0,
             dynamic_friction=1.0,
-        ),
-        physx=PhysxCfg(
-            bounce_threshold_velocity=0.2,
+            restitution=0.0,
         ),
     )
-    # robot
-    right_robot_cfg: ArticulationCfg = IRIS_CFG.replace(prim_path="/World/envs/env_.*/RightRobot").replace(
-        init_state=ArticulationCfg.InitialStateCfg(
-            pos=(-10.0, 0.0, 3.0),
-            rot=(1.0, 0.0, 0.0, 0.0),
-            joint_pos={".*": 0.0},
-        )
-    )
-    left_robot_cfg: ArticulationCfg = IRIS_CFG.replace(prim_path="/World/envs/env_.*/LeftRobot").replace(
-        init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, -10.0, 3.0),
-            rot=(0, 0, -0.7071068, 0.7071068), # -90 degrees
-            joint_pos={".*": 0.0},
-        )
-    )
-    actuated_joint_names = [
-        "cgo3_horizontal_arm_joint",
-        "cgo3_camera_joint",
-        "cgo3_vertical_arm_joint",
-        # "robot0_WRJ1",
-        # "robot0_WRJ0",
-        # "robot0_FFJ3",
-        # "robot0_FFJ2",
-        # "robot0_FFJ1",
-        # "robot0_MFJ3",
-        # "robot0_MFJ2",
-        # "robot0_MFJ1",
-        # "robot0_RFJ3",
-        # "robot0_RFJ2",
-        # "robot0_RFJ1",
-        # "robot0_LFJ4",
-        # "robot0_LFJ3",
-        # "robot0_LFJ2",
-        # "robot0_LFJ1",
-        # "robot0_THJ4",
-        # "robot0_THJ3",
-        # "robot0_THJ2",
-        # "robot0_THJ1",
-        # "robot0_THJ0",
-    ]
-    fingertip_body_names = [
-        # "robot0_ffdistal",
-        # "robot0_mfdistal",
-        # "robot0_rfdistal",
-        # "robot0_lfdistal",
-        # "robot0_thdistal",
-    ]
 
-    # in-hand object
-    # object_cfg: RigidObjectCfg = RigidObjectCfg(
-    #     prim_path="/World/envs/env_.*/object",
-    #     spawn=sim_utils.SphereCfg(
-    #         radius=0.0335,
-    #         visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 1.0, 0.0)),
-    #         physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=0.7),
-    #         rigid_props=sim_utils.RigidBodyPropertiesCfg(
-    #             kinematic_enabled=False,
-    #             disable_gravity=False,
-    #             enable_gyroscopic_forces=True,
-    #             solver_position_iteration_count=8,
-    #             solver_velocity_iteration_count=0,
-    #             sleep_threshold=0.005,
-    #             stabilization_threshold=0.0025,
-    #             max_depenetration_velocity=1000.0,
-    #         ),
-    #         collision_props=sim_utils.CollisionPropertiesCfg(),
-    #         mass_props=sim_utils.MassPropertiesCfg(density=500.0),
-    #     ),
-    #     init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, -0.39, 0.54), rot=(1.0, 0.0, 0.0, 0.0)),
-    # )
-    # goal object @todo: make it move
-    goal_object_cfg: VisualizationMarkersCfg = VisualizationMarkersCfg(
-        prim_path="/Visuals/goal_marker",
-        markers={
-            "goal": sim_utils.SphereCfg(
-                radius=0.0335,
-                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.4, 0.3, 1.0)),
-            ),
-        },
+    phys: PhysxCfg = PhysxCfg(
+        gpu_max_rigid_patch_count=950272,
     )
-    # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=2048, env_spacing=1.5, replicate_physics=True)
+
+    # Terrain
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
         terrain_type="plane",
@@ -234,22 +84,129 @@ class IrisEnvCfg(DirectMARLEnvCfg):
         debug_vis=False,
     )
 
-    # reset
-    reset_position_noise = 0.01  # range of position at reset
-    reset_dof_pos_noise = 0.2  # range of dof pos at reset
-    reset_dof_vel_noise = 0.0  # range of dof vel at reset
-    # scales and constants
-    fall_dist = 0.24
-    vel_obs_scale = 0.2
-    act_moving_average = 1.0
-    # reward-related scales
-    lin_vel_reward_scale = -0.05
-    ang_vel_reward_scale = -0.01
-    dist_reward_scale = 20.0
-    target_speed = 3.0
-    thrust_to_weight = 1.9
-    moment_scale = 0.01
-    gimbal_scale = np.pi / 2.0
-    distance_to_goal_reward_scale = 15.0
-    target_distance_scale = 1.0
-    ray_target_distance_scale = 1.0
+    # Camera configurations for both drones
+    camera_0_cfg = TiledCameraCfg(
+        prim_path="/World/envs/env_.*/Drone0/pitch_link/camera",
+        update_period=0.1,
+        height=480,
+        width=640,
+        data_types=["rgb", "semantic_segmentation"],
+        colorize_semantic_segmentation=True,
+        semantic_segmentation_mapping={"class:target": (255, 36, 66, 255), "class:robot": (255, 36, 255, 255)},
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=24.0, 
+            focus_distance=400.0, 
+            horizontal_aperture=20.955, 
+            clipping_range=(0.1, 1.0e5)
+        ),
+        offset=TiledCameraCfg.OffsetCfg(
+            pos=(0.0, 0.0, 0.0), 
+            rot=(0.5, -0.5, 0.5, -0.5), 
+            convention="ros"
+        ),
+    )
+
+    camera_1_cfg = TiledCameraCfg(
+        prim_path="/World/envs/env_.*/Drone1/pitch_link/camera",
+        update_period=0.1,
+        height=480,
+        width=640,
+        data_types=["rgb", "semantic_segmentation"],
+        colorize_semantic_segmentation=True,
+        semantic_segmentation_mapping={"class:target": (255, 36, 66, 255), "class:robot": (255, 36, 255, 255)},
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=24.0, 
+            focus_distance=400.0, 
+            horizontal_aperture=20.955, 
+            clipping_range=(0.1, 1.0e5)
+        ),
+        offset=TiledCameraCfg.OffsetCfg(
+            pos=(0.0, 0.0, 0.0), 
+            rot=(0.5, -0.5, 0.5, -0.5), 
+            convention="ros"
+        ),
+    )
+
+    # Target configuration
+    target_cfg: RigidObjectCfg = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/target",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd",
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=False,
+                disable_gravity=True,
+                enable_gyroscopic_forces=False,
+                rigid_body_enabled=True,
+            ),
+            copy_from_source=False,
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(5.0, 0.0, 3.5), rot=(1.0, 0.0, 0.0, 0.0)),
+    )
+
+    # Frame transformers for each drone
+    frame_transformer_0_cfg: FrameTransformerCfg = FrameTransformerCfg(
+        prim_path="/World/envs/env_.*/Drone0/body",
+        target_frames=[
+            FrameTransformerCfg.FrameCfg(prim_path="/World/envs/env_.*/Drone0/pitch_link"),
+            FrameTransformerCfg.FrameCfg(prim_path="/World/envs/env_.*/target"),
+        ],
+        debug_vis=True,
+    )
+
+    frame_transformer_1_cfg: FrameTransformerCfg = FrameTransformerCfg(
+        prim_path="/World/envs/env_.*/Drone1/body",
+        target_frames=[
+            FrameTransformerCfg.FrameCfg(prim_path="/World/envs/env_.*/Drone1/pitch_link"),
+            FrameTransformerCfg.FrameCfg(prim_path="/World/envs/env_.*/target"),
+        ],
+        debug_vis=True,
+    )
+
+    # Scene
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1024, env_spacing=20.0, replicate_physics=True)
+    
+    # Drone configurations
+    drone_0_cfg: ArticulationCfg = IRIS_GIMBAL2_CFG.replace(prim_path="/World/envs/env_.*/Drone0")
+    drone_1_cfg: ArticulationCfg = IRIS_GIMBAL2_CFG.replace(prim_path="/World/envs/env_.*/Drone1")
+    
+    # Control parameters
+    thrust_to_weight = 4.0
+    moment_scale = 10.0
+    yaw_moment_scale = 1.0
+
+    # Action weights for penalty
+    action_weight = [1, 1, 5, 0.5, 0.03, 0.03, 0.01]
+    action_delta_weight = [1, 1, 5, 0.5, 0.03, 0.03, 0.01]
+
+    # Reward scales
+    lin_vel_reward_scale = -0.1
+    ang_vel_reward_scale = -0.02
+    action_sum_reward_scale = -0.1
+    action_delta_reward_scale = -0.01
+    zoom_reward_scale = -0.5
+
+    # Multi-agent specific rewards
+    formation_reward_scale = 100.0  # Reward for maintaining optimal formation
+    triangulation_reward_scale = 80.0  # Reward for good triangulation geometry
+    bbox_center_reward_scale = 60.0
+    bbox_size_reward_scale = 60.0
+    coordination_reward_scale = 50.0  # Reward for coordination between drones
+
+    # Physical limits
+    max_target_speed = 15.0
+    max_lin_vel = 15.0
+    max_yaw_rate = 20.0
+    max_lin_acc = 3.0
+    max_ang_acc = 30.0
+    
+    # Target movement parameters
+    target_acceleration_scale = 2.0
+    target_velocity_damping = 0.95
+    target_direction_change_prob = 0.01
+    target_max_acceleration = 1.0
+
+    # Formation parameters for triangulation
+    optimal_baseline_distance = 8.0  # Optimal distance between drones for triangulation
+    min_baseline_distance = 4.0     # Minimum safe distance between drones
+    max_baseline_distance = 15.0    # Maximum useful distance for triangulation
+    optimal_triangulation_angle = math.pi / 3  # 60 degrees for good triangulation
