@@ -175,7 +175,7 @@ class IrisGimbal2ZoomEnvCfg(DirectRLEnvCfg):
     )
 
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=5.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=10.0, replicate_physics=True)
     # robot
     robot: ArticulationCfg = IRIS_GIMBAL2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     thrust_to_weight = 4.0
@@ -183,12 +183,14 @@ class IrisGimbal2ZoomEnvCfg(DirectRLEnvCfg):
     yaw_moment_scale = 1.0
 
     # reward scales
-    lin_vel_reward_scale = -0.01
+    lin_vel_reward_scale = -0.1
     ang_vel_reward_scale = -0.02
     action_sum_reward_scale = -0.1
     action_weight = [1, 1, 5, 0.5, 0.03, 0.03, 0.01]
     action_delta_reward_scale = -0.01
     action_delta_weight = [1, 1, 5, 0.5, 0.03, 0.03, 0.01]
+    zoom_reward_scale = -0.5
+
     distance_to_goal_reward_scale = 60.0
     yaw_reward_scale = -10
     yaw_rate_reward_scale = -0.001
@@ -263,6 +265,7 @@ class IrisGimbal2ZoomEnv(DirectRLEnv):
                 # "yaw_rate",
                 "bbox_center",
                 "bbox_size",
+                "zoom",
             ]
         }
         # Get specific body indices
@@ -563,6 +566,7 @@ class IrisGimbal2ZoomEnv(DirectRLEnv):
             # "yaw_rate": yaw_rate * self.cfg.yaw_rate_reward_scale * self.step_dt,
             "bbox_center": bbox_center_mapped * self.cfg.bbox_center_reward_scale * self.step_dt,
             "bbox_size": bbox_size_mapped * self.cfg.bbox_size_reward_scale * self.step_dt,
+            "zoom": self.cfg.zoom_reward_scale * torch.square((self.zoom_level - 1.0)/10) * self.step_dt,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         self._last_actions = self._actions.clone()
