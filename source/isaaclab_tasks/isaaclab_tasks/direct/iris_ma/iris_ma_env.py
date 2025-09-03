@@ -9,6 +9,7 @@ import gymnasium as gym
 import torch
 import math
 import numpy as np
+import copy
 from typing import Dict
 
 import isaaclab.sim as sim_utils
@@ -72,7 +73,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     episode_length_s = 30.0
     decimation = 2
     
-    # Define agents
+    # Define agents - The environment is now built from this list
     possible_agents = ["drone_0", "drone_1"]
     
     # Define spaces for each agent
@@ -116,9 +117,9 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
         debug_vis=False,
     )
 
-    # Camera configuration (shared between agents)
-    camera_cfg = TiledCameraCfg(
-        prim_path="/World/envs/env_.*/Robot_.*/pitch_link/camera",
+    # Camera configuration template (dynamically applied to each agent)
+    camera: TiledCameraCfg = TiledCameraCfg(
+        prim_path="/World/envs/env_.*/{robot_name}/pitch_link/camera",
         update_period=0.1,
         height=480,
         width=640,
@@ -160,9 +161,8 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     # Scene configuration
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1024, env_spacing=15.0, replicate_physics=True)
     
-    # Robot configurations for each agent
-    robot_0: ArticulationCfg = IRIS_GIMBAL2_CFG.replace(prim_path="/World/envs/env_.*/Robot_0")
-    robot_1: ArticulationCfg = IRIS_GIMBAL2_CFG.replace(prim_path="/World/envs/env_.*/Robot_1")
+    # Robot configuration template (dynamically applied to each agent)
+    robot: ArticulationCfg = IRIS_GIMBAL2_CFG.replace(prim_path="/World/envs/env_.*/{robot_name}")
     
     # Control parameters
     thrust_to_weight = 4.0
@@ -210,6 +210,24 @@ class IrisMAEnv(DirectMARLEnv):
     cfg: IrisMAEnvCfg
 
     def __init__(self, cfg: IrisMAEnvCfg, render_mode: str | None = None, **kwargs):
+        # -- Dynamically generate agent-specific robot and camera configs --
+        # This must be done BEFORE super().__init__ because _setup_scene is called from there.
+        self.agent_robot_cfgs = {}
+        self.agent_camera_cfgs = {}
+        for agent_id in cfg.possible_agents:
+            robot_index = agent_id.split("_")[-1]
+            robot_name = f"Robot_{robot_index}"
+
+            # Create and store robot config
+            robot_cfg = copy.deepcopy(cfg.robot)
+            robot_cfg.prim_path = robot_cfg.prim_path.format(robot_name=robot_name)
+            self.agent_robot_cfgs[agent_id] = robot_cfg
+            
+            # Create and store camera config
+            camera_cfg = copy.deepcopy(cfg.camera)
+            camera_cfg.prim_path = camera_cfg.prim_path.format(robot_name=robot_name)
+            self.agent_camera_cfgs[agent_id] = camera_cfg
+            
         super().__init__(cfg, render_mode, **kwargs)
         
         # Initialize per-agent action and control tensors
@@ -274,13 +292,16 @@ class IrisMAEnv(DirectMARLEnv):
             agent: torch.ones(self.num_envs, device=self.device) * 1.0
             for agent in self.cfg.possible_agents
         }
-        self.base_focal_length = self.cfg.camera_cfg.spawn.focal_length
+        self.base_focal_length = self.cfg.camera.spawn.focal_length
         
-        # Camera configuration
-        self.camera_cfg_batch = create_camera_cfg_tensor(self.cfg.camera_cfg, self.num_envs, device=self.device)
-        camera_offset_rot_single = torch.tensor(cfg.camera_cfg.offset.rot, device=self.device)
+        # Camera configuration batch for each agent
+        self.camera_cfg_batch = {
+            agent_id: create_camera_cfg_tensor(agent_cfg, self.num_envs, device=self.device)
+            for agent_id, agent_cfg in self.agent_camera_cfgs.items()
+        }
+        camera_offset_rot_single = torch.tensor(cfg.camera.offset.rot, device=self.device)
         self.camera_offset_rot_batch = camera_offset_rot_single.unsqueeze(0).expand(self.num_envs, -1)
-        camera_offset_pos_single = torch.tensor(cfg.camera_cfg.offset.pos, device=self.device)
+        camera_offset_pos_single = torch.tensor(cfg.camera.offset.pos, device=self.device)
         self.camera_offset_pos_batch = camera_offset_pos_single.unsqueeze(0).expand(self.num_envs, -1)
         
         # Action weights
@@ -341,13 +362,18 @@ class IrisMAEnv(DirectMARLEnv):
     
     def _setup_scene(self):
         """Setup the scene with multiple robots and shared target."""
-        # Create robots for each agent
+        # Create robots for each agent from the dynamically generated configs
         self._robots = {}
-        self.cfg.robot_0.spawn.semantic_tags = [("class", "robot")]
-        self.cfg.robot_1.spawn.semantic_tags = [("class", "robot")]
-        self._robots["drone_0"] = Articulation(self.cfg.robot_0)
-        self._robots["drone_1"] = Articulation(self.cfg.robot_1)
+        for agent_id, robot_cfg in self.agent_robot_cfgs.items():
+            robot_cfg.spawn.semantic_tags = [("class", "robot")]
+            self._robots[agent_id] = Articulation(robot_cfg)
         
+        # Create cameras for each agent from the dynamically generated configs
+        self._cameras = {}
+        if DEBUG_DRAW:
+            for agent_id, camera_cfg in self.agent_camera_cfgs.items():
+                self._cameras[agent_id] = TiledCamera(camera_cfg)
+
         # Create terrain
         if self.cfg.terrain is not None:
             self.cfg.terrain.num_envs = self.scene.cfg.num_envs
@@ -365,10 +391,17 @@ class IrisMAEnv(DirectMARLEnv):
         if self.cfg.terrain is not None:
             self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
         
-        # Register articulations
-        self.scene.articulations["robot_0"] = self._robots["drone_0"]
-        self.scene.articulations["robot_1"] = self._robots["drone_1"]
+        # Register articulations, rigid objects, and sensors
+        for agent_id, robot in self._robots.items():
+            robot_index = agent_id.split("_")[-1]
+            self.scene.articulations[f"robot_{robot_index}"] = robot
+        
         self.scene.rigid_objects["target"] = self.target
+
+        if DEBUG_DRAW:
+            for agent_id, camera in self._cameras.items():
+                robot_index = agent_id.split("_")[-1]
+                self.scene.sensors[f"camera_{robot_index}"] = camera
         
         # Add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
@@ -382,6 +415,7 @@ class IrisMAEnv(DirectMARLEnv):
                 
             robot = self._robots[agent_id]
             stabilizer = self._stabilizers[agent_id]
+            agent_cam_cfg = self.agent_camera_cfgs[agent_id]
             
             # Clamp and store actions
             self._actions[agent_id] = agent_actions.clone().clamp(-1.0, 1.0)
@@ -423,7 +457,8 @@ class IrisMAEnv(DirectMARLEnv):
             
             # Update camera parameters for each agent
             current_focal_length = self.base_focal_length * self.zoom_level[agent_id]
-            
+            self.camera_cfg_batch[agent_id][:, 2] = current_focal_length
+
             # Compute camera pose for bounding box generation
             robot_pos = robot.data.root_pos_w
             robot_quat = robot.data.root_state_w[:, 3:7]
@@ -446,10 +481,10 @@ class IrisMAEnv(DirectMARLEnv):
             
             # Generate bounding boxes
             bbox_gen = BBoxGenerator(
-                camera_width=self.cfg.camera_cfg.width, 
-                camera_height=self.cfg.camera_cfg.height,
-                focal_length=self.cfg.camera_cfg.spawn.focal_length, 
-                horizontal_aperture=self.cfg.camera_cfg.spawn.horizontal_aperture
+                camera_width=agent_cam_cfg.width, 
+                camera_height=agent_cam_cfg.height,
+                focal_length=agent_cam_cfg.spawn.focal_length, 
+                horizontal_aperture=agent_cam_cfg.spawn.horizontal_aperture
             )
             
             self.bboxes[agent_id], self.bbox_valid_mask[agent_id][:, 0] = bbox_gen.generate_2d_bbox(
@@ -457,17 +492,17 @@ class IrisMAEnv(DirectMARLEnv):
                 self.target.data.root_state_w[:, 3:7],
                 self.camera_pos_world[agent_id], 
                 self.camera_quat_world[agent_id], 
-                min_bbox_size=int(0.1*self.cfg.camera_cfg.width),
+                min_bbox_size=int(0.1*agent_cam_cfg.width),
                 focal_length=current_focal_length
             )
             
             # Normalize bounding boxes
             self.bboxes_normalized[agent_id] = self.bboxes[agent_id].clone()
             valid = self.bbox_valid_mask[agent_id].squeeze(-1)
-            self.bboxes_normalized[agent_id][:, 0] = torch.where(valid, self.bboxes[agent_id][:, 0] / self.cfg.camera_cfg.width, torch.ones_like(self.bboxes[agent_id][:, 0]) * (-1.0))
-            self.bboxes_normalized[agent_id][:, 1] = torch.where(valid, self.bboxes[agent_id][:, 1] / self.cfg.camera_cfg.height, torch.ones_like(self.bboxes[agent_id][:, 1]) * (-1.0))
-            self.bboxes_normalized[agent_id][:, 2] = torch.where(valid, self.bboxes[agent_id][:, 2] / self.cfg.camera_cfg.width, torch.ones_like(self.bboxes[agent_id][:, 2]) * (-1.0))
-            self.bboxes_normalized[agent_id][:, 3] = torch.where(valid, self.bboxes[agent_id][:, 3] / self.cfg.camera_cfg.height, torch.ones_like(self.bboxes[agent_id][:, 3]) * (-1.0))
+            self.bboxes_normalized[agent_id][:, 0] = torch.where(valid, self.bboxes[agent_id][:, 0] / agent_cam_cfg.width, torch.ones_like(self.bboxes[agent_id][:, 0]) * (-1.0))
+            self.bboxes_normalized[agent_id][:, 1] = torch.where(valid, self.bboxes[agent_id][:, 1] / agent_cam_cfg.height, torch.ones_like(self.bboxes[agent_id][:, 1]) * (-1.0))
+            self.bboxes_normalized[agent_id][:, 2] = torch.where(valid, self.bboxes[agent_id][:, 2] / agent_cam_cfg.width, torch.ones_like(self.bboxes[agent_id][:, 2]) * (-1.0))
+            self.bboxes_normalized[agent_id][:, 3] = torch.where(valid, self.bboxes[agent_id][:, 3] / agent_cam_cfg.height, torch.ones_like(self.bboxes[agent_id][:, 3]) * (-1.0))
         
         # Update target movement (shared)
         self._update_target_movement()
@@ -515,6 +550,7 @@ class IrisMAEnv(DirectMARLEnv):
         if DEBUG_DRAW and hasattr(self, 'draw_interface'):
             self.draw_interface.clear_lines()
             for agent_id in self.cfg.possible_agents:
+                # Draw line to target
                 line_colors_yellow = torch.tensor([[1.0, 1.0, 0.0, 1.0]], device=self.device).repeat(self.num_envs, 1)
                 line_colors_green = torch.tensor([[0.0, 1.0, 0.0, 1.0]], device=self.device).repeat(self.num_envs, 1)
                 line_colors = torch.where(self.bbox_valid_mask[agent_id], line_colors_green, line_colors_yellow).tolist()
@@ -525,6 +561,16 @@ class IrisMAEnv(DirectMARLEnv):
                     line_colors, 
                     line_thicknesses
                 )
+                
+                # Draw camera frustum
+                if hasattr(self, 'camera_frustrum'):
+                    self.camera_frustrum.draw_frustrum(
+                        camera_position=self.camera_pos_world[agent_id],
+                        camera_orientation=self.camera_quat_world[agent_id],
+                        camera_intrinsics=self.camera_cfg_batch[agent_id],
+                        zoom_level=self.zoom_level[agent_id],
+                        device=self.device
+                    )
 
     def _get_observations(self) -> Dict[str, torch.Tensor]:
         """Get observations for all agents."""
@@ -532,6 +578,7 @@ class IrisMAEnv(DirectMARLEnv):
         
         for agent_id in self.cfg.possible_agents:
             robot = self._robots[agent_id]
+            # This logic is specific to a 2-agent scenario
             other_agent_id = "drone_1" if agent_id == "drone_0" else "drone_0"
             other_robot = self._robots[other_agent_id]
             
@@ -581,7 +628,7 @@ class IrisMAEnv(DirectMARLEnv):
             agent: self._robots[agent].data.root_pos_w for agent in self.cfg.possible_agents
         }
         
-        # Calculate baseline distance between drones
+        # The following reward logic is hardcoded for a 2-agent scenario
         baseline_distance = torch.norm(
             robot_positions["drone_0"] - robot_positions["drone_1"], 
             dim=1
@@ -612,6 +659,7 @@ class IrisMAEnv(DirectMARLEnv):
         
         for agent_id in self.cfg.possible_agents:
             robot = self._robots[agent_id]
+            agent_cam_cfg = self.agent_camera_cfgs[agent_id]
             
             # Individual tracking rewards
             lin_vel = torch.sum(torch.square(robot.data.root_lin_vel_b), dim=1)
@@ -623,11 +671,11 @@ class IrisMAEnv(DirectMARLEnv):
             )
             
             # Bounding box rewards
-            bbox = (torch.square((self.bboxes[agent_id][:, 0] + self.bboxes[agent_id][:, 2])/2 - self.cfg.camera_cfg.width/2) / self.cfg.camera_cfg.width**2 
-                    + torch.square((self.bboxes[agent_id][:, 1] + self.bboxes[agent_id][:, 3])/2 - self.cfg.camera_cfg.height/2) / self.cfg.camera_cfg.height**2)
+            bbox = (torch.square((self.bboxes[agent_id][:, 0] + self.bboxes[agent_id][:, 2])/2 - agent_cam_cfg.width/2) / agent_cam_cfg.width**2 
+                    + torch.square((self.bboxes[agent_id][:, 1] + self.bboxes[agent_id][:, 3])/2 - agent_cam_cfg.height/2) / agent_cam_cfg.height**2)
             bbox_center_mapped = (1 - torch.tanh(bbox / 0.8)) * self.bbox_valid_mask[agent_id].squeeze(-1).float()
             
-            bbox_size = (self.bboxes[agent_id][:, 2] - self.bboxes[agent_id][:, 0]) * (self.bboxes[agent_id][:, 3] - self.bboxes[agent_id][:, 1]) / (self.cfg.camera_cfg.width * self.cfg.camera_cfg.height)
+            bbox_size = (self.bboxes[agent_id][:, 2] - self.bboxes[agent_id][:, 0]) * (self.bboxes[agent_id][:, 3] - self.bboxes[agent_id][:, 1]) / (agent_cam_cfg.width * agent_cam_cfg.height)
             bbox_size_mapped = (1 - torch.tanh((bbox_size-0.2**2) / 0.8)) * self.bbox_valid_mask[agent_id].squeeze(-1).float()
             
             # Zoom penalty
@@ -676,7 +724,7 @@ class IrisMAEnv(DirectMARLEnv):
     def _reset_idx(self, env_ids: torch.Tensor | None):
         """Reset environments at specified indices."""
         if env_ids is None or len(env_ids) == self.num_envs:
-            env_ids = self._robots["drone_0"]._ALL_INDICES
+            env_ids = self._robots[self.cfg.possible_agents[0]]._ALL_INDICES # Use any agent to get all indices
         
         # Logging
         all_extras = {}
@@ -710,16 +758,10 @@ class IrisMAEnv(DirectMARLEnv):
             joint_pos[:, gimbal_idx["roll"]] = torch.zeros_like(joint_pos[:, gimbal_idx["roll"]])
             self.gimbal_dof_targets[agent_id][env_ids] = joint_pos
             
-            # Set initial positions with offset for each drone
+            # Set initial positions with offset for each drone based on its index
             default_root_state = robot.data.default_root_state[env_ids]
-            if idx == 0:
-                # First drone on left
-                default_root_state[:, 0] = -2.0
-                default_root_state[:, 1] = torch.zeros_like(default_root_state[:, 1]).uniform_(-1.0, 1.0)
-            else:
-                # Second drone on right
-                default_root_state[:, 0] = 2.0
-                default_root_state[:, 1] = torch.zeros_like(default_root_state[:, 1]).uniform_(-1.0, 1.0)
+            default_root_state[:, 0] = 2.0 * idx
+            default_root_state[:, 1] = torch.zeros_like(default_root_state[:, 1]).uniform_(-1.0, 1.0)
             
             default_root_state[:, :3] += self._env_origins[env_ids]
             default_root_state[:, 2] += torch.ones_like(default_root_state[:, 2]) * 3.0
@@ -750,8 +792,6 @@ class IrisMAEnv(DirectMARLEnv):
         
         # Reset episode length buffer
         super()._reset_idx(env_ids)
-        if len(env_ids) == self.num_envs:
-            self.episode_length_buf = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
 
     def _update_target_movement(self):
         """Update target movement with smooth acceleration-based motion."""
