@@ -82,8 +82,8 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
         "drone_1": 7,
     }
     observation_spaces = {
-        "drone_0": 26,  # Added formation-related observations
-        "drone_1": 26,
+        "drone_0": 27,  # Added formation-related observations
+        "drone_1": 27,
     }
     state_space = -1  # Concatenate all observations
     
@@ -206,10 +206,10 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     optimal_triangulation_angle = 90.0  # Optimal angle in degrees
 
     # Step at which to start and end introducing coordination rewards
-    curriculum_coordination_start_step: int = 40000
+    curriculum_coordination_start_step: int = 30000
     curriculum_coordination_end_step: int = 100000
     curriculum_tracking_start_step: int = -1
-    curriculum_tracking_end_step: int = 40000
+    curriculum_tracking_end_step: int = 30000
 
 class IrisMAEnv(DirectMARLEnv):
     cfg: IrisMAEnvCfg
@@ -529,7 +529,7 @@ class IrisMAEnv(DirectMARLEnv):
             robot = self._robots[agent_id]
             stabilizer = self._stabilizers[agent_id]
             
-            # Compute new velocities with resistance
+            # Compute new velocities
             new_vel_lin_w = robot.data.root_lin_vel_w * (1 - self.step_dt) + quat_rotate(
                 robot.data.root_state_w[:, 3:7], self._thrust[agent_id][:, 0, :]) * self.step_dt
             new_vel_lin_w[:, :2] = torch.clamp(new_vel_lin_w[:, :2], min=-self.cfg.max_lin_vel, max=self.cfg.max_lin_vel)
@@ -607,6 +607,7 @@ class IrisMAEnv(DirectMARLEnv):
                 robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["yaw"]:self.gimbal_joint_idx[agent_id]["yaw"] + 1],  # 1
                 self.bboxes_normalized[agent_id],  # 4: normalized bbox
                 self.bbox_valid_mask[agent_id].float(),  # 1: validity
+                self.zoom_level[agent_id].unsqueeze(-1),  # 1: zoom level
                 relative_dir,  # 3: direction to other drone
                 relative_dist / 10.0,  # 1: normalized distance to other drone
                 triangulation_angle / math.pi,  # 1: normalized triangulation angle
@@ -634,6 +635,7 @@ class IrisMAEnv(DirectMARLEnv):
         # self.common_step_counter is from the base DirectMARLEnv class
         progress = (self.common_step_counter - start) / (end - start)
         progress = 0 if progress < 0 else (1 if progress > 1 else progress)
+        progress = 1 if DEBUG_DRAW else progress  # Always use full rewards in debug mode
         curriculum_alpha = torch.tensor(progress, device=self.device)
 
         # Get robot positions for triangulation calculations
@@ -658,7 +660,9 @@ class IrisMAEnv(DirectMARLEnv):
         
         # Optimal triangulation angle reward (peak at 90 degrees)
         optimal_angle = self.cfg.optimal_triangulation_angle
-        triangulation_quality = torch.exp(-torch.square(torch.abs(triangulation_angle_deg) - optimal_angle) / (math.pi/2))
+        angle_error = torch.abs(triangulation_angle_deg - optimal_angle)
+        # angle_error = torch.where(angle_error <= 30.0, 30.0 * torch.ones_like(angle_error), angle_error)
+        triangulation_quality = torch.exp(-torch.square(angle_error / 90.0))
         
         # Optimal baseline reward (peak at optimal_baseline_distance)
         baseline_quality = torch.exp(-torch.square(baseline_distance - self.cfg.optimal_baseline_distance) / (1.5**2))
@@ -757,7 +761,7 @@ class IrisMAEnv(DirectMARLEnv):
             if curriculum_tracking_state == len(self.cfg.possible_agents):
                 self.cfg.curriculum_tracking_start_step = self.common_step_counter
                 self.cfg.curriculum_tracking_end_step += self.cfg.curriculum_tracking_start_step
-                self.cfg.curriculum_coordination_start_step = self.cfg.curriculum_tracking_end_step
+                # self.cfg.curriculum_coordination_start_step = self.cfg.curriculum_tracking_end_step
 
         formation_center = torch.zeros(len(env_ids), 3, device=self.device)
         formation_center[:, 0] = torch.zeros_like(formation_center[:, 0]).uniform_(-5.0, 5.0)
@@ -775,6 +779,7 @@ class IrisMAEnv(DirectMARLEnv):
         end = self.cfg.curriculum_tracking_end_step
         progress = (self.common_step_counter - start) / (end - start)
         progress = 0.1 if (progress < 0.1 or start < 0) else (1 if progress > 1 else progress)
+        progress = 1 if DEBUG_DRAW else progress  # Always use full range in debug mode
         target_pos[:, 0] = torch.zeros_like(target_pos[:, 0]).uniform_(40.0 * progress, 80.0 * progress) + formation_center[:, 0]
         target_pos[:, 1] = torch.zeros_like(target_pos[:, 1]).uniform_(-20.0 * progress, 20.0 * progress) + formation_center[:, 1]
         target_pos[:, 2] = torch.zeros_like(target_pos[:, 2]).uniform_(0.0, 35.0 * progress) + formation_center[:, 2]
@@ -798,7 +803,7 @@ class IrisMAEnv(DirectMARLEnv):
             self._last_actions[agent_id][env_ids] = 0.0
             
             # Reset zoom level
-            self.zoom_level[agent_id][env_ids] = 1.0
+            self.zoom_level[agent_id][env_ids] = torch.zeros_like(self.zoom_level[agent_id][env_ids]).uniform_(1.0, 2.0)
             
             # Set initial positions with offset for each drone based on its index
             default_root_state = robot.data.default_root_state[env_ids]

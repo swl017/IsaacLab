@@ -69,6 +69,7 @@ from datetime import datetime
 
 import skrl
 from packaging import version
+import shutil
 
 # check for minimum supported skrl version
 SKRL_VERSION = "1.4.2"
@@ -148,6 +149,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent_cfg["agent"]["experiment"]["experiment_name"] = log_dir
     # update log_dir
     log_dir = os.path.join(log_root_path, log_dir)
+    env_folder = "/home/usrg/IsaacPX4/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma"
+    shutil.copytree(env_folder, os.path.join(log_dir, "iris_ma"))
+    print(f"Env script copied to: {log_dir}")
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)

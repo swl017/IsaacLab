@@ -110,7 +110,7 @@ class PhysxCfg:
     gpu_max_rigid_contact_count: int = 2**23
     """Size of rigid contact stream buffer allocated in pinned host memory. Default is 2 ** 23."""
 
-    gpu_max_rigid_patch_count: int = 5 * 2**15
+    gpu_max_rigid_patch_count: int = 237568 * 4
     """Size of the rigid contact patch stream buffer allocated in pinned host memory. Default is 5 * 2 ** 15."""
 
     gpu_found_lost_pairs_capacity: int = 2**21
