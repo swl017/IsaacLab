@@ -14,7 +14,7 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description="Play a trained PPO RNN agent for Iris Gimbal task")
 parser.add_argument("--model-path", type=str, help="Path to model checkpoint (.pt file)")
 parser.add_argument("--experiment-dir", type=str, help="Path to experiment directory")
-parser.add_argument("--task", type=str, default="Isaac-Iris-Gimbal2-Direct-v0", help="Task name")
+parser.add_argument("--task", type=str, default="Isaac-Iris-Gimbal2-Zoom-Direct-v0", help="Task name")
 parser.add_argument("--num-envs", type=int, default=16, help="Number of play environments")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during play")
 parser.add_argument("--video_length", type=int, default=200, help="Length of recorded video (in steps)")

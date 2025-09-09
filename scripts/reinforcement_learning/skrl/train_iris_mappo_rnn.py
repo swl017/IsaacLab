@@ -72,9 +72,20 @@ class Policy(GaussianMixin, Model):
 
 
 # load and wrap the Isaac Lab environment
-task_name = "Isaac-Iris-Gimbal2-Zoom-Direct-v0"
-experiment_name = "IrisGimbal2Zoom_zoom_penalty"
-env = load_isaaclab_env(task_name=task_name, num_envs=4096, headless=True)
+task_name = "Isaac-Iris-MA-Direct-v0"
+experiment_name = "iris_mappo_rnn_test0"
+env = load_isaaclab_env(task_name=task_name, num_envs=2048, headless=True)
+
+
+from isaaclab.envs import (
+    DirectMARLEnv,
+    DirectMARLEnvCfg,
+    DirectRLEnvCfg,
+    ManagerBasedRLEnvCfg,
+    multi_agent_to_single_agent,
+)
+
+env = multi_agent_to_single_agent(env)
 env = wrap_env(env)
 
 device = env.device
@@ -136,10 +147,9 @@ current_script = __file__
 script_backup_path = os.path.join(experiment_dir, "train_script.py")
 shutil.copy2(current_script, script_backup_path)
 print(f"Training script copied to: {script_backup_path}")
-env_file = "/home/usrg/IsaacPX4/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/iris_gimbal2_zoom/iris_gimbal2_zoom_env.py"
-env_backup_path = os.path.join(experiment_dir, "env_script.py")
-shutil.copy2(env_file, env_backup_path)
-print(f"Env script copied to: {env_backup_path}")
+env_folder = "/home/usrg/IsaacPX4/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma"
+shutil.copytree(env_folder, os.path.join(experiment_dir, "iris_ma"))
+print(f"Env script copied to: {experiment_dir}")
 
 cfg["experiment"]["directory"] = experiment_dir
 cfg["experiment"]["experiment_name"] = f"{experiment_name}"
@@ -155,7 +165,7 @@ agent = PPO_RNN(models=models,
 
 # configure and instantiate the RL trainer
 cfg_trainer = {
-    "timesteps": 80800, 
+    "timesteps": 120000, 
     "headless": True,
     "environment_info": "log"  # Enable logging of environment extras
 }
