@@ -1,3 +1,4 @@
+# file: train_iris_mappo_rnn.py
 import argparse
 import torch
 import torch.nn as nn
@@ -30,7 +31,7 @@ set_seed(42)
 
 # Load and wrap the Isaac Lab multi-agent environment
 task_name = "Isaac-Iris-MA-Direct-v0"
-experiment_name = "mappo_rnn_decentralized"
+experiment_name = "mappo_rnn_tracking"
 env = load_isaaclab_env(task_name=task_name, num_envs=2048, headless=True)
 env = wrap_env(env)
 device = env.device
@@ -62,14 +63,14 @@ except Exception as e:
 
 # Configure MAPPO_RNN
 cfg = MAPPO_RNN_DEFAULT_CONFIG.copy()
-cfg["rollouts"] = 32
+cfg["rollouts"] = 128
 cfg["learning_epochs"] = 4
-cfg["mini_batches"] = 4
+cfg["mini_batches"] = 8
 cfg["discount_factor"] = 0.99
 cfg["lambda"] = 0.95
-cfg["learning_rate"] = 3e-5
+cfg["learning_rate"] = 1e-5
 cfg["learning_rate_scheduler"] = KLAdaptiveRL
-cfg["learning_rate_scheduler_kwargs"] = {"kl_threshold": 0.008}
+cfg["learning_rate_scheduler_kwargs"] = {"kl_threshold": 0.004}
 cfg["random_timesteps"] = 0
 cfg["learning_starts"] = 0
 cfg["grad_norm_clip"] = 1.0
@@ -89,26 +90,28 @@ cfg["value_preprocessor"] = RunningStandardScaler
 cfg["value_preprocessor_kwargs"] = {"size": 1, "device": device}
 
 
-for agent_id in possible_agents:
-    # Each agent gets its own policy and value function
-    models[agent_id] = {}
-    
-    # Policy network (uses local observations)
-    models[agent_id]["policy"] = MAPPORNNPolicy(
-        observation_space=env.observation_spaces[agent_id],
-        action_space=env.action_spaces[agent_id],
-        device=device,
-        hidden_size=256,
-        gru_num_layers=2,
-        gru_hidden_size=256,
-        num_envs=env.num_envs
-    )
-    
-    if agent_id != possible_agents[0]:
-        models[agent_id]["value"] = models[possible_agents[0]]["value"]
-    else:
-        models[agent_id]["value"] = MAPPORNNValue(
-            observation_space=shared_observation_spaces[agent_id],
+# Create a single shared policy network
+# First, check if all agents have the same observation and action spaces
+obs_spaces_match = all(
+    env.observation_spaces[agent_id] == env.observation_spaces[possible_agents[0]] 
+    for agent_id in possible_agents
+)
+action_spaces_match = all(
+    env.action_spaces[agent_id] == env.action_spaces[possible_agents[0]] 
+    for agent_id in possible_agents
+)
+
+if not obs_spaces_match or not action_spaces_match:
+    # Separate policy, shared value
+    print("Agents have different observation or action spaces. Creating separate policy networks for each agent, but sharing the value network.")
+    sys.exit(1)
+    for agent_id in possible_agents:
+        # Each agent gets its own policy and value function
+        models[agent_id] = {}
+        
+        # Policy network (uses local observations)
+        models[agent_id]["policy"] = MAPPORNNPolicy(
+            observation_space=env.observation_spaces[agent_id],
             action_space=env.action_spaces[agent_id],
             device=device,
             hidden_size=256,
@@ -116,15 +119,63 @@ for agent_id in possible_agents:
             gru_hidden_size=256,
             num_envs=env.num_envs
         )
-    
-    
-    # Create memory for each agent
-    memory_cfg = {
-        "memory_size": cfg["rollouts"],  # rollouts
-        "num_envs": env.num_envs,
-        "device": device,
-    }
-    memories[agent_id] = RandomMemory(**memory_cfg)
+        
+        if agent_id != possible_agents[0]:
+            models[agent_id]["value"] = models[possible_agents[0]]["value"]
+        else:
+            models[agent_id]["value"] = MAPPORNNValue(
+                observation_space=shared_observation_spaces[agent_id],
+                action_space=env.action_spaces[agent_id],
+                device=device,
+                hidden_size=256,
+                gru_num_layers=2,
+                gru_hidden_size=256,
+                num_envs=env.num_envs
+            )
+
+        memory_cfg = {
+            "memory_size": cfg["rollouts"],
+            "num_envs": env.num_envs,
+            "device": device,
+        }
+        memories[agent_id] = RandomMemory(**memory_cfg)
+else:
+    print("All agents have the same observation and action spaces. Creating shared policy and value networks.")
+    # Create the shared policy network once
+    shared_policy = MAPPORNNPolicy(
+        observation_space=env.observation_spaces[possible_agents[0]],  # Use first agent's space as reference
+        action_space=env.action_spaces[possible_agents[0]],
+        device=device,
+        hidden_size=256,
+        gru_num_layers=2,
+        gru_hidden_size=256,
+        num_envs=env.num_envs
+    )
+
+    # Create the shared value network once
+    shared_value = MAPPORNNValue(
+        observation_space=shared_observation_spaces[possible_agents[0]],
+        action_space=env.action_spaces[possible_agents[0]],
+        device=device,
+        hidden_size=256,
+        gru_num_layers=2,
+        gru_hidden_size=256,
+        num_envs=env.num_envs
+    )
+
+    # Assign the same networks to all agents
+    for agent_id in possible_agents:
+        models[agent_id] = {}
+        models[agent_id]["policy"] = shared_policy  # All agents share the same policy
+        models[agent_id]["value"] = shared_value    # All agents share the same value function
+        
+        # Create memory for each agent (still separate memories)
+        memory_cfg = {
+            "memory_size": cfg["rollouts"],
+            "num_envs": env.num_envs,
+            "device": device,
+        }
+        memories[agent_id] = RandomMemory(**memory_cfg)
 
 # Set up logging
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
