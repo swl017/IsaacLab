@@ -66,6 +66,18 @@ class IrisMAEnvWindow(BaseEnvWindow):
                 with self.ui_window_elements["debug_vstack"]:
                     self._create_debug_vis_ui_element("targets", self.env)
 
+@configclass
+class ResearchLoggingCfg:
+    log_interval_steps: int = 1              # throttle step logs
+    sample_envs: int = 64                     # subsample envs for percentiles
+    tqi_opt_area: float = 0.05                # bbox area fraction (5%) is “ideal” size in image
+    tqi_area_sigma: float = 0.02              # width of Gaussian around the ideal area
+    tqi_threshold: float = 0.20               # threshold for CVTT accumulation
+    beta_min_deg: float = 30.0                # "good" triangulation angle window (for ref only)
+    beta_max_deg: float = 150.0
+    pixel_pitch_m: float = 3.45e-6            # sensor pixel pitch (user-tunable)
+    det_std_px: float = 0.5                   # detector 1-sigma in pixels (user-tunable)
+    enable_step_logging: bool = DEBUG_DRAW          # allow disabling for speed
 
 @configclass
 class IrisMAEnvCfg(DirectMARLEnvCfg):
@@ -164,6 +176,8 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     # Robot configuration template (dynamically applied to each agent)
     robot: ArticulationCfg = IRIS_GIMBAL2_CFG.replace(prim_path="/World/envs/env_.*/{robot_name}")
     
+    research: ResearchLoggingCfg = ResearchLoggingCfg()
+
     # Control parameters
     thrust_to_weight = 4.0
     moment_scale = 10.0
@@ -206,10 +220,10 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     optimal_triangulation_angle = 90.0  # Optimal angle in degrees
 
     # Step at which to start and end introducing coordination rewards
-    curriculum_coordination_start_step: int = 30000
-    curriculum_coordination_end_step: int = 100000
+    curriculum_coordination_start_step: int = 50000
+    curriculum_coordination_end_step: int = 90000
     curriculum_tracking_start_step: int = -1
-    curriculum_tracking_end_step: int = 30000
+    curriculum_tracking_end_step: int = 10000
 
 class IrisMAEnv(DirectMARLEnv):
     cfg: IrisMAEnvCfg
@@ -331,6 +345,16 @@ class IrisMAEnv(DirectMARLEnv):
             robot_weight = (self._robot_mass[agent] * torch.tensor(self.sim.cfg.gravity, device=self.device).norm()).item()
             self._stabilizers[agent] = PointMass(0, robot_weight, self.num_envs, self.device)
         
+        self._research = {
+            "cvtt_sec": torch.zeros(self.num_envs, device=self.device),
+            "tqi_sum": torch.zeros(self.num_envs, device=self.device),
+            "steps": torch.zeros(self.num_envs, device=self.device),
+            "last_step_logged": -1,
+        }
+        # choose a stable random subsample once (for percentiles / hist)
+        perm = torch.randperm(self.num_envs, device=self.device)
+        self._research_sample_ids = perm[:min(self.cfg.research.sample_envs, self.num_envs)]
+
         # Episode tracking
         self._episode_sums = {
             agent: {
@@ -511,7 +535,7 @@ class IrisMAEnv(DirectMARLEnv):
             self.bboxes_normalized[agent_id][:, 3] = torch.where(valid, self.bboxes[agent_id][:, 3] / agent_cam_cfg.height, torch.ones_like(self.bboxes[agent_id][:, 3]) * (-1.0))
         
         # Update target movement (shared)
-        self._update_target_movement()
+        self._update_target_movement(mode="circular")
         
         # Bounce targets that are too low
         up_vel = self.target_vel.clone()
@@ -635,7 +659,7 @@ class IrisMAEnv(DirectMARLEnv):
         # self.common_step_counter is from the base DirectMARLEnv class
         progress = (self.common_step_counter - start) / (end - start)
         progress = 0 if progress < 0 else (1 if progress > 1 else progress)
-        progress = 1 if DEBUG_DRAW else progress  # Always use full rewards in debug mode
+        # progress = 1 if DEBUG_DRAW else progress  # Always use full rewards in debug mode
         curriculum_alpha = torch.tensor(progress, device=self.device)
 
         # Get robot positions for triangulation calculations
@@ -761,7 +785,7 @@ class IrisMAEnv(DirectMARLEnv):
             if curriculum_tracking_state == len(self.cfg.possible_agents):
                 self.cfg.curriculum_tracking_start_step = self.common_step_counter
                 self.cfg.curriculum_tracking_end_step += self.cfg.curriculum_tracking_start_step
-                # self.cfg.curriculum_coordination_start_step = self.cfg.curriculum_tracking_end_step
+                self.cfg.curriculum_coordination_start_step = self.cfg.curriculum_tracking_end_step
 
         formation_center = torch.zeros(len(env_ids), 3, device=self.device)
         formation_center[:, 0] = torch.zeros_like(formation_center[:, 0]).uniform_(-5.0, 5.0)
@@ -779,7 +803,7 @@ class IrisMAEnv(DirectMARLEnv):
         end = self.cfg.curriculum_tracking_end_step
         progress = (self.common_step_counter - start) / (end - start)
         progress = 0.1 if (progress < 0.1 or start < 0) else (1 if progress > 1 else progress)
-        progress = 1 if DEBUG_DRAW else progress  # Always use full range in debug mode
+        # progress = 1 if DEBUG_DRAW else progress  # Always use full range in debug mode
         target_pos[:, 0] = torch.zeros_like(target_pos[:, 0]).uniform_(40.0 * progress, 80.0 * progress) + formation_center[:, 0]
         target_pos[:, 1] = torch.zeros_like(target_pos[:, 1]).uniform_(-20.0 * progress, 20.0 * progress) + formation_center[:, 1]
         target_pos[:, 2] = torch.zeros_like(target_pos[:, 2]).uniform_(0.0, 35.0 * progress) + formation_center[:, 2]
@@ -806,9 +830,9 @@ class IrisMAEnv(DirectMARLEnv):
             self.zoom_level[agent_id][env_ids] = torch.zeros_like(self.zoom_level[agent_id][env_ids]).uniform_(1.0, 2.0)
             
             # Set initial positions with offset for each drone based on its index
-            default_root_state = robot.data.default_root_state[env_ids]
-            default_root_state[:, 0:2] = formation_center[:, 0:2] + gap_ref[:, 0:2] * (idx + 1) * (-1)**(idx + gap_ref[:, 0:2].int())
-            default_root_state[:, :3] += self._env_origins[env_ids]
+            default_root_state = robot.data.default_root_state[env_ids].clone()
+            default_root_state[:, :3] = self._env_origins[env_ids].clone()
+            default_root_state[:, 0:2] += formation_center[:, 0:2] + gap_ref[:, 0:2] * (idx + 1) * (-1)**(idx + gap_ref[:, 0:2].int())
             default_root_state[:, 2] += formation_center[:, 2] + gap_ref[:, 2] * (-1)**(idx + gap_ref[:, 2].int())
             default_root_state[:, 3:7] = quat_from_euler_xyz(
                                             torch.zeros(len(env_ids), device=self.device),
@@ -858,43 +882,79 @@ class IrisMAEnv(DirectMARLEnv):
         
         return gimbal_yaw, gimbal_pitch
 
-    def _update_target_movement(self):
+    def _update_target_movement(self, mode: str = "linear"):
         """Update target movement with smooth acceleration-based motion."""
         self.target_vel_change_timer += self.step_dt
         
         # Randomly change desired velocity
         change_mask = torch.rand(self.num_envs, device=self.device) < self.cfg.target_direction_change_prob
         
-        # Generate new random desired velocities
-        new_desired_vel = torch.zeros_like(self.target_desired_vel)
-        new_desired_vel[:, :3] = torch.rand(self.num_envs, 3, device=self.device) * 2.0 - 1.0
-        new_desired_vel[:, 3:] = torch.rand(self.num_envs, 3, device=self.device) * 0.2 - 0.1
-        new_desired_vel[:, :3] *= self.cfg.max_target_speed * 0.3
-        
-        # Update desired velocity where mask is true
-        self.target_desired_vel = torch.where(
-            change_mask.unsqueeze(-1).expand(-1, 6),
-            new_desired_vel,
-            self.target_desired_vel
-        )
-        
-        # Reset timer for environments that changed direction
-        self.target_vel_change_timer = torch.where(
-            change_mask, 
-            torch.zeros_like(self.target_vel_change_timer), 
-            self.target_vel_change_timer
-        )
-        
-        # Compute acceleration towards desired velocity
-        vel_error = self.target_desired_vel - self.target_vel
-        self.target_acceleration = vel_error * self.cfg.target_acceleration_scale
-        
-        # Clamp acceleration
-        self.target_acceleration = torch.clamp(
-            self.target_acceleration, 
-            -self.cfg.target_max_acceleration, 
-            self.cfg.target_max_acceleration
-        )
+        if mode == "linear":
+            # Generate new random desired velocities
+            new_desired_vel = torch.zeros_like(self.target_desired_vel)
+            new_desired_vel[:, :3] = torch.rand(self.num_envs, 3, device=self.device) * 2.0 - 1.0
+            new_desired_vel[:, 3:] = torch.rand(self.num_envs, 3, device=self.device) * 0.2 - 0.1
+            new_desired_vel[:, :3] *= self.cfg.max_target_speed * 0.3
+            
+            # Update desired velocity where mask is true
+            self.target_desired_vel = torch.where(
+                change_mask.unsqueeze(-1).expand(-1, 6),
+                new_desired_vel,
+                self.target_desired_vel
+            )
+            
+            # Reset timer for environments that changed direction
+            self.target_vel_change_timer = torch.where(
+                change_mask, 
+                torch.zeros_like(self.target_vel_change_timer), 
+                self.target_vel_change_timer
+            )
+            
+            # Compute acceleration towards desired velocity
+            vel_error = self.target_desired_vel - self.target_vel
+            self.target_acceleration = vel_error * self.cfg.target_acceleration_scale
+            
+            # Clamp acceleration
+            self.target_acceleration = torch.clamp(
+                self.target_acceleration, 
+                -self.cfg.target_max_acceleration, 
+                self.cfg.target_max_acceleration
+            )
+        elif mode == "circular":
+            t = self.common_step_counter * self.step_dt
+            radius = torch.rand_like(change_mask.float()) * 20.0 + 50.0
+            angular_speed = torch.rand_like(change_mask.float()) * 0.5 + 0.2
+            
+            center = self._env_origins
+            desired_x = center[:, 0] + radius * torch.cos(angular_speed * t)
+            desired_y = center[:, 1] + radius * torch.sin(angular_speed * t)
+            desired_z = 10.0 + 5.0 * torch.sin(0.5 * angular_speed * t)
+
+            desired_pos = torch.stack([desired_x, desired_y, desired_z], dim=1)
+            pos_error = desired_pos - self.target.data.root_state_w[:, :3]
+            
+            # Proportional control to compute desired velocity
+            kp = 1.0
+            self.target_desired_vel[:, :3] = kp * pos_error
+            
+            # Clamp desired velocity
+            speed = torch.norm(self.target_desired_vel[:, :3], dim=1, keepdim=True)
+            speed_clamped = torch.clamp(speed, max=self.cfg.max_target_speed)
+            self.target_desired_vel[:, :3] = self.target_desired_vel[:, :3] / (speed + 1e-6) * speed_clamped
+            
+            # No rotation in circular mode
+            self.target_desired_vel[:, 3:] = 0.0
+            
+            # Compute acceleration towards desired velocity
+            vel_error = self.target_desired_vel - self.target_vel
+            self.target_acceleration = vel_error * self.cfg.target_acceleration_scale
+            
+            # Clamp acceleration
+            self.target_acceleration = torch.clamp(
+                self.target_acceleration, 
+                -self.cfg.target_max_acceleration, 
+                self.cfg.target_max_acceleration
+            )
         
         # Update velocity with acceleration and damping
         self.target_vel += self.target_acceleration * self.step_dt
@@ -906,6 +966,103 @@ class IrisMAEnv(DirectMARLEnv):
             -self.cfg.max_target_speed, 
             self.cfg.max_target_speed
         )
+
+    def _update_research_metrics(self):
+        # --- geometry ---
+        p0 = self._robots["drone_0"].data.root_pos_w
+        p1 = self._robots["drone_1"].data.root_pos_w
+        pt = self.target.data.root_pos_w
+
+        d01 = torch.norm(p0 - p1, dim=1)  # baseline (m)
+
+        v0 = pt - p0
+        v1 = pt - p1
+        cosb = torch.sum(v0 * v1, dim=1) / (torch.norm(v0, dim=1) * torch.norm(v1, dim=1) + 1e-8)
+        cosb = torch.clamp(cosb, -1.0, 1.0)
+        beta = torch.acos(cosb)                               # rad
+        beta_deg = torch.rad2deg(beta)
+        w_geom = torch.sin(beta) ** 2                         # sin^2 beta
+
+        # --- bbox area fraction & validity ---
+        def bbox_area_frac(b, cam_cfg):
+            area = (b[:, 2] - b[:, 0]).clamp(min=0) * (b[:, 3] - b[:, 1]).clamp(min=0)
+            return area / (cam_cfg.width * cam_cfg.height)
+
+        a0 = bbox_area_frac(self.bboxes["drone_0"], self.agent_camera_cfgs["drone_0"])
+        a1 = bbox_area_frac(self.bboxes["drone_1"], self.agent_camera_cfgs["drone_1"])
+        valid0 = self.bbox_valid_mask["drone_0"][:, 0]
+        valid1 = self.bbox_valid_mask["drone_1"][:, 0]
+        both_valid = valid0 & valid1
+
+        # --- TQI ---
+        a = torch.minimum(a0, a1)  # conservative: use smaller footprint
+        mu = self.cfg.research.tqi_opt_area
+        sig = self.cfg.research.tqi_area_sigma
+        w_scale = torch.exp(-((a - mu) ** 2) / (sig ** 2 + 1e-12))
+        tqi = both_valid.float() * w_geom * w_scale
+
+        # --- CVTT accumulation ---
+        self._research["cvtt_sec"] += (tqi >= self.cfg.research.tqi_threshold).float() * self.step_dt
+        self._research["tqi_sum"] += tqi
+        self._research["steps"] += 1
+
+        # --- Noise proxy & IG_approx ---
+        # Focal length used in your bbox generation is in mm; convert to meters
+        f0_m = (self.base_focal_length * self.zoom_level["drone_0"]) * 1e-3
+        f1_m = (self.base_focal_length * self.zoom_level["drone_1"]) * 1e-3
+        pitch = self.cfg.research.pixel_pitch_m
+        sig_px = self.cfg.research.det_std_px
+        sig_th0 = sig_px * pitch / (f0_m + 1e-12)     # radians
+        sig_th1 = sig_px * pitch / (f1_m + 1e-12)
+
+        d0 = torch.norm(v0, dim=1) + 1e-6
+        d1 = torch.norm(v1, dim=1) + 1e-6
+        fim_scalar = w_geom * (1.0 / (d0 * d0 * sig_th0 * sig_th0) + 1.0 / (d1 * d1 * sig_th1 * sig_th1))
+        ig_approx = torch.log(fim_scalar + 1e-12)
+
+        # ====== STEP LOGGING (throttled) ======
+        if not self.cfg.research.enable_step_logging:
+            return
+        if (self._research["last_step_logged"] == -1) or \
+        ((self.common_step_counter - self._research["last_step_logged"]) >= self.cfg.research.log_interval_steps):
+
+            ids = self._research_sample_ids
+            def mean_std(x):
+                return torch.mean(x).item(), torch.std(x).item()
+
+            m_d, s_d = mean_std(d01)
+            m_b, s_b = mean_std(beta_deg)
+            m_tqi, s_tqi = mean_std(tqi)
+            m_ig, s_ig = mean_std(ig_approx)
+            valid_rate0 = valid0.float().mean().item()
+            valid_rate1 = valid1.float().mean().item()
+            both_valid_rate = both_valid.float()[ids].mean().item()
+
+            # A couple of percentiles from the subsample (keeps tensors small)
+            p50_ang = torch.quantile(beta_deg[ids], 0.5).item()
+            p90_ang = torch.quantile(beta_deg[ids], 0.9).item()
+
+            if "step" not in self.extras:
+                self.extras["step"] = {}
+            self.extras["step"].update({
+                "Step/baseline_m_mean": m_d,
+                "Step/baseline_m_std": s_d,
+                "Step/angle_deg_mean": m_b,
+                "Step/angle_deg_std": s_b,
+                "Step/angle_deg_p50": p50_ang,
+                "Step/angle_deg_p90": p90_ang,
+                "Step/tqi_mean": m_tqi,
+                "Step/tqi_std": s_tqi,
+                "Step/ig_approx_mean": m_ig,
+                "Step/ig_approx_std": s_ig,
+                "Step/valid_rate_d0": valid_rate0,
+                "Step/valid_rate_d1": valid_rate1,
+                "Step/both_valid_rate_sample": both_valid_rate,
+                "Step/curriculum_alpha": float(
+                    max(0.0, min(1.0, (self.common_step_counter - self.cfg.curriculum_coordination_start_step) /
+                        (self.cfg.curriculum_coordination_end_step - self.cfg.curriculum_coordination_start_step + 1e-6))))
+            })
+            self._research["last_step_logged"] = self.common_step_counter
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         """Set debug visualization."""
