@@ -164,7 +164,8 @@ class BBoxRayCaster:
         camera_poses: dict[str, tuple[torch.Tensor, torch.Tensor]],
         camera_intrinsics: dict[str, torch.Tensor],
         target_poses: tuple[torch.Tensor, torch.Tensor],
-        image_shapes: dict[str, tuple[int, int]] | None = None
+        image_shapes: dict[str, tuple[int, int]] | None = None,
+        target_scale: torch.Tensor | None = None
     ):
         """Update bounding boxes for current frame.
         
@@ -186,6 +187,7 @@ class BBoxRayCaster:
                 Position shape: (N, T, 3), Quaternion shape: (N, T, 4).
             image_shapes: Optional dict mapping agent_id to (height, width).
                 If None, uses shapes from intrinsics stored during initialization.
+            target_scale: Optional (N, T, 3) scaling factors (x,y,z) for targets.
         """
         self._track_memory("start")
 
@@ -223,7 +225,7 @@ class BBoxRayCaster:
 
         # Step 4: Transform bbox corners to world frame
         try:
-            self._transform_corners_to_world(target_pos_w, target_quat_w)
+            self._transform_corners_to_world(target_pos_w, target_quat_w, target_scale)
         except RuntimeError as e:
             warnings.warn(f"Corner transformation failed: {e}")
             self._data.valid_mask.fill_(False)
@@ -253,7 +255,7 @@ class BBoxRayCaster:
 
         # Step 9: Check occlusions (if enabled)
         if self.cfg.enable_occlusion_check:
-            self._check_occlusions()
+            self._check_occlusions(target_scale)
 
         self._track_memory("after_occlusion")
 
@@ -506,15 +508,23 @@ class BBoxRayCaster:
     def _transform_corners_to_world(
         self,
         target_pos: torch.Tensor,
-        target_quat: torch.Tensor
+        target_quat: torch.Tensor,
+        target_scale: torch.Tensor | None = None
     ):
         """Transform target bbox corners from local to world frame.
         
         Handles two cases efficiently:
         1. Shared bbox: All targets identical - corners_local is (8, 3)
         2. Per-env bbox: Different targets - corners_local is (N, 8, 3)
+
+        Args:
+            target_pos: (N, T, 3) target positions in world frame.
+            target_quat: (N, T, 4) target orientations in world frame.
+            target_scale: Optional (N, T, 3) scaling factors (x,y,z) for targets.
         """
         corners_local = self.target_bbox_corners_local
+        if target_scale.ndim != 3:
+            target_scale = None # Invalid scale
         
         if self.targets_share_bbox:
             # Case 1: All targets share same bbox (8, 3)
@@ -537,7 +547,7 @@ class BBoxRayCaster:
             
             # Transform using per-environment corners
             self._batch_transform_points_per_env(
-                corners_expanded,
+                corners_expanded * target_scale.unsqueeze(2) if target_scale is not None else corners_expanded,
                 target_pos,
                 target_quat,
                 out=self._corners_world
@@ -666,7 +676,11 @@ class BBoxRayCaster:
         self._data.valid_bbox_corners_mask = corners_ok
         self._data.valid_bbox_size_mask = size_ok
 
-    def _check_occlusions(self):
+    def _check_occlusions(self, target_scale: torch.Tensor | None = None):
+        """
+        Args:
+            target_scale: Optional (N, T, 3) scaling factors (x,y,z) for targets.
+        """
         """Check for occlusions using raycasting."""
         if len(self.meshes) == 0:
             warnings.warn("No meshes loaded. Skipping occlusion check.")
@@ -682,10 +696,10 @@ class BBoxRayCaster:
         # Get target bbox size (handle both shared and per-env cases)
         if self.targets_share_bbox:
             # Single bbox size for all targets
-            target_bbox_size = self.target_bbox_sizes  # (3,)
+            target_bbox_size = self.target_bbox_sizes * target_scale.squeeze(1)[0, :]  # (3,) <- (N, T, 3) -> (3,)
         else:
             # Different bbox size per environment
-            target_bbox_size = self.target_bbox_sizes  # (N, 3) <- One target per env assumed
+            target_bbox_size = self.target_bbox_sizes * target_scale.squeeze(1)  # (N, 3) <- One target per env assumed
 
         # Check occlusion for all cameras
         # Use first mesh for now (TODO: support multiple meshes)

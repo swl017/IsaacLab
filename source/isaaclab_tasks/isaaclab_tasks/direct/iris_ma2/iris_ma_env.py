@@ -304,7 +304,12 @@ class IrisMAEnv(DirectMARLEnv):
             agent: torch.zeros(self.num_envs, 1, 6, device=self.device)
             for agent in self.cfg.possible_agents
         }
-        
+
+        # Target scale
+        num_targets_per_env = 1
+        self.base_target_scale = 1 / 0.06 # Base scale for target size (6cm cube scaled up by to match 1m in env)
+        self.target_scale = torch.ones(self.num_envs, num_targets_per_env, 3, device=self.device)
+
         # Target movement
         self.target_vel = torch.zeros(self.num_envs, 6, device=self.device).uniform_(-1.0, 1.0)
         self.last_target_vel = self.target_vel.clone()
@@ -746,7 +751,8 @@ class IrisMAEnv(DirectMARLEnv):
             camera_poses=camera_poses,
             camera_intrinsics=camera_intrinsics,
             target_poses=target_poses,
-            image_shapes=image_shapes
+            image_shapes=image_shapes,
+            target_scale=self.target_scale
         )
 
         observations = {}
@@ -963,6 +969,12 @@ class IrisMAEnv(DirectMARLEnv):
         self.target.data.root_state_w[env_ids, 7:] = torch.zeros_like(self.target.data.root_state_w[env_ids, 7:])
         self.target.write_root_pose_to_sim(self.target.data.root_state_w[env_ids, :7], env_ids)
         
+        # Randomize target scale
+        self.target_scale[env_ids, :, 0] = torch.zeros_like(self.target_scale[env_ids, :, 0]).uniform_(
+            0.5 * self.base_target_scale, 1.5 * self.base_target_scale)
+        self.target_scale[env_ids, :, 1] = self.target_scale[env_ids, :, 0]
+        self.target_scale[env_ids, :, 2] = torch.zeros_like(self.target_scale[env_ids, :, 2]).uniform_(
+            0.5 * self.base_target_scale, 1.0 * self.base_target_scale)
         # Reset target velocity
         self.target_vel[env_ids] = torch.zeros_like(self.target_vel[env_ids]).uniform_(-1.0, 1.0)
         self.last_target_vel[env_ids] = self.target_vel[env_ids].clone()
