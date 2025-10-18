@@ -1,7 +1,4 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers.
-# All rights reserved.
-#
-# SPDX-License-Identifier: BSD-3-Clause
+# file: __init__.py
 
 """Batched bounding box raycasting module for multi-agent RL environments.
 

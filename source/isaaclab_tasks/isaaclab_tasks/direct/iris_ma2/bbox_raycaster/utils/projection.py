@@ -1,7 +1,4 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers.
-# All rights reserved.
-#
-# SPDX-License-Identifier: BSD-3-Clause
+# file: utils/projection.py
 
 """3D-to-2D projection utilities for batched bounding box raycasting."""
 
@@ -242,7 +239,7 @@ def check_gimbal_lock(
         Boolean mask indicating potential gimbal lock. Shape (N, C).
     """
     # Convert to rotation matrix
-    rot_mat = math_utils.quat_to_matrix(camera_quat)  # (N, C, 3, 3)
+    rot_mat = math_utils.matrix_from_quat(camera_quat)  # (N, C, 3, 3)
     
     # Check if camera z-axis (forward direction) is nearly vertical
     # Z-axis is the third column of rotation matrix

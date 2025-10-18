@@ -1,7 +1,4 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers.
-# All rights reserved.
-#
-# SPDX-License-Identifier: BSD-3-Clause
+# file: utils/__init__.py
 
 """Utilities for batched bounding box raycasting."""
 
@@ -14,7 +11,7 @@ from .bbox_ops import (
     validate_bbox_sizes,
 )
 from .occlusion import (
-    batch_check_occlusion,
+    batch_check_occlusion_body_local,
     compute_bbox_diagonal,
     compute_bbox_size,
     generate_occlusion_test_points,
@@ -38,7 +35,7 @@ __all__ = [
     "normalize_bboxes",
     "validate_bbox_sizes",
     # occlusion
-    "batch_check_occlusion",
+    "batch_check_occlusion_body_local",
     "compute_bbox_diagonal",
     "compute_bbox_size",
     "generate_occlusion_test_points",

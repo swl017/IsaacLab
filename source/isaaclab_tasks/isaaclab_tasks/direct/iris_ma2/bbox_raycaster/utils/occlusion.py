@@ -1,15 +1,13 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers.
-# All rights reserved.
-#
-# SPDX-License-Identifier: BSD-3-Clause
+# file: utils/occlusion.py
 
-"""Occlusion detection using raycasting for batched bbox raycasting."""
+"""Occlusion detection using body-local raycasting for batched bbox raycasting."""
 
 import torch
 import warp as wp
-from typing import Literal, Optional
+from typing import Literal, Optional, Dict
 
 from isaaclab.utils.warp import raycast_mesh
+import isaaclab.utils.math as math_utils
 
 
 def generate_occlusion_test_points(
@@ -77,28 +75,87 @@ def generate_occlusion_test_points(
         raise ValueError(f"Unknown occlusion test pattern: {pattern}")
 
 
-def batch_check_occlusion(
+def world_to_body_frame(
+    points_world: torch.Tensor,
+    body_pos: torch.Tensor,
+    body_quat: torch.Tensor,
+    eps: float = 1e-8
+) -> torch.Tensor:
+    """Transform points from world frame to body frame.
+    
+    Args:
+        points_world: Points in world frame. Shape (..., 3).
+        body_pos: Body position in world frame. Shape (..., 3).
+        body_quat: Body quaternion (w, x, y, z). Shape (..., 4).
+        eps: Epsilon for quaternion normalization.
+        
+    Returns:
+        Points in body frame. Same shape as points_world.
+    """
+    # Store original shape
+    orig_shape = points_world.shape
+    points_flat = points_world.reshape(-1, 3)
+    
+    # Broadcast body pose to match points
+    if body_pos.ndim == 1:
+        body_pos = body_pos.unsqueeze(0).expand(points_flat.shape[0], -1)
+    elif body_pos.shape[0] != points_flat.shape[0]:
+        body_pos = body_pos.unsqueeze(0).expand(points_flat.shape[0], -1)
+    
+    if body_quat.ndim == 1:
+        body_quat = body_quat.unsqueeze(0).expand(points_flat.shape[0], -1)
+    elif body_quat.shape[0] != points_flat.shape[0]:
+        body_quat = body_quat.unsqueeze(0).expand(points_flat.shape[0], -1)
+    
+    # Normalize quaternion
+    quat_norm = torch.norm(body_quat, dim=-1, keepdim=True)
+    body_quat = body_quat / torch.clamp(quat_norm, min=eps)
+    
+    # Translate to body origin
+    points_rel = points_flat - body_pos
+    
+    # Rotate to body frame using inverse quaternion
+    body_quat_inv = math_utils.quat_inv(body_quat)
+    points_body = math_utils.quat_apply(body_quat_inv, points_rel)
+    
+    return points_body.reshape(orig_shape)
+
+
+def batch_check_occlusion_body_local(
     camera_pos: torch.Tensor,
+    camera_quat: torch.Tensor,
     test_points_world: torch.Tensor,
     target_positions: torch.Tensor,
     target_bbox_size: torch.Tensor,
-    mesh: wp.Mesh,
+    agent_poses: Dict[str, tuple[torch.Tensor, torch.Tensor]],
+    agent_meshes: Dict[str, wp.Mesh],
+    static_mesh: Optional[wp.Mesh],
     max_distance: float,
     visibility_threshold: float,
     tolerance_scale: float = 1.1,
+    current_agent_ids: Optional[list[str]] = None,
     out_hits: Optional[torch.Tensor] = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Check occlusion using raycasting from cameras to target test points.
+    """Check occlusion using per-environment body-local raycasting.
+    
+    This function tests occlusion by:
+    1. Testing rays against static environment (ground) in world frame
+    2. Testing rays against each agent's mesh in that agent's body frame
     
     Args:
         camera_pos: Camera positions in world frame. Shape (N, C, 3).
+        camera_quat: Camera quaternions in world frame. Shape (N, C, 4).
         test_points_world: Test points in world frame. Shape (N, T, K, 3).
         target_positions: Target center positions in world frame. Shape (N, T, 3).
         target_bbox_size: Target bbox dimensions. Shape (N, T, 3) or (T, 3).
-        mesh: Warp mesh for raycasting.
+        agent_poses: Dict mapping agent_id -> (position, quaternion).
+            position: (N, 3), quaternion: (N, 4)
+        agent_meshes: Dict mapping agent_id -> wp.Mesh (in body-local coords).
+        static_mesh: Warp mesh for static environment (ground, etc.) in world coords.
         max_distance: Maximum raycasting distance.
         visibility_threshold: Fraction of points that must be visible.
         tolerance_scale: Tolerance multiplier for ray-target intersection.
+        current_agent_ids: List of agent IDs corresponding to camera indices.
         out_hits: Optional pre-allocated output tensor for hit positions.
         
     Returns:
@@ -108,80 +165,182 @@ def batch_check_occlusion(
     """
     N, C = camera_pos.shape[:2]
     T, K = test_points_world.shape[1:3]
+    device = camera_pos.device
     
-    # Expand camera positions: (N, C, 1, 1, 3) -> (N, C, T, K, 3)
-    camera_pos_expanded = camera_pos.view(N, C, 1, 1, 3).expand(-1, -1, T, K, -1)
+    # Initialize visibility tracking
+    point_visible = torch.ones((N, C, T, K), dtype=torch.bool, device=device)
     
-    # Expand test points: (N, 1, T, K, 3) -> (N, C, T, K, 3)
-    test_points_expanded = test_points_world.unsqueeze(1).expand(-1, C, -1, -1, -1)
-    
-    # Compute ray directions
-    ray_directions = test_points_expanded - camera_pos_expanded  # (N, C, T, K, 3)
-    ray_distances = torch.norm(ray_directions, dim=-1, keepdim=True)  # (N, C, T, K, 1)
-    
-    # Normalize directions (avoid division by zero)
-    eps = 1e-8
-    ray_directions = ray_directions / torch.clamp(ray_distances, min=eps)
-    
-    # Flatten for raycasting
-    batch_size = N * C * T * K
-    ray_starts_flat = camera_pos_expanded.reshape(batch_size, 3)
-    ray_directions_flat = ray_directions.reshape(batch_size, 3)
-    
-    # Perform raycasting
-    ray_hits_flat, _, _, _ = raycast_mesh(
-        ray_starts_flat,
-        ray_directions_flat,
-        mesh=mesh,
-        max_dist=max_distance,
-        return_distance=False,
-        return_normal=False
-    )
-    
-    # Reshape hit positions
-    ray_hits = ray_hits_flat.view(N, C, T, K, 3) # (4, 2, 1, 1, 3)
-    
-    # Store hits for visualization if requested
-    if out_hits is not None:
-        out_hits.copy_(ray_hits)
-    
-    # Check if ray hits are close to target
     # Compute target bbox diagonal for tolerance
     if target_bbox_size.ndim == 2:
-        # Shape (N, 3) -> expand to (N, T, 3) @TODO: What happens if T > 1?
-        target_bbox_size = target_bbox_size.unsqueeze(1)
-    
+        target_bbox_size = target_bbox_size.unsqueeze(0).expand(N, -1, -1)
     bbox_diagonal = torch.norm(target_bbox_size, dim=-1) / 2.0  # (N, T)
-    # max_dist_to_target = bbox_diagonal * tolerance_scale
     
-    # max_dist_to_target = max_dist_to_target.unsqueeze(1)
-    # max_dist_to_target = max_dist_to_target.unsqueeze(3)
-    min_dist_to_target = torch.norm(
-            test_points_expanded - camera_pos_expanded, dim=-1
-        ) - bbox_diagonal.unsqueeze(1).unsqueeze(2).expand(-1, C, -1, -1) # (N, C, T, 1)
+    # === Per-environment, per-camera occlusion checking ===
+    for env_idx in range(N):
+        for cam_idx in range(C):
+            cam_pos_w = camera_pos[env_idx, cam_idx]  # (3,)
+            
+            for target_idx in range(T):
+                test_pts_w = test_points_world[env_idx, target_idx]  # (K, 3)
+                target_pos_w = target_positions[env_idx, target_idx]  # (3,)
+                target_radius = bbox_diagonal[env_idx, target_idx]  # scalar
+                
+                # Compute ray parameters
+                ray_dirs_w = test_pts_w - cam_pos_w.unsqueeze(0)  # (K, 3)
+                ray_distances = torch.norm(ray_dirs_w, dim=-1, keepdim=True)  # (K, 1)
+                ray_dirs_w = ray_dirs_w / torch.clamp(ray_distances, min=1e-8)
+                
+                cam_to_target_dist = torch.norm(target_pos_w - cam_pos_w)  # scalar
+                
+                # --- 1. Test against static environment (world frame) ---
+                if static_mesh is not None:
+                    occluded_static = _raycast_static_env(
+                        cam_pos_w, ray_dirs_w, static_mesh, 
+                        cam_to_target_dist, target_radius, max_distance
+                    )
+                    point_visible[env_idx, cam_idx, target_idx] &= ~occluded_static
+                
+                # --- 2. Test against agent meshes (body-local frame) ---
+                current_agent_id = current_agent_ids[cam_idx] if current_agent_ids else None
+                
+                for agent_id, agent_mesh in agent_meshes.items():
+                    # Skip self-occlusion
+                    if agent_id == current_agent_id:
+                        continue
+                    
+                    if agent_id not in agent_poses:
+                        continue
+                    
+                    agent_pos, agent_quat = agent_poses[agent_id]
+                    occluded_agent = _raycast_agent_body_local(
+                        cam_pos_w, ray_dirs_w, test_pts_w,
+                        agent_pos[env_idx], agent_quat[env_idx],
+                        agent_mesh, cam_to_target_dist, 
+                        target_radius, max_distance
+                    )
+                    point_visible[env_idx, cam_idx, target_idx] &= ~occluded_agent
     
-    # Expand target positions: (N, 1, T, 1, 3)
-    target_pos_expanded = target_positions.unsqueeze(1).unsqueeze(3)
-    
-    # Compute distance from ray hit to target center
-    dist_to_target = torch.norm(ray_hits - target_pos_expanded, dim=-1)  # (N, C, T, K)
-    
-    # Check if hit happens beyond the target
-    hits_target = dist_to_target > min_dist_to_target
-    
-    # Check for invalid hits (nothing in between) (inf/nan from missing intersections)
-    invalid_hit = (torch.isinf(ray_hits).any(dim=-1) | torch.isnan(ray_hits).any(dim=-1))
-    
-    # A point is visible if it hits the target (or no geometry)
-    point_visible = hits_target | invalid_hit  # No hit means nothing blocking
-    
-    # Compute visibility ratio for each target
+    # Compute visibility ratio
     visibility_ratio = point_visible.float().mean(dim=-1)  # (N, C, T)
     
     # Target is visible if visibility ratio exceeds threshold
     visibility_mask = visibility_ratio >= visibility_threshold
     
     return visibility_mask, visibility_ratio
+
+
+def _raycast_static_env(
+    camera_pos: torch.Tensor,      # (3,)
+    ray_dirs: torch.Tensor,         # (K, 3)
+    static_mesh: wp.Mesh,
+    cam_to_target_dist: torch.Tensor,  # scalar
+    target_radius: torch.Tensor,       # scalar
+    max_distance: float
+) -> torch.Tensor:
+    """Raycast against static environment in world frame.
+    
+    Returns:
+        occluded: Boolean tensor of shape (K,) indicating occluded rays.
+    """
+    K = ray_dirs.shape[0]
+    
+    # Prepare ray starts (all from camera)
+    ray_starts = camera_pos.unsqueeze(0).expand(K, -1)  # (K, 3)
+    
+    # Perform raycasting
+    ray_hits, _, _, _ = raycast_mesh(
+        ray_starts,
+        ray_dirs,
+        mesh=static_mesh,
+        max_dist=max_distance,
+        return_distance=False,
+        return_normal=False
+    )
+    
+    # Check if hit is valid and closer than target
+    valid_hit = ~(torch.isinf(ray_hits).any(dim=-1) | torch.isnan(ray_hits).any(dim=-1))
+    
+    if not valid_hit.any():
+        return torch.zeros(K, dtype=torch.bool, device=camera_pos.device)
+    
+    hit_distances = torch.norm(ray_hits - camera_pos.unsqueeze(0), dim=-1)  # (K,)
+    
+    # Occluded if hit is significantly closer than target (with tolerance)
+    min_clear_dist = cam_to_target_dist - target_radius
+    occluded = valid_hit & (hit_distances < min_clear_dist)
+    
+    return occluded
+
+
+def _raycast_agent_body_local(
+    camera_pos_w: torch.Tensor,    # (3,) - world frame
+    ray_dirs_w: torch.Tensor,      # (K, 3) - world frame
+    test_points_w: torch.Tensor,   # (K, 3) - world frame
+    agent_pos: torch.Tensor,       # (3,) - world frame
+    agent_quat: torch.Tensor,      # (4,) - world frame
+    agent_mesh: wp.Mesh,           # body-local coordinates
+    cam_to_target_dist: torch.Tensor,  # scalar
+    target_radius: torch.Tensor,       # scalar
+    max_distance: float
+) -> torch.Tensor:
+    """Raycast against agent mesh in body-local frame.
+    
+    Args:
+        camera_pos_w: Camera position in world frame.
+        ray_dirs_w: Ray directions in world frame (normalized).
+        test_points_w: Test points in world frame (for distance calculation).
+        agent_pos: Agent position in world frame.
+        agent_quat: Agent quaternion in world frame (w, x, y, z).
+        agent_mesh: Agent mesh in body-local coordinates.
+        cam_to_target_dist: Distance from camera to target.
+        target_radius: Radius of target bounding sphere.
+        max_distance: Maximum raycasting distance.
+        
+    Returns:
+        occluded: Boolean tensor of shape (K,) indicating occluded rays.
+    """
+    K = ray_dirs_w.shape[0]
+    device = camera_pos_w.device
+    
+    # === Transform camera and rays to agent body frame ===
+    camera_pos_body = world_to_body_frame(
+        camera_pos_w, agent_pos, agent_quat
+    )  # (3,)
+    
+    # Transform ray directions (rotation only, no translation)
+    # Normalize quaternion first
+    agent_quat_normalized = agent_quat / torch.clamp(torch.norm(agent_quat), min=1e-8)
+    agent_quat_inv = math_utils.quat_inv(agent_quat_normalized.unsqueeze(0))  # (1, 4)
+    ray_dirs_body = math_utils.quat_apply(
+        agent_quat_inv.expand(K, -1), ray_dirs_w
+    )  # (K, 3)
+    
+    # === Perform raycasting in body frame ===
+    ray_starts_body = camera_pos_body.unsqueeze(0).expand(K, -1)  # (K, 3)
+    
+    ray_hits_body, _, _, _ = raycast_mesh(
+        ray_starts_body,
+        ray_dirs_body,
+        mesh=agent_mesh,
+        max_dist=max_distance,
+        return_distance=False,
+        return_normal=False
+    )
+    
+    # === Check if hits are valid and occluding ===
+    valid_hit = ~(torch.isinf(ray_hits_body).any(dim=-1) | torch.isnan(ray_hits_body).any(dim=-1))
+    
+    if not valid_hit.any():
+        return torch.zeros(K, dtype=torch.bool, device=device)
+    
+    # Compute hit distances in body frame
+    hit_distances = torch.norm(ray_hits_body - camera_pos_body.unsqueeze(0), dim=-1)  # (K,)
+    
+    # Occluded if hit is significantly closer than target (with tolerance)
+    min_clear_dist = cam_to_target_dist - target_radius
+    occluded = valid_hit & (hit_distances < min_clear_dist)
+    
+    return occluded
 
 
 def compute_bbox_diagonal(corners_local: torch.Tensor) -> torch.Tensor:

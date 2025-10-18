@@ -99,8 +99,8 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
         "drone_1": 7,
     }
     observation_spaces = {
-        "drone_0": 27,  # Added formation-related observations
-        "drone_1": 27,
+        "drone_0": 22,  # Added formation-related observations
+        "drone_1": 22,
     }
     state_space = -1  # Concatenate all observations
     
@@ -192,6 +192,10 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
         num_cameras_per_env=2,
         num_cameras_per_agent=1,
         
+        load_agent_meshes=True,
+        agent_mesh_simplification=1.1,  # Use 70% of triangles for balance
+        use_collision_proxy=False,      # Use full meshes, not boxes
+        
         # Validation thresholds
         min_bbox_size=(0.02, 0.02),
         max_bbox_size=(0.90, 0.90),
@@ -200,7 +204,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
         
         # Occlusion detection
         enable_occlusion_check=True,
-        occlusion_ray_pattern="center_only",
+        occlusion_ray_pattern="9point",  # Start simple, can upgrade to "9point"
         occlusion_visibility_threshold=0.5,
         occlusion_ray_tolerance=1.1,
         
@@ -307,8 +311,8 @@ class IrisMAEnv(DirectMARLEnv):
 
         # Target scale
         num_targets_per_env = 1
-        self.base_target_scale = 1 / 0.06 # Base scale for target size (6cm cube scaled up by to match 1m in env)
-        self.target_scale = torch.ones(self.num_envs, num_targets_per_env, 3, device=self.device)
+        self.base_target_scale = 15.0 # 1 / 0.06 # Base scale for target size (6cm cube scaled up by to match 1m in env)
+        self.target_scale = torch.ones(self.num_envs, num_targets_per_env, 3, device=self.device) * self.base_target_scale
 
         # Target movement
         self.target_vel = torch.zeros(self.num_envs, 6, device=self.device).uniform_(-1.0, 1.0)
@@ -374,13 +378,6 @@ class IrisMAEnv(DirectMARLEnv):
         self.camera_offset_rot_batch = camera_offset_rot_single.unsqueeze(0).expand(self.num_envs, -1)
         camera_offset_pos_single = torch.tensor(cfg.camera.offset.pos, device=self.device)
         self.camera_offset_pos_batch = camera_offset_pos_single.unsqueeze(0).expand(self.num_envs, -1)
-        
-        self.bbox_raycaster = bbox_raycaster.BBoxRayCaster(
-            cfg=self.cfg.bbox_raycaster, 
-            num_envs=self.num_envs,
-            num_targets_per_env=1,
-            device=self.device,
-        )
 
         # Action weights
         self.action_weight = torch.tensor(self.cfg.action_weight, device=self.device).repeat(self.num_envs, 1)
@@ -504,7 +501,8 @@ class IrisMAEnv(DirectMARLEnv):
             cfg=self.cfg.bbox_raycaster,
             num_envs=self.num_envs,
             num_targets_per_env=1,
-            device=self.device
+            device=self.device,
+            agent_ids=self.cfg.possible_agents,
         )
 
         # Add lights
@@ -519,7 +517,6 @@ class IrisMAEnv(DirectMARLEnv):
                 
             robot = self._robots[agent_id]
             stabilizer = self._stabilizers[agent_id]
-            agent_cam_cfg = self.agent_camera_cfgs[agent_id]
             
             # Clamp and store actions
             self._actions[agent_id] = agent_actions.clone().clamp(-1.0, 1.0)
@@ -609,6 +606,8 @@ class IrisMAEnv(DirectMARLEnv):
         camera_poses = {}
         camera_intrinsics = {}
         image_shapes = {}
+        agent_poses = {}
+
         for agent_id in self.cfg.possible_agents:
             robot = self._robots[agent_id]
 
@@ -619,7 +618,8 @@ class IrisMAEnv(DirectMARLEnv):
             # Compute camera pose for bounding box generation
             robot_pos = robot.data.root_pos_w
             robot_quat = robot.data.root_state_w[:, 3:7]
-            
+            agent_poses[agent_id] = (robot_pos, robot_quat)
+
             gimbal_idx = self.gimbal_joint_idx[agent_id]
             gimbal_yaw = robot.data.joint_pos[:, gimbal_idx["yaw"]]
             gimbal_roll = robot.data.joint_pos[:, gimbal_idx["roll"]]
@@ -637,7 +637,8 @@ class IrisMAEnv(DirectMARLEnv):
             camera_offset = torch.tensor((0, 0, 0.1), device=self.device).expand(self.num_envs, -1)
             self.camera_pos_world[agent_id] = robot_pos + quat_rotate(self.camera_quat_world[agent_id], camera_offset)
             
-            # # Generate bounding boxes
+            agent_cam_cfg = self.agent_camera_cfgs[agent_id]
+            # Generate bounding boxes
             # bbox_gen = BBoxGenerator(
             #     camera_width=agent_cam_cfg.width, 
             #     camera_height=agent_cam_cfg.height,
@@ -645,12 +646,12 @@ class IrisMAEnv(DirectMARLEnv):
             #     horizontal_aperture=agent_cam_cfg.spawn.horizontal_aperture
             # )
             
-            # self.bboxes[agent_id], self.bbox_valid_mask[agent_id][:, 0] = bbox_gen.generate_2d_bbox_from_pose(
+            # self.bboxes[agent_id], self.bbox_valid_mask[agent_id][:, 0] = bbox_gen.generate_2d_bbox(
             #     self.target.data.root_state_w[:, :3], 
             #     self.target.data.root_state_w[:, 3:7],
-            #     self.camera_pos_world[agent_id], 
-            #     self.camera_quat_world[agent_id], 
-            #     min_bbox_size=int(0.1*agent_cam_cfg.width),
+            #     self.camera_pos_world[agent_id],
+            #     self.camera_quat_world[agent_id],
+            #     min_bbox_size=int(0.01 * agent_cam_cfg.width),
             #     focal_length=current_focal_length
             # )
             
@@ -751,6 +752,7 @@ class IrisMAEnv(DirectMARLEnv):
             camera_poses=camera_poses,
             camera_intrinsics=camera_intrinsics,
             target_poses=target_poses,
+            agent_poses=agent_poses,
             image_shapes=image_shapes,
             target_scale=self.target_scale
         )
@@ -762,23 +764,31 @@ class IrisMAEnv(DirectMARLEnv):
             # This logic is specific to a 2-agent scenario
             other_agent_id = next(aid for aid in self.cfg.possible_agents if aid != agent_id)
             other_robot = self._robots[other_agent_id]
-            
-            # Relative position to other drone
-            relative_pos = other_robot.data.root_pos_w - robot.data.root_pos_w
-            relative_dist = torch.norm(relative_pos, dim=1, keepdim=True)
-            relative_dir = relative_pos / (relative_dist + 1e-6)
-            
+                        
             self.bboxes[agent_id]= self.bbox_raycaster.data.bboxes_xyxy[:, i, 0, :]
             self.bbox_valid_mask[agent_id][:, 0] = self.bbox_raycaster.data.valid_mask[:, i, 0]
 
-            # Triangulation angle (angle between camera-target lines)
-            to_target_self = self.target.data.root_pos_w - robot.data.root_pos_w
-            to_target_other = self.target.data.root_pos_w - other_robot.data.root_pos_w
-            cos_angle = torch.sum(to_target_self * to_target_other, dim=1, keepdim=True) / (
-                torch.norm(to_target_self, dim=1, keepdim=True) * torch.norm(to_target_other, dim=1, keepdim=True) + 1e-6
+            # Normalize bboxes
+            agent_cam_cfg = self.agent_camera_cfgs[agent_id]
+            self.bboxes_normalized[agent_id] = self.bboxes[agent_id].clone()
+            valid = self.bbox_valid_mask[agent_id].squeeze(-1)
+            self.bboxes_normalized[agent_id][:, 0] = torch.where(
+                valid, self.bboxes[agent_id][:, 0] / agent_cam_cfg.width, 
+                torch.ones_like(self.bboxes[agent_id][:, 0]) * (-1.0)
             )
-            triangulation_angle = torch.acos(torch.clamp(cos_angle, -1.0, 1.0))
-            
+            self.bboxes_normalized[agent_id][:, 1] = torch.where(
+                valid, self.bboxes[agent_id][:, 1] / agent_cam_cfg.height, 
+                torch.ones_like(self.bboxes[agent_id][:, 1]) * (-1.0)
+            )
+            self.bboxes_normalized[agent_id][:, 2] = torch.where(
+                valid, self.bboxes[agent_id][:, 2] / agent_cam_cfg.width, 
+                torch.ones_like(self.bboxes[agent_id][:, 2]) * (-1.0)
+            )
+            self.bboxes_normalized[agent_id][:, 3] = torch.where(
+                valid, self.bboxes[agent_id][:, 3] / agent_cam_cfg.height, 
+                torch.ones_like(self.bboxes[agent_id][:, 3]) * (-1.0)
+            )
+
             obs = torch.cat([
                 robot.data.root_state_w[:, :10],  # 10: pos, quat, lin_vel
                 robot.data.root_ang_vel_b[:, 2:3],  # 1: yaw rate
@@ -788,9 +798,6 @@ class IrisMAEnv(DirectMARLEnv):
                 self.bboxes_normalized[agent_id],  # 4: normalized bbox
                 self.bbox_valid_mask[agent_id].float(),  # 1: validity
                 self.zoom_level[agent_id].unsqueeze(-1),  # 1: zoom level
-                relative_dir,  # 3: direction to other drone
-                relative_dist / 10.0,  # 1: normalized distance to other drone
-                triangulation_angle / math.pi,  # 1: normalized triangulation angle
             ], dim=-1)
             
             observations[agent_id] = obs
@@ -962,7 +969,7 @@ class IrisMAEnv(DirectMARLEnv):
         # progress = 1 if DEBUG_DRAW else progress  # Always use full range in debug mode
         target_pos[:, 0] = torch.zeros_like(target_pos[:, 0]).uniform_(40.0 * progress, 80.0 * progress) + formation_center[:, 0]
         target_pos[:, 1] = torch.zeros_like(target_pos[:, 1]).uniform_(-20.0 * progress, 20.0 * progress) + formation_center[:, 1]
-        target_pos[:, 2] = torch.zeros_like(target_pos[:, 2]).uniform_(0.0, 35.0 * progress) + formation_center[:, 2]
+        target_pos[:, 2] = torch.zeros_like(target_pos[:, 2]).uniform_(0.0, 5.0) + formation_center[:, 2]
         target_pos += self._env_origins[env_ids]
         
         self.target.data.root_state_w[env_ids, :3] = target_pos
@@ -970,11 +977,11 @@ class IrisMAEnv(DirectMARLEnv):
         self.target.write_root_pose_to_sim(self.target.data.root_state_w[env_ids, :7], env_ids)
         
         # Randomize target scale
-        self.target_scale[env_ids, :, 0] = torch.zeros_like(self.target_scale[env_ids, :, 0]).uniform_(
-            0.5 * self.base_target_scale, 1.5 * self.base_target_scale)
-        self.target_scale[env_ids, :, 1] = self.target_scale[env_ids, :, 0]
-        self.target_scale[env_ids, :, 2] = torch.zeros_like(self.target_scale[env_ids, :, 2]).uniform_(
-            0.5 * self.base_target_scale, 1.0 * self.base_target_scale)
+        # self.target_scale[env_ids, :, 0] = torch.zeros_like(self.target_scale[env_ids, :, 0]).uniform_(
+        #     0.5 * self.base_target_scale, 1.5 * self.base_target_scale)
+        # self.target_scale[env_ids, :, 1] = self.target_scale[env_ids, :, 0]
+        # self.target_scale[env_ids, :, 2] = torch.zeros_like(self.target_scale[env_ids, :, 2]).uniform_(
+        #     0.5 * self.base_target_scale, 1.0 * self.base_target_scale)
         # Reset target velocity
         self.target_vel[env_ids] = torch.zeros_like(self.target_vel[env_ids]).uniform_(-1.0, 1.0)
         self.last_target_vel[env_ids] = self.target_vel[env_ids].clone()
@@ -1235,11 +1242,28 @@ class IrisMAEnv(DirectMARLEnv):
         """Debug visualization callback."""
         if DEBUG_DRAW and hasattr(self, 'draw_interface'):
             self.draw_interface.clear_lines()
+        
             for agent_id in self.cfg.possible_agents:
-                # Draw line to target
+                # Draw line to target (color indicates visibility)
                 line_colors_yellow = torch.tensor([[1.0, 1.0, 0.0, 1.0]], device=self.device).repeat(self.num_envs, 1)
                 line_colors_green = torch.tensor([[0.0, 1.0, 0.0, 1.0]], device=self.device).repeat(self.num_envs, 1)
-                line_colors = torch.where(self.bbox_valid_mask[agent_id], line_colors_green, line_colors_yellow).tolist()
+                line_colors_red = torch.tensor([[1.0, 0.0, 0.0, 1.0]], device=self.device).repeat(self.num_envs, 1)
+                
+                # Red if invalid (occluded), yellow if invalid (other reason), green if valid
+                is_valid = self.bbox_valid_mask[agent_id]
+                agent_idx = self.cfg.possible_agents.index(agent_id)
+                is_visible = self.bbox_raycaster.data.valid_bbox_visibility_mask[:, agent_idx, 0].unsqueeze(-1)
+                
+                line_colors = torch.where(
+                    is_valid, 
+                    line_colors_green,
+                    torch.where(
+                        is_visible,
+                        line_colors_yellow,  # Invalid but visible (e.g., out of FOV)
+                        line_colors_red      # Occluded
+                    )
+                ).tolist()
+                
                 line_thicknesses = [5.0] * self.camera_pos_world[agent_id].shape[0]
                 self.draw_interface.draw_lines(
                     self.camera_pos_world[agent_id].tolist(), 
@@ -1257,4 +1281,6 @@ class IrisMAEnv(DirectMARLEnv):
                         zoom_level=self.zoom_level[agent_id],
                         device=self.device
                     )
+            
+            # Visualize raycaster debug info (occlusion rays, etc.)
             self.bbox_raycaster.visualize()

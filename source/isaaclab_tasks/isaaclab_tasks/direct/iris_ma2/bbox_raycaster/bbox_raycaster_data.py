@@ -1,8 +1,4 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers.
-# All rights reserved.
-#
-# SPDX-License-Identifier: BSD-3-Clause
-
+# file: bbox_raycaster_data.py
 import torch
 from dataclasses import dataclass
 
