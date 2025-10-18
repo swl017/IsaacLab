@@ -107,7 +107,7 @@ def batch_transform_to_camera_frame(
     )
     
     if out is not None:
-        points_camera_flat.view(N, C, T, K, 3, out=out)
+        out.copy_(points_camera_flat.view(N, C, T, K, 3))
         return out
     else:
         return points_camera_flat.view(N, C, T, K, 3)

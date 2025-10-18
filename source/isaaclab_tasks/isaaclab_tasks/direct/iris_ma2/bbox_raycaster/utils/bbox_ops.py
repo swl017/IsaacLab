@@ -10,7 +10,7 @@ import numpy as np
 from typing import Optional
 
 import isaacsim.core.utils.bounds as bounds_utils
-import isaaclab.sim as sim_utils
+import isaacsim.core.utils.prims as prim_utils
 from pxr import UsdGeom
 
 
@@ -33,9 +33,8 @@ def get_bbox_corners_local(
                 min_x_min_y_max_z, max_x_min_y_max_z, min_x_max_y_max_z, max_x_max_y_max_z]
     """
     # Get the first matching prim (accept any valid prim)
-    prim = sim_utils.get_first_matching_child_prim(
-        prim_path,
-        lambda prim: prim.IsValid()
+    prim = prim_utils.get_first_matching_child_prim(
+        prim_path, predicate=lambda x: "target" in x
     )
 
     if prim is None or not prim.IsValid():

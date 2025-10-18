@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 """Main batched bounding box raycaster class."""
+
 from __future__ import annotations
 
 import torch
@@ -15,10 +16,12 @@ import omni.log
 import omni.usd
 from pxr import UsdGeom
 
+import isaacsim.core.utils.prims as prim_utils
 import isaaclab.sim as sim_utils
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.terrains.trimesh.utils import make_plane
 from isaaclab.utils.warp import convert_to_warp_mesh
+import isaaclab.utils.math as math_utils
 
 from .bbox_raycaster_data import BBoxRayCasterData
 from .utils import (
@@ -107,9 +110,14 @@ class BBoxRayCaster:
         self.meshes: dict[str, wp.Mesh] = {}
         self._initialize_meshes()
 
-        # Extract target bounding boxes (one-time, per target type)
-        self.target_bbox_corners_local: dict[str, torch.Tensor] = {}
-        self.target_bbox_sizes: dict[str, torch.Tensor] = {}
+        # Extract target bounding boxes (one-time, handles all environments)
+        # Will be either:
+        #   - (8, 3) if all targets identical (memory efficient)
+        #   - (N, 8, 3) if targets differ per environment
+        self.target_bbox_corners_local: torch.Tensor | None = None
+        self.target_bbox_sizes: torch.Tensor | None = None
+        self.targets_share_bbox: bool = True  # Flag set during extraction
+        
         self._extract_target_bboxes()
 
         # Pre-allocate all buffers
@@ -307,18 +315,80 @@ class BBoxRayCaster:
             self.meshes[mesh_prim_path] = wp_mesh
 
     def _extract_target_bboxes(self):
-        """Extract 3D bounding box corners for each target type."""
-        for target_path in self.cfg.target_prim_paths:
+        """Extract 3D bounding box corners efficiently for all targets.
+        
+        Strategy:
+        1. Extract bbox from first target
+        2. Check if all other targets have identical bbox
+        3. If identical: store once (8, 3) - memory efficient
+        4. If different: store all (N, 8, 3) - handles heterogeneous targets
+        """
+        if len(self.cfg.target_prim_paths) == 0:
+            raise RuntimeError("No target prim paths provided")
+        
+        
+        # Extract bbox from all environments
+        corners_list = []
+        bbox_sizes_list = []
+        valid_paths = []
+        
+        for env_path in self.cfg.target_prim_paths:
+            # Construct full target path
+            if "/target" not in env_path:
+                target_path = f"{env_path}/target"
+            else:
+                target_path = env_path
+            
+            # Check if path exists
+            prim = prim_utils.get_prim_at_path(target_path)
+            if prim is None or not prim.IsValid():
+                raise RuntimeError(f"Invalid target prim path: {target_path}")
+            
             try:
-                corners_local = get_bbox_corners_local(target_path, self.device)
-                bbox_size = compute_bbox_size(corners_local)
-
-                self.target_bbox_corners_local[target_path] = corners_local
-                self.target_bbox_sizes[target_path] = bbox_size
-
-                omni.log.info(f"Extracted bbox for {target_path}: size={bbox_size.tolist()}")
+                # Extract bbox corners and size
+                corners = get_bbox_corners_local(target_path, self.device)
+                bbox_size = compute_bbox_size(corners)
+                
+                corners_list.append(corners)
+                bbox_sizes_list.append(bbox_size)
+                valid_paths.append(target_path)
             except Exception as e:
-                warnings.warn(f"Failed to extract bbox for {target_path}: {e}")
+                raise RuntimeError(f"Failed to extract bbox from {target_path}: {e}")
+        
+        if len(corners_list) == 0:
+            raise RuntimeError("No valid target bboxes extracted")
+        
+        # Stack all corners and sizes
+        all_corners = torch.stack(corners_list, dim=0)  # (N, 8, 3)
+        all_sizes = torch.stack(bbox_sizes_list, dim=0)  # (N, 3)
+        
+        # Check if all targets have identical bbox (within tolerance)
+        first_corners = all_corners[0]
+        differences = torch.abs(all_corners - first_corners.unsqueeze(0))
+        max_difference = differences.max().item()
+        # all_identical = max_difference < 1e-5
+        all_identical = False
+        
+        if all_identical:
+            # Optimization: All targets identical - store once
+            self.target_bbox_corners_local = first_corners  # (8, 3)
+            self.target_bbox_sizes = bbox_sizes_list[0]  # (3,)
+            self.targets_share_bbox = True
+            
+            omni.log.info(
+                f"All {len(corners_list)} targets have identical bbox "
+                f"(size={bbox_sizes_list[0].tolist()}) - using shared storage"
+            )
+        else:
+            # Different targets - store per-environment
+            self.target_bbox_corners_local = all_corners  # (N, 8, 3)
+            self.target_bbox_sizes = all_sizes  # (N, 3)
+            self.targets_share_bbox = False
+            
+            omni.log.info(
+                f"Extracted {len(corners_list)} unique target bboxes "
+                f"(max difference: {max_difference:.6f}m) - using per-env storage"
+            )
 
     def _allocate_buffers(self):
         """Pre-allocate all tensor buffers for efficient memory usage."""
@@ -343,6 +413,9 @@ class BBoxRayCaster:
         self._pixels = torch.zeros((N, C, T, 8, 2), device=self.device)
         self._depths = torch.zeros((N, C, T, 8), device=self.device)
         self._corners_valid = torch.zeros((N, C, T, 8), device=self.device, dtype=torch.bool)
+
+        # Initialize bbox sharing flag (set properly in _extract_target_bboxes)
+        self.targets_share_bbox = False  # Default assumption
 
         # Debug buffers (optional)
         if self.cfg.debug_vis or self.cfg.debug_vis_corners:
@@ -434,19 +507,69 @@ class BBoxRayCaster:
         target_pos: torch.Tensor,
         target_quat: torch.Tensor
     ):
-        """Transform target bbox corners from local to world frame."""
-        # Get corners for first target (assume all same type for now)
-        target_path = self.cfg.target_prim_paths[0]
-        corners_local = self.target_bbox_corners_local[target_path]
-
-        # Transform to world frame: (N, T, 8, 3)
-        batch_transform_points(
-            corners_local,
-            target_pos,
-            target_quat,
-            out=self._corners_world,
-            eps=self.cfg.quat_normalize_epsilon
-        )
+        """Transform target bbox corners from local to world frame.
+        
+        Handles two cases efficiently:
+        1. Shared bbox: All targets identical - corners_local is (8, 3)
+        2. Per-env bbox: Different targets - corners_local is (N, 8, 3)
+        """
+        corners_local = self.target_bbox_corners_local
+        
+        if self.targets_share_bbox:
+            # Case 1: All targets share same bbox (8, 3)
+            # batch_transform_points will broadcast to all (N, T, 8, 3)
+            batch_transform_points(
+                corners_local,
+                target_pos,
+                target_quat,
+                out=self._corners_world,
+                eps=self.cfg.quat_normalize_epsilon
+            )
+        else:
+            # Case 2: Different bbox per environment (N, 8, 3)
+            # Need to transform each environment's corners separately
+            N, T = target_pos.shape[:2]
+            K = corners_local.shape[1]  # 8 corners
+            
+            # Expand corners to include target dimension: (N, 8, 3) -> (N, T, 8, 3)
+            corners_expanded = corners_local.unsqueeze(1).expand(N, T, K, 3)
+            
+            # Transform using per-environment corners
+            self._batch_transform_points_per_env(
+                corners_expanded,
+                target_pos,
+                target_quat,
+                out=self._corners_world
+            )
+    
+    def _batch_transform_points_per_env(
+        self,
+        points_local: torch.Tensor,  # (N, T, K, 3) - per-env points
+        pos: torch.Tensor,            # (N, T, 3)
+        quat: torch.Tensor,           # (N, T, 4)
+        out: torch.Tensor             # (N, T, K, 3)
+    ):
+        """Transform points when each environment has different local points.
+        
+        This is a specialized version of batch_transform_points for per-env data.
+        """
+        N, T, K = points_local.shape[:3]
+        
+        # Normalize quaternions
+        quat_norm = torch.norm(quat, dim=-1, keepdim=True)
+        quat_normalized = quat / torch.clamp(quat_norm, min=self.cfg.quat_normalize_epsilon)
+        
+        # Flatten for rotation
+        points_flat = points_local.reshape(N * T * K, 3)
+        quat_flat = quat_normalized.unsqueeze(2).expand(-1, -1, K, -1).reshape(N * T * K, 4)
+        
+        # Rotate
+        points_rotated_flat = math_utils.quat_apply(quat_flat, points_flat)
+        points_rotated = points_rotated_flat.view(N, T, K, 3)
+        
+        # Add translation
+        pos_expanded = pos.unsqueeze(2)  # (N, T, 1, 3)
+        torch.add(points_rotated, pos_expanded, out=out)
 
     def _transform_corners_to_camera(
         self,
@@ -551,9 +674,13 @@ class BBoxRayCaster:
             out=self._occlusion_test_points
         )
 
-        # Get target bbox size
-        target_path = self.cfg.target_prim_paths[0]
-        target_bbox_size = self.target_bbox_sizes[target_path]
+        # Get target bbox size (handle both shared and per-env cases)
+        if self.targets_share_bbox:
+            # Single bbox size for all targets
+            target_bbox_size = self.target_bbox_sizes  # (3,)
+        else:
+            # Different bbox size per environment
+            target_bbox_size = self.target_bbox_sizes  # (N, 3)
 
         # Check occlusion for all cameras
         # Use first mesh for now (TODO: support multiple meshes)

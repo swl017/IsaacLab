@@ -43,6 +43,10 @@ class BBoxRayCasterCfg:
     
     This should match the number of agents with cameras in your multi-agent setup.
     """
+    num_cameras_per_agent: int = 1
+    """Number of cameras per agent.
+    This should match the number of cameras assigned to each agent.
+    """
 
     # Validation thresholds
     min_bbox_size: tuple[float, float] = (0.01, 0.01)

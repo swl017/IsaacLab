@@ -155,7 +155,8 @@ def batch_check_occlusion(
     max_dist_to_target = bbox_diagonal * tolerance_scale
     
     # Expand for broadcasting: (N, 1, T, 1)
-    max_dist_to_target = max_dist_to_target.unsqueeze(1).unsqueeze(3)
+    max_dist_to_target = max_dist_to_target.unsqueeze(1)
+    max_dist_to_target = max_dist_to_target.unsqueeze(3)
     
     # Expand target positions: (N, 1, T, 1, 3)
     target_pos_expanded = target_positions.unsqueeze(1).unsqueeze(3)
