@@ -16,6 +16,9 @@ from .occlusion import (
     compute_bbox_size,
     generate_occlusion_test_points,
 )
+from .occlusion_fully_batched import (
+    batch_check_occlusion_fully_batched,
+)
 from .projection import (
     batch_project_to_image_plane,
     batch_transform_points,
@@ -39,6 +42,8 @@ __all__ = [
     "compute_bbox_diagonal",
     "compute_bbox_size",
     "generate_occlusion_test_points",
+    # occlusion_fully_batched
+    "batch_check_occlusion_fully_batched",
     # projection
     "batch_project_to_image_plane",
     "batch_transform_points",

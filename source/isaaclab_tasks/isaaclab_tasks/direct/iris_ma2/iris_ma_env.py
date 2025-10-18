@@ -628,9 +628,9 @@ class IrisMAEnv(DirectMARLEnv):
             gimbal_quat = quat_mul(
                 quat_mul(
                     quat_from_euler_xyz(torch.zeros_like(gimbal_yaw), torch.zeros_like(gimbal_yaw), gimbal_yaw),
-                    quat_from_euler_xyz(gimbal_roll, torch.zeros_like(gimbal_roll), torch.zeros_like(gimbal_roll))
+                    quat_from_euler_xyz(torch.zeros_like(gimbal_pitch), gimbal_pitch, torch.zeros_like(gimbal_pitch))
                 ),
-                quat_from_euler_xyz(torch.zeros_like(gimbal_pitch), gimbal_pitch, torch.zeros_like(gimbal_pitch))
+                quat_from_euler_xyz(gimbal_roll, torch.zeros_like(gimbal_roll), torch.zeros_like(gimbal_roll))
             )
             
             self.camera_quat_world[agent_id] = quat_mul(robot_quat, quat_mul(gimbal_quat, self.camera_offset_rot_batch))

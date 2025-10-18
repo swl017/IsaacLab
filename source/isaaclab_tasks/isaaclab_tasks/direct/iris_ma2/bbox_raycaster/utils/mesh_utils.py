@@ -12,7 +12,7 @@ import hashlib
 
 from pxr import UsdGeom
 import omni.usd
-import isaacsim.core.utils.prims as prim_utils
+import isaaclab.sim as sim_utils
 from isaaclab.utils.warp import convert_to_warp_mesh
 
 
@@ -184,7 +184,7 @@ class MeshLoader:
             Tuple of (vertices, faces) or (None, None) if failed.
         """
         # Try to find body mesh
-        body_prim = prim_utils.get_first_matching_child_prim(
+        body_prim = sim_utils.get_first_matching_child_prim(
             prim_path,
             lambda prim: "body" in str(prim.GetPath()).lower() and prim.GetTypeName() == "Mesh"
         )

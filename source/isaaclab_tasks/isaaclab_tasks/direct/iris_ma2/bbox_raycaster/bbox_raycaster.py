@@ -315,7 +315,6 @@ class BBoxRayCaster:
                     indices = mesh_prim.GetFaceVertexIndicesAttr().Get()
 
                     # Apply world transform
-                    import numpy as np
                     transform_matrix = np.array(omni.usd.get_world_transform_matrix(mesh_prim)).T
                     points = np.asarray(points)
                     points = np.matmul(points, transform_matrix[:3, :3].T) + transform_matrix[:3, 3]
@@ -353,9 +352,9 @@ class BBoxRayCaster:
         robot_prim_path = f"/World/envs/env_0/Robot_{robot_index}"
         
         # Find the body link (main rigid body)
-        body_prim = prim_utils.get_first_matching_child_prim(
+        body_prim = sim_utils.get_first_matching_child_prim(
             robot_prim_path,
-            lambda prim_path: "body/body" in str(prim_path).lower() # USD specific. Inspect your robot model
+            lambda prim: "body" in str(prim.GetPath()).lower() and prim.GetTypeName() == "Mesh"
         )
         
         if body_prim is None or not body_prim.IsValid():
@@ -749,7 +748,7 @@ class BBoxRayCaster:
         camera_poses: dict[str, tuple[torch.Tensor, torch.Tensor]],
         target_scale: torch.Tensor | None = None
     ):
-        """Check for occlusions using body-local raycasting."""
+        """Check for occlusions using fully batched body-local raycasting."""
         if self.static_mesh is None and len(self.agent_meshes) == 0:
             warnings.warn("No meshes loaded. Skipping occlusion check.")
             return
@@ -774,8 +773,11 @@ class BBoxRayCaster:
         # Get current agent IDs for cameras
         current_agent_ids = sorted(camera_poses.keys())
 
-        # Check occlusion using body-local raycasting
-        visibility_mask, visibility_ratio = batch_check_occlusion_body_local(
+        # Import fully batched implementation
+        from .utils.occlusion_fully_batched import batch_check_occlusion_fully_batched
+
+        # Check occlusion using fully batched raycasting
+        visibility_mask, visibility_ratio = batch_check_occlusion_fully_batched(
             self._data.camera_pos_w,
             self._data.camera_quat_w,
             self._occlusion_test_points,
@@ -788,7 +790,6 @@ class BBoxRayCaster:
             visibility_threshold=self.cfg.occlusion_visibility_threshold,
             tolerance_scale=self.cfg.occlusion_ray_tolerance,
             current_agent_ids=current_agent_ids,
-            out_hits=self._occlusion_ray_hits if self.cfg.debug_vis else None
         )
 
         self._data.occlusion_visibility_ratio = visibility_ratio
@@ -797,7 +798,6 @@ class BBoxRayCaster:
 
         if self.cfg.debug_vis or self.cfg.debug_vis_occlusion_rays:
             self._data.occlusion_test_points_w = self._occlusion_test_points
-            self._data.occlusion_ray_hits_w = self._occlusion_ray_hits
 
     """
     Helper Methods

@@ -204,9 +204,8 @@ def batch_check_occlusion_body_local(
                 current_agent_id = current_agent_ids[cam_idx] if current_agent_ids else None
                 
                 for agent_id, agent_mesh in agent_meshes.items():
-                    # Skip self-occlusion
-                    if agent_id == current_agent_id:
-                        continue
+                    # if agent_id == current_agent_id:
+                    #     continue
                     
                     if agent_id not in agent_poses:
                         continue
