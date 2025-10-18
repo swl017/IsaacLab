@@ -685,7 +685,7 @@ class BBoxRayCaster:
             target_bbox_size = self.target_bbox_sizes  # (3,)
         else:
             # Different bbox size per environment
-            target_bbox_size = self.target_bbox_sizes  # (N, 3)
+            target_bbox_size = self.target_bbox_sizes  # (N, 3) <- One target per env assumed
 
         # Check occlusion for all cameras
         # Use first mesh for now (TODO: support multiple meshes)

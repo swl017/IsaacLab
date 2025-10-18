@@ -139,7 +139,7 @@ def batch_check_occlusion(
     )
     
     # Reshape hit positions
-    ray_hits = ray_hits_flat.view(N, C, T, K, 3)
+    ray_hits = ray_hits_flat.view(N, C, T, K, 3) # (4, 2, 1, 1, 3)
     
     # Store hits for visualization if requested
     if out_hits is not None:
@@ -148,15 +148,17 @@ def batch_check_occlusion(
     # Check if ray hits are close to target
     # Compute target bbox diagonal for tolerance
     if target_bbox_size.ndim == 2:
-        # Shape (T, 3) -> expand to (N, T, 3)
-        target_bbox_size = target_bbox_size.unsqueeze(0).expand(N, -1, -1)
+        # Shape (N, 3) -> expand to (N, T, 3) @TODO: What happens if T > 1?
+        target_bbox_size = target_bbox_size.unsqueeze(1)
     
     bbox_diagonal = torch.norm(target_bbox_size, dim=-1) / 2.0  # (N, T)
-    max_dist_to_target = bbox_diagonal * tolerance_scale
+    # max_dist_to_target = bbox_diagonal * tolerance_scale
     
-    # Expand for broadcasting: (N, 1, T, 1)
-    max_dist_to_target = max_dist_to_target.unsqueeze(1)
-    max_dist_to_target = max_dist_to_target.unsqueeze(3)
+    # max_dist_to_target = max_dist_to_target.unsqueeze(1)
+    # max_dist_to_target = max_dist_to_target.unsqueeze(3)
+    min_dist_to_target = torch.norm(
+            test_points_expanded - camera_pos_expanded, dim=-1
+        ) - bbox_diagonal.unsqueeze(1).unsqueeze(2).expand(-1, C, -1, -1) # (N, C, T, 1)
     
     # Expand target positions: (N, 1, T, 1, 3)
     target_pos_expanded = target_positions.unsqueeze(1).unsqueeze(3)
@@ -164,14 +166,14 @@ def batch_check_occlusion(
     # Compute distance from ray hit to target center
     dist_to_target = torch.norm(ray_hits - target_pos_expanded, dim=-1)  # (N, C, T, K)
     
-    # Check if hit is within tolerance of target
-    hits_target = dist_to_target < max_dist_to_target
+    # Check if hit happens beyond the target
+    hits_target = dist_to_target > min_dist_to_target
     
-    # Check for invalid hits (inf/nan from missing intersections)
-    valid_hit = ~(torch.isinf(ray_hits).any(dim=-1) | torch.isnan(ray_hits).any(dim=-1))
+    # Check for invalid hits (nothing in between) (inf/nan from missing intersections)
+    invalid_hit = (torch.isinf(ray_hits).any(dim=-1) | torch.isnan(ray_hits).any(dim=-1))
     
     # A point is visible if it hits the target (or no geometry)
-    point_visible = hits_target | ~valid_hit  # No hit means nothing blocking
+    point_visible = hits_target | invalid_hit  # No hit means nothing blocking
     
     # Compute visibility ratio for each target
     visibility_ratio = point_visible.float().mean(dim=-1)  # (N, C, T)

@@ -171,7 +171,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
                 rigid_body_enabled=True,
             ),
             copy_from_source=False,
-            scale=(6, 6, 6)
+            scale=(15.0, 15.0, 15.0)
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(5.0, 0.0, 3.5), rot=(1.0, 0.0, 0.0, 0.0)),
     )
@@ -669,16 +669,67 @@ class IrisMAEnv(DirectMARLEnv):
             # Image shapes
             image_shapes[agent_id] = (self.agent_camera_cfgs[agent_id].height, self.agent_camera_cfgs[agent_id].width)
 
-        # @TODO: Apply updated intrinsics to individual camera sensors. Currently batched implementation is not supported.
-        # if DEBUG_DRAW:
-        #     for i, agent_id in enumerate(self.cfg.possible_agents):
-        #         current_focal_length = self.base_focal_length[agent_id] * self.zoom_level[agent_id]
-        #         for env_id in range(self.num_envs):
-        #             self._cameras[agent_id][env_id].set_intrinsic_matrices(
-        #                 self.camera_intrinsics[agent_id][env_id, :, :], 
-        #                 current_focal_length[env_id].item(),
-        #                 env_id
-        #             )
+        if DEBUG_DRAW:
+            for i, agent_id in enumerate(self.cfg.possible_agents):
+                current_focal_length = self.base_focal_length[agent_id] * self.zoom_level[agent_id]
+                self._cameras[agent_id].set_intrinsic_matrices_batched(
+                    self.camera_intrinsics[agent_id], 
+                    current_focal_length
+                )
+                """
+                @file: source/isaaclab/isaaclab/sensors/camera/camera.py (modified)
+                ️@description: Added method to set intrinsic matrices in batch.
+                def set_intrinsic_matrices_batched(
+                    self, matrices: torch.Tensor, focal_length: torch.tensor, env_ids: Sequence[int] | None = None
+                ):
+                    # resolve env_ids
+                    if env_ids is None:
+                        env_ids = self._ALL_INDICES
+                    # convert matrices to numpy tensors
+                    if isinstance(matrices, torch.Tensor):
+                        matrices = matrices.cpu().numpy()
+                    else:
+                        matrices = np.asarray(matrices, dtype=float)
+                    # iterate over env_ids
+                    for i, intrinsic_matrix in zip(env_ids, matrices):
+                        # extract parameters from matrix
+                        f_x = intrinsic_matrix[0, 0]
+                        c_x = intrinsic_matrix[0, 2]
+                        f_y = intrinsic_matrix[1, 1]
+                        c_y = intrinsic_matrix[1, 2]
+                        # get viewport parameters
+                        height, width = self.image_shape
+                        height, width = float(height), float(width)
+                        # resolve parameters for usd camera
+                        params = {
+                            "focal_length": focal_length[i].item(),
+                            "horizontal_aperture": width * focal_length[i].item() / f_x,
+                            "vertical_aperture": height * focal_length[i].item() / f_y,
+                            "horizontal_aperture_offset": (c_x - width / 2) / f_x,
+                            "vertical_aperture_offset": (c_y - height / 2) / f_y,
+                        }
+
+                        # TODO: Adjust to handle aperture offsets once supported by omniverse
+                        #   Internal ticket from rendering team: OM-42611
+                        if params["horizontal_aperture_offset"] > 1e-4 or params["vertical_aperture_offset"] > 1e-4:
+                            omni.log.warn("Camera aperture offsets are not supported by Omniverse. These parameters are ignored.")
+
+                        # change data for corresponding camera index
+                        sensor_prim = self._sensor_prims[i]
+                        # set parameters for camera
+                        for param_name, param_value in params.items():
+                            # convert to camel case (CC)
+                            param_name = to_camel_case(param_name, to="CC")
+                            # get attribute from the class
+                            param_attr = getattr(sensor_prim, f"Get{param_name}Attr")
+                            # set value
+                            # note: We have to do it this way because the camera might be on a different
+                            #   layer (default cameras are on session layer), and this is the simplest
+                            #   way to set the property on the right layer.
+                            omni.usd.set_prop_val(param_attr(), param_value)
+                    # update the internal buffers
+                    self._update_intrinsic_matrices(env_ids)
+                """
         # Get target poses with correct dimensions
         target_pos = self.target.data.root_pos_w  # May be (N, 3)
         target_quat = self.target.data.root_quat_w  # May be (N, 4)
