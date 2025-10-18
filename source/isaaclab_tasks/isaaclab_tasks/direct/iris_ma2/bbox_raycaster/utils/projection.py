@@ -162,6 +162,41 @@ def batch_project_to_image_plane(
     
     return pixels, z, valid_mask
 
+def create_intrinsic_matrix_tensor(camera_cfg_batch: torch.Tensor) -> torch.Tensor:
+    """Create intrinsic matrices from camera configuration batch per agent.
+    
+    Args:
+        camera_cfg_batch: Batched tensor of shape (n, 6) containing camera parameters
+            where the last dimension contains (width, height, focal_length, horizontal_aperture, clipping_range[0], clipping_range[1]).
+
+    Returns:
+        intrinsic_matrices: Camera intrinsic matrices. Shape (N, 3, 3).
+    """
+    N, P = camera_cfg_batch.shape[:2]
+    
+    # Extract parameters
+    width = camera_cfg_batch[:, 0]  # (N, C)
+    height = camera_cfg_batch[:, 1]
+    focal_length = camera_cfg_batch[:, 2]
+    horizontal_aperture = camera_cfg_batch[:, 3]
+
+    # Compute focal lengths in pixels
+    fx = (focal_length / horizontal_aperture) * width  # (N, C)
+    fy = (focal_length / horizontal_aperture) * height
+
+    # Principal point at image center
+    cx = width / 2.0
+    cy = height / 2.0
+    
+    # Construct intrinsic matrices
+    intrinsic_matrices = torch.zeros((N, 3, 3), device=camera_cfg_batch.device, dtype=camera_cfg_batch.dtype)
+    intrinsic_matrices[:, 0, 0] = fx
+    intrinsic_matrices[:, 1, 1] = fy
+    intrinsic_matrices[:, 0, 2] = cx
+    intrinsic_matrices[:, 1, 2] = cy
+    intrinsic_matrices[:, 2, 2] = 1.0
+    
+    return intrinsic_matrices
 
 def check_points_in_fov(
     pixels: torch.Tensor,

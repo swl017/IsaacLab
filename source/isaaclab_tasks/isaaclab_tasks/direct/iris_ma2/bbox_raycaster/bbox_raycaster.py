@@ -116,7 +116,7 @@ class BBoxRayCaster:
         #   - (N, 8, 3) if targets differ per environment
         self.target_bbox_corners_local: torch.Tensor | None = None
         self.target_bbox_sizes: torch.Tensor | None = None
-        self.targets_share_bbox: bool = True  # Flag set during extraction
+        self.targets_share_bbox: bool = False  # Flag set during extraction
         
         self._extract_target_bboxes()
 
@@ -404,6 +404,7 @@ class BBoxRayCaster:
 
         # Output buffers
         self._data.bboxes = torch.zeros((N, C, T, 4), device=self.device)
+        self._data.bboxes_xyxy = torch.zeros((N, C, T, 4), device=self.device)
         self._data.bboxes_normalized = torch.zeros((N, C, T, 4), device=self.device)
         self._data.valid_mask = torch.zeros((N, C, T), device=self.device, dtype=torch.bool)
 
@@ -631,6 +632,7 @@ class BBoxRayCaster:
 
         # Store in data container
         self._data.bboxes = bbox_xywh
+        self._data.bboxes_xyxy = bbox_xyxy
 
         # Normalize by image dimensions
         bbox_normalized = normalize_bboxes(
@@ -642,6 +644,7 @@ class BBoxRayCaster:
 
         # Initialize validity mask with bbox computation result
         self._data.valid_mask = bbox_valid
+        self._data.valid_bbox_compute_mask = bbox_valid
 
     def _validate_detections(self):
         """Validate bbox detections based on various criteria."""
@@ -660,6 +663,8 @@ class BBoxRayCaster:
 
         # Combine with existing validity
         self._data.valid_mask = self._data.valid_mask & corners_ok & size_ok
+        self._data.valid_bbox_corners_mask = corners_ok
+        self._data.valid_bbox_size_mask = size_ok
 
     def _check_occlusions(self):
         """Check for occlusions using raycasting."""
@@ -700,6 +705,8 @@ class BBoxRayCaster:
 
         # Store visibility ratio
         self._data.occlusion_visibility_ratio = visibility_ratio
+
+        self._data.valid_bbox_visibility_mask = visibility_mask
 
         # Update validity mask with occlusion check
         self._data.valid_mask = self._data.valid_mask & visibility_mask

@@ -62,6 +62,12 @@ class BBoxRayCasterData:
     Shape is (N, C, T, 4), where the last dimension contains (center_x, center_y, width, height) in pixels.
     """
 
+    bboxes_xyxy: torch.Tensor = None
+    """2D bounding boxes in pixel coordinates.
+
+    Shape is (N, C, T, 4), where the last dimension contains (x_min, y_min, x_max, y_max) in pixels.
+    """
+
     bboxes_normalized: torch.Tensor = None
     """2D bounding boxes normalized by image dimensions.
     
@@ -74,6 +80,11 @@ class BBoxRayCasterData:
     Shape is (N, C, T). A value of True indicates the bounding box is valid (fully visible,
     correct size, not occluded).
     """
+
+    valid_bbox_compute_mask: torch.Tensor = None
+    valid_bbox_visibility_mask: torch.Tensor = None
+    valid_bbox_corners_mask: torch.Tensor = None
+    valid_bbox_size_mask: torch.Tensor = None
 
     # Debug/visualization data (optional)
     projected_corners_2d: torch.Tensor = None

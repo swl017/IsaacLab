@@ -36,12 +36,12 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab_assets import IRIS_GIMBAL2_CFG
 from isaaclab.markers import CUBOID_MARKER_CFG, FRAME_MARKER_CFG
 
-from point_mass import PointMass
-from bbox_generator import BBoxGenerator
-from camera_frustrum import CameraFrustrum, create_camera_cfg_tensor, project_2d_to_3d
-# from .point_mass import PointMass
-# from .bbox_generator import BBoxGenerator
-# from .camera_frustrum import CameraFrustrum, create_camera_cfg_tensor, project_2d_to_3d
+# from point_mass import PointMass
+# from bbox_generator import BBoxGenerator
+# from camera_frustrum import CameraFrustrum, create_camera_cfg_tensor, project_2d_to_3d
+from .point_mass import PointMass
+from .bbox_generator import BBoxGenerator
+from .camera_frustrum import CameraFrustrum, create_camera_cfg_tensor, project_2d_to_3d
 
 import carb
 
@@ -57,8 +57,8 @@ if DEBUG_DRAW:
             DEBUG_DRAW = False
             omni_debug_draw = None
 
-import bbox_raycaster
-# from . import bbox_raycaster
+# import bbox_raycaster
+from . import bbox_raycaster
 
 class IrisMAEnvWindow(BaseEnvWindow):
     """Window manager for the Multi-Agent Iris environment."""
@@ -159,7 +159,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
         ),
     )
 
-    # Target configuration (shared between agents)
+    # Target configuration
     target_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/target",
         spawn=sim_utils.UsdFileCfg(
@@ -171,6 +171,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
                 rigid_body_enabled=True,
             ),
             copy_from_source=False,
+            scale=(6, 6, 6)
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(5.0, 0.0, 3.5), rot=(1.0, 0.0, 0.0, 0.0)),
     )
@@ -183,15 +184,32 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     
     research: ResearchLoggingCfg = ResearchLoggingCfg()
 
-    bbox_ray: bbox_raycaster.BBoxRayCasterCfg = bbox_raycaster.BBoxRayCasterCfg(
-        target_prim_paths=["/World/envs/env_.*/target"],
-        mesh_prim_paths=["/World/ground", "World/envs/env_.*/{robot_name}"],
-        num_cameras_per_env=len(possible_agents),
-        min_bbox_size=(0.01, 0.01),
+    bbox_raycaster: bbox_raycaster.BBoxRayCasterCfg = bbox_raycaster.BBoxRayCasterCfg(
+        target_prim_paths=[], # Will be set dynamically in _setup_scene
+        mesh_prim_paths=["/World/ground"],
+        
+        # Camera configuration
+        num_cameras_per_env=2,
+        num_cameras_per_agent=1,
+        
+        # Validation thresholds
+        min_bbox_size=(0.02, 0.02),
+        max_bbox_size=(0.90, 0.90),
         partial_detection_allowed=False,
+        min_bbox_area_pixels=1.0,
+        
+        # Occlusion detection
+        enable_occlusion_check=True,
+        occlusion_ray_pattern="center_only",
+        occlusion_visibility_threshold=0.5,
+        occlusion_ray_tolerance=1.1,
+        
+        # Performance
         max_distance=100.0,
+        
+        # Debug
         debug_vis=True,
-        debug_vis_occlusion_rays=True,
+        debug_memory=False,
     )
 
     # Control parameters
@@ -200,7 +218,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     yaw_moment_scale = 1.0
     
     # Motion limits
-    max_target_speed = 15.0
+    max_target_speed = 0.0
     max_lin_vel = 15.0
     max_yaw_rate = 20.0
     max_lin_acc = 3.0
@@ -287,7 +305,7 @@ class IrisMAEnv(DirectMARLEnv):
             for agent in self.cfg.possible_agents
         }
         
-        # Target movement (shared)
+        # Target movement
         self.target_vel = torch.zeros(self.num_envs, 6, device=self.device).uniform_(-1.0, 1.0)
         self.last_target_vel = self.target_vel.clone()
         self.target_acceleration = torch.zeros(self.num_envs, 6, device=self.device)
@@ -327,20 +345,33 @@ class IrisMAEnv(DirectMARLEnv):
             agent: torch.ones(self.num_envs, device=self.device) * 1.0
             for agent in self.cfg.possible_agents
         }
-        self.base_focal_length = self.cfg.camera.spawn.focal_length
+        self.base_focal_length = {
+            agent: torch.full(
+                (self.num_envs,),
+                float(self.agent_camera_cfgs[agent].spawn.focal_length),
+                device=self.device,
+                dtype=torch.float32,
+            )
+            for agent in self.cfg.possible_agents
+        }
         
         # Camera configuration batch for each agent
         self.camera_cfg_batch = {
             agent_id: create_camera_cfg_tensor(agent_cfg, self.num_envs, device=self.device)
             for agent_id, agent_cfg in self.agent_camera_cfgs.items()
-        }
+        } # Shape (N, 6) per agent
+        self.camera_intrinsics = {
+            agent: bbox_raycaster.utils.create_intrinsic_matrix_tensor(self.camera_cfg_batch[agent])
+            for agent in self.cfg.possible_agents
+        } # Shape (N, 3, 3) per agent
+        self.base_intrinsic_matrices = self.camera_intrinsics.copy()
         camera_offset_rot_single = torch.tensor(cfg.camera.offset.rot, device=self.device)
         self.camera_offset_rot_batch = camera_offset_rot_single.unsqueeze(0).expand(self.num_envs, -1)
         camera_offset_pos_single = torch.tensor(cfg.camera.offset.pos, device=self.device)
         self.camera_offset_pos_batch = camera_offset_pos_single.unsqueeze(0).expand(self.num_envs, -1)
         
         self.bbox_raycaster = bbox_raycaster.BBoxRayCaster(
-            cfg=self.cfg.bbox_ray, 
+            cfg=self.cfg.bbox_raycaster, 
             num_envs=self.num_envs,
             num_targets_per_env=1,
             device=self.device,
@@ -454,6 +485,23 @@ class IrisMAEnv(DirectMARLEnv):
                 robot_index = agent_id.split("_")[-1]
                 self.scene.sensors[f"camera_{robot_index}"] = camera
         
+        # Configure and initialize bbox raycaster
+        self.cfg.bbox_raycaster.debug_vis = DEBUG_DRAW
+        self.cfg.bbox_raycaster.target_prim_paths = self.scene.env_prim_paths
+        # This gives: ["/World/envs/env_0", "/World/envs/env_1", ...]
+        # BBoxRayCaster will:
+        #   1. Append "/target" to each path
+        #   2. Extract bbox from all environments
+        #   3. Automatically detect if all targets identical
+        #   4. Optimize storage accordingly
+        
+        self.bbox_raycaster = bbox_raycaster.BBoxRayCaster(
+            cfg=self.cfg.bbox_raycaster,
+            num_envs=self.num_envs,
+            num_targets_per_env=1,
+            device=self.device
+        )
+
         # Add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
@@ -508,58 +556,6 @@ class IrisMAEnv(DirectMARLEnv):
             self.zoom_level[agent_id] += delta_zoom
             self.zoom_level[agent_id] = torch.clamp(self.zoom_level[agent_id], 1.0, 10.0)
             
-            # Update camera parameters for each agent
-            current_focal_length = self.base_focal_length * self.zoom_level[agent_id]
-            self.camera_cfg_batch[agent_id][:, 2] = current_focal_length
-
-            # Compute camera pose for bounding box generation
-            robot_pos = robot.data.root_pos_w
-            robot_quat = robot.data.root_state_w[:, 3:7]
-            
-            gimbal_yaw = robot.data.joint_pos[:, gimbal_idx["yaw"]]
-            gimbal_roll = robot.data.joint_pos[:, gimbal_idx["roll"]]
-            gimbal_pitch = robot.data.joint_pos[:, gimbal_idx["pitch"]]
-            
-            gimbal_quat = quat_mul(
-                quat_mul(
-                    quat_from_euler_xyz(torch.zeros_like(gimbal_yaw), torch.zeros_like(gimbal_yaw), gimbal_yaw),
-                    quat_from_euler_xyz(gimbal_roll, torch.zeros_like(gimbal_roll), torch.zeros_like(gimbal_roll))
-                ),
-                quat_from_euler_xyz(torch.zeros_like(gimbal_pitch), gimbal_pitch, torch.zeros_like(gimbal_pitch))
-            )
-            
-            self.camera_quat_world[agent_id] = quat_mul(robot_quat, quat_mul(gimbal_quat, self.camera_offset_rot_batch))
-            camera_offset = torch.tensor((0, 0, 0.1), device=self.device).expand(self.num_envs, -1)
-            self.camera_pos_world[agent_id] = robot_pos + quat_rotate(self.camera_quat_world[agent_id], camera_offset)
-            
-            # # Generate bounding boxes
-            # bbox_gen = BBoxGenerator(
-            #     camera_width=agent_cam_cfg.width, 
-            #     camera_height=agent_cam_cfg.height,
-            #     focal_length=agent_cam_cfg.spawn.focal_length, 
-            #     horizontal_aperture=agent_cam_cfg.spawn.horizontal_aperture
-            # )
-            
-            # self.bboxes[agent_id], self.bbox_valid_mask[agent_id][:, 0] = bbox_gen.generate_2d_bbox_from_pose(
-            #     self.target.data.root_state_w[:, :3], 
-            #     self.target.data.root_state_w[:, 3:7],
-            #     self.camera_pos_world[agent_id], 
-            #     self.camera_quat_world[agent_id], 
-            #     min_bbox_size=int(0.1*agent_cam_cfg.width),
-            #     focal_length=current_focal_length
-            # )
-            
-            # # Normalize bounding boxes
-            # self.bboxes_normalized[agent_id] = self.bboxes[agent_id].clone()
-            # valid = self.bbox_valid_mask[agent_id].squeeze(-1)
-            # self.bboxes_normalized[agent_id][:, 0] = torch.where(valid, self.bboxes[agent_id][:, 0] / agent_cam_cfg.width, torch.ones_like(self.bboxes[agent_id][:, 0]) * (-1.0))
-            # self.bboxes_normalized[agent_id][:, 1] = torch.where(valid, self.bboxes[agent_id][:, 1] / agent_cam_cfg.height, torch.ones_like(self.bboxes[agent_id][:, 1]) * (-1.0))
-            # self.bboxes_normalized[agent_id][:, 2] = torch.where(valid, self.bboxes[agent_id][:, 2] / agent_cam_cfg.width, torch.ones_like(self.bboxes[agent_id][:, 2]) * (-1.0))
-            # self.bboxes_normalized[agent_id][:, 3] = torch.where(valid, self.bboxes[agent_id][:, 3] / agent_cam_cfg.height, torch.ones_like(self.bboxes[agent_id][:, 3]) * (-1.0))
-        
-            self.bbox_raycaster.update(
-                
-            )
 
         # Update target movement (shared)
         self._update_target_movement(mode="circular")
@@ -601,37 +597,110 @@ class IrisMAEnv(DirectMARLEnv):
         # Apply target velocity
         self.target.write_root_com_velocity_to_sim(self.target_vel)
         
-        # Debug visualization
-        if DEBUG_DRAW and hasattr(self, 'draw_interface'):
-            self.draw_interface.clear_lines()
-            for agent_id in self.cfg.possible_agents:
-                # Draw line to target
-                line_colors_yellow = torch.tensor([[1.0, 1.0, 0.0, 1.0]], device=self.device).repeat(self.num_envs, 1)
-                line_colors_green = torch.tensor([[0.0, 1.0, 0.0, 1.0]], device=self.device).repeat(self.num_envs, 1)
-                line_colors = torch.where(self.bbox_valid_mask[agent_id], line_colors_green, line_colors_yellow).tolist()
-                line_thicknesses = [5.0] * self.camera_pos_world[agent_id].shape[0]
-                self.draw_interface.draw_lines(
-                    self.camera_pos_world[agent_id].tolist(), 
-                    self.target.data.root_pos_w.tolist(), 
-                    line_colors, 
-                    line_thicknesses
-                )
-                
-                # Draw camera frustum
-                if hasattr(self, 'camera_frustrum'):
-                    self.camera_frustrum.draw_frustrum(
-                        camera_position=self.camera_pos_world[agent_id],
-                        camera_orientation=self.camera_quat_world[agent_id],
-                        camera_intrinsics=self.camera_cfg_batch[agent_id],
-                        zoom_level=self.zoom_level[agent_id],
-                        device=self.device
-                    )
+        
 
     def _get_observations(self) -> Dict[str, torch.Tensor]:
         """Get observations for all agents."""
+        camera_poses = {}
+        camera_intrinsics = {}
+        image_shapes = {}
+        for agent_id in self.cfg.possible_agents:
+            robot = self._robots[agent_id]
+
+            # Update camera parameters for each agent
+            current_focal_length = self.base_focal_length[agent_id] * self.zoom_level[agent_id]
+            self.camera_cfg_batch[agent_id][:, 2] = current_focal_length
+
+            # Compute camera pose for bounding box generation
+            robot_pos = robot.data.root_pos_w
+            robot_quat = robot.data.root_state_w[:, 3:7]
+            
+            gimbal_idx = self.gimbal_joint_idx[agent_id]
+            gimbal_yaw = robot.data.joint_pos[:, gimbal_idx["yaw"]]
+            gimbal_roll = robot.data.joint_pos[:, gimbal_idx["roll"]]
+            gimbal_pitch = robot.data.joint_pos[:, gimbal_idx["pitch"]]
+            
+            gimbal_quat = quat_mul(
+                quat_mul(
+                    quat_from_euler_xyz(torch.zeros_like(gimbal_yaw), torch.zeros_like(gimbal_yaw), gimbal_yaw),
+                    quat_from_euler_xyz(gimbal_roll, torch.zeros_like(gimbal_roll), torch.zeros_like(gimbal_roll))
+                ),
+                quat_from_euler_xyz(torch.zeros_like(gimbal_pitch), gimbal_pitch, torch.zeros_like(gimbal_pitch))
+            )
+            
+            self.camera_quat_world[agent_id] = quat_mul(robot_quat, quat_mul(gimbal_quat, self.camera_offset_rot_batch))
+            camera_offset = torch.tensor((0, 0, 0.1), device=self.device).expand(self.num_envs, -1)
+            self.camera_pos_world[agent_id] = robot_pos + quat_rotate(self.camera_quat_world[agent_id], camera_offset)
+            
+            # # Generate bounding boxes
+            # bbox_gen = BBoxGenerator(
+            #     camera_width=agent_cam_cfg.width, 
+            #     camera_height=agent_cam_cfg.height,
+            #     focal_length=agent_cam_cfg.spawn.focal_length, 
+            #     horizontal_aperture=agent_cam_cfg.spawn.horizontal_aperture
+            # )
+            
+            # self.bboxes[agent_id], self.bbox_valid_mask[agent_id][:, 0] = bbox_gen.generate_2d_bbox_from_pose(
+            #     self.target.data.root_state_w[:, :3], 
+            #     self.target.data.root_state_w[:, 3:7],
+            #     self.camera_pos_world[agent_id], 
+            #     self.camera_quat_world[agent_id], 
+            #     min_bbox_size=int(0.1*agent_cam_cfg.width),
+            #     focal_length=current_focal_length
+            # )
+            
+            # # Normalize bounding boxes
+            # self.bboxes_normalized[agent_id] = self.bboxes[agent_id].clone()
+            # valid = self.bbox_valid_mask[agent_id].squeeze(-1)
+            # self.bboxes_normalized[agent_id][:, 0] = torch.where(valid, self.bboxes[agent_id][:, 0] / agent_cam_cfg.width, torch.ones_like(self.bboxes[agent_id][:, 0]) * (-1.0))
+            # self.bboxes_normalized[agent_id][:, 1] = torch.where(valid, self.bboxes[agent_id][:, 1] / agent_cam_cfg.height, torch.ones_like(self.bboxes[agent_id][:, 1]) * (-1.0))
+            # self.bboxes_normalized[agent_id][:, 2] = torch.where(valid, self.bboxes[agent_id][:, 2] / agent_cam_cfg.width, torch.ones_like(self.bboxes[agent_id][:, 2]) * (-1.0))
+            # self.bboxes_normalized[agent_id][:, 3] = torch.where(valid, self.bboxes[agent_id][:, 3] / agent_cam_cfg.height, torch.ones_like(self.bboxes[agent_id][:, 3]) * (-1.0))
+        
+            camera_poses[agent_id] = (self.camera_pos_world[agent_id], self.camera_quat_world[agent_id])
+
+            # Apply zoom to intrinsics
+            # Apply zoom to intrinsics using the fixed base matrices
+            self.camera_intrinsics[agent_id] = self.base_intrinsic_matrices[agent_id].clone()
+            self.camera_intrinsics[agent_id][:, 0, 0] *= self.zoom_level[agent_id]
+            self.camera_intrinsics[agent_id][:, 1, 1] *= self.zoom_level[agent_id]
+            camera_intrinsics[agent_id] = self.camera_intrinsics[agent_id]
+
+            # Image shapes
+            image_shapes[agent_id] = (self.agent_camera_cfgs[agent_id].height, self.agent_camera_cfgs[agent_id].width)
+
+        # @TODO: Apply updated intrinsics to individual camera sensors. Currently batched implementation is not supported.
+        # if DEBUG_DRAW:
+        #     for i, agent_id in enumerate(self.cfg.possible_agents):
+        #         current_focal_length = self.base_focal_length[agent_id] * self.zoom_level[agent_id]
+        #         for env_id in range(self.num_envs):
+        #             self._cameras[agent_id][env_id].set_intrinsic_matrices(
+        #                 self.camera_intrinsics[agent_id][env_id, :, :], 
+        #                 current_focal_length[env_id].item(),
+        #                 env_id
+        #             )
+        # Get target poses with correct dimensions
+        target_pos = self.target.data.root_pos_w  # May be (N, 3)
+        target_quat = self.target.data.root_quat_w  # May be (N, 4)
+        
+        # Add target dimension if missing
+        if target_pos.ndim == 2:
+            target_pos = target_pos.unsqueeze(1)  # (N, 3) -> (N, 1, 3)
+        if target_quat.ndim == 2:
+            target_quat = target_quat.unsqueeze(1)  # (N, 4) -> (N, 1, 4)
+        
+        target_poses = (target_pos, target_quat)
+
+        self.bbox_raycaster.update(
+            camera_poses=camera_poses,
+            camera_intrinsics=camera_intrinsics,
+            target_poses=target_poses,
+            image_shapes=image_shapes
+        )
+
         observations = {}
         
-        for agent_id in self.cfg.possible_agents:
+        for i, agent_id in enumerate(self.cfg.possible_agents):
             robot = self._robots[agent_id]
             # This logic is specific to a 2-agent scenario
             other_agent_id = next(aid for aid in self.cfg.possible_agents if aid != agent_id)
@@ -642,6 +711,9 @@ class IrisMAEnv(DirectMARLEnv):
             relative_dist = torch.norm(relative_pos, dim=1, keepdim=True)
             relative_dir = relative_pos / (relative_dist + 1e-6)
             
+            self.bboxes[agent_id]= self.bbox_raycaster.data.bboxes_xyxy[:, i, 0, :]
+            self.bbox_valid_mask[agent_id][:, 0] = self.bbox_raycaster.data.valid_mask[:, i, 0]
+
             # Triangulation angle (angle between camera-target lines)
             to_target_self = self.target.data.root_pos_w - robot.data.root_pos_w
             to_target_other = self.target.data.root_pos_w - other_robot.data.root_pos_w
@@ -873,7 +945,8 @@ class IrisMAEnv(DirectMARLEnv):
             gimbal_yaw, gimbal_pitch = self.point_to_region(
                                             default_root_state[:, :3],
                                             default_root_state[:, 3:7],
-                                            target_pos + torch.zeros_like(target_pos).uniform_(-5.0, 5.0))
+                                            target_pos)
+                                            # target_pos + torch.zeros_like(target_pos).uniform_(-5.0, 5.0))
             joint_pos[:, gimbal_idx["yaw"]] = gimbal_yaw
             joint_pos[:, gimbal_idx["pitch"]] = gimbal_pitch
             joint_pos[:, gimbal_idx["roll"]] = torch.zeros_like(joint_pos[:, gimbal_idx["roll"]])
@@ -1035,8 +1108,8 @@ class IrisMAEnv(DirectMARLEnv):
 
         # --- Noise proxy & IG_approx ---
         # Focal length used in your bbox generation is in mm; convert to meters
-        f0_m = (self.base_focal_length * self.zoom_level["drone_0"]) * 1e-3
-        f1_m = (self.base_focal_length * self.zoom_level["drone_1"]) * 1e-3
+        f0_m = (self.base_focal_length["drone_0"] * self.zoom_level["drone_0"]) * 1e-3
+        f1_m = (self.base_focal_length["drone_1"] * self.zoom_level["drone_1"]) * 1e-3
         pitch = self.cfg.research.pixel_pitch_m
         sig_px = self.cfg.research.det_std_px
         sig_th0 = sig_px * pitch / (f0_m + 1e-12)     # radians
@@ -1097,4 +1170,28 @@ class IrisMAEnv(DirectMARLEnv):
 
     def _debug_vis_callback(self, event):
         """Debug visualization callback."""
-        pass
+        if DEBUG_DRAW and hasattr(self, 'draw_interface'):
+            self.draw_interface.clear_lines()
+            for agent_id in self.cfg.possible_agents:
+                # Draw line to target
+                line_colors_yellow = torch.tensor([[1.0, 1.0, 0.0, 1.0]], device=self.device).repeat(self.num_envs, 1)
+                line_colors_green = torch.tensor([[0.0, 1.0, 0.0, 1.0]], device=self.device).repeat(self.num_envs, 1)
+                line_colors = torch.where(self.bbox_valid_mask[agent_id], line_colors_green, line_colors_yellow).tolist()
+                line_thicknesses = [5.0] * self.camera_pos_world[agent_id].shape[0]
+                self.draw_interface.draw_lines(
+                    self.camera_pos_world[agent_id].tolist(), 
+                    self.target.data.root_pos_w.tolist(), 
+                    line_colors, 
+                    line_thicknesses
+                )
+                
+                # Draw camera frustum
+                if hasattr(self, 'camera_frustrum'):
+                    self.camera_frustrum.draw_frustrum(
+                        camera_position=self.camera_pos_world[agent_id],
+                        camera_orientation=self.camera_quat_world[agent_id],
+                        camera_intrinsics=self.camera_cfg_batch[agent_id],
+                        zoom_level=self.zoom_level[agent_id],
+                        device=self.device
+                    )
+            self.bbox_raycaster.visualize()

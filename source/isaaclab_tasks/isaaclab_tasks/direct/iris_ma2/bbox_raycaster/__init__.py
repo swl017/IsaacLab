@@ -38,7 +38,8 @@ Example:
 from .bbox_raycaster import BBoxRayCaster
 from .bbox_raycaster_cfg import BBoxRayCasterCfg
 from .bbox_raycaster_data import BBoxRayCasterData
+from . import utils
 
-__all__ = ["BBoxRayCaster", "BBoxRayCasterCfg", "BBoxRayCasterData"]
+__all__ = ["BBoxRayCaster", "BBoxRayCasterCfg", "BBoxRayCasterData", "utils"]
 
 __version__ = "1.0.0"
