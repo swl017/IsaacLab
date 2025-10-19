@@ -426,6 +426,8 @@ class IrisMAEnv(DirectMARLEnv):
         self.camera_intrinsics_stacked = torch.zeros(
             self.num_envs, len(self.cfg.possible_agents), 3, 3, device=self.device
         )
+        self.camera_intrinsics_stacked[:, 0, :, :] = self.camera_intrinsics[self.cfg.possible_agents[0]]
+        self.camera_intrinsics_stacked[:, 1, :, :] = self.camera_intrinsics[self.cfg.possible_agents[1]]
 
         # Define uncertainty covariances
         # Target position uncertainty [N, T, 3, 3]
@@ -920,7 +922,7 @@ class IrisMAEnv(DirectMARLEnv):
             #     gimbal_yaws=self.gimbal_yaws_stacked,
             #     gimbal_pitches=self.gimbal_pitches_stacked,
             #     camera_intrinsics=self.camera_intrinsics_stacked,
-            #     pixel_std=0.5  # 0.5 pixel standard deviation
+            #     pixel_std=50.0
             # )
             # Full covariance computation 
             self.Sigma_X, trace_cov = triangulation_covariance_multi_camera(
