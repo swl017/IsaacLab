@@ -202,7 +202,7 @@ class BBoxRayCaster:
         """
         self._track_memory("start")
 
-        # Step 1: Stack camera data from dict to tensors
+        # Step 1: Stack camera data from dict to tensors. (N, C, 3), (N, C, 4), (N, C, 3, 3)
         camera_pos_w, camera_quat_w, intrinsic_matrices = self._stack_camera_data(
             camera_poses, camera_intrinsics
         )
@@ -211,7 +211,7 @@ class BBoxRayCaster:
         if image_shapes is not None:
             self._update_image_shapes(image_shapes)
 
-        # Step 3: Validate and normalize inputs
+        # Step 3: Validate and normalize inputs. (N, T, 3), (N, T, 4)
         target_pos_w, target_quat_w = target_poses
         target_quat_w = self._normalize_quaternions(target_quat_w, self.cfg.quat_normalize_epsilon)
         camera_quat_w = self._normalize_quaternions(camera_quat_w, self.cfg.quat_normalize_epsilon)

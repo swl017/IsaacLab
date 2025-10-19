@@ -116,3 +116,10 @@ class BBoxRayCasterData:
     Shape is (N, C, T). Values range from 0.0 (fully occluded) to 1.0 (fully visible).
     Only populated when occlusion checking is enabled.
     """
+
+    ray_dir_w: torch.Tensor = None
+    """Ray directions from camera to target in world frame.
+
+    Shape is (N, C, T, 3), where N is the number of environments, C is the number of cameras per environment,
+    and T is the number of targets per environment.
+    """
