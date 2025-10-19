@@ -115,7 +115,8 @@ class BBoxRayCaster:
         # Load meshes for raycasting
         self.static_mesh: wp.Mesh | None = None
         self.agent_meshes: Dict[str, wp.Mesh] = {}
-        self._initialize_meshes()
+        if cfg.enable_occlusion_check:
+            self._initialize_meshes()
 
         # Extract target bounding boxes (one-time, handles all environments)
         self.target_bbox_corners_local: torch.Tensor | None = None

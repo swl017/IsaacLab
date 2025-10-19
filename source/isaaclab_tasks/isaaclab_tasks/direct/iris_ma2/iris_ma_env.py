@@ -1083,18 +1083,18 @@ class IrisMAEnv(DirectMARLEnv):
                 self.cfg.curriculum_tracking_end_step += self.cfg.curriculum_tracking_start_step
                 self.cfg.curriculum_coordination_start_step = self.cfg.curriculum_tracking_end_step
 
-        formation_center = torch.zeros(self.num_envs, 3, device=self.device)
+        formation_center = torch.zeros(len(env_ids), 3, device=self.device)
         formation_center[:, 0] = torch.zeros_like(formation_center[:, 0]).uniform_(-5.0, 5.0)
         formation_center[:, 1] = torch.zeros_like(formation_center[:, 1]).uniform_(0, 10.0)
         formation_center[:, 2] = torch.zeros_like(formation_center[:, 2]).uniform_(15.0, 20.0)
 
-        gap_ref = torch.zeros(self.num_envs, 3, device=self.device)
+        gap_ref = torch.zeros(len(env_ids), 3, device=self.device)
         gap_ref[:, 0] = torch.zeros_like(gap_ref[:, 0]).uniform_(-5.0, 5.0)
         gap_ref[:, 1] = torch.zeros_like(gap_ref[:, 1]).uniform_(0, 10.0)
         gap_ref[:, 2] = torch.zeros_like(gap_ref[:, 2]).uniform_(5.0, 7.0)
 
         # Reset target position (centered between drones)
-        target_pos = torch.zeros(self.num_envs, 3, device=self.device)
+        target_pos = torch.zeros(len(env_ids), 3, device=self.device)
         start = self.cfg.curriculum_tracking_start_step
         end = self.cfg.curriculum_tracking_end_step
         progress = (self.common_step_counter - start) / (end - start)
@@ -1137,9 +1137,9 @@ class IrisMAEnv(DirectMARLEnv):
             default_root_state[:, 0:2] += formation_center[:, 0:2] + gap_ref[:, 0:2] * (idx + 1) * (-1)**(idx + gap_ref[:, 0:2].int())
             default_root_state[:, 2] += formation_center[:, 2] + gap_ref[:, 2] * (-1)**(idx + gap_ref[:, 2].int())
             default_root_state[:, 3:7] = quat_from_euler_xyz(
-                                            torch.zeros(self.num_envs, device=self.device),
-                                            torch.zeros(self.num_envs, device=self.device),
-                                            torch.zeros(self.num_envs, device=self.device))
+                                            torch.zeros(len(env_ids), device=self.device),
+                                            torch.zeros(len(env_ids), device=self.device),
+                                            torch.zeros(len(env_ids), device=self.device))
                                             # torch.zeros(len(env_ids), device=self.device).uniform_(-math.pi*1/6, math.pi*1/6))
 
             # Reset gimbal targets
