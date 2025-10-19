@@ -337,11 +337,19 @@ def triangulation_covariance_multi_camera(
     # Sigma_theta: [N, C, M, M]
     # W_i: [N, C, 2, 2]
     
+    # Get M (nuisance parameters per camera)
+    M = J_theta.shape[-1]
+    
     # Reshape for batch matrix operations
-    # Stack cameras: [N, T, 2C, 3], [N, T, 2C, M], etc.
+    # Stack cameras: [N, T, 2C, 3]
     JX_stacked = JX.reshape(N, T, 2*C, 3)
-    J_theta_stacked = J_theta.reshape(N, T, 2*C, -1)
-    M = J_theta_stacked.shape[-1]
+    
+    # Create block diagonal J_theta: [N, T, 2C, CM]
+    # Each camera's 2 measurements only depend on its own M parameters
+    J_theta_stacked = torch.zeros(N, T, 2*C, C*M, device=device)
+    for c in range(C):
+        # Camera c's measurements (rows 2c:2c+2) depend on parameters [c*M:(c+1)*M]
+        J_theta_stacked[:, :, 2*c:2*c+2, c*M:(c+1)*M] = J_theta[:, :, c, :, :]
     
     # Block diagonal weight matrix [N, 2C, 2C]
     W_block = torch.zeros(N, 2*C, 2*C, device=device)

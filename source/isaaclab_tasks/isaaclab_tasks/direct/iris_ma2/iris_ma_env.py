@@ -484,7 +484,10 @@ class IrisMAEnv(DirectMARLEnv):
                 markers={
                     "sphere": sim_utils.SphereCfg(
                         radius=0.5,
-                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0)),
+                        visual_material=sim_utils.PreviewSurfaceCfg(
+                            diffuse_color=(0.0, 1.0, 0.0),
+                            opacity=0.6,
+                        ),
                     ),
                 }
             )
