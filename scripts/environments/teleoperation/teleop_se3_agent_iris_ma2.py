@@ -220,9 +220,9 @@ def visualize_bboxes(
         # if occluded:
         #     continue
         # Draw rectangle
-        color = (0, 125, 125)
-        cv2.rectangle(vis_image, (min_x, min_y), (max_x, max_y), color, 2)
-        # cv2.rectangle(vis_image, (x, y), (x + w, y + h), color, 2)
+        color = (125, 125, 125)
+        # cv2.rectangle(vis_image, (min_x, min_y), (max_x, max_y), color, 2)
+        cv2.rectangle(vis_image, (x, y), (x + w, y + h), color, 2)
         
         # Add label
         # if bbox_type == "semantic":
@@ -422,22 +422,25 @@ def main():
             segmentation_data01 = env.scene["camera_1"].data.output["rgba"][0].cpu().numpy()
             segmentation_data10 = env.scene["camera_0"].data.output["rgba"][1].cpu().numpy()
             segmentation_data11 = env.scene["camera_1"].data.output["rgba"][1].cpu().numpy()
-            env_bboxes = env.bboxes
+            env_bboxes = env.bbox_raycaster.data.bboxes
             env_bboxes_xyxy = env.bbox_raycaster.data.bboxes_xyxy
             bboxes = []
             for n in range(env.num_envs):
                 for a, drone_name in enumerate(["drone_0", "drone_1"]):
                     compute = " comp" if not env.bbox_raycaster.data.valid_bbox_compute_mask[n, a, 0] else ""
-                    visibility = " vis" if not env.bbox_raycaster.data.valid_bbox_visibility_mask[n, a, 0] else ""
+                    if env.bbox_raycaster.data.valid_bbox_visibility_mask is not None:
+                        visibility = " vis" if not env.bbox_raycaster.data.valid_bbox_visibility_mask[n, a, 0] else ""
+                    else:
+                        visibility = ""
                     corners = " cor" if not env.bbox_raycaster.data.valid_bbox_corners_mask[n, a, 0] else ""
                     size = " size" if not env.bbox_raycaster.data.valid_bbox_size_mask[n, a, 0] else ""
                     status = "valid" if env.bbox_raycaster.data.valid_mask[n, a, 0] else "invalid: " + compute + visibility + corners + size
                     bbox = {
                         "class_id": "target " + status,
-                        "center_x_px": int(env_bboxes[drone_name][n,0].item()),
-                        "center_y_px": int(env_bboxes[drone_name][n,1].item()),
-                        "width_px": int(env_bboxes[drone_name][n,2].item()),
-                        "height_px": int(env_bboxes[drone_name][n,3].item()),
+                        "center_x_px": int(env_bboxes[n, a, 0, 0].item()),
+                        "center_y_px": int(env_bboxes[n, a, 0, 1].item()),
+                        "width_px": int(env_bboxes[n, a, 0, 2].item()),
+                        "height_px": int(env_bboxes[n, a, 0, 3].item()),
                         "min_x_px": int(env_bboxes_xyxy[n, a, 0, 0].item()),
                         "min_y_px": int(env_bboxes_xyxy[n, a, 0, 1].item()),
                         "max_x_px": int(env_bboxes_xyxy[n, a, 0, 2].item()),

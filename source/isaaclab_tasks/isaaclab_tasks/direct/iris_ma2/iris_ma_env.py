@@ -105,8 +105,8 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
         "drone_1": 7,
     }
     observation_spaces = {
-        "drone_0": 22,  # Added formation-related observations
-        "drone_1": 22,
+        "drone_0": 25,  # Added formation-related observations
+        "drone_1": 25,
     }
     state_space = -1  # Concatenate all observations
     
@@ -209,7 +209,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
         min_bbox_area_pixels=1.0,
         
         # Occlusion detection
-        enable_occlusion_check=True,
+        enable_occlusion_check=False,
         occlusion_ray_pattern="9point",  # Start simple, can upgrade to "9point"
         occlusion_visibility_threshold=0.5,
         occlusion_ray_tolerance=1.1,
@@ -256,7 +256,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     # Multi-agent coordination rewards
     triangulation_reward_scale = 1  # Reward for good triangulation geometry
     collision_penalty_scale = -100   # Penalty for getting too close to each other
-    min_safe_distance = 5.0
+    min_safe_distance = 10.0
 
     # Triangulation parameters
     pix_std = 7.0  # pixel standard deviation
@@ -426,14 +426,24 @@ class IrisMAEnv(DirectMARLEnv):
         self.camera_intrinsics_stacked = torch.zeros(
             self.num_envs, len(self.cfg.possible_agents), 3, 3, device=self.device
         )
-        self.camera_intrinsics_stacked[:, 0, :, :] = self.camera_intrinsics[self.cfg.possible_agents[0]]
-        self.camera_intrinsics_stacked[:, 1, :, :] = self.camera_intrinsics[self.cfg.possible_agents[1]]
+        # Initialize with default values
+        for agent_idx, agent_id in enumerate(self.cfg.possible_agents):
+            default_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
+            self.robot_quats_stacked[:, agent_idx, :] = default_quat.unsqueeze(0).expand(self.num_envs, -1)
+            self.camera_intrinsics_stacked[:, agent_idx, :, :] = self.camera_intrinsics[agent_id]
 
         # Define uncertainty covariances
         # Target position uncertainty [N, T, 3, 3]
-        self.Sigma_X = torch.eye(3, device=self.device).unsqueeze(0).unsqueeze(0).expand(
+        self.Sigma_X_invalid = torch.eye(3, device=self.device).unsqueeze(0).unsqueeze(0).expand(
             self.num_envs, 1, 3, 3
-        )
+        ) * (-1.0)
+        self.Sigma_X = self.Sigma_X_invalid.clone()
+        # trace_cov: [N, T]
+        self.trace_cov_invalid = torch.ones(self.num_envs, 1, device=self.device) * (-1.0)
+        self.trace_cov = self.trace_cov_invalid.clone()
+        # Tri cov computation validity mask: [N, T]
+        self.is_tri_cov_valid = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.bool)
+
         # Pixel noise [N, C, 2, 2]
         self.Sigma_pix = torch.eye(2, device=self.device).unsqueeze(0).unsqueeze(0).expand(
             self.num_envs, len(self.cfg.possible_agents), 2, 2
@@ -455,6 +465,10 @@ class IrisMAEnv(DirectMARLEnv):
         self.Sigma_K = torch.eye(4, device=self.device).unsqueeze(0).unsqueeze(0).expand(
             self.num_envs, len(self.cfg.possible_agents), 4, 4
         ) * (self.cfg.intrinsic_std ** 2)
+
+        self.baseline_distances = torch.ones(
+            self.num_envs, len(self.cfg.possible_agents), len(self.cfg.possible_agents), 1, 
+            device=self.device) * (-1.0)
 
         self._research = {
             "cvtt_sec": torch.zeros(self.num_envs, device=self.device),
@@ -825,6 +839,66 @@ class IrisMAEnv(DirectMARLEnv):
             target_scale=self.target_scale
         )
 
+        # ===== TRIANGULATION COVARIANCE COMPUTATION =====
+        # Stack robot positions and orientations [N, C, 3] and [N, C, 4]
+        # Use pre-allocated stacked tensors for efficiency
+        for agent_idx, agent_id in enumerate(self.cfg.possible_agents):
+            robot = self._robots[agent_id]
+            joint_idx = self.gimbal_joint_idx[agent_id]
+            self.robot_positions_stacked[:, agent_idx, :] = robot.data.root_pos_w
+            self.robot_quats_stacked[:, agent_idx, :] = robot.data.root_state_w[:, 3:7]
+            self.gimbal_yaws_stacked[:, agent_idx] = robot.data.joint_pos[:, joint_idx["yaw"]]
+            self.gimbal_pitches_stacked[:, agent_idx] = robot.data.joint_pos[:, joint_idx["pitch"]]
+            self.camera_intrinsics_stacked[:, agent_idx, :, :] = self.camera_intrinsics[agent_id]
+        
+        # Target positions [N, T, 3] where T=1 (one target per environment)
+        target_pos_batch = self.target.data.root_state_w[:, :3].unsqueeze(1)  # [N, 1, 3]
+
+        try:
+            # Compute triangulation covariance using simplified version (pixel noise only)
+            # self.Sigma_X, trace_cov = triangulation_covariance_simple(
+            #     X_w=target_pos_batch,
+            #     robot_positions=self.robot_positions_stacked,
+            #     robot_quats=self.robot_quats_stacked,
+            #     gimbal_yaws=self.gimbal_yaws_stacked,
+            #     gimbal_pitches=self.gimbal_pitches_stacked,
+            #     camera_intrinsics=self.camera_intrinsics_stacked,
+            #     pixel_std=50.0
+            # )
+            # Full covariance computation 
+            self.Sigma_X, self.trace_cov = triangulation_covariance_multi_camera(
+                X_w=target_pos_batch,
+                robot_positions=self.robot_positions_stacked,
+                robot_quats=self.robot_quats_stacked,
+                gimbal_yaws=self.gimbal_yaws_stacked,
+                gimbal_pitches=self.gimbal_pitches_stacked,
+                camera_intrinsics=self.camera_intrinsics_stacked,
+                Sigma_pix=self.Sigma_pix,
+                Sigma_twb=self.Sigma_twb,
+                Sigma_phiwb=self.Sigma_phiwb,
+                Sigma_alpha=self.Sigma_alpha,
+                Sigma_beta=self.Sigma_beta,
+                Sigma_K=self.Sigma_K,
+                include_pose=True,
+                include_gimbal=True,
+                include_intrinsics=True
+            )
+            # Check validity for all targets: trace_cov should be non-negative and finite
+            # Sigma_X: [N, T, 3, 3], trace_cov: [N, T]
+            is_trace_valid = (self.trace_cov >= 0.0) & torch.isfinite(self.trace_cov)  # [N, T]
+            is_sigma_finite = torch.isfinite(self.Sigma_X).all(dim=(-2, -1))  # [N, T]
+            self.is_tri_cov_valid = is_trace_valid & is_sigma_finite  # [N, T]
+            Sigma_X_diag = torch.diagonal(self.Sigma_X, dim1=-2, dim2=-1)  # [N, T, 3]
+            Sigma_diag_sqrt = torch.sqrt(torch.clamp(Sigma_X_diag, min=0.0) + 1e-12)  # (N, T, 3)
+        except Exception as e:
+            # Fallback if computation fails
+            # print(f"Warning: Triangulation covariance computation failed: {e}")
+            self.is_tri_cov_valid = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.bool)
+            self.Sigma_X = self.Sigma_X_invalid.clone()
+            self.trace_cov = self.trace_cov_invalid.clone()
+            Sigma_diag_sqrt = torch.ones(self.num_envs, 1, 3, device=self.device) * (-1.0)
+
+
         observations = {}
         
         for i, agent_id in enumerate(self.cfg.possible_agents):
@@ -833,29 +907,9 @@ class IrisMAEnv(DirectMARLEnv):
             other_agent_id = next(aid for aid in self.cfg.possible_agents if aid != agent_id)
             other_robot = self._robots[other_agent_id]
                         
-            self.bboxes[agent_id]= self.bbox_raycaster.data.bboxes_xyxy[:, i, 0, :]
+            self.bboxes[agent_id] = self.bbox_raycaster.data.bboxes_xyxy[:, i, 0, :]
             self.bbox_valid_mask[agent_id][:, 0] = self.bbox_raycaster.data.valid_mask[:, i, 0]
-
-            # Normalize bboxes
-            agent_cam_cfg = self.agent_camera_cfgs[agent_id]
-            self.bboxes_normalized[agent_id] = self.bboxes[agent_id].clone()
-            valid = self.bbox_valid_mask[agent_id].squeeze(-1)
-            self.bboxes_normalized[agent_id][:, 0] = torch.where(
-                valid, self.bboxes[agent_id][:, 0] / agent_cam_cfg.width, 
-                torch.ones_like(self.bboxes[agent_id][:, 0]) * (-1.0)
-            )
-            self.bboxes_normalized[agent_id][:, 1] = torch.where(
-                valid, self.bboxes[agent_id][:, 1] / agent_cam_cfg.height, 
-                torch.ones_like(self.bboxes[agent_id][:, 1]) * (-1.0)
-            )
-            self.bboxes_normalized[agent_id][:, 2] = torch.where(
-                valid, self.bboxes[agent_id][:, 2] / agent_cam_cfg.width, 
-                torch.ones_like(self.bboxes[agent_id][:, 2]) * (-1.0)
-            )
-            self.bboxes_normalized[agent_id][:, 3] = torch.where(
-                valid, self.bboxes[agent_id][:, 3] / agent_cam_cfg.height, 
-                torch.ones_like(self.bboxes[agent_id][:, 3]) * (-1.0)
-            )
+            self.bboxes_normalized[agent_id] = self.bbox_raycaster.data.bboxes_normalized[:, i, 0, :] # xywh
 
             obs = torch.cat([
                 robot.data.root_state_w[:, :10],  # 10: pos, quat, lin_vel
@@ -866,6 +920,7 @@ class IrisMAEnv(DirectMARLEnv):
                 self.bboxes_normalized[agent_id],  # 4: normalized bbox
                 self.bbox_valid_mask[agent_id].float(),  # 1: validity
                 self.zoom_level[agent_id].unsqueeze(-1),  # 1: zoom level
+                Sigma_diag_sqrt[:, 0, :],  # 3: X, Y, Z (world) std deviations
             ], dim=-1)
             
             observations[agent_id] = obs
@@ -892,60 +947,10 @@ class IrisMAEnv(DirectMARLEnv):
         progress = 0 if progress < 0 else (1 if progress > 1 else progress)
         curriculum_alpha = torch.tensor(progress, device=self.device)
 
-        # ===== TRIANGULATION COVARIANCE COMPUTATION =====
-        # Stack robot positions and orientations [N, C, 3] and [N, C, 4]
-        # Use pre-allocated stacked tensors for efficiency
-        self.robot_positions_stacked[:, 0, :] = self._robots[self.cfg.possible_agents[0]].data.root_pos_w
-        self.robot_positions_stacked[:, 1, :] = self._robots[self.cfg.possible_agents[1]].data.root_pos_w
-        
-        self.robot_quats_stacked[:, 0, :] = self._robots[self.cfg.possible_agents[0]].data.root_state_w[:, 3:7]
-        self.robot_quats_stacked[:, 1, :] = self._robots[self.cfg.possible_agents[1]].data.root_state_w[:, 3:7]
-        
-        self.gimbal_yaws_stacked[:, 0] = self._robots[self.cfg.possible_agents[0]].data.joint_pos[:, self.gimbal_joint_idx[self.cfg.possible_agents[0]]["yaw"]]
-        self.gimbal_yaws_stacked[:, 1] = self._robots[self.cfg.possible_agents[1]].data.joint_pos[:, self.gimbal_joint_idx[self.cfg.possible_agents[1]]["yaw"]]
-        
-        self.gimbal_pitches_stacked[:, 0] = self._robots[self.cfg.possible_agents[0]].data.joint_pos[:, self.gimbal_joint_idx[self.cfg.possible_agents[0]]["pitch"]]
-        self.gimbal_pitches_stacked[:, 1] = self._robots[self.cfg.possible_agents[1]].data.joint_pos[:, self.gimbal_joint_idx[self.cfg.possible_agents[1]]["pitch"]]
-        
-        self.camera_intrinsics_stacked[:, 0, :, :] = self.camera_intrinsics[self.cfg.possible_agents[0]]
-        self.camera_intrinsics_stacked[:, 1, :, :] = self.camera_intrinsics[self.cfg.possible_agents[1]]
-        
-        # Target positions [N, T, 3] where T=1 (one target per environment)
-        target_pos_batch = self.target.data.root_state_w[:, :3].unsqueeze(1)  # [N, 1, 3]
         
         try:
-            # Compute triangulation covariance using simplified version (pixel noise only)
-            # self.Sigma_X, trace_cov = triangulation_covariance_simple(
-            #     X_w=target_pos_batch,
-            #     robot_positions=self.robot_positions_stacked,
-            #     robot_quats=self.robot_quats_stacked,
-            #     gimbal_yaws=self.gimbal_yaws_stacked,
-            #     gimbal_pitches=self.gimbal_pitches_stacked,
-            #     camera_intrinsics=self.camera_intrinsics_stacked,
-            #     pixel_std=50.0
-            # )
-            # Full covariance computation 
-            self.Sigma_X, trace_cov = triangulation_covariance_multi_camera(
-                X_w=target_pos_batch,
-                robot_positions=self.robot_positions_stacked,
-                robot_quats=self.robot_quats_stacked,
-                gimbal_yaws=self.gimbal_yaws_stacked,
-                gimbal_pitches=self.gimbal_pitches_stacked,
-                camera_intrinsics=self.camera_intrinsics_stacked,
-                Sigma_pix=self.Sigma_pix,
-                Sigma_twb=self.Sigma_twb,
-                Sigma_phiwb=self.Sigma_phiwb,
-                Sigma_alpha=self.Sigma_alpha,
-                Sigma_beta=self.Sigma_beta,
-                Sigma_K=self.Sigma_K,
-                include_pose=True,
-                include_gimbal=True,
-                include_intrinsics=True
-            )
-            # Sigma_X: [N, T, 3, 3], trace_cov: [N, T]
-            
             # Extract for single target per environment
-            trace_cov_per_env = trace_cov[:, 0]  # [N]
+            trace_cov_per_env = self.trace_cov[:, 0]  # [N]
             
             # Triangulation quality: lower covariance trace = better triangulation
             # Map to reward: higher reward for lower uncertainty
@@ -955,23 +960,35 @@ class IrisMAEnv(DirectMARLEnv):
         except Exception as e:
             # Fallback if computation fails
             print(f"Warning: Triangulation covariance computation failed: {e}")
-            triangulation_quality = torch.zeros(self.num_envs, device=self.device)
+            triangulation_quality = torch.ones(self.num_envs, device=self.device) * (-1.0)
         
+            
         # ===== GEOMETRIC METRICS FOR DEBUGGING =====
         # Compute baseline distance between drones
-        robot0_pos = self._robots[self.cfg.possible_agents[0]].data.root_pos_w
-        robot1_pos = self._robots[self.cfg.possible_agents[1]].data.root_pos_w
-        baseline_distance = torch.norm(robot0_pos - robot1_pos, dim=1)
-        
-        # Collision penalty
-        collision_penalty = torch.where(
-            baseline_distance < self.cfg.min_safe_distance,
-            torch.ones_like(baseline_distance) * self.cfg.collision_penalty_scale,
-            torch.zeros_like(baseline_distance)
+        # baseline_distances: shape (N, C, C, 1)
+        for i, ego_agent_id in enumerate(self.cfg.possible_agents):
+            for j, other_agent_id in enumerate(self.cfg.possible_agents):
+                if i >= j: # Compute only upper triangle
+                    continue
+                ego_robot = self._robots[ego_agent_id]
+                other_robot = self._robots[other_agent_id]
+                
+                ego_pos = ego_robot.data.root_pos_w  # [N, 3]
+                other_pos = other_robot.data.root_pos_w  # [N, 3]
+                
+                distance = torch.norm(ego_pos - other_pos, dim=1, keepdim=False)  # [N,]
+                self.baseline_distances[:, i, j, 0] = distance  # Store distance
+                self.baseline_distances[:, j, i, 0] = distance  # Symmetric
+        # Collision tensor: shape (N, C, C, 1)
+        collision_tensor = torch.where(
+            (self.baseline_distances < self.cfg.min_safe_distance) & (self.baseline_distances > 0),
+            torch.zeros_like(self.baseline_distances), # Zero for collision
+            torch.ones_like(self.baseline_distances), # One for no collision
         )
+
         
         # ===== PER-AGENT REWARDS =====
-        for agent_id in self.cfg.possible_agents:
+        for i, agent_id in enumerate(self.cfg.possible_agents):
             robot = self._robots[agent_id]
             agent_cam_cfg = self.agent_camera_cfgs[agent_id]
             
@@ -994,7 +1011,14 @@ class IrisMAEnv(DirectMARLEnv):
             
             # Zoom penalty
             zoom_penalty = torch.square((self.zoom_level[agent_id] - 1.0)/10)
-            
+
+            # Collision penalty
+            collision_penalty = torch.where(
+                torch.prod(collision_tensor[:, i, :, 0], dim=1) < 1.0,
+                torch.ones(self.num_envs, device=self.device),
+                torch.zeros(self.num_envs, device=self.device)
+            )
+
             # Combine rewards
             rewards = {
                 "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
@@ -1004,7 +1028,7 @@ class IrisMAEnv(DirectMARLEnv):
                 "bbox_size": bbox_size_mapped * self.cfg.bbox_size_reward_scale * self.step_dt,
                 "zoom": zoom_penalty * self.cfg.zoom_reward_scale * self.step_dt,
                 "triangulation": triangulation_quality * self.cfg.triangulation_reward_scale * self.step_dt * curriculum_alpha,
-                "collision": collision_penalty * self.step_dt * curriculum_alpha,
+                "collision": collision_penalty * self.cfg.collision_penalty_scale * self.step_dt * curriculum_alpha,
             }
             
             # Store for logging
@@ -1361,14 +1385,17 @@ class IrisMAEnv(DirectMARLEnv):
                 # Red if invalid (occluded), yellow if invalid (other reason), green if valid
                 is_valid = self.bbox_valid_mask[agent_id]
                 agent_idx = self.cfg.possible_agents.index(agent_id)
-                is_visible = self.bbox_raycaster.data.valid_bbox_visibility_mask[:, agent_idx, 0].unsqueeze(-1)
-                
+                if self.bbox_raycaster.data.valid_bbox_visibility_mask is not None:
+                    is_visible = self.bbox_raycaster.data.valid_bbox_visibility_mask[:, agent_idx, 0].unsqueeze(-1)
+                else:
+                    is_visible = torch.ones_like(is_valid) > 0
+
                 line_colors = torch.where(
                     is_valid, 
                     line_colors_green,
                     torch.where(
                         is_visible,
-                        line_colors_yellow,  # Invalid but visible (e.g., out of FOV)
+                        line_colors_yellow,  # Invalid but not occluded (e.g., out of FOV)
                         line_colors_red      # Occluded
                     )
                 ).tolist()

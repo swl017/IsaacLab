@@ -4,7 +4,7 @@ seed: 42
 # Models are instantiated using skrl's model instantiator utility
 # https://skrl.readthedocs.io/en/latest/api/utils/model_instantiators.html
 models:
-  separate: True
+  separate: False
   policy:  # see gaussian_model parameters
     class: GaussianMixin
     clip_actions: True
@@ -46,13 +46,13 @@ agent:
   class: MAPPO
   rollouts: 32
   learning_epochs: 4
-  mini_batches: 4
+  mini_batches: 8
   discount_factor: 0.99
   lambda: 0.95
-  learning_rate: 3.0e-05
+  learning_rate: 1.0e-05
   learning_rate_scheduler: KLAdaptiveLR
   learning_rate_scheduler_kwargs:
-    kl_threshold: 0.008
+    kl_threshold: 0.004
   state_preprocessor: RunningStandardScaler
   state_preprocessor_kwargs: null
   shared_state_preprocessor: RunningStandardScaler
@@ -69,11 +69,11 @@ agent:
   value_loss_scale: 1.0
   kl_threshold: 0.0
   rewards_shaper_scale: 1.0
-  time_limit_bootstrap: False
+  time_limit_bootstrap: True
   # logging and checkpoint
   experiment:
-    directory: "iris_mappo"
-    experiment_name: "obs_zoom"
+    directory: "iris_ma2"
+    experiment_name: "test_run"
     write_interval: auto
     checkpoint_interval: auto
 
