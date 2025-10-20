@@ -198,7 +198,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
         num_cameras_per_env=2,
         num_cameras_per_agent=1,
         
-        load_agent_meshes=True,
+        load_agent_meshes=False,
         agent_mesh_simplification=1.1,  # Use 70% of triangles for balance
         use_collision_proxy=False,      # Use full meshes, not boxes
         
@@ -206,7 +206,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
         min_bbox_size=(0.02, 0.02),
         max_bbox_size=(0.90, 0.90),
         partial_detection_allowed=False,
-        min_bbox_area_pixels=1.0,
+        min_bbox_area_pixels=400.0,
         
         # Occlusion detection
         enable_occlusion_check=False,
@@ -266,8 +266,8 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     intrinsic_std = 10.0  # pixel uncertainty in focal length and principal point
 
     # Step at which to start and end introducing coordination rewards
-    curriculum_coordination_start_step: int = 50000
-    curriculum_coordination_end_step: int = 90000
+    curriculum_coordination_start_step: int = 40000
+    curriculum_coordination_end_step: int = 60000
     curriculum_tracking_start_step: int = -1
     curriculum_tracking_end_step: int = 10000
 

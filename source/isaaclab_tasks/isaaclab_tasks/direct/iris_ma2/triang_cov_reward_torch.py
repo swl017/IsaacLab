@@ -148,11 +148,12 @@ def build_views_from_env_state(
     R_bg = rotation_matrix_from_euler(zeros, gimbal_pitch, gimbal_yaw, 'ZYX')
     
     # Gimbal to camera (ENU to RDF)
-    R_gc = torch.tensor([
+    R_cg = torch.tensor([
         [0., -1., 0.],
         [0., 0., -1.],
         [1., 0., 0.]
-    ], device=device).expand(N, C, 3, 3)
+    ], device=device)
+    R_gc = R_cg.T.expand(N, C, 3, 3)
     
     # World to camera
     R_wc = R_wb @ R_bg @ R_gc
