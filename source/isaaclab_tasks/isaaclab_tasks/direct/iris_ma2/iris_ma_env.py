@@ -887,7 +887,14 @@ class IrisMAEnv(DirectMARLEnv):
             # Sigma_X: [N, T, 3, 3], trace_cov: [N, T]
             is_trace_valid = (self.trace_cov >= 0.0) & torch.isfinite(self.trace_cov)  # [N, T]
             is_sigma_finite = torch.isfinite(self.Sigma_X).all(dim=(-2, -1))  # [N, T]
-            self.is_tri_cov_valid = is_trace_valid & is_sigma_finite  # [N, T]
+            is_not_nan = ~torch.isnan(self.Sigma_X).any(dim=(-2, -1))  # [N, T]
+            is_bbox_valid = self.bbox_raycaster.data.valid_mask.all(dim=1)  # [N, C] -> [N, T]
+            self.is_tri_cov_valid = is_trace_valid & is_sigma_finite & is_not_nan & is_bbox_valid  # [N, T]
+            self.Sigma_X = torch.where(
+                self.is_tri_cov_valid.unsqueeze(-1).unsqueeze(-1),
+                self.Sigma_X,
+                self.Sigma_X_invalid
+            )
             Sigma_X_diag = torch.diagonal(self.Sigma_X, dim1=-2, dim2=-1)  # [N, T, 3]
             Sigma_diag_sqrt = torch.sqrt(torch.clamp(Sigma_X_diag, min=0.0) + 1e-12)  # (N, T, 3)
         except Exception as e:
@@ -923,6 +930,11 @@ class IrisMAEnv(DirectMARLEnv):
                 Sigma_diag_sqrt[:, 0, :],  # 3: X, Y, Z (world) std deviations
             ], dim=-1)
             
+            # Check for NaN values in total obs
+            if torch.isnan(obs).any():
+                nan_envs = torch.nonzero(torch.isnan(obs)).flatten()
+                raise ValueError(f"NaN detected in {agent_id} observation at environments: {nan_envs.tolist()}")
+
             observations[agent_id] = obs
         
         return observations
@@ -946,22 +958,14 @@ class IrisMAEnv(DirectMARLEnv):
         progress = (self.common_step_counter - start) / (end - start)
         progress = 0 if progress < 0 else (1 if progress > 1 else progress)
         curriculum_alpha = torch.tensor(progress, device=self.device)
-
+        # curriculum_alpha = torch.ones(self.num_envs, device=self.device)
         
-        try:
-            # Extract for single target per environment
-            trace_cov_per_env = self.trace_cov[:, 0]  # [N]
-            
-            # Triangulation quality: lower covariance trace = better triangulation
-            # Map to reward: higher reward for lower uncertainty
-            # Use exponential decay: exp(-k * trace_cov)
-            triangulation_quality = torch.exp(-0.01 * trace_cov_per_env)
-
-        except Exception as e:
-            # Fallback if computation fails
-            print(f"Warning: Triangulation covariance computation failed: {e}")
-            triangulation_quality = torch.ones(self.num_envs, device=self.device) * (-1.0)
-        
+        trace_cov_per_env = self.trace_cov[:, 0]  # [N]
+        triangulation_quality = torch.where(
+            self.is_tri_cov_valid[:, 0],
+            torch.exp(-0.01 * trace_cov_per_env),
+            torch.ones(self.num_envs, device=self.device) * (-1.0)
+        )
             
         # ===== GEOMETRIC METRICS FOR DEBUGGING =====
         # Compute baseline distance between drones
@@ -1034,6 +1038,19 @@ class IrisMAEnv(DirectMARLEnv):
             # Store for logging
             for key, value in rewards.items():
                 self._episode_sums[agent_id][key] += value
+
+            total_reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
+            
+            # Check for NaN values in individual rewards
+            for reward_name, reward_value in rewards.items():
+                if torch.isnan(reward_value).any():
+                    nan_envs = torch.nonzero(torch.isnan(reward_value)).flatten()
+                    raise ValueError(f"NaN detected in {agent_id} reward '{reward_name}' at environments: {nan_envs.tolist()}")
+            
+            # Check for NaN values in total reward
+            if torch.isnan(total_reward).any():
+                nan_envs = torch.nonzero(torch.isnan(total_reward)).flatten()
+                raise ValueError(f"NaN detected in {agent_id} total reward at environments: {nan_envs.tolist()}")
             
             # Total reward
             rewards_dict[agent_id] = torch.sum(torch.stack(list(rewards.values())), dim=0)

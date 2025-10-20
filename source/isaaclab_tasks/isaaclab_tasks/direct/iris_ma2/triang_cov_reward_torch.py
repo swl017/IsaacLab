@@ -82,7 +82,7 @@ def rotation_matrix_from_euler(roll: torch.Tensor, pitch: torch.Tensor, yaw: tor
     R = torch.eye(3, device=device).expand(*shape, 3, 3).clone()
     
     for ax in order:
-        R = m[ax] @ R
+        R = R @ m[ax]
     
     return R
 
