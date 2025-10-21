@@ -33,7 +33,7 @@ from isaaclab.utils.math import (
 
 # Pre-defined configs
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
-from isaaclab_assets import IRIS_GIMBAL2_CFG
+from isaaclab_assets import IRIS_GIMBAL2_CFG, IRIS_BODY_CFG
 from isaaclab.markers import CUBOID_MARKER_CFG, FRAME_MARKER_CFG
 
 # from point_mass import PointMass
@@ -105,8 +105,8 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
         "drone_1": 7,
     }
     observation_spaces = {
-        "drone_0": 25,  # Added formation-related observations
-        "drone_1": 25,
+        "drone_0": 26,
+        "drone_1": 26,
     }
     state_space = -1  # Concatenate all observations
     
@@ -169,7 +169,8 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     target_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/target",
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd",
+            usd_path="/home/usrg/IsaacPX4/PegasusSimulator/extensions/pegasus.simulator/pegasus/simulator/assets/Robots/Iris/iris_body.usda",
+            # usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=False,
                 disable_gravity=True,
@@ -177,13 +178,13 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
                 rigid_body_enabled=True,
             ),
             copy_from_source=False,
-            scale=(15.0, 15.0, 15.0)
+            scale=(1.0, 1.0, 1.0)
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(5.0, 0.0, 3.5), rot=(1.0, 0.0, 0.0, 0.0)),
     )
 
     # Scene configuration
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=15.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=25.0, replicate_physics=True)
     
     # Robot configuration template (dynamically applied to each agent)
     robot: ArticulationCfg = IRIS_GIMBAL2_CFG.replace(prim_path="/World/envs/env_.*/{robot_name}")
@@ -229,7 +230,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     
     # Motion limits
     max_target_speed = 0.0
-    max_lin_vel = 15.0
+    max_lin_vel = 10.0
     max_yaw_rate = 20.0
     max_lin_acc = 3.0
     max_ang_acc = 30.0
@@ -241,11 +242,11 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     target_max_acceleration = 1.0
     
     # Reward scales (per agent)
-    lin_vel_reward_scale = -0.1
-    ang_vel_reward_scale = -0.02
-    action_sum_reward_scale = -0.1
+    lin_vel_penalty_scale = -0.1
+    ang_vel_penalty_scale = lin_vel_penalty_scale * 0.2
+    action_sum_penalty_scale = -1.0
     action_weight = [1, 1, 5, 0.5, 0.03, 0.03, 0.01]
-    action_delta_reward_scale = -0.01
+    action_delta_penalty_scale = -0.01
     action_delta_weight = [1, 1, 5, 0.5, 0.03, 0.03, 0.01]
     zoom_reward_scale = -0.5
     
@@ -254,7 +255,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     bbox_size_reward_scale = 60
     
     # Multi-agent coordination rewards
-    triangulation_reward_scale = 1  # Reward for good triangulation geometry
+    triangulation_reward_scale = 5  # Reward for good triangulation geometry
     collision_penalty_scale = -100   # Penalty for getting too close to each other
     min_safe_distance = 10.0
 
@@ -266,8 +267,9 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     intrinsic_std = 10.0  # pixel uncertainty in focal length and principal point
 
     # Step at which to start and end introducing coordination rewards
-    curriculum_coordination_start_step: int = 40000
-    curriculum_coordination_end_step: int = 60000
+    curriculum_coordination_start_step: int = 30000
+    curriculum_coordination_end_step: int = 40000
+    curriculum_coordination_duration_steps: int = 5000
     curriculum_tracking_start_step: int = -1
     curriculum_tracking_end_step: int = 10000
 
@@ -319,7 +321,7 @@ class IrisMAEnv(DirectMARLEnv):
 
         # Target scale
         num_targets_per_env = 1
-        self.base_target_scale = 15.0 # 1 / 0.06 # Base scale for target size (6cm cube scaled up by to match 1m in env)
+        self.base_target_scale = self.cfg.target_cfg.spawn.scale[0] # 1 / 0.06 # Base scale for target size (6cm cube scaled up by to match 1m in env)
         self.target_scale = torch.ones(self.num_envs, num_targets_per_env, 3, device=self.device) * self.base_target_scale
 
         # Target movement
@@ -484,8 +486,16 @@ class IrisMAEnv(DirectMARLEnv):
         self._episode_sums = {
             agent: {
                 key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
-                for key in ["lin_vel", "action_sum", "action_delta", "bbox_center", "bbox_size", "zoom", 
-                           "triangulation", "collision"]
+                for key in [
+                    # "lin_vel", 
+                    "action_sum", 
+                    # "action_delta", 
+                    "bbox_center", 
+                    "bbox_size", 
+                    # "zoom", 
+                    "triangulation", 
+                    # "collision",
+                    ]
             }
             for agent in self.cfg.possible_agents
         }
@@ -501,8 +511,7 @@ class IrisMAEnv(DirectMARLEnv):
                     "sphere": sim_utils.SphereCfg(
                         radius=0.5,
                         visual_material=sim_utils.PreviewSurfaceCfg(
-                            diffuse_color=(0.0, 1.0, 0.0),
-                            opacity=0.6,
+                            diffuse_color=(3/255, 252/255, 248/255),
                         ),
                     ),
                 }
@@ -690,6 +699,7 @@ class IrisMAEnv(DirectMARLEnv):
         image_shapes = {}
         agent_poses = {}
 
+        # Compute agent states and camera parameters
         for agent_id in self.cfg.possible_agents:
             robot = self._robots[agent_id]
 
@@ -854,6 +864,11 @@ class IrisMAEnv(DirectMARLEnv):
         # Target positions [N, T, 3] where T=1 (one target per environment)
         target_pos_batch = self.target.data.root_state_w[:, :3].unsqueeze(1)  # [N, 1, 3]
 
+        # Update Sigma_K based on zoom level
+        for agent_idx, agent_id in enumerate(self.cfg.possible_agents):
+            self.Sigma_K[:, agent_idx, :, :] = torch.eye(4, device=self.device).expand(self.num_envs, 4, 4) * (
+                self.cfg.intrinsic_std * self.zoom_level[agent_id].unsqueeze(-1).unsqueeze(-1)) ** 2
+
         try:
             # Compute triangulation covariance using simplified version (pixel noise only)
             # self.Sigma_X, trace_cov = triangulation_covariance_simple(
@@ -897,6 +912,11 @@ class IrisMAEnv(DirectMARLEnv):
             )
             Sigma_X_diag = torch.diagonal(self.Sigma_X, dim1=-2, dim2=-1)  # [N, T, 3]
             Sigma_diag_sqrt = torch.sqrt(torch.clamp(Sigma_X_diag, min=0.0) + 1e-12)  # (N, T, 3)
+            self.trace_cov = torch.where(
+                self.is_tri_cov_valid,
+                self.trace_cov,
+                self.trace_cov_invalid
+            )
         except Exception as e:
             # Fallback if computation fails
             # print(f"Warning: Triangulation covariance computation failed: {e}")
@@ -927,6 +947,7 @@ class IrisMAEnv(DirectMARLEnv):
                 self.bboxes_normalized[agent_id],  # 4: normalized bbox
                 self.bbox_valid_mask[agent_id].float(),  # 1: validity
                 self.zoom_level[agent_id].unsqueeze(-1),  # 1: zoom level
+                self.trace_cov[:, 0:1],  # 1: trace of covariance
                 Sigma_diag_sqrt[:, 0, :],  # 3: X, Y, Z (world) std deviations
             ], dim=-1)
             
@@ -963,8 +984,8 @@ class IrisMAEnv(DirectMARLEnv):
         trace_cov_per_env = self.trace_cov[:, 0]  # [N]
         triangulation_quality = torch.where(
             self.is_tri_cov_valid[:, 0],
-            torch.exp(-0.01 * trace_cov_per_env),
-            torch.ones(self.num_envs, device=self.device) * (-1.0)
+            1.0 / torch.sqrt(trace_cov_per_env + 1e-12),
+            torch.zeros(self.num_envs, device=self.device)
         )
             
         # ===== GEOMETRIC METRICS FOR DEBUGGING =====
@@ -983,8 +1004,8 @@ class IrisMAEnv(DirectMARLEnv):
                 distance = torch.norm(ego_pos - other_pos, dim=1, keepdim=False)  # [N,]
                 self.baseline_distances[:, i, j, 0] = distance  # Store distance
                 self.baseline_distances[:, j, i, 0] = distance  # Symmetric
-        # Collision tensor: shape (N, C, C, 1)
-        collision_tensor = torch.where(
+        # Collision table: shape (N, C, C, 1)
+        collision_table = torch.where(
             (self.baseline_distances < self.cfg.min_safe_distance) & (self.baseline_distances > 0),
             torch.zeros_like(self.baseline_distances), # Zero for collision
             torch.ones_like(self.baseline_distances), # One for no collision
@@ -1018,21 +1039,21 @@ class IrisMAEnv(DirectMARLEnv):
 
             # Collision penalty
             collision_penalty = torch.where(
-                torch.prod(collision_tensor[:, i, :, 0], dim=1) < 1.0,
+                torch.prod(collision_table[:, i, :, 0], dim=1) < 1.0,
                 torch.ones(self.num_envs, device=self.device),
                 torch.zeros(self.num_envs, device=self.device)
             )
 
             # Combine rewards
             rewards = {
-                "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
-                "action_sum": action_sum * self.cfg.action_sum_reward_scale * self.step_dt,
-                "action_delta": action_delta * self.cfg.action_delta_reward_scale * self.step_dt,
+                # "lin_vel": lin_vel * self.cfg.lin_vel_penalty_scale * self.step_dt,
+                "action_sum": action_sum * self.cfg.action_sum_penalty_scale * self.step_dt,
+                #"action_delta": action_delta * self.cfg.action_delta_penalty_scale * self.step_dt,
                 "bbox_center": bbox_center_mapped * self.cfg.bbox_center_reward_scale * self.step_dt,
                 "bbox_size": bbox_size_mapped * self.cfg.bbox_size_reward_scale * self.step_dt,
-                "zoom": zoom_penalty * self.cfg.zoom_reward_scale * self.step_dt,
-                "triangulation": triangulation_quality * self.cfg.triangulation_reward_scale * self.step_dt * curriculum_alpha,
-                "collision": collision_penalty * self.cfg.collision_penalty_scale * self.step_dt * curriculum_alpha,
+                #"zoom": zoom_penalty * self.cfg.zoom_reward_scale * self.step_dt,
+                "triangulation": triangulation_quality * self.cfg.triangulation_reward_scale * self.step_dt # * curriculum_alpha,
+                # "collision": collision_penalty * self.cfg.collision_penalty_scale * self.step_dt * curriculum_alpha,
             }
             
             # Store for logging
@@ -1094,11 +1115,12 @@ class IrisMAEnv(DirectMARLEnv):
         if self.cfg.curriculum_tracking_start_step < 0:
             curriculum_tracking_state = 0
             for agent_id in self.cfg.possible_agents:
-                curriculum_tracking_state += 1 if all_extras[f"Episode_Reward/{agent_id}_bbox_center"] > 20 else 0
+                curriculum_tracking_state += 1 if all_extras[f"Episode_Reward/{agent_id}_bbox_center"] > 50 else 0
             if curriculum_tracking_state == len(self.cfg.possible_agents):
                 self.cfg.curriculum_tracking_start_step = self.common_step_counter
                 self.cfg.curriculum_tracking_end_step += self.cfg.curriculum_tracking_start_step
                 self.cfg.curriculum_coordination_start_step = self.cfg.curriculum_tracking_end_step
+                self.cfg.curriculum_coordination_end_step = self.cfg.curriculum_coordination_start_step + self.cfg.curriculum_coordination_duration_steps
 
         formation_center = torch.zeros(len(env_ids), 3, device=self.device)
         formation_center[:, 0] = torch.zeros_like(formation_center[:, 0]).uniform_(-5.0, 5.0)
@@ -1417,7 +1439,7 @@ class IrisMAEnv(DirectMARLEnv):
                     )
                 ).tolist()
                 
-                line_thicknesses = [5.0] * self.camera_pos_world[agent_id].shape[0]
+                line_thicknesses = [1.0] * self.camera_pos_world[agent_id].shape[0]
                 self.draw_interface.draw_lines(
                     self.camera_pos_world[agent_id].tolist(), 
                     self.target.data.root_pos_w.tolist(), 

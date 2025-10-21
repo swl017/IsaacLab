@@ -16,6 +16,13 @@ class PointMass:
         # self.weight_tensor = torch.tensor(self.weight, dtype=torch.float32).view(1, 1).expand(num_envs, 1) if num_envs > 1 else torch.tensor(self.weight, dtype=torch.float32).view(1, 1)
         self.num_envs = num_envs
 
+        self.default_gains = {
+            "kp_x": torch.tensor([3.0]).expand(num_envs),
+            "kp_y": torch.tensor([3.0]).expand(num_envs),
+            "kp_z": torch.tensor([2.0]).expand(num_envs),
+            "kp_yaw": torch.tensor([1.0]).expand(num_envs),
+        }
+
     def wrap_to_pi(self, angle: torch.Tensor) -> torch.Tensor:
         """
         Wraps the angle to the range [-pi, pi].
@@ -29,19 +36,27 @@ class PointMass:
         curr_quat_w: torch.Tensor,    # Current orientation in world frame (w,x,y,z)
         curr_lin_vel_w: torch.Tensor, # Current linear velocity in world frame
         curr_ang_vel_b: torch.Tensor, # Current angular velocity in body frame
-        dt: float = 0.02             # Time step
+        dt: float = 0.02,             # Time step
+        gains: dict = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Compute the control commands for the point mass.
         Apply torques to stabilize.
         """
+        if gains is None:
+            gains = {
+                "kp_x": 3.0,
+                "kp_y": 3.0,
+                "kp_z": 2.0,
+                "kp_yaw": 1.0,
+            }
         # Convert current orientation to Euler angles
         roll, pitch, yaw = euler_xyz_from_quat(curr_quat_w)
         curr_ang_vel_w = quat_rotate(curr_quat_w, curr_ang_vel_b)
         moment_w = torch.stack([
             -self.wrap_to_pi(roll) * 2 - curr_ang_vel_w[:,0]*1.3,
             -self.wrap_to_pi(pitch) * 2 - curr_ang_vel_w[:,1]*1.3,
-            (cmd_yaw_vel - curr_ang_vel_w[:,2])
+            (cmd_yaw_vel - curr_ang_vel_w[:,2]) * gains["kp_yaw"]
         ], dim=1)
         moment = quat_rotate_inverse(curr_quat_w, moment_w)
 
