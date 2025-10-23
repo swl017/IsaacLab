@@ -14,7 +14,7 @@ from typing import Dict
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg
-from isaaclab.envs import DirectMARLEnv, DirectMARLEnvCfg
+from isaaclab.envs import DirectMARLEnv, DirectMARLEnvCfg, ViewerCfg
 from isaaclab.envs.ui import BaseEnvWindow
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.scene import InteractiveSceneCfg
@@ -183,6 +183,12 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
         init_state=RigidObjectCfg.InitialStateCfg(pos=(5.0, 0.0, 3.5), rot=(1.0, 0.0, 0.0, 0.0)),
     )
 
+    # Viewer configuration
+    viewer: ViewerCfg = ViewerCfg(
+        eye=(100.0, 100.0, 100.0),
+        lookat=(0.0, 0.0, 0.0),
+    )
+
     # Scene configuration
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=25.0, replicate_physics=True)
     
@@ -229,7 +235,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     yaw_moment_scale = 1.0
     
     # Motion limits
-    max_target_speed = 0.0
+    max_target_speed = 15.0
     max_lin_vel = 10.0
     max_yaw_rate = 20.0
     max_lin_acc = 3.0
@@ -245,19 +251,35 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     lin_vel_penalty_scale = -0.1
     ang_vel_penalty_scale = lin_vel_penalty_scale * 0.2
     action_sum_penalty_scale = -1.0
-    action_weight = [1, 1, 5, 0.5, 0.03, 0.03, 0.01]
-    action_delta_penalty_scale = -0.01
-    action_delta_weight = [1, 1, 5, 0.5, 0.03, 0.03, 0.01]
+    # aw: int = 0
+    # if aw == 0:
+    #     action_weight = [1, 1, 5, 0.5, 0.03, 0.03, 0.01]
+    # elif aw == 1:
+    #     action_weight = [1, 1, 5, 0.5, 0.3, 0.3, 0.01]
+    # elif aw == 2:
+    #     action_weight = [1, 1, 5, 0.5, 3, 3, 0.01]
+    # adw: int = 0
+    # if adw == 0:
+    #     action_delta_weight = [1, 1, 5, 0.5, 0.03, 0.03, 0.01]
+    # elif adw == 1:
+    #     action_delta_weight = [1, 1, 5, 0.5, 0.3, 0.3, 0.01]
+    # elif adw == 2:
+    #     action_delta_weight = [1, 1, 5, 0.5, 3, 3, 0.01]
+    action_weight = [1, 1, 1, 1, 1, 1, 1]
+    action_delta_weight = [1, 1, 1, 1, 1, 1, 1]
+    action_delta_penalty_scale = -0.05
     zoom_reward_scale = -0.5
     
     # Single-agent tracking rewards
     bbox_center_reward_scale = 60
     bbox_size_reward_scale = 60
+    bbox_size_preferred = 0.04**2 # 10%(width) * 10% (height) of image area
+    bbox_reward_shape_width = 0.3
     
     # Multi-agent coordination rewards
     triangulation_reward_scale = 5  # Reward for good triangulation geometry
     collision_penalty_scale = -100   # Penalty for getting too close to each other
-    min_safe_distance = 10.0
+    min_safe_distance = 30.0
 
     # Triangulation parameters
     pix_std = 7.0  # pixel standard deviation
@@ -267,11 +289,13 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     intrinsic_std = 10.0  # pixel uncertainty in focal length and principal point
 
     # Step at which to start and end introducing coordination rewards
-    curriculum_coordination_start_step: int = 30000
-    curriculum_coordination_end_step: int = 40000
+    curriculum_coordination_start_step: int = 20000
+    curriculum_coordination_end_step: int = 30000
     curriculum_coordination_duration_steps: int = 5000
     curriculum_tracking_start_step: int = -1
     curriculum_tracking_end_step: int = 10000
+    curriculum_moving_target_start_step: int = 20000
+    curriculum_moving_target_end_step: int = 40000
 
 class IrisMAEnv(DirectMARLEnv):
     cfg: IrisMAEnvCfg
@@ -489,7 +513,7 @@ class IrisMAEnv(DirectMARLEnv):
                 for key in [
                     # "lin_vel", 
                     "action_sum", 
-                    # "action_delta", 
+                    "action_delta", 
                     "bbox_center", 
                     "bbox_size", 
                     # "zoom", 
@@ -687,8 +711,12 @@ class IrisMAEnv(DirectMARLEnv):
             )
             robot.set_joint_position_target(self.gimbal_dof_targets[agent_id])
         
+        start = self.cfg.curriculum_moving_target_start_step
+        end = self.cfg.curriculum_moving_target_end_step
+        progress = (self.common_step_counter - start) / (end - start)
+        progress = 0 if progress < 0 else (1 if progress > 1 else progress)
         # Apply target velocity
-        self.target.write_root_com_velocity_to_sim(self.target_vel)
+        self.target.write_root_com_velocity_to_sim(self.target_vel * progress)
         
         
 
@@ -989,7 +1017,7 @@ class IrisMAEnv(DirectMARLEnv):
         )
             
         # ===== GEOMETRIC METRICS FOR DEBUGGING =====
-        # Compute baseline distance between drones
+        # Compute baseline distance between drones & targets
         # baseline_distances: shape (N, C, C, 1)
         for i, ego_agent_id in enumerate(self.cfg.possible_agents):
             for j, other_agent_id in enumerate(self.cfg.possible_agents):
@@ -1029,10 +1057,10 @@ class IrisMAEnv(DirectMARLEnv):
             # Bounding box rewards
             bbox = (torch.square((self.bboxes[agent_id][:, 0] + self.bboxes[agent_id][:, 2])/2 - agent_cam_cfg.width/2) / agent_cam_cfg.width**2 
                     + torch.square((self.bboxes[agent_id][:, 1] + self.bboxes[agent_id][:, 3])/2 - agent_cam_cfg.height/2) / agent_cam_cfg.height**2)
-            bbox_center_mapped = (1 - torch.tanh(bbox / 0.8)) * self.bbox_valid_mask[agent_id].squeeze(-1).float()
+            bbox_center_mapped = torch.exp(-((bbox)**2)/self.cfg.bbox_reward_shape_width**2) * self.bbox_valid_mask[agent_id].squeeze(-1).float()
             
             bbox_size = (self.bboxes[agent_id][:, 2] - self.bboxes[agent_id][:, 0]) * (self.bboxes[agent_id][:, 3] - self.bboxes[agent_id][:, 1]) / (agent_cam_cfg.width * agent_cam_cfg.height)
-            bbox_size_mapped = (1 - torch.tanh((bbox_size-0.2**2) / 0.8)) * self.bbox_valid_mask[agent_id].squeeze(-1).float()
+            bbox_size_mapped = torch.exp(-((bbox_size - self.cfg.bbox_size_preferred)**2)/self.cfg.bbox_reward_shape_width**2) * self.bbox_valid_mask[agent_id].squeeze(-1).float()
             
             # Zoom penalty
             zoom_penalty = torch.square((self.zoom_level[agent_id] - 1.0)/10)
@@ -1048,7 +1076,7 @@ class IrisMAEnv(DirectMARLEnv):
             rewards = {
                 # "lin_vel": lin_vel * self.cfg.lin_vel_penalty_scale * self.step_dt,
                 "action_sum": action_sum * self.cfg.action_sum_penalty_scale * self.step_dt,
-                #"action_delta": action_delta * self.cfg.action_delta_penalty_scale * self.step_dt,
+                "action_delta": action_delta * self.cfg.action_delta_penalty_scale * self.step_dt,
                 "bbox_center": bbox_center_mapped * self.cfg.bbox_center_reward_scale * self.step_dt,
                 "bbox_size": bbox_size_mapped * self.cfg.bbox_size_reward_scale * self.step_dt,
                 #"zoom": zoom_penalty * self.cfg.zoom_reward_scale * self.step_dt,
@@ -1138,7 +1166,7 @@ class IrisMAEnv(DirectMARLEnv):
         end = self.cfg.curriculum_tracking_end_step
         progress = (self.common_step_counter - start) / (end - start)
         progress = 0.1 if (progress < 0.1 or start < 0) else (1 if progress > 1 else progress)
-        # progress = 1 if DEBUG_DRAW else progress  # Always use full range in debug mode
+        progress = 1 if DEBUG_DRAW else progress  # Always use full range in debug mode
         target_pos[:, 0] = torch.zeros_like(target_pos[:, 0]).uniform_(40.0 * progress, 80.0 * progress) + formation_center[:, 0]
         target_pos[:, 1] = torch.zeros_like(target_pos[:, 1]).uniform_(-20.0 * progress, 20.0 * progress) + formation_center[:, 1]
         target_pos[:, 2] = torch.zeros_like(target_pos[:, 2]).uniform_(0.0, 5.0) + formation_center[:, 2]
