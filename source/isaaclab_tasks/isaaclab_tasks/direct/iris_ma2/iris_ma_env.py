@@ -105,8 +105,8 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
         "drone_1": 7,
     }
     observation_spaces = {
-        "drone_0": 30,
-        "drone_1": 30,
+        "drone_0": 32,
+        "drone_1": 32,
     }
     state_space = -1  # Concatenate all observations
     
@@ -244,6 +244,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     max_gimbal_pitch_angle = [math.radians(-60.0), math.radians(10.0)]   # -60 deg (up) to +10 deg (down)
     max_gimbal_angle_rate = [math.radians(-180.0), math.radians(180.0)]  # -180 deg/s to +180 deg/s
     max_zoom_rate = [-1.0, 1.0]  # per second
+    max_no_detection_sec = episode_length_s / 2.0
 
     # Target movement parameters
     target_acceleration_scale = 2.0
@@ -283,6 +284,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     # Multi-agent coordination rewards
     triangulation_reward_scale = 5  # Reward for good triangulation geometry
     collision_penalty_scale = -100   # Penalty for getting too close to each other
+    ttc_penalty_scale = -10        # Penalty for low time-to-collision
     min_safe_distance = 30.0
 
     # Triangulation parameters
@@ -446,6 +448,9 @@ class IrisMAEnv(DirectMARLEnv):
         self.robot_quats_stacked = torch.zeros(
             self.num_envs, len(self.cfg.possible_agents), 4, device=self.device
         )
+        self.robot_velocity_stacked = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), 3, device=self.device
+        )
         self.gimbal_yaws_stacked = torch.zeros(
             self.num_envs, len(self.cfg.possible_agents), device=self.device
         )
@@ -460,6 +465,9 @@ class IrisMAEnv(DirectMARLEnv):
             default_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
             self.robot_quats_stacked[:, agent_idx, :] = default_quat.unsqueeze(0).expand(self.num_envs, -1)
             self.camera_intrinsics_stacked[:, agent_idx, :, :] = self.camera_intrinsics[agent_id]
+
+        # Consecutive no-detection counters (N, C, T)
+        self.no_detection_counts = torch.zeros(self.num_envs, len(self.cfg.possible_agents), 1, device=self.device, dtype=torch.int)
 
         # Define uncertainty covariances
         # Target position uncertainty [N, T, 3, 3]
@@ -496,8 +504,11 @@ class IrisMAEnv(DirectMARLEnv):
         ) * (self.cfg.intrinsic_std ** 2)
 
         self.baseline_distances = torch.ones(
-            self.num_envs, len(self.cfg.possible_agents), len(self.cfg.possible_agents), 1, 
+            self.num_envs, len(self.cfg.possible_agents), len(self.cfg.possible_agents), 1+1, 
             device=self.device) * (-1.0)
+        self.ttc = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), len(self.cfg.possible_agents), 1, 
+            device=self.device)
 
         self._research = {
             "cvtt_sec": torch.zeros(self.num_envs, device=self.device),
@@ -896,6 +907,11 @@ class IrisMAEnv(DirectMARLEnv):
             self.ray_dir,
             torch.zeros_like(self.ray_dir)
         )
+        self.no_detection_counts = torch.where(
+            is_bbox_valid,
+            torch.zeros_like(self.no_detection_counts),
+            self.no_detection_counts + 1
+        )
         
         # ===== TRIANGULATION COVARIANCE COMPUTATION =====
         # Stack robot positions and orientations [N, C, 3] and [N, C, 4]
@@ -905,6 +921,7 @@ class IrisMAEnv(DirectMARLEnv):
             joint_idx = self.gimbal_joint_idx[agent_id]
             self.robot_positions_stacked[:, agent_idx, :] = robot.data.root_pos_w
             self.robot_quats_stacked[:, agent_idx, :] = robot.data.root_state_w[:, 3:7]
+            self.robot_velocity_stacked[:, agent_idx, :] = robot.data.root_lin_vel_w
             self.gimbal_yaws_stacked[:, agent_idx] = robot.data.joint_pos[:, joint_idx["yaw"]]
             self.gimbal_pitches_stacked[:, agent_idx] = robot.data.joint_pos[:, joint_idx["pitch"]]
             self.camera_intrinsics_stacked[:, agent_idx, :, :] = self.camera_intrinsics[agent_id]
@@ -982,24 +999,34 @@ class IrisMAEnv(DirectMARLEnv):
             other_agent_idxs.pop(i)
             other_agent_ids = self.cfg.possible_agents.copy()
             other_agent_ids.pop(i)
+
+            _, _, ego_yaw = euler_xyz_from_quat(robot.data.root_state_w[:, 3:7])
                         
             self.bboxes[agent_id] = self.bbox_raycaster.data.bboxes_xyxy[:, i, 0, :]
             self.bbox_valid_mask[agent_id][:, 0] = self.bbox_raycaster.data.valid_mask[:, i, 0]
             self.bboxes_normalized[agent_id] = self.bbox_raycaster.data.bboxes_normalized[:, i, 0, :] # xywh
 
+            relative_positions = self.robot_positions_stacked[:, other_agent_idxs, :] - robot.data.root_pos_w.unsqueeze(1).repeat(1, len(other_agent_idxs), 1)
+
             obs = torch.cat([
-                robot.data.root_state_w[:, :10],  # 10: pos, quat, lin_vel
+                robot.data.root_state_w[:, :3],  # 3: pos, 
+                ego_yaw.unsqueeze(-1),  # 1: yaw
+                robot.data.root_lin_vel_w[:, :3],  # 3: linear vel
                 robot.data.root_ang_vel_b[:, 2:3],  # 1: yaw rate
                 robot.data.body_lin_acc_w[:, 0],  # 3: acceleration
                 robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["pitch"]:self.gimbal_joint_idx[agent_id]["pitch"] + 1],  # 1
                 robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["yaw"]:self.gimbal_joint_idx[agent_id]["yaw"] + 1],  # 1
-                self.bboxes_normalized[agent_id],  # 4: normalized bbox
-                # self.bbox_valid_mask[agent_id].float(),  # 1: validity
+                self.bboxes_normalized[agent_id],  # 4: normalized bbox, xywh
+                self.bbox_valid_mask[agent_id].float(),  # 1: validity
                 self.zoom_level[agent_id].unsqueeze(-1),  # 1: zoom level
                 # self.trace_cov[:, 0:1],  # 1: trace of covariance
                 # self.ray_dir[:, i, 0, :],  # 3: ray direction
                 self.ray_dir[:, other_agent_idxs, 0, :].flatten(start_dim=1),  # 3*(C-1): ray direction
+                self.bbox_raycaster.data.valid_mask[:, other_agent_idxs, 0].flatten(start_dim=1),  # 1*(C-1): other agents' validity
+                # self.no_detection_counts[:, other_agent_idxs] * self.step_dt,  # 1: no detection count
                 self.robot_positions_stacked[:, other_agent_idxs, :].flatten(start_dim=1),  # 3*(C-1): other agents' positions
+                # self.robot_velocity_stacked[:, other_agent_idxs, :].flatten(start_dim=1),  # 3*(C-1): other agents' velocities
+                relative_positions.flatten(start_dim=1),  # 3*(C-1): other agents' relative positions
                 Sigma_diag_sqrt[:, 0, :],  # 3: X, Y, Z (world) std deviations
             ], dim=-1)
             
@@ -1030,6 +1057,7 @@ class IrisMAEnv(DirectMARLEnv):
         # self.common_step_counter is from the base DirectMARLEnv class
         progress = (self.common_step_counter - start) / (end - start)
         progress = 0 if progress < 0 else (1 if progress > 1 else progress)
+        # progress = 1
         curriculum_alpha = torch.tensor(progress, device=self.device)
         # curriculum_alpha = torch.ones(self.num_envs, device=self.device)
         
@@ -1042,7 +1070,7 @@ class IrisMAEnv(DirectMARLEnv):
             
         # ===== GEOMETRIC METRICS FOR DEBUGGING =====
         # Compute baseline distance between drones & targets
-        # baseline_distances: shape (N, C, C, 1)
+        # baseline_distances: shape (N, C, C, T+1)
         for i, ego_agent_id in enumerate(self.cfg.possible_agents):
             for j, other_agent_id in enumerate(self.cfg.possible_agents):
                 if i >= j: # Compute only upper triangle
@@ -1052,17 +1080,39 @@ class IrisMAEnv(DirectMARLEnv):
                 
                 ego_pos = ego_robot.data.root_pos_w  # [N, 3]
                 other_pos = other_robot.data.root_pos_w  # [N, 3]
+                target_pos = self.target.data.root_pos_w  # [N, 3]
+
+                ego_vel = ego_robot.data.root_lin_vel_w  # [N, 3]
+                other_vel = other_robot.data.root_lin_vel_w  # [N, 3]
                 
-                distance = torch.norm(ego_pos - other_pos, dim=1, keepdim=False)  # [N,]
-                self.baseline_distances[:, i, j, 0] = distance  # Store distance
-                self.baseline_distances[:, j, i, 0] = distance  # Symmetric
-        # Collision table: shape (N, C, C, 1)
+                distance_oth_ego = torch.norm(other_pos - ego_pos, dim=1, keepdim=False)  # [N,]
+                distance_tar_ego = torch.norm(target_pos - ego_pos, dim=1, keepdim=False)  # [N,]
+                distance_tar_oth = torch.norm(target_pos - other_pos, dim=1, keepdim=False)  # [N,]
+
+                self.baseline_distances[:, i, j, 0] = distance_oth_ego  # Store distance
+                self.baseline_distances[:, j, i, 0] = distance_oth_ego  # Symmetric
+                self.baseline_distances[:, i, j, 1] = distance_tar_ego  # Store distance to target
+                self.baseline_distances[:, j, i, 1] = distance_tar_oth
+
+                # # TTC penalty
+                # ttc_penalty = self.compute_ttc_penalty(
+                #     ego_pos=ego_pos,
+                #     ego_vel=ego_vel,
+                #     other_pos=other_pos,
+                #     other_vel=other_vel,
+                #     safe_distance=self.cfg.min_safe_distance
+                # )
+                # self.ttc[:, i, j, 0] = ttc_penalty
+                # self.ttc[:, j, i, 0] = ttc_penalty
+        # Collision table: shape (N, C, C, T+1)
         collision_table = torch.where(
             (self.baseline_distances < self.cfg.min_safe_distance) & (self.baseline_distances > 0),
             torch.zeros_like(self.baseline_distances), # Zero for collision
-            torch.ones_like(self.baseline_distances), # One for no collision
+            torch.where(self.baseline_distances < 0,
+                        torch.ones_like(self.baseline_distances)*(-1), # Minus one for self-collision
+                        torch.ones_like(self.baseline_distances), # One for no collision
+            )
         )
-
         
         # ===== PER-AGENT REWARDS =====
         for i, agent_id in enumerate(self.cfg.possible_agents):
@@ -1095,9 +1145,13 @@ class IrisMAEnv(DirectMARLEnv):
             # Ego ray o: Gain reward(=1) if bbox is already valid.
             # Ego ray x / other ray x: You should encourage searching, but how...
 
+            # TODO: Add TTC penalty
+            # ttc_penalty = self.ttc[:, i, :, 0].sum(dim=1)
+            # but may not be necessary if collision penalty is sufficient...
+
             # Collision penalty
             collision_penalty = torch.where(
-                torch.prod(collision_table[:, i, :, 0], dim=1) < 1.0,
+                torch.prod(torch.prod(collision_table[:, i, :, :], dim=-1),dim=-1,dtype=torch.bool),
                 torch.ones(self.num_envs, device=self.device),
                 torch.zeros(self.num_envs, device=self.device)
             )
@@ -1112,6 +1166,7 @@ class IrisMAEnv(DirectMARLEnv):
                 #"zoom": zoom_penalty * self.cfg.zoom_reward_scale * self.step_dt,
                 "triangulation": triangulation_quality * self.cfg.triangulation_reward_scale * self.step_dt * curriculum_alpha,
                 "collision": collision_penalty * self.cfg.collision_penalty_scale * self.step_dt * curriculum_alpha,
+                # "ttc": self.ttc[:, i, :, 0].sum(dim=1) * self.cfg.ttc_penalty_scale * self.step_dt * curriculum_alpha,
             }
             
             # Store for logging
@@ -1142,7 +1197,8 @@ class IrisMAEnv(DirectMARLEnv):
     def _get_dones(self) -> tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         """Get termination and timeout flags for all agents."""
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        
+        no_detection_too_long = self.no_detection_counts >= self.cfg.max_no_detection_sec / self.step_dt
+        time_out = time_out
         terminated_dict = {}
         time_out_dict = {}
         
@@ -1196,7 +1252,8 @@ class IrisMAEnv(DirectMARLEnv):
         end = self.cfg.curriculum_tracking_end_step
         progress = (self.common_step_counter - start) / (end - start)
         progress = 0.1 if (progress < 0.1 or start < 0) else (1 if progress > 1 else progress)
-        # progress = 1 if DEBUG_DRAW else progress  # Always use full range in debug mode
+        progress = 1 if DEBUG_DRAW else progress  # Always use full range in debug mode
+        # progress = 1
         target_pos[:, 0] = torch.zeros_like(target_pos[:, 0]).uniform_(4.0, 80.0 * progress) + formation_center[:, 0]
         target_pos[:, 1] = torch.zeros_like(target_pos[:, 1]).uniform_(-20.0 * progress, 20.0 * progress) + formation_center[:, 1]
         target_pos[:, 2] = torch.zeros_like(target_pos[:, 2]).uniform_(0.0, 5.0) + formation_center[:, 2]
@@ -1281,6 +1338,35 @@ class IrisMAEnv(DirectMARLEnv):
         gimbal_pitch = torch.atan2(-target_vector_b[:, 2], horizontal_distance)
         
         return gimbal_yaw, gimbal_pitch
+
+    def compute_ttc_penalty(self, ego_pos, ego_vel, other_pos, other_vel, safe_distance):
+        """
+        Combined TTC and proximity penalty
+        Penalizes both: (1) being too close AND (2) approaching too fast
+        """
+        rel_pos = other_pos - ego_pos
+        rel_vel = other_vel - ego_vel
+        distance = torch.norm(rel_pos, dim=-1, keepdim=False)
+        rel_speed = torch.sum(rel_pos * rel_vel, dim=-1, keepdim=False) / (distance + 1e-8)
+        
+        # # Proximity penalty (inverse distance)
+        # proximity_penalty = safe_distance / (distance + 1e-8)
+        # proximity_penalty = torch.clamp(proximity_penalty, min=0.0, max=1.0)
+        
+        # TTC penalty (inverse TTC)
+        ttc_inv = torch.clamp(rel_speed / (distance + 1e-8), min=0.0)
+        
+        # penalty = 0.5 * proximity_penalty + 0.5 * ttc_inv
+        
+        # penalty = torch.where(
+        #     distance < safe_distance * 4.0,
+        #     penalty,
+        #     torch.zeros_like(penalty)
+        # )
+        
+        penalty = ttc_inv
+
+        return penalty
 
     def _update_target_movement(self, mode: str = "linear"):
         """Update target movement with smooth acceleration-based motion."""
