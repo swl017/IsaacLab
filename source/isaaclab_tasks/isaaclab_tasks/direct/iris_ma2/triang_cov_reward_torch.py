@@ -503,7 +503,7 @@ def get_ray_dir_from_bbox(
         camera_positions: Camera positions [N, C, 3]
 
     Returns:
-        ray_dirs: Ray directions in world frame [N, C, 3]
+        ray_dirs: Ray directions in world frame [N, C, T, 3]
     """
     N, C = bbox_2d.shape[:2]
     device = bbox_2d.device

@@ -93,7 +93,7 @@ class ResearchLoggingCfg:
 @configclass
 class IrisMAEnvCfg(DirectMARLEnvCfg):
     # env
-    episode_length_s = 30.0
+    episode_length_s = 20.0
     decimation = 2
     
     # Define agents - The environment is now built from this list
@@ -105,8 +105,8 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
         "drone_1": 7,
     }
     observation_spaces = {
-        "drone_0": 26,
-        "drone_1": 26,
+        "drone_0": 30,
+        "drone_1": 30,
     }
     state_space = -1  # Concatenate all observations
     
@@ -235,12 +235,16 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     yaw_moment_scale = 1.0
     
     # Motion limits
-    max_target_speed = 15.0
+    max_target_speed = 5.0
     max_lin_vel = 10.0
     max_yaw_rate = 20.0
     max_lin_acc = 3.0
     max_ang_acc = 30.0
-    
+    max_gimbal_yaw_angle = [math.radians(-180.0), math.radians(180.0)]  # -180 deg (left) to +180 deg (right)
+    max_gimbal_pitch_angle = [math.radians(-60.0), math.radians(10.0)]   # -60 deg (up) to +10 deg (down)
+    max_gimbal_angle_rate = [math.radians(-180.0), math.radians(180.0)]  # -180 deg/s to +180 deg/s
+    max_zoom_rate = [-1.0, 1.0]  # per second
+
     # Target movement parameters
     target_acceleration_scale = 2.0
     target_velocity_damping = 0.95
@@ -289,9 +293,8 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     intrinsic_std = 10.0  # pixel uncertainty in focal length and principal point
 
     # Step at which to start and end introducing coordination rewards
-    curriculum_coordination_start_step: int = 20000
-    curriculum_coordination_end_step: int = 30000
-    curriculum_coordination_duration_steps: int = 5000
+    curriculum_coordination_start_step: int = 10000
+    curriculum_coordination_end_step: int = 20000
     curriculum_tracking_start_step: int = -1
     curriculum_tracking_end_step: int = 10000
     curriculum_moving_target_start_step: int = 20000
@@ -518,7 +521,7 @@ class IrisMAEnv(DirectMARLEnv):
                     "bbox_size", 
                     # "zoom", 
                     "triangulation", 
-                    # "collision",
+                    "collision",
                     ]
             }
             for agent in self.cfg.possible_agents
@@ -657,25 +660,28 @@ class IrisMAEnv(DirectMARLEnv):
             roll_b, pitch_b, _ = euler_xyz_from_quat(quat_mul(robot.data.root_state_w[:, 3:7], quat_inv(curr_quat_w_yaw)))
             
             gimbal_idx = self.gimbal_joint_idx[agent_id]
-            self.gimbal_dof_targets[agent_id][:, gimbal_idx["yaw"]] += self._actions[agent_id][:, 4] * self.step_dt * 2 * math.pi
+            self.gimbal_dof_targets[agent_id][:, gimbal_idx["yaw"]] += torch.clamp(
+                self._actions[agent_id][:, 4] * self.step_dt * 2 * math.pi, self.cfg.max_gimbal_angle_rate[0], self.cfg.max_gimbal_angle_rate[1]
+            )
             self.gimbal_dof_targets[agent_id][:, gimbal_idx["yaw"]] = torch.clamp(
-                self.gimbal_dof_targets[agent_id][:, gimbal_idx["yaw"]], -math.pi*2/3, math.pi*2/3
+                self.gimbal_dof_targets[agent_id][:, gimbal_idx["yaw"]], self.cfg.max_gimbal_yaw_angle[0], self.cfg.max_gimbal_yaw_angle[1]
             )
             self.gimbal_dof_targets[agent_id][:, gimbal_idx["roll"]] = self._stabilizers[agent_id].wrap_to_pi(-roll_b)
-            self.gimbal_dof_targets[agent_id][:, gimbal_idx["pitch"]] += self._actions[agent_id][:, 5] * self.step_dt * 2 * math.pi
-            self.gimbal_dof_targets[agent_id][:, gimbal_idx["pitch"]] = torch.clamp(
-                self.gimbal_dof_targets[agent_id][:, gimbal_idx["pitch"]], -math.pi*1/3, math.pi*1/3
+            self.gimbal_dof_targets[agent_id][:, gimbal_idx["pitch"]] += torch.clamp(
+                self._actions[agent_id][:, 5] * self.step_dt * 2 * math.pi, self.cfg.max_gimbal_angle_rate[0], self.cfg.max_gimbal_angle_rate[1]
             )
-            # gimbal_yaw, gimbal_pitch = self.point_to_region(robot.data.root_state_w[:, :3], robot.data.root_state_w[:, 3:7], self.target.data.root_state_w[:, :3])
+            self.gimbal_dof_targets[agent_id][:, gimbal_idx["pitch"]] = torch.clamp(
+                self.gimbal_dof_targets[agent_id][:, gimbal_idx["pitch"]], self.cfg.max_gimbal_pitch_angle[0], self.cfg.max_gimbal_pitch_angle[1]
+            )
 
             # Update zoom level
-            delta_zoom = self._actions[agent_id][:, 6] * self.step_dt * 5.0
+            delta_zoom = self._actions[agent_id][:, 6] * self.step_dt # `delta_zoom = self._actions[agent_id][:, 6] * self.step_dt` implicitly gives max_zoom_rate=1.0 per second
             self.zoom_level[agent_id] += delta_zoom
             self.zoom_level[agent_id] = torch.clamp(self.zoom_level[agent_id], 1.0, 10.0)
             
 
         # Update target movement (shared)
-        self._update_target_movement(mode="circular")
+        self._update_target_movement(mode="linear")
         
         # Bounce targets that are too low
         up_vel = self.target_vel.clone()
@@ -715,6 +721,7 @@ class IrisMAEnv(DirectMARLEnv):
         end = self.cfg.curriculum_moving_target_end_step
         progress = (self.common_step_counter - start) / (end - start)
         progress = 0 if progress < 0 else (1 if progress > 1 else progress)
+        progress = 1 if DEBUG_DRAW else progress
         # Apply target velocity
         self.target.write_root_com_velocity_to_sim(self.target_vel * progress)
         
@@ -877,6 +884,19 @@ class IrisMAEnv(DirectMARLEnv):
             target_scale=self.target_scale
         )
 
+        self.ray_dir = get_ray_dir_from_bbox(
+                self.bbox_raycaster.data.bboxes,
+                self.camera_intrinsics_stacked,
+                torch.stack([self.camera_quat_world[agent_id] for agent_id in self.cfg.possible_agents], dim=1),
+                torch.stack([self.camera_pos_world[agent_id] for agent_id in self.cfg.possible_agents], dim=1),
+            ) # (N, C, T, 3)
+        is_bbox_valid = self.bbox_raycaster.data.valid_mask  # (N, C, T)
+        self.ray_dir = torch.where(
+            is_bbox_valid.unsqueeze(-1),
+            self.ray_dir,
+            torch.zeros_like(self.ray_dir)
+        )
+        
         # ===== TRIANGULATION COVARIANCE COMPUTATION =====
         # Stack robot positions and orientations [N, C, 3] and [N, C, 4]
         # Use pre-allocated stacked tensors for efficiency
@@ -931,8 +951,8 @@ class IrisMAEnv(DirectMARLEnv):
             is_trace_valid = (self.trace_cov >= 0.0) & torch.isfinite(self.trace_cov)  # [N, T]
             is_sigma_finite = torch.isfinite(self.Sigma_X).all(dim=(-2, -1))  # [N, T]
             is_not_nan = ~torch.isnan(self.Sigma_X).any(dim=(-2, -1))  # [N, T]
-            is_bbox_valid = self.bbox_raycaster.data.valid_mask.all(dim=1)  # [N, C] -> [N, T]
-            self.is_tri_cov_valid = is_trace_valid & is_sigma_finite & is_not_nan & is_bbox_valid  # [N, T]
+            is_all_bboxes_valid = self.bbox_raycaster.data.valid_mask.all(dim=1)  # [N, C] -> [N, T]
+            self.is_tri_cov_valid = is_trace_valid & is_sigma_finite & is_not_nan & is_all_bboxes_valid  # [N, T]
             self.Sigma_X = torch.where(
                 self.is_tri_cov_valid.unsqueeze(-1).unsqueeze(-1),
                 self.Sigma_X,
@@ -958,9 +978,10 @@ class IrisMAEnv(DirectMARLEnv):
         
         for i, agent_id in enumerate(self.cfg.possible_agents):
             robot = self._robots[agent_id]
-            # This logic is specific to a 2-agent scenario
-            other_agent_id = next(aid for aid in self.cfg.possible_agents if aid != agent_id)
-            other_robot = self._robots[other_agent_id]
+            other_agent_idxs = list(range(len(self.cfg.possible_agents)))
+            other_agent_idxs.pop(i)
+            other_agent_ids = self.cfg.possible_agents.copy()
+            other_agent_ids.pop(i)
                         
             self.bboxes[agent_id] = self.bbox_raycaster.data.bboxes_xyxy[:, i, 0, :]
             self.bbox_valid_mask[agent_id][:, 0] = self.bbox_raycaster.data.valid_mask[:, i, 0]
@@ -973,9 +994,12 @@ class IrisMAEnv(DirectMARLEnv):
                 robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["pitch"]:self.gimbal_joint_idx[agent_id]["pitch"] + 1],  # 1
                 robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["yaw"]:self.gimbal_joint_idx[agent_id]["yaw"] + 1],  # 1
                 self.bboxes_normalized[agent_id],  # 4: normalized bbox
-                self.bbox_valid_mask[agent_id].float(),  # 1: validity
+                # self.bbox_valid_mask[agent_id].float(),  # 1: validity
                 self.zoom_level[agent_id].unsqueeze(-1),  # 1: zoom level
-                self.trace_cov[:, 0:1],  # 1: trace of covariance
+                # self.trace_cov[:, 0:1],  # 1: trace of covariance
+                # self.ray_dir[:, i, 0, :],  # 3: ray direction
+                self.ray_dir[:, other_agent_idxs, 0, :].flatten(start_dim=1),  # 3*(C-1): ray direction
+                self.robot_positions_stacked[:, other_agent_idxs, :].flatten(start_dim=1),  # 3*(C-1): other agents' positions
                 Sigma_diag_sqrt[:, 0, :],  # 3: X, Y, Z (world) std deviations
             ], dim=-1)
             
@@ -1065,6 +1089,12 @@ class IrisMAEnv(DirectMARLEnv):
             # Zoom penalty
             zoom_penalty = torch.square((self.zoom_level[agent_id] - 1.0)/10)
 
+            # TODO: Add shared information reward
+            # Reward for pointing to other agents' ray directions
+            # Ego ray x / other ray o: Gain reward(=1) when ray(staring from ray origin) is within the image frame.
+            # Ego ray o: Gain reward(=1) if bbox is already valid.
+            # Ego ray x / other ray x: You should encourage searching, but how...
+
             # Collision penalty
             collision_penalty = torch.where(
                 torch.prod(collision_table[:, i, :, 0], dim=1) < 1.0,
@@ -1080,8 +1110,8 @@ class IrisMAEnv(DirectMARLEnv):
                 "bbox_center": bbox_center_mapped * self.cfg.bbox_center_reward_scale * self.step_dt,
                 "bbox_size": bbox_size_mapped * self.cfg.bbox_size_reward_scale * self.step_dt,
                 #"zoom": zoom_penalty * self.cfg.zoom_reward_scale * self.step_dt,
-                "triangulation": triangulation_quality * self.cfg.triangulation_reward_scale * self.step_dt # * curriculum_alpha,
-                # "collision": collision_penalty * self.cfg.collision_penalty_scale * self.step_dt * curriculum_alpha,
+                "triangulation": triangulation_quality * self.cfg.triangulation_reward_scale * self.step_dt * curriculum_alpha,
+                "collision": collision_penalty * self.cfg.collision_penalty_scale * self.step_dt * curriculum_alpha,
             }
             
             # Store for logging
@@ -1147,8 +1177,8 @@ class IrisMAEnv(DirectMARLEnv):
             if curriculum_tracking_state == len(self.cfg.possible_agents):
                 self.cfg.curriculum_tracking_start_step = self.common_step_counter
                 self.cfg.curriculum_tracking_end_step += self.cfg.curriculum_tracking_start_step
-                self.cfg.curriculum_coordination_start_step = self.cfg.curriculum_tracking_end_step
-                self.cfg.curriculum_coordination_end_step = self.cfg.curriculum_coordination_start_step + self.cfg.curriculum_coordination_duration_steps
+                # self.cfg.curriculum_coordination_start_step = self.cfg.curriculum_tracking_end_step
+                # self.cfg.curriculum_coordination_end_step = self.cfg.curriculum_coordination_start_step + self.cfg.curriculum_coordination_duration_steps
 
         formation_center = torch.zeros(len(env_ids), 3, device=self.device)
         formation_center[:, 0] = torch.zeros_like(formation_center[:, 0]).uniform_(-5.0, 5.0)
@@ -1166,8 +1196,8 @@ class IrisMAEnv(DirectMARLEnv):
         end = self.cfg.curriculum_tracking_end_step
         progress = (self.common_step_counter - start) / (end - start)
         progress = 0.1 if (progress < 0.1 or start < 0) else (1 if progress > 1 else progress)
-        progress = 1 if DEBUG_DRAW else progress  # Always use full range in debug mode
-        target_pos[:, 0] = torch.zeros_like(target_pos[:, 0]).uniform_(40.0 * progress, 80.0 * progress) + formation_center[:, 0]
+        # progress = 1 if DEBUG_DRAW else progress  # Always use full range in debug mode
+        target_pos[:, 0] = torch.zeros_like(target_pos[:, 0]).uniform_(4.0, 80.0 * progress) + formation_center[:, 0]
         target_pos[:, 1] = torch.zeros_like(target_pos[:, 1]).uniform_(-20.0 * progress, 20.0 * progress) + formation_center[:, 1]
         target_pos[:, 2] = torch.zeros_like(target_pos[:, 2]).uniform_(0.0, 5.0) + formation_center[:, 2]
         target_pos += self._env_origins[env_ids]
@@ -1183,7 +1213,7 @@ class IrisMAEnv(DirectMARLEnv):
         # self.target_scale[env_ids, :, 2] = torch.zeros_like(self.target_scale[env_ids, :, 2]).uniform_(
         #     0.5 * self.base_target_scale, 1.0 * self.base_target_scale)
         # Reset target velocity
-        self.target_vel[env_ids] = torch.zeros_like(self.target_vel[env_ids]).uniform_(-1.0, 1.0)
+        self.target_vel[env_ids] = torch.zeros_like(self.target_vel[env_ids]).uniform_(-self.cfg.max_target_speed, self.cfg.max_target_speed)
         self.last_target_vel[env_ids] = self.target_vel[env_ids].clone()
 
         # Reset robots
@@ -1264,7 +1294,7 @@ class IrisMAEnv(DirectMARLEnv):
             new_desired_vel = torch.zeros_like(self.target_desired_vel)
             new_desired_vel[:, :3] = torch.rand(self.num_envs, 3, device=self.device) * 2.0 - 1.0
             new_desired_vel[:, 3:] = torch.rand(self.num_envs, 3, device=self.device) * 0.2 - 0.1
-            new_desired_vel[:, :3] *= self.cfg.max_target_speed * 0.3
+            new_desired_vel[:, :3] *= self.cfg.max_target_speed
             
             # Update desired velocity where mask is true
             self.target_desired_vel = torch.where(
@@ -1486,15 +1516,9 @@ class IrisMAEnv(DirectMARLEnv):
                     )
 
             # Visualize triangulation covariance ellipsoids
-            ray_dir = get_ray_dir_from_bbox(
-                self.bbox_raycaster.data.bboxes,
-                self.camera_intrinsics_stacked,
-                torch.stack([self.camera_quat_world[agent_id] for agent_id in self.cfg.possible_agents], dim=1),
-                torch.stack([self.camera_pos_world[agent_id] for agent_id in self.cfg.possible_agents], dim=1),
-            )
             X_w_est = midpoint_method_batched(
                 pts=torch.stack([self.camera_pos_world[agent_id] for agent_id in self.cfg.possible_agents], dim=1),
-                dirs=ray_dir,
+                dirs=self.ray_dir,
             )
             # Extract diagonal of Sigma_X (N, T, 3, 3) -> (N, T, 3)
             Sigma_diag = torch.diagonal(self.Sigma_X, dim1=-2, dim2=-1)  # (N, T, 3)
