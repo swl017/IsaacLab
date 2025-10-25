@@ -25,6 +25,7 @@ from isaaclab.utils import configclass
 from isaaclab.utils.math import (
     subtract_frame_transforms, 
     euler_xyz_from_quat, 
+    quat_apply,
     quat_from_euler_xyz,
     quat_mul,
     quat_inv,
@@ -235,11 +236,12 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     yaw_moment_scale = 1.0
     
     # Motion limits
-    max_target_speed = 5.0
-    max_lin_vel = 10.0
+    max_target_speed = 15.0
+    max_target_ang_speed = math.radians(90.0)
+    max_lin_vel = 20.0
     max_yaw_rate = 20.0
     max_lin_acc = 3.0
-    max_ang_acc = 30.0
+    max_ang_acc = 15.0
     max_gimbal_yaw_angle = [math.radians(-180.0), math.radians(180.0)]  # -180 deg (left) to +180 deg (right)
     max_gimbal_pitch_angle = [math.radians(-60.0), math.radians(10.0)]   # -60 deg (up) to +10 deg (down)
     max_gimbal_angle_rate = [math.radians(-180.0), math.radians(180.0)]  # -180 deg/s to +180 deg/s
@@ -250,26 +252,12 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     target_acceleration_scale = 2.0
     target_velocity_damping = 0.95
     target_direction_change_prob = 0.01
-    target_max_acceleration = 1.0
+    target_max_acceleration = 3.0
     
     # Reward scales (per agent)
     lin_vel_penalty_scale = -0.1
     ang_vel_penalty_scale = lin_vel_penalty_scale * 0.2
     action_sum_penalty_scale = -1.0
-    # aw: int = 0
-    # if aw == 0:
-    #     action_weight = [1, 1, 5, 0.5, 0.03, 0.03, 0.01]
-    # elif aw == 1:
-    #     action_weight = [1, 1, 5, 0.5, 0.3, 0.3, 0.01]
-    # elif aw == 2:
-    #     action_weight = [1, 1, 5, 0.5, 3, 3, 0.01]
-    # adw: int = 0
-    # if adw == 0:
-    #     action_delta_weight = [1, 1, 5, 0.5, 0.03, 0.03, 0.01]
-    # elif adw == 1:
-    #     action_delta_weight = [1, 1, 5, 0.5, 0.3, 0.3, 0.01]
-    # elif adw == 2:
-    #     action_delta_weight = [1, 1, 5, 0.5, 3, 3, 0.01]
     action_weight = [1, 1, 1, 1, 1, 1, 1]
     action_delta_weight = [1, 1, 1, 1, 1, 1, 1]
     action_delta_penalty_scale = -0.05
@@ -278,20 +266,21 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     # Single-agent tracking rewards
     bbox_center_reward_scale = 60
     bbox_size_reward_scale = 60
-    bbox_size_preferred = 0.04**2 # 10%(width) * 10% (height) of image area
+    bbox_size_preferred = 0.04**2 # 4%(width) * 4% (height) of image area
     bbox_reward_shape_width = 0.3
     
     # Multi-agent coordination rewards
     triangulation_reward_scale = 5  # Reward for good triangulation geometry
     collision_penalty_scale = -100   # Penalty for getting too close to each other
     ttc_penalty_scale = -10        # Penalty for low time-to-collision
-    min_safe_distance = 30.0
+    min_safe_distance = 20.0
+    ttc_horizon = 5.0  # seconds
 
     # Triangulation parameters
     pix_std = 7.0  # pixel standard deviation
     pos_std = 0.1  # position uncertainty
     ori_std = 0.02  # rads orientation uncertainty
-    gimbal_std = 0.02  # rads gimbal uncertainty
+    gimbal_std = 0.01  # rads gimbal uncertainty
     intrinsic_std = 10.0  # pixel uncertainty in focal length and principal point
 
     # Step at which to start and end introducing coordination rewards
@@ -300,7 +289,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     curriculum_tracking_start_step: int = -1
     curriculum_tracking_end_step: int = 10000
     curriculum_moving_target_start_step: int = 20000
-    curriculum_moving_target_end_step: int = 40000
+    curriculum_moving_target_end_step: int = 90000
 
 class IrisMAEnv(DirectMARLEnv):
     cfg: IrisMAEnvCfg
@@ -350,15 +339,19 @@ class IrisMAEnv(DirectMARLEnv):
 
         # Target scale
         num_targets_per_env = 1
-        self.base_target_scale = self.cfg.target_cfg.spawn.scale[0] # 1 / 0.06 # Base scale for target size (6cm cube scaled up by to match 1m in env)
+        self.base_target_scale = self.cfg.target_cfg.spawn.scale[0]
         self.target_scale = torch.ones(self.num_envs, num_targets_per_env, 3, device=self.device) * self.base_target_scale
 
         # Target movement
         self.target_vel = torch.zeros(self.num_envs, 6, device=self.device).uniform_(-1.0, 1.0)
         self.last_target_vel = self.target_vel.clone()
         self.target_acceleration = torch.zeros(self.num_envs, 6, device=self.device)
-        self.target_desired_vel = torch.zeros(self.num_envs, 6, device=self.device).uniform_(-1.0, 1.0)
+        self.target_desired_vel = torch.zeros(self.num_envs, 6, device=self.device).uniform_(-1.0, 1.0) * self.cfg.max_target_speed
+        self.target_desired_vel[:, 3:5] = 0.0  # No roll, pitch for target
         self.target_vel_change_timer = torch.zeros(self.num_envs, device=self.device)
+        self.target_motion_type = torch.randint(0, 2, (self.num_envs,), device=self.device)  # 0: linear, 1: circular
+        self.target_motion_radius = torch.zeros(self.num_envs, device=self.device).uniform_(10.0, 50.0) # (N,)
+        self.target_motion_yaw_vel = torch.norm(self.target_desired_vel[:, :3], dim=-1) / self.target_motion_radius  # (N,)
         
         # Camera tracking for each agent
         self.camera_pos_world = {
@@ -503,12 +496,18 @@ class IrisMAEnv(DirectMARLEnv):
             self.num_envs, len(self.cfg.possible_agents), 4, 4
         ) * (self.cfg.intrinsic_std ** 2)
 
-        self.baseline_distances = torch.ones(
-            self.num_envs, len(self.cfg.possible_agents), len(self.cfg.possible_agents), 1+1, 
-            device=self.device) * (-1.0)
-        self.ttc = torch.zeros(
-            self.num_envs, len(self.cfg.possible_agents), len(self.cfg.possible_agents), 1, 
-            device=self.device)
+        self.cam_to_cam_distance = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), len(self.cfg.possible_agents), 
+            device=self.device) # (N, C, C)
+        self.cam_to_target_distance = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), 1, 
+            device=self.device) # (N, C, T)
+        self.cam_to_cam_ttc = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), len(self.cfg.possible_agents), 
+            device=self.device) # (N, C, C)
+        self.cam_to_target_ttc = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), 1, 
+            device=self.device) # (N, C, T)
 
         self._research = {
             "cvtt_sec": torch.zeros(self.num_envs, device=self.device),
@@ -533,6 +532,7 @@ class IrisMAEnv(DirectMARLEnv):
                     # "zoom", 
                     "triangulation", 
                     "collision",
+                    "ttc_penalty",
                     ]
             }
             for agent in self.cfg.possible_agents
@@ -692,7 +692,17 @@ class IrisMAEnv(DirectMARLEnv):
             
 
         # Update target movement (shared)
-        self._update_target_movement(mode="linear")
+        # Randomly assign environments to linear (0) or circular (1) motion
+        target_motion_assignment = torch.randint(0, 2, (self.num_envs,), device=self.device)
+        linear_env_ids = torch.nonzero(target_motion_assignment == 0, as_tuple=False).squeeze(-1)
+        circular_env_ids = torch.nonzero(target_motion_assignment == 1, as_tuple=False).squeeze(-1)
+
+        # Update target movement based on assignment
+        if len(linear_env_ids) > 0:
+            self._update_target_movement(mode="linear", env_ids=linear_env_ids)
+        if len(circular_env_ids) > 0:
+            self._update_target_movement(mode="circular", env_ids=circular_env_ids)
+        # self._update_target_movement(mode="default")
         
         # Bounce targets that are too low
         up_vel = self.target_vel.clone()
@@ -1067,52 +1077,49 @@ class IrisMAEnv(DirectMARLEnv):
             1.0 / torch.sqrt(trace_cov_per_env + 1e-12),
             torch.zeros(self.num_envs, device=self.device)
         )
-            
-        # ===== GEOMETRIC METRICS FOR DEBUGGING =====
-        # Compute baseline distance between drones & targets
-        # baseline_distances: shape (N, C, C, T+1)
+
+        # Compute distances between drones & targets
+        # cam_to_cam_distance: shape (N, C, C)
+        # cam_to_target_distance: shape (N, C, T)
         for i, ego_agent_id in enumerate(self.cfg.possible_agents):
+            ego_robot = self._robots[ego_agent_id]
+            ego_pos = ego_robot.data.root_pos_w  # [N, 3]
+            ego_vel = ego_robot.data.root_lin_vel_w  # [N, 3]
+            target_pos = self.target.data.root_pos_w  # [N, 3]
+            target_vel = self.target.data.root_lin_vel_w  # [N, 3]
+            self.cam_to_target_distance[:, i, 0] = torch.norm(target_pos - ego_pos, dim=1, keepdim=False)  # [N,]
+
+            self.cam_to_target_ttc[:, i, 0] = self.compute_ttc(
+                    ego_pos=ego_pos,
+                    ego_vel=ego_vel,
+                    other_pos=target_pos,
+                    other_vel=target_vel,
+                    safe_distance=self.cfg.min_safe_distance
+                )
             for j, other_agent_id in enumerate(self.cfg.possible_agents):
                 if i >= j: # Compute only upper triangle
                     continue
-                ego_robot = self._robots[ego_agent_id]
                 other_robot = self._robots[other_agent_id]
-                
-                ego_pos = ego_robot.data.root_pos_w  # [N, 3]
                 other_pos = other_robot.data.root_pos_w  # [N, 3]
-                target_pos = self.target.data.root_pos_w  # [N, 3]
-
-                ego_vel = ego_robot.data.root_lin_vel_w  # [N, 3]
                 other_vel = other_robot.data.root_lin_vel_w  # [N, 3]
                 
-                distance_oth_ego = torch.norm(other_pos - ego_pos, dim=1, keepdim=False)  # [N,]
-                distance_tar_ego = torch.norm(target_pos - ego_pos, dim=1, keepdim=False)  # [N,]
-                distance_tar_oth = torch.norm(target_pos - other_pos, dim=1, keepdim=False)  # [N,]
+                distance = torch.norm(other_pos - ego_pos, dim=1, keepdim=False)  # [N,]
 
-                self.baseline_distances[:, i, j, 0] = distance_oth_ego  # Store distance
-                self.baseline_distances[:, j, i, 0] = distance_oth_ego  # Symmetric
-                self.baseline_distances[:, i, j, 1] = distance_tar_ego  # Store distance to target
-                self.baseline_distances[:, j, i, 1] = distance_tar_oth
-
-                # # TTC penalty
-                # ttc_penalty = self.compute_ttc_penalty(
-                #     ego_pos=ego_pos,
-                #     ego_vel=ego_vel,
-                #     other_pos=other_pos,
-                #     other_vel=other_vel,
-                #     safe_distance=self.cfg.min_safe_distance
-                # )
-                # self.ttc[:, i, j, 0] = ttc_penalty
-                # self.ttc[:, j, i, 0] = ttc_penalty
-        # Collision table: shape (N, C, C, T+1)
-        collision_table = torch.where(
-            (self.baseline_distances < self.cfg.min_safe_distance) & (self.baseline_distances > 0),
-            torch.zeros_like(self.baseline_distances), # Zero for collision
-            torch.where(self.baseline_distances < 0,
-                        torch.ones_like(self.baseline_distances)*(-1), # Minus one for self-collision
-                        torch.ones_like(self.baseline_distances), # One for no collision
-            )
-        )
+                self.cam_to_cam_distance[:, i, j] = distance
+                self.cam_to_cam_distance[:, j, i] = distance  # Symmetric
+                # TTC penalty
+                ttc_penalty = self.compute_ttc(
+                    ego_pos=ego_pos,
+                    ego_vel=ego_vel,
+                    other_pos=other_pos,
+                    other_vel=other_vel,
+                )
+                self.cam_to_cam_ttc[:, i, j] = ttc_penalty
+                self.cam_to_cam_ttc[:, j, i] = ttc_penalty
+        self.cam_to_cam_distance[:, range(len(self.cfg.possible_agents)), range(len(self.cfg.possible_agents))] = float('inf')  # Set self-distances to infinity
+        self.cam_to_cam_ttc[:, range(len(self.cfg.possible_agents)), range(len(self.cfg.possible_agents))] = float('inf')  # Set self-ttc to infinity
+        cam_to_cam_collision = self.cam_to_cam_distance < self.cfg.min_safe_distance  # [N, C, C]
+        cam_to_target_collision = self.cam_to_target_distance < self.cfg.min_safe_distance  # [N, C, T]
         
         # ===== PER-AGENT REWARDS =====
         for i, agent_id in enumerate(self.cfg.possible_agents):
@@ -1144,18 +1151,39 @@ class IrisMAEnv(DirectMARLEnv):
             # Ego ray x / other ray o: Gain reward(=1) when ray(staring from ray origin) is within the image frame.
             # Ego ray o: Gain reward(=1) if bbox is already valid.
             # Ego ray x / other ray x: You should encourage searching, but how...
-
-            # TODO: Add TTC penalty
-            # ttc_penalty = self.ttc[:, i, :, 0].sum(dim=1)
-            # but may not be necessary if collision penalty is sufficient...
+            # Turns out not necessary.
 
             # Collision penalty
+            has_collision = torch.any(cam_to_cam_collision[:, i, :], dim=1) | torch.any(cam_to_target_collision[:, i, :], dim=1)  # [N,]
             collision_penalty = torch.where(
-                torch.prod(torch.prod(collision_table[:, i, :, :], dim=-1),dim=-1,dtype=torch.bool),
+                has_collision,
                 torch.ones(self.num_envs, device=self.device),
                 torch.zeros(self.num_envs, device=self.device)
             )
+            # TODO: Add TTC penalty
+            # ttc_penalty = self.ttc[:, i, :, 0].sum(dim=1)
+            # but may not be necessary if collision penalty is sufficient...
+            ttc_cam_to_cam_normalized = torch.clamp(
+                (self.cam_to_cam_ttc[:, i, :] / self.cfg.ttc_horizon), min=0, max=1
+            )  # [N, C]
+            ttc_cam_to_target_normalized = torch.clamp(
+                (self.cam_to_target_ttc[:, i, :] / self.cfg.ttc_horizon), min=0, max=1
+            )  # [N, T]
+            ttc = torch.concat((
+                self.cam_to_cam_ttc[:, i, :],
+                self.cam_to_target_ttc[:, i, :]
+            ), dim=1)  # [N, C+T]
+            ttc_normalized = torch.concat((
+                ttc_cam_to_cam_normalized,
+                ttc_cam_to_target_normalized
+            ), dim=1)  # [N, C+T]
 
+            ttc_penalty = (1.0 - ttc_normalized) ** 2
+            ttc_penalty = torch.where(
+                (ttc < self.cfg.ttc_horizon) & (ttc > 0),
+                ttc_penalty,
+                torch.zeros_like(ttc_penalty)
+            )
             # Combine rewards
             rewards = {
                 # "lin_vel": lin_vel * self.cfg.lin_vel_penalty_scale * self.step_dt,
@@ -1166,7 +1194,7 @@ class IrisMAEnv(DirectMARLEnv):
                 #"zoom": zoom_penalty * self.cfg.zoom_reward_scale * self.step_dt,
                 "triangulation": triangulation_quality * self.cfg.triangulation_reward_scale * self.step_dt * curriculum_alpha,
                 "collision": collision_penalty * self.cfg.collision_penalty_scale * self.step_dt * curriculum_alpha,
-                # "ttc": self.ttc[:, i, :, 0].sum(dim=1) * self.cfg.ttc_penalty_scale * self.step_dt * curriculum_alpha,
+                "ttc_penalty": ttc_penalty.sum(dim=1) * self.cfg.ttc_penalty_scale * self.step_dt * curriculum_alpha,
             }
             
             # Store for logging
@@ -1246,6 +1274,12 @@ class IrisMAEnv(DirectMARLEnv):
         gap_ref[:, 1] = torch.zeros_like(gap_ref[:, 1]).uniform_(0, 10.0)
         gap_ref[:, 2] = torch.zeros_like(gap_ref[:, 2]).uniform_(5.0, 7.0)
 
+        formation_rotation = quat_from_euler_xyz(
+            torch.zeros(len(env_ids), device=self.device),
+            torch.zeros(len(env_ids), device=self.device),
+            torch.zeros(len(env_ids), device=self.device).uniform_(-math.pi, math.pi)
+        )
+
         # Reset target position (centered between drones)
         target_pos = torch.zeros(len(env_ids), 3, device=self.device)
         start = self.cfg.curriculum_tracking_start_step
@@ -1257,10 +1291,14 @@ class IrisMAEnv(DirectMARLEnv):
         target_pos[:, 0] = torch.zeros_like(target_pos[:, 0]).uniform_(4.0, 80.0 * progress) + formation_center[:, 0]
         target_pos[:, 1] = torch.zeros_like(target_pos[:, 1]).uniform_(-20.0 * progress, 20.0 * progress) + formation_center[:, 1]
         target_pos[:, 2] = torch.zeros_like(target_pos[:, 2]).uniform_(0.0, 5.0) + formation_center[:, 2]
+        target_pos = quat_apply(formation_rotation, target_pos)
         target_pos += self._env_origins[env_ids]
         
         self.target.data.root_state_w[env_ids, :3] = target_pos
-        self.target.data.root_state_w[env_ids, 7:] = torch.zeros_like(self.target.data.root_state_w[env_ids, 7:])
+        self.target.data.root_state_w[env_ids, 3:7] = quat_from_euler_xyz(
+            torch.zeros(len(env_ids), device=self.device),
+            torch.zeros(len(env_ids), device=self.device),
+            torch.zeros(len(env_ids), device=self.device).uniform_(-math.pi, math.pi))
         self.target.write_root_pose_to_sim(self.target.data.root_state_w[env_ids, :7], env_ids)
         
         # Randomize target scale
@@ -1270,7 +1308,9 @@ class IrisMAEnv(DirectMARLEnv):
         # self.target_scale[env_ids, :, 2] = torch.zeros_like(self.target_scale[env_ids, :, 2]).uniform_(
         #     0.5 * self.base_target_scale, 1.0 * self.base_target_scale)
         # Reset target velocity
-        self.target_vel[env_ids] = torch.zeros_like(self.target_vel[env_ids]).uniform_(-self.cfg.max_target_speed, self.cfg.max_target_speed)
+        self.target_vel[env_ids, :3] = torch.zeros_like(self.target_vel[env_ids, :3]).uniform_(-self.cfg.max_target_speed, self.cfg.max_target_speed)
+        self.target_vel[env_ids, 3:5] = torch.zeros_like(self.target_vel[env_ids, 3:5])
+        self.target_vel[env_ids, 5] = torch.zeros_like(self.target_vel[env_ids, 5]).uniform_(-self.cfg.max_target_ang_speed, self.cfg.max_target_ang_speed)
         self.last_target_vel[env_ids] = self.target_vel[env_ids].clone()
 
         # Reset robots
@@ -1287,14 +1327,15 @@ class IrisMAEnv(DirectMARLEnv):
             
             # Set initial positions with offset for each drone based on its index
             default_root_state = robot.data.default_root_state[env_ids].clone()
-            default_root_state[:, :3] = self._env_origins[env_ids].clone()
-            default_root_state[:, 0:2] += formation_center[:, 0:2] + gap_ref[:, 0:2] * (idx + 1) * (-1)**(idx + gap_ref[:, 0:2].int())
-            default_root_state[:, 2] += formation_center[:, 2] + gap_ref[:, 2] * (-1)**(idx + gap_ref[:, 2].int())
+            default_root_state[:, 0:2] = formation_center[:, 0:2] + gap_ref[:, 0:2] * (idx + 1) * (-1)**(idx + gap_ref[:, 0:2].int())
+            default_root_state[:, 2] = formation_center[:, 2] + gap_ref[:, 2] * (-1)**(idx + gap_ref[:, 2].int())
+            default_root_state[:, :3] = quat_apply(formation_rotation, default_root_state[:, :3])
+            default_root_state[:, :3] += self._env_origins[env_ids]
             default_root_state[:, 3:7] = quat_from_euler_xyz(
                                             torch.zeros(len(env_ids), device=self.device),
                                             torch.zeros(len(env_ids), device=self.device),
-                                            torch.zeros(len(env_ids), device=self.device))
-                                            # torch.zeros(len(env_ids), device=self.device).uniform_(-math.pi*1/6, math.pi*1/6))
+                                            # torch.zeros(len(env_ids), device=self.device))
+                                            torch.zeros(len(env_ids), device=self.device).uniform_(-math.pi, math.pi))
 
             # Reset gimbal targets
             joint_pos = robot.data.default_joint_pos[env_ids]
@@ -1339,54 +1380,65 @@ class IrisMAEnv(DirectMARLEnv):
         
         return gimbal_yaw, gimbal_pitch
 
-    def compute_ttc_penalty(self, ego_pos, ego_vel, other_pos, other_vel, safe_distance):
+    def compute_ttc(self, ego_pos, ego_vel, other_pos, other_vel, safe_distance: float | None = None) -> torch.Tensor:
         """
-        Combined TTC and proximity penalty
-        Penalizes both: (1) being too close AND (2) approaching too fast
+        Time-To-Collision (TTC) based penalty computation.
         """
-        rel_pos = other_pos - ego_pos
-        rel_vel = other_vel - ego_vel
-        distance = torch.norm(rel_pos, dim=-1, keepdim=False)
-        rel_speed = torch.sum(rel_pos * rel_vel, dim=-1, keepdim=False) / (distance + 1e-8)
+        """
+        Compute Time-To-Collision (TTC) penalty.
         
-        # # Proximity penalty (inverse distance)
-        # proximity_penalty = safe_distance / (distance + 1e-8)
-        # proximity_penalty = torch.clamp(proximity_penalty, min=0.0, max=1.0)
+        Args:
+            ego_pos: Position of ego agent [N, 3]
+            ego_vel: Velocity of ego agent [N, 3]
+            other_pos: Position of other agent/target [N, 3]
+            other_vel: Velocity of other agent/target [N, 3]
+            safe_distance: Minimum distance to consider for TTC computation. If None, no minimum distance is applied.
+        Returns:
+            ttc: TTC [N,]
+        """
+        rel_pos = other_pos - ego_pos  # [N, 3]
+        rel_vel = other_vel - ego_vel  # [N, 3]
         
-        # TTC penalty (inverse TTC)
-        ttc_inv = torch.clamp(rel_speed / (distance + 1e-8), min=0.0)
+        distance = torch.norm(rel_pos, dim=-1, keepdim=False)  # [N,]
         
-        # penalty = 0.5 * proximity_penalty + 0.5 * ttc_inv
+        # Closing speed: rate at which distance is decreasing
+        # Positive when approaching, negative when separating
+        closing_speed = -torch.sum(rel_pos * rel_vel, dim=-1) / (distance + 1e-8)  # [N,]
         
-        # penalty = torch.where(
-        #     distance < safe_distance * 4.0,
-        #     penalty,
-        #     torch.zeros_like(penalty)
-        # )
+        # Only consider approaching objects (closing_speed > 0)
+        if safe_distance is not None:
+            is_approaching = (closing_speed > 0.0) & (distance > safe_distance)
+        else:
+            is_approaching = closing_speed > 0.0
         
-        penalty = ttc_inv
+        # TTC = distance / closing_speed (only valid when approaching)
+        ttc = torch.where(
+            is_approaching,
+            distance / (closing_speed + 1e-8),
+            torch.full_like(distance, float('inf'))
+        )
+        return ttc
 
-        return penalty
-
-    def _update_target_movement(self, mode: str = "linear"):
+    def _update_target_movement(self, mode: str = "linear", env_ids: torch.Tensor | None = None):
         """Update target movement with smooth acceleration-based motion."""
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
         self.target_vel_change_timer += self.step_dt
         
         # Randomly change desired velocity
         change_mask = torch.rand(self.num_envs, device=self.device) < self.cfg.target_direction_change_prob
         
-        if mode == "linear":
+        if mode == "linear" or mode == "default":
             # Generate new random desired velocities
             new_desired_vel = torch.zeros_like(self.target_desired_vel)
-            new_desired_vel[:, :3] = torch.rand(self.num_envs, 3, device=self.device) * 2.0 - 1.0
-            new_desired_vel[:, 3:] = torch.rand(self.num_envs, 3, device=self.device) * 0.2 - 0.1
-            new_desired_vel[:, :3] *= self.cfg.max_target_speed
+            new_desired_vel[:, :3] = torch.rand(self.num_envs, 3, device=self.device) * self.cfg.max_target_speed
+            new_desired_vel[:, 5] = torch.rand(self.num_envs, device=self.device) * self.cfg.max_target_speed * 0.1
             
             # Update desired velocity where mask is true
-            self.target_desired_vel = torch.where(
-                change_mask.unsqueeze(-1).expand(-1, 6),
-                new_desired_vel,
-                self.target_desired_vel
+            self.target_desired_vel[env_ids] = torch.where(
+                change_mask.unsqueeze(-1).expand(-1, 6)[env_ids],
+                new_desired_vel[env_ids],
+                self.target_desired_vel[env_ids]
             )
             
             # Reset timer for environments that changed direction
@@ -1397,47 +1449,63 @@ class IrisMAEnv(DirectMARLEnv):
             )
             
             # Compute acceleration towards desired velocity
-            vel_error = self.target_desired_vel - self.target_vel
-            self.target_acceleration = vel_error * self.cfg.target_acceleration_scale
+            vel_error = self.target_desired_vel[env_ids] - self.target_vel[env_ids]
+            self.target_acceleration[env_ids] = vel_error * self.cfg.target_acceleration_scale
             
             # Clamp acceleration
-            self.target_acceleration = torch.clamp(
-                self.target_acceleration, 
+            self.target_acceleration[env_ids] = torch.clamp(
+                self.target_acceleration[env_ids], 
                 -self.cfg.target_max_acceleration, 
                 self.cfg.target_max_acceleration
             )
-        elif mode == "circular":
+        if mode == "circular" or mode == "default":
             t = self.common_step_counter * self.step_dt
-            radius = torch.rand_like(change_mask.float()) * 20.0 + 50.0
-            angular_speed = torch.rand_like(change_mask.float()) * 0.5 + 0.2
+            self.target_motion_radius = torch.where(
+                change_mask,
+                torch.rand_like(self.target_motion_radius) * 30.0 + 40.0,
+                self.target_motion_radius
+            )
+            radius = self.target_motion_radius # (N,)
+            
+            self.target_motion_yaw_vel = torch.where(
+                change_mask,
+                torch.rand_like(self.target_motion_yaw_vel) * self.cfg.max_target_ang_speed / radius,
+                self.target_motion_yaw_vel
+            ) # (N,)
+            angular_speed = self.target_motion_yaw_vel # (N,)
             
             center = self._env_origins
             desired_x = center[:, 0] + radius * torch.cos(angular_speed * t)
             desired_y = center[:, 1] + radius * torch.sin(angular_speed * t)
-            desired_z = 10.0 + 5.0 * torch.sin(0.5 * angular_speed * t)
+            desired_z = center[:, 2] + torch.rand(self.num_envs, device=self.device) * 10.0 + 30.0
 
             desired_pos = torch.stack([desired_x, desired_y, desired_z], dim=1)
             pos_error = desired_pos - self.target.data.root_state_w[:, :3]
             
             # Proportional control to compute desired velocity
             kp = 1.0
-            self.target_desired_vel[:, :3] = kp * pos_error
+            self.target_desired_vel[env_ids, :2] = kp * pos_error[env_ids, :2]
+            self.target_desired_vel[env_ids, 2] = torch.where(
+                change_mask[env_ids],
+                kp * pos_error[env_ids, 2],
+                self.target_desired_vel[env_ids, 2]
+            )
             
             # Clamp desired velocity
-            speed = torch.norm(self.target_desired_vel[:, :3], dim=1, keepdim=True)
+            speed = torch.norm(self.target_desired_vel[env_ids, :3], dim=1, keepdim=True)
             speed_clamped = torch.clamp(speed, max=self.cfg.max_target_speed)
-            self.target_desired_vel[:, :3] = self.target_desired_vel[:, :3] / (speed + 1e-6) * speed_clamped
+            self.target_desired_vel[env_ids, :3] = self.target_desired_vel[env_ids, :3] / (speed + 1e-6) * speed_clamped
             
             # No rotation in circular mode
-            self.target_desired_vel[:, 3:] = 0.0
+            self.target_desired_vel[env_ids, 3:] = 0.0
             
             # Compute acceleration towards desired velocity
-            vel_error = self.target_desired_vel - self.target_vel
-            self.target_acceleration = vel_error * self.cfg.target_acceleration_scale
-            
+            vel_error = self.target_desired_vel[env_ids] - self.target_vel[env_ids]
+            self.target_acceleration[env_ids] = vel_error * self.cfg.target_acceleration_scale
+
             # Clamp acceleration
-            self.target_acceleration = torch.clamp(
-                self.target_acceleration, 
+            self.target_acceleration[env_ids] = torch.clamp(
+                self.target_acceleration[env_ids], 
                 -self.cfg.target_max_acceleration, 
                 self.cfg.target_max_acceleration
             )
