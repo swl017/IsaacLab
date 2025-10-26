@@ -844,3 +844,14 @@ class BBoxRayCaster:
             viz_hits = self._data.occlusion_ray_hits_w.reshape(-1, 3)
             valid_hits = ~torch.isinf(viz_hits).any(dim=-1)
             self.visualizer.visualize(viz_hits[valid_hits])
+
+    def add_noise(self, noise: torch.Tensor):
+        """Add noise to the bounding boxes (for data augmentation).
+        
+        Args:
+            noise: Tensor of shape (N, C, T, 4) representing noise to add to bboxes.
+        """
+        self._data.bboxes_xyxy += noise
+        self._data.bboxes = bbox_xyxy_to_xywh(self._data.bboxes_xyxy)
+
+        self._validate_detections()

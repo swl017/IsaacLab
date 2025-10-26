@@ -73,7 +73,7 @@ agent:
   # logging and checkpoint
   experiment:
     directory: "iris_ma2"
-    experiment_name: "target_moves_lin_cir_ttc_penalty"
+    experiment_name: "noisy_obs_bug_fixed"
     write_interval: auto
     checkpoint_interval: auto
 

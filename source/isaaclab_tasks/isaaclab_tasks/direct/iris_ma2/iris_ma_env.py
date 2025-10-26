@@ -397,6 +397,7 @@ class IrisMAEnv(DirectMARLEnv):
         }
         
         # Camera configuration batch for each agent
+        self.camera_offset = torch.tensor((0, 0, 0.1), device=self.device).expand(self.num_envs, -1)
         self.camera_cfg_batch = {
             agent_id: create_camera_cfg_tensor(agent_cfg, self.num_envs, device=self.device)
             for agent_id, agent_cfg in self.agent_camera_cfgs.items()
@@ -462,7 +463,9 @@ class IrisMAEnv(DirectMARLEnv):
         # Consecutive no-detection counters (N, C, T)
         self.no_detection_counts = torch.zeros(self.num_envs, len(self.cfg.possible_agents), 1, device=self.device, dtype=torch.int)
 
-        # Define uncertainty covariances
+        # ------------------------------------------------------ #
+        # ----------- Define uncertainty covariances ----------- #
+        # ------------------------------------------------------ #
         # Target position uncertainty [N, T, 3, 3]
         self.Sigma_X_invalid = torch.eye(3, device=self.device).unsqueeze(0).unsqueeze(0).expand(
             self.num_envs, 1, 3, 3
@@ -496,6 +499,30 @@ class IrisMAEnv(DirectMARLEnv):
             self.num_envs, len(self.cfg.possible_agents), 4, 4
         ) * (self.cfg.intrinsic_std ** 2)
 
+        # Sampled noise values for each component [N, C, ...]
+        self.sampled_noise_generator = torch.Generator(device=self.device).manual_seed(0)
+        self.sampled_noise_pix = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), 1, 4, device=self.device
+        ) # (N, C, T, 4(xyxy))
+        self.sampled_noise_twb = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), 3, device=self.device
+        ) # (N, C, 3(x,y,z))
+        self.sampled_noise_phiwb = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), 3, device=self.device
+        ) # (N, C, 3(roll,pitch,yaw))
+        self.sampled_noise_alpha = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), 1, device=self.device
+        ) # (N, C, 1(gimbal yaw))
+        self.sampled_noise_beta = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), 1, device=self.device
+        ) # (N, C, 1(gimbal pitch))
+        self.sampled_noise_K = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), 4, device=self.device
+        ) # (N, C, 4(fx, fy, cx, cy))
+
+        # ----------------------------------------------------- #
+        # ----------------- Collision and TTC ----------------- #
+        # ----------------------------------------------------- #
         self.cam_to_cam_distance = torch.zeros(
             self.num_envs, len(self.cfg.possible_agents), len(self.cfg.possible_agents), 
             device=self.device) # (N, C, C)
@@ -745,84 +772,6 @@ class IrisMAEnv(DirectMARLEnv):
         progress = 1 if DEBUG_DRAW else progress
         # Apply target velocity
         self.target.write_root_com_velocity_to_sim(self.target_vel * progress)
-        
-        
-
-    def _get_observations(self) -> Dict[str, torch.Tensor]:
-        """Get observations for all agents."""
-        camera_poses = {}
-        camera_intrinsics = {}
-        image_shapes = {}
-        agent_poses = {}
-
-        # Compute agent states and camera parameters
-        for agent_id in self.cfg.possible_agents:
-            robot = self._robots[agent_id]
-
-            # Update camera parameters for each agent
-            current_focal_length = self.base_focal_length[agent_id] * self.zoom_level[agent_id]
-            self.camera_cfg_batch[agent_id][:, 2] = current_focal_length
-
-            # Compute camera pose for bounding box generation
-            robot_pos = robot.data.root_pos_w
-            robot_quat = robot.data.root_state_w[:, 3:7]
-            agent_poses[agent_id] = (robot_pos, robot_quat)
-
-            gimbal_idx = self.gimbal_joint_idx[agent_id]
-            gimbal_yaw = robot.data.joint_pos[:, gimbal_idx["yaw"]]
-            gimbal_roll = robot.data.joint_pos[:, gimbal_idx["roll"]]
-            gimbal_pitch = robot.data.joint_pos[:, gimbal_idx["pitch"]]
-            
-            gimbal_quat = quat_mul(
-                quat_mul(
-                    quat_from_euler_xyz(torch.zeros_like(gimbal_yaw), torch.zeros_like(gimbal_yaw), gimbal_yaw),
-                    quat_from_euler_xyz(torch.zeros_like(gimbal_pitch), gimbal_pitch, torch.zeros_like(gimbal_pitch))
-                ),
-                quat_from_euler_xyz(gimbal_roll, torch.zeros_like(gimbal_roll), torch.zeros_like(gimbal_roll))
-            )
-            
-            self.camera_quat_world[agent_id] = quat_mul(robot_quat, quat_mul(gimbal_quat, self.camera_offset_rot_batch))
-            camera_offset = torch.tensor((0, 0, 0.1), device=self.device).expand(self.num_envs, -1)
-            self.camera_pos_world[agent_id] = robot_pos + quat_rotate(self.camera_quat_world[agent_id], camera_offset)
-            
-            agent_cam_cfg = self.agent_camera_cfgs[agent_id]
-            # Generate bounding boxes
-            # bbox_gen = BBoxGenerator(
-            #     camera_width=agent_cam_cfg.width, 
-            #     camera_height=agent_cam_cfg.height,
-            #     focal_length=agent_cam_cfg.spawn.focal_length, 
-            #     horizontal_aperture=agent_cam_cfg.spawn.horizontal_aperture
-            # )
-            
-            # self.bboxes[agent_id], self.bbox_valid_mask[agent_id][:, 0] = bbox_gen.generate_2d_bbox(
-            #     self.target.data.root_state_w[:, :3], 
-            #     self.target.data.root_state_w[:, 3:7],
-            #     self.camera_pos_world[agent_id],
-            #     self.camera_quat_world[agent_id],
-            #     min_bbox_size=int(0.01 * agent_cam_cfg.width),
-            #     focal_length=current_focal_length
-            # )
-            
-            # # Normalize bounding boxes
-            # self.bboxes_normalized[agent_id] = self.bboxes[agent_id].clone()
-            # valid = self.bbox_valid_mask[agent_id].squeeze(-1)
-            # self.bboxes_normalized[agent_id][:, 0] = torch.where(valid, self.bboxes[agent_id][:, 0] / agent_cam_cfg.width, torch.ones_like(self.bboxes[agent_id][:, 0]) * (-1.0))
-            # self.bboxes_normalized[agent_id][:, 1] = torch.where(valid, self.bboxes[agent_id][:, 1] / agent_cam_cfg.height, torch.ones_like(self.bboxes[agent_id][:, 1]) * (-1.0))
-            # self.bboxes_normalized[agent_id][:, 2] = torch.where(valid, self.bboxes[agent_id][:, 2] / agent_cam_cfg.width, torch.ones_like(self.bboxes[agent_id][:, 2]) * (-1.0))
-            # self.bboxes_normalized[agent_id][:, 3] = torch.where(valid, self.bboxes[agent_id][:, 3] / agent_cam_cfg.height, torch.ones_like(self.bboxes[agent_id][:, 3]) * (-1.0))
-        
-            camera_poses[agent_id] = (self.camera_pos_world[agent_id], self.camera_quat_world[agent_id])
-
-            # Apply zoom to intrinsics
-            # Apply zoom to intrinsics using the fixed base matrices
-            self.camera_intrinsics[agent_id] = self.base_intrinsic_matrices[agent_id].clone()
-            self.camera_intrinsics[agent_id][:, 0, 0] *= self.zoom_level[agent_id]
-            self.camera_intrinsics[agent_id][:, 1, 1] *= self.zoom_level[agent_id]
-            camera_intrinsics[agent_id] = self.camera_intrinsics[agent_id]
-
-            # Image shapes
-            image_shapes[agent_id] = (self.agent_camera_cfgs[agent_id].height, self.agent_camera_cfgs[agent_id].width)
-
         if DEBUG_DRAW:
             for i, agent_id in enumerate(self.cfg.possible_agents):
                 current_focal_length = self.base_focal_length[agent_id] * self.zoom_level[agent_id]
@@ -884,9 +833,85 @@ class IrisMAEnv(DirectMARLEnv):
                     # update the internal buffers
                     self._update_intrinsic_matrices(env_ids)
                 """
+
+    def _get_observations(self) -> Dict[str, torch.Tensor]:
+        """Get observations for all agents."""
+        camera_poses = {}
+        camera_intrinsics = {}
+        image_shapes = {}
+        agent_poses = {}
+        
+        # Generate noise for realistic mearsurements
+        # noisy K is only sampled during resets.
+        self.sampled_noise_pix.normal_(mean=0.0, std=self.cfg.pix_std, generator=self.sampled_noise_generator)
+        self.sampled_noise_twb.normal_(mean=0.0, std=self.cfg.pos_std, generator=self.sampled_noise_generator)
+        self.sampled_noise_phiwb.normal_(mean=0.0, std=self.cfg.ori_std, generator=self.sampled_noise_generator)
+        self.sampled_noise_alpha.normal_(mean=0.0, std=self.cfg.gimbal_std, generator=self.sampled_noise_generator)
+        self.sampled_noise_beta.normal_(mean=0.0, std=self.cfg.gimbal_std, generator=self.sampled_noise_generator)
+
+        # Compute agent states and camera parameters
+        for i, agent_id in enumerate(self.cfg.possible_agents):
+            robot = self._robots[agent_id]
+
+            # Compute camera poses with noise
+            robot_pos = robot.data.root_pos_w + self.sampled_noise_twb[:, i, :]
+            robot_roll, robot_pitch, robot_yaw = euler_xyz_from_quat(robot.data.root_state_w[:, 3:7])
+            robot_quat = quat_from_euler_xyz(
+                robot_roll + self.sampled_noise_phiwb[:, i, 0],
+                robot_pitch + self.sampled_noise_phiwb[:, i, 1],
+                robot_yaw + self.sampled_noise_phiwb[:, i, 2],
+            )
+            agent_poses[agent_id] = (robot_pos, robot_quat)
+            self.robot_positions_stacked[:, i, :] = robot_pos
+            self.robot_quats_stacked[:, i, :] = robot_quat
+            self.robot_velocity_stacked[:, i, :] = robot.data.root_lin_vel_w # TODO: add delay
+
+            gimbal_idx = self.gimbal_joint_idx[agent_id]
+            gimbal_yaw = robot.data.joint_pos[:, gimbal_idx["yaw"]] + self.sampled_noise_alpha[:, i, 0]
+            gimbal_roll = robot.data.joint_pos[:, gimbal_idx["roll"]]
+            gimbal_pitch = robot.data.joint_pos[:, gimbal_idx["pitch"]] + self.sampled_noise_beta[:, i, 0]
+            self.gimbal_yaws_stacked[:, i] = gimbal_yaw
+            self.gimbal_pitches_stacked[:, i] = gimbal_pitch
+
+            gimbal_quat = quat_mul(
+                quat_mul(
+                    quat_from_euler_xyz(torch.zeros_like(gimbal_yaw), torch.zeros_like(gimbal_yaw), gimbal_yaw),
+                    quat_from_euler_xyz(torch.zeros_like(gimbal_pitch), gimbal_pitch, torch.zeros_like(gimbal_pitch))
+                ),
+                quat_from_euler_xyz(gimbal_roll, torch.zeros_like(gimbal_roll), torch.zeros_like(gimbal_roll))
+            )
+            
+            self.camera_quat_world[agent_id] = quat_mul(robot_quat, quat_mul(gimbal_quat, self.camera_offset_rot_batch))
+            self.camera_pos_world[agent_id] = robot_pos + quat_rotate(self.camera_quat_world[agent_id], self.camera_offset)
+            
+            agent_cam_cfg = self.agent_camera_cfgs[agent_id]        
+            camera_poses[agent_id] = (self.camera_pos_world[agent_id], self.camera_quat_world[agent_id])
+
+            # Apply zoom to intrinsics
+            # fx = (focal_length / horizontal_aperture) * width  # (N, C)
+            width = self.camera_cfg_batch[agent_id][:, 0]
+            horizontal_aperture = self.camera_cfg_batch[agent_id][:, 3]
+            current_focal_length = (self.base_focal_length[agent_id] + self.sampled_noise_K[:, i, 0] / width * horizontal_aperture) * self.zoom_level[agent_id]
+            self.camera_cfg_batch[agent_id][:, 2] = current_focal_length
+
+            self.camera_intrinsics[agent_id] = self.base_intrinsic_matrices[agent_id].clone()
+            # fx, fy
+            self.camera_intrinsics[agent_id][:, 0, 0] += self.sampled_noise_K[:, i, 0]
+            self.camera_intrinsics[agent_id][:, 1, 1] += self.sampled_noise_K[:, i, 1]
+            self.camera_intrinsics[agent_id][:, 0, 0] *= self.zoom_level[agent_id]
+            self.camera_intrinsics[agent_id][:, 1, 1] *= self.zoom_level[agent_id]
+            # cx, cy: not supported in IsaacSim yet.
+            # self.camera_intrinsics[agent_id][:, 0, 2] += self.sampled_noise_K[:, i, 2]
+            # self.camera_intrinsics[agent_id][:, 1, 2] += self.sampled_noise_K[:, i, 3]
+            self.camera_intrinsics_stacked[:, i, :, :] = self.camera_intrinsics[agent_id]
+            camera_intrinsics[agent_id] = self.camera_intrinsics[agent_id]
+
+            # Image shapes
+            image_shapes[agent_id] = (self.agent_camera_cfgs[agent_id].height, self.agent_camera_cfgs[agent_id].width)
+
         # Get target poses with correct dimensions
-        target_pos = self.target.data.root_pos_w  # May be (N, 3)
-        target_quat = self.target.data.root_quat_w  # May be (N, 4)
+        target_pos = self.target.data.root_pos_w  # (N, 3)
+        target_quat = self.target.data.root_quat_w  # (N, 4)
         
         # Add target dimension if missing
         if target_pos.ndim == 2:
@@ -904,6 +929,8 @@ class IrisMAEnv(DirectMARLEnv):
             image_shapes=image_shapes,
             target_scale=self.target_scale
         )
+        # bboxes (N, C, T, 4), sampled_noise_pix (N, C, T, 2)
+        self.bbox_raycaster.add_noise(self.sampled_noise_pix)
 
         self.ray_dir = get_ray_dir_from_bbox(
                 self.bbox_raycaster.data.bboxes,
@@ -911,33 +938,8 @@ class IrisMAEnv(DirectMARLEnv):
                 torch.stack([self.camera_quat_world[agent_id] for agent_id in self.cfg.possible_agents], dim=1),
                 torch.stack([self.camera_pos_world[agent_id] for agent_id in self.cfg.possible_agents], dim=1),
             ) # (N, C, T, 3)
-        is_bbox_valid = self.bbox_raycaster.data.valid_mask  # (N, C, T)
-        self.ray_dir = torch.where(
-            is_bbox_valid.unsqueeze(-1),
-            self.ray_dir,
-            torch.zeros_like(self.ray_dir)
-        )
-        self.no_detection_counts = torch.where(
-            is_bbox_valid,
-            torch.zeros_like(self.no_detection_counts),
-            self.no_detection_counts + 1
-        )
         
         # ===== TRIANGULATION COVARIANCE COMPUTATION =====
-        # Stack robot positions and orientations [N, C, 3] and [N, C, 4]
-        # Use pre-allocated stacked tensors for efficiency
-        for agent_idx, agent_id in enumerate(self.cfg.possible_agents):
-            robot = self._robots[agent_id]
-            joint_idx = self.gimbal_joint_idx[agent_id]
-            self.robot_positions_stacked[:, agent_idx, :] = robot.data.root_pos_w
-            self.robot_quats_stacked[:, agent_idx, :] = robot.data.root_state_w[:, 3:7]
-            self.robot_velocity_stacked[:, agent_idx, :] = robot.data.root_lin_vel_w
-            self.gimbal_yaws_stacked[:, agent_idx] = robot.data.joint_pos[:, joint_idx["yaw"]]
-            self.gimbal_pitches_stacked[:, agent_idx] = robot.data.joint_pos[:, joint_idx["pitch"]]
-            self.camera_intrinsics_stacked[:, agent_idx, :, :] = self.camera_intrinsics[agent_id]
-        
-        # Target positions [N, T, 3] where T=1 (one target per environment)
-        target_pos_batch = self.target.data.root_state_w[:, :3].unsqueeze(1)  # [N, 1, 3]
 
         # Update Sigma_K based on zoom level
         for agent_idx, agent_id in enumerate(self.cfg.possible_agents):
@@ -945,6 +947,11 @@ class IrisMAEnv(DirectMARLEnv):
                 self.cfg.intrinsic_std * self.zoom_level[agent_id].unsqueeze(-1).unsqueeze(-1)) ** 2
 
         try:
+            # TODO: Check what happens to the invalid ray dirs.
+            X_w_est = midpoint_method_batched(
+                pts=torch.stack([self.camera_pos_world[agent_id] for agent_id in self.cfg.possible_agents], dim=1),
+                dirs=self.ray_dir,
+            )
             # Compute triangulation covariance using simplified version (pixel noise only)
             # self.Sigma_X, trace_cov = triangulation_covariance_simple(
             #     X_w=target_pos_batch,
@@ -957,7 +964,7 @@ class IrisMAEnv(DirectMARLEnv):
             # )
             # Full covariance computation 
             self.Sigma_X, self.trace_cov = triangulation_covariance_multi_camera(
-                X_w=target_pos_batch,
+                X_w=X_w_est, # target_pos_batch (N, T, 3) # Using estimated position for better realism
                 robot_positions=self.robot_positions_stacked,
                 robot_quats=self.robot_quats_stacked,
                 gimbal_yaws=self.gimbal_yaws_stacked,
@@ -994,12 +1001,24 @@ class IrisMAEnv(DirectMARLEnv):
             )
         except Exception as e:
             # Fallback if computation fails
-            # print(f"Warning: Triangulation covariance computation failed: {e}")
+            print(f"Warning: Triangulation covariance (measurement) computation failed: {e}")
             self.is_tri_cov_valid = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.bool)
             self.Sigma_X = self.Sigma_X_invalid.clone()
             self.trace_cov = self.trace_cov_invalid.clone()
             Sigma_diag_sqrt = torch.ones(self.num_envs, 1, 3, device=self.device) * (-1.0)
 
+        # Set ray directions to zero where bbox is invalid
+        is_bbox_valid = self.bbox_raycaster.data.valid_mask  # (N, C, T)
+        self.ray_dir = torch.where(
+            is_bbox_valid.unsqueeze(-1),
+            self.ray_dir,
+            torch.zeros_like(self.ray_dir)
+        )
+        self.no_detection_counts = torch.where(
+            is_bbox_valid,
+            torch.zeros_like(self.no_detection_counts),
+            self.no_detection_counts + 1
+        )
 
         observations = {}
         
@@ -1071,9 +1090,121 @@ class IrisMAEnv(DirectMARLEnv):
         curriculum_alpha = torch.tensor(progress, device=self.device)
         # curriculum_alpha = torch.ones(self.num_envs, device=self.device)
         
-        trace_cov_per_env = self.trace_cov[:, 0]  # [N]
+        # --- Compute triangulation quality using GT values ---
+        # Target positions [N, T, 3] where T=1 (one target per environment)
+        target_pos_stacked_gt = self.target.data.root_state_w[:, :3].unsqueeze(1)  # [N, 1, 3]
+        robot_positions_stacked_gt = torch.zeros_like(self.robot_positions_stacked)
+        robot_quats_stacked_gt = torch.zeros_like(self.robot_quats_stacked)
+        gimbal_yaws_stacked_gt = torch.zeros_like(self.gimbal_yaws_stacked)
+        gimbal_pitches_stacked_gt = torch.zeros_like(self.gimbal_pitches_stacked)
+        camera_intrinsics_stacked_gt = torch.zeros_like(self.camera_intrinsics_stacked)
+        agent_poses_gt = {}
+        camera_poses_gt = {}
+        camera_pos_world_gt = {}
+        camera_quat_world_gt = {}
+        camera_intrinsics_gt = {}
+        image_shapes = {}
+        for i, agent_id in enumerate(self.cfg.possible_agents):
+            robot = self._robots[agent_id]
+            # Robot poses
+            robot_pos = robot.data.root_pos_w
+            robot_quat = robot.data.root_state_w[:, 3:7]
+            agent_poses_gt[agent_id] = (robot_pos, robot_quat)
+            robot_positions_stacked_gt[:, i, :] = robot_pos
+            robot_quats_stacked_gt[:, i, :] = robot_quat
+
+            # Gimbal angles
+            gimbal_idx = self.gimbal_joint_idx[agent_id]
+            gimbal_yaw = robot.data.joint_pos[:, gimbal_idx["yaw"]]
+            gimbal_roll = robot.data.joint_pos[:, gimbal_idx["roll"]]
+            gimbal_pitch = robot.data.joint_pos[:, gimbal_idx["pitch"]]
+            # Camera poses
+            gimbal_quat = quat_mul(
+                quat_mul(
+                    quat_from_euler_xyz(torch.zeros_like(gimbal_yaw), torch.zeros_like(gimbal_yaw), gimbal_yaw),
+                    quat_from_euler_xyz(torch.zeros_like(gimbal_pitch), gimbal_pitch, torch.zeros_like(gimbal_pitch))
+                ),
+                quat_from_euler_xyz(gimbal_roll, torch.zeros_like(gimbal_roll), torch.zeros_like(gimbal_roll))
+            )
+            gimbal_yaws_stacked_gt[:, i] = gimbal_yaw
+            gimbal_pitches_stacked_gt[:, i] = gimbal_pitch
+
+            camera_quat_world_gt[agent_id] = quat_mul(robot_quat, quat_mul(gimbal_quat, self.camera_offset_rot_batch))
+            camera_pos_world_gt[agent_id] = robot_pos + quat_rotate(camera_quat_world_gt[agent_id], self.camera_offset)
+
+            camera_poses_gt[agent_id] = (camera_pos_world_gt[agent_id], camera_quat_world_gt[agent_id])
+            # Camera intrinsics
+            camera_intrinsics_stacked_gt[:, i, :, :] = self.base_intrinsic_matrices[agent_id].clone()
+            camera_intrinsics_stacked_gt[:, i, 0, 0] *= self.zoom_level[agent_id]
+            camera_intrinsics_stacked_gt[:, i, 1, 1] *= self.zoom_level[agent_id]
+            camera_intrinsics_gt[agent_id] = camera_intrinsics_stacked_gt[:, i, :, :]
+
+            # Image shapes
+            image_shapes[agent_id] = (self.agent_camera_cfgs[agent_id].height, self.agent_camera_cfgs[agent_id].width)
+
+        # Get target poses with correct dimensions
+        target_pos = self.target.data.root_pos_w  # (N, 3)
+        target_quat = self.target.data.root_quat_w  # (N, 4)
+        
+        # Add target dimension if missing
+        if target_pos.ndim == 2:
+            target_pos = target_pos.unsqueeze(1)  # (N, 3) -> (N, 1, 3)
+        if target_quat.ndim == 2:
+            target_quat = target_quat.unsqueeze(1)  # (N, 4) -> (N, 1, 4)
+        
+        target_poses = (target_pos, target_quat)
+        self.bbox_raycaster.update(
+            camera_poses=camera_poses_gt,
+            camera_intrinsics=camera_intrinsics_gt,
+            target_poses=target_poses,
+            agent_poses=agent_poses_gt,
+            image_shapes=image_shapes,
+            target_scale=self.target_scale
+        )
+        # Full covariance computation 
+        try:
+            Sigma_X_gt, trace_cov_gt = triangulation_covariance_multi_camera(
+                X_w=target_pos_stacked_gt,  # (N, T, 3)
+                robot_positions=robot_positions_stacked_gt,
+                robot_quats=robot_quats_stacked_gt,
+                gimbal_yaws=gimbal_yaws_stacked_gt,
+                gimbal_pitches=gimbal_pitches_stacked_gt,
+                camera_intrinsics=camera_intrinsics_stacked_gt,
+                Sigma_pix=self.Sigma_pix,
+                Sigma_twb=self.Sigma_twb,
+                Sigma_phiwb=self.Sigma_phiwb,
+                Sigma_alpha=self.Sigma_alpha,
+                Sigma_beta=self.Sigma_beta,
+                Sigma_K=self.Sigma_K,
+                include_pose=True,
+                include_gimbal=True,
+                include_intrinsics=True
+            )
+            is_trace_valid = (trace_cov_gt >= 0.0) & torch.isfinite(trace_cov_gt)  # [N, T]
+            is_sigma_finite = torch.isfinite(Sigma_X_gt).all(dim=(-2, -1))  # [N, T]
+            is_not_nan = ~torch.isnan(Sigma_X_gt).any(dim=(-2, -1))  # [N, T]
+            is_all_bboxes_valid = self.bbox_raycaster.data.valid_mask.all(dim=1)  # [N, C] -> [N, T]
+            is_tri_cov_valid = is_trace_valid & is_sigma_finite & is_not_nan & is_all_bboxes_valid  # [N, T]
+            Sigma_X_gt = torch.where(
+                is_tri_cov_valid.unsqueeze(-1).unsqueeze(-1),
+                Sigma_X_gt,
+                self.Sigma_X_invalid
+            )
+            trace_cov_gt = torch.where(
+                is_tri_cov_valid,
+                trace_cov_gt,
+                self.trace_cov_invalid
+            )
+        except Exception as e:
+            # Fallback if computation fails
+            print(f"Warning: Triangulation covariance (GT) computation failed: {e}")
+            is_tri_cov_valid = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.bool)
+            Sigma_X_gt = self.Sigma_X_invalid.clone()
+            trace_cov_gt = self.trace_cov_invalid.clone()
+        
+        trace_cov_per_env = trace_cov_gt[:, 0]  # [N]
         triangulation_quality = torch.where(
-            self.is_tri_cov_valid[:, 0],
+            is_tri_cov_valid[:, 0],
             1.0 / torch.sqrt(trace_cov_per_env + 1e-12),
             torch.zeros(self.num_envs, device=self.device)
         )
@@ -1358,6 +1489,10 @@ class IrisMAEnv(DirectMARLEnv):
             
             # Reset stabilizers
             self._stabilizers[agent_id].reset(env_ids)
+
+            # Reset noise samplers
+            self.sampled_noise_K.normal_(mean=0.0, std=self.cfg.intrinsic_std, generator=self.sampled_noise_generator)
+
         
         # Reset episode length buffer
         super()._reset_idx(env_ids)
