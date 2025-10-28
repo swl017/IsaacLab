@@ -1,28 +1,48 @@
 #!/bin/bash
 
 # Define sweep parameters
-ACTION_SUM_SCALES=(-1.0)
-# ACTION_WEIGHT=("'[1, 1, 5, 0.5, 0.03, 0.03, 0.01]'" "'[1, 1, 5, 0.5, 0.3, 0.3, 0.01]'" "'[1, 1, 5, 0.5, 3, 3, 0.01]'")
-ACTION_WEIGHT=(0 1 2)
-ACTION_DELTA_SCALES=(-0.01 -0.1 -1.0)
-# ACTION_DELTA_WEIGHT=("[1, 1, 5, 0.5, 0.03, 0.03, 0.01]" "[1, 1, 5, 0.5, 0.3, 0.3, 0.01]" "[1, 1, 5, 0.5, 3, 3, 0.01]")
-ACTION_DELTA_WEIGHT=(0 1 2)
-bbox_reward_shape_width_list=(0.3 0.6 0.8)
+DETECTION_FPS=(50.0)
+DETECTION_MEAN_LATENCY=(0.05 0.2)
+DETECTION_STD_LATENCY=(0.01 0.1)
+EXPERIMENT_CASE=(0)
 # Base command
-BASE_CMD="python /home/usrg/IsaacPX4/IsaacLab/scripts/reinforcement_learning/skrl/train.py --task Isaac-Iris-MA2-Direct-v0 --algorithm MAPPO --num_envs 1024 --headless --video --video_interval 20000 --video_length 1000 --enable_cameras"
+BASE_CMD="python /home/usrg/IsaacPX4/IsaacLab/scripts/reinforcement_learning/skrl/train.py --algorithm MAPPO --headless"
+RNN_CMD="python /home/usrg/IsaacPX4/IsaacLab/scripts/reinforcement_learning/skrl/train_iris_mappo_rnn.py"
 
 # Loop through all combinations
-for action_weight in "${ACTION_WEIGHT[@]}"; do
-    for action_delta_weight in "${ACTION_DELTA_WEIGHT[@]}"; do
-        echo "Running with action_weight=${action_weight}, action_delta_weight=${action_delta_weight}"
+for exp_case in "${EXPERIMENT_CASE[@]}"; do
+    # detection_mean_latency=${DETECTION_MEAN_LATENCY[$exp_case]}
+    # detection_std_latency=${DETECTION_STD_LATENCY[$exp_case]}
+    # detection_fps=${DETECTION_FPS[0]}
+    # echo "Running with learning_rate=${learning_rate}, detection_mean_latency=${detection_mean_latency}, detection_std_latency=${detection_std_latency}"
+    # $BASE_CMD --num_envs 1024 --task Isaac-Iris-MA2-Direct-Delay-v0 \
+    #     agent.agent.experiment.experiment_name="sweep14_noise_o_delay_x_obsdim29" \
+    #     agent.trainer.timesteps=200000 \
+    #     env.enable_delay_system=False \
+    #     # agent.trainer.timesteps=300 \
+    #     # env.action_sum_penalty_scale=$action_sum \
+    # sleep 5
+    # $BASE_CMD --num_envs 1024 --task Isaac-Iris-MA2-Direct-Delay-v0 \
+    #     agent.agent.experiment.experiment_name="sweep14_noise_o_delay_x_obsdim35" \
+    #     agent.trainer.timesteps=200000 \
+    #     env.enable_delay_system=False \
+    #     # agent.trainer.timesteps=300 \
+    #     # env.action_sum_penalty_scale=$action_sum \
+    # sleep 5
+
+    $BASE_CMD --num_envs 1024 --task Isaac-Iris-MA2-Direct-Delay-v0 \
+        agent.agent.experiment.experiment_name="sweep14_noise_o_delay_o_obsdim29" \
+        agent.trainer.timesteps=200000 \
+        # agent.trainer.timesteps=300 \
+        # env.action_sum_penalty_scale=$action_sum \
+    sleep 5
+
+    $RNN_CMD --task Isaac-Iris-MA2-Direct-Delay-v0 \
         
-        $BASE_CMD \
-            env.aw=$action_weight \
-            env.adw=$action_delta_weight \
-            agent.agent.experiment.experiment_name="sweep_05_aw${action_weight}_adw${action_delta_weight}" \
-            # env.lin_vel_penalty_scale=$lin_vel \
-            # env.action_sum_penalty_scale=$action_sum \
-        
-        sleep 5
-    done
+    sleep 5
+
+    # $RNN_CMD --task Isaac-Iris-MA2-Direct-Delayed-v0 \
+
+    # sleep 5
+
 done

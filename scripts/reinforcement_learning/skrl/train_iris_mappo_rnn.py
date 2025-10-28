@@ -19,20 +19,23 @@ from skrl.resources.preprocessors.torch import RunningStandardScaler
 from skrl.resources.schedulers.torch import KLAdaptiveRL
 from skrl.trainers.torch import SequentialTrainer
 from skrl.utils import set_seed
+import yaml
 
 
 # Parse arguments
 parser = argparse.ArgumentParser(description="Train MAPPO RNN agents for Iris Multi-Agent task")
+parser.add_argument("--task", type=str, default="Isaac-Iris-MA2-Direct-Delay-v0", help="Name of the task.")
 parser.add_argument("--tuning-param", type=str, help="Custom tuning parameter")
+parser.add_argument("--experiment-name", type=str, default="sweep14_noise_o_delay_o_rnn_obsdim29", help="Name of the experiment")
 args_cli = parser.parse_args()
 
 # Set seed for reproducibility
 set_seed(42)
 
 # Load and wrap the Isaac Lab multi-agent environment
-task_name = "Isaac-Iris-MA-Direct-v0"
-experiment_name = "mappo_rnn_tracking"
-env = load_isaaclab_env(task_name=task_name, num_envs=2048, headless=True)
+task_name = args_cli.task
+experiment_name = args_cli.experiment_name
+env = load_isaaclab_env(task_name=task_name, num_envs=1024, headless=True)
 env = wrap_env(env)
 device = env.device
 
@@ -63,7 +66,7 @@ except Exception as e:
 
 # Configure MAPPO_RNN
 cfg = MAPPO_RNN_DEFAULT_CONFIG.copy()
-cfg["rollouts"] = 128
+cfg["rollouts"] = 64
 cfg["learning_epochs"] = 4
 cfg["mini_batches"] = 8
 cfg["discount_factor"] = 0.99
@@ -179,7 +182,7 @@ else:
 
 # Set up logging
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-experiment_dir = f"logs/skrl/{task_name}/{timestamp}"
+experiment_dir = f"logs/skrl/iris_ma2/{timestamp}_{experiment_name}"
 os.makedirs(experiment_dir, exist_ok=True)
 
 # Copy training script for reproducibility
@@ -193,8 +196,8 @@ print(f"Training script copied to: {script_backup_path}")
 # shutil.copy2("mappo_rnn.py", mappo_rnn_backup_path)
 # print(f"MAPPO_RNN implementation copied to: {mappo_rnn_backup_path}")
 
-env_folder = "/home/usrg/IsaacPX4/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma"
-shutil.copytree(env_folder, os.path.join(experiment_dir, "iris_ma"))
+env_folder = "/home/usrg/IsaacPX4/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma2"
+shutil.copytree(env_folder, os.path.join(experiment_dir, "iris_ma2"))
 print(f"Env script copied to: {experiment_dir}")
 
 cfg["experiment"]["directory"] = experiment_dir
@@ -215,7 +218,7 @@ agent = MAPPO_RNN(
 
 # Configure trainer
 cfg_trainer = {
-    "timesteps": 120000,
+    "timesteps": 200000,
     "headless": True,
     "environment_info": "log"
 }
@@ -240,8 +243,8 @@ for agent_id in possible_agents:
     print(f"Agent {agent_id} saved to: {agent_path}")
 
 # Save training configuration
-config_path = os.path.join(experiment_dir, "training_config.pt")
-torch.save({
+config_path = os.path.join(experiment_dir, "training_config.yaml")
+config_to_save = {
     "agent_config": cfg,
     "trainer_config": cfg_trainer,
     "task_name": task_name,
@@ -249,7 +252,10 @@ torch.save({
     "possible_agents": possible_agents,
     "timestamp": timestamp,
     "device": str(device)
-}, config_path)
+}
+
+with open(config_path, 'w') as f:
+    yaml.dump(config_to_save, f, default_flow_style=False, indent=2)
 print(f"Training configuration saved to: {config_path}")
 
 print(f"Decentralized MAPPO training completed!")

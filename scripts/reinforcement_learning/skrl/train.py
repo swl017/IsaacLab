@@ -101,6 +101,11 @@ from isaaclab_rl.skrl import SkrlVecEnvWrapper
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
+from isaacsim.core.utils.viewports import set_camera_view
+import numpy as np
+from pxr import Gf
+from isaaclab.sim import SimulationContext
+
 # PLACEHOLDER: Extension template (do not remove this comment)
 
 # config shortcuts
@@ -149,8 +154,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent_cfg["agent"]["experiment"]["experiment_name"] = log_dir
     # update log_dir
     log_dir = os.path.join(log_root_path, log_dir)
-    env_folder = "/home/usrg/IsaacPX4/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma"
-    shutil.copytree(env_folder, os.path.join(log_dir, "iris_ma"))
+    env_folder = "/home/usrg/IsaacPX4/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma2"
+    shutil.copytree(env_folder, os.path.join(log_dir, "iris_ma2"))
     print(f"Env script copied to: {log_dir}")
 
     # dump the configuration into log-directory

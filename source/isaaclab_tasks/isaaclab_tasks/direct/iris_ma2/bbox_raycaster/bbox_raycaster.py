@@ -853,5 +853,22 @@ class BBoxRayCaster:
         """
         self._data.bboxes_xyxy += noise
         self._data.bboxes = bbox_xyxy_to_xywh(self._data.bboxes_xyxy)
-
+        self._data.bboxes_normalized = normalize_bboxes(
+            self._data.bboxes,
+            self._data.image_shapes,
+            epsilon=self.cfg.projection_epsilon
+        )
         self._validate_detections()
+
+    def get_normalized_bboxes(self, bboxes_xywh: torch.Tensor) -> torch.Tensor:
+        """Get normalized bounding boxes (x_center, y_center, width, height) in [0,1].
+        Args:
+            bboxes_xywh: Tensor of shape (..., 4)
+        Returns:
+            Tensor of shape (N, C, T, 4) with normalized bounding boxes.
+        """
+        return normalize_bboxes(
+            bboxes_xywh,
+            self._data.image_shapes,
+            epsilon=self.cfg.projection_epsilon
+        )
