@@ -743,6 +743,54 @@ class BBoxRayCaster:
         self._data.valid_bbox_corners_mask = corners_ok
         self._data.valid_bbox_size_mask = size_ok
 
+    def validate_bbox(self, bbox: torch.Tensor) -> torch.Tensor:
+        """Validate arbitrary bounding boxes based on size and center criteria.
+        Args:
+            bboxes: Tensor of shape (N, 4) in normalized (x_center, y_center, width, height) format.
+        Returns:
+            Tensor of shape (N,) with boolean validity mask.
+        """
+        # Normalize one bbox
+        # Extract dimensions
+        img_h = self._data.image_shapes[:, 0, 0]
+        img_w = self._data.image_shapes[:, 0, 1]
+        
+        # Prevent division by zero
+        img_w_safe = torch.clamp(img_w, min=self.cfg.projection_epsilon)
+        img_h_safe = torch.clamp(img_h, min=self.cfg.projection_epsilon)
+        
+        # Split bbox components
+        cx, cy, w, h = bbox.split(1, dim=-1)
+
+        # Normalize
+        cx_norm = cx / img_w_safe
+        cy_norm = cy / img_h_safe
+        w_norm = w / img_w_safe
+        h_norm = h / img_h_safe
+        
+        # Clamp to [0, 1] to handle numerical errors
+        cx_norm = torch.clamp(cx_norm, 0.0, 1.0)
+        cy_norm = torch.clamp(cy_norm, 0.0, 1.0)
+        w_norm = torch.clamp(w_norm, 0.0, 1.0)
+        h_norm = torch.clamp(h_norm, 0.0, 1.0)
+        bbox_normalized = torch.cat([cx_norm, cy_norm, w_norm, h_norm], dim=-1) # (N, 4)
+
+        size_ok = validate_bbox_sizes(
+            bbox_normalized,
+            self.cfg.min_bbox_size,
+            self.cfg.max_bbox_size
+        )
+        center_x = bbox_normalized[..., 0]
+        center_y = bbox_normalized[..., 1]
+        center_ok = (
+            (center_x >= 0.0) & (center_x <= 1.0) &
+            (center_y >= 0.0) & (center_y <= 1.0)
+        )
+
+        valid_mask = size_ok & center_ok
+
+        return valid_mask
+
     def _check_occlusions(
         self,
         agent_poses: dict[str, tuple[torch.Tensor, torch.Tensor]] | None,

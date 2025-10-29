@@ -1,14 +1,6 @@
 # delay_comm_system_optimized.py
 """
-HIGHLY OPTIMIZED delay and communication system using vectorized tensor operations.
-
-Key optimizations vs original:
-1. Fixed-size tensor circular buffers (no Python lists)
-2. All operations vectorized across environments  
-3. No Python loops over env_id
-4. Everything stays on GPU
-
-Performance: ~50x faster for 8192 envs (1600ms → 30ms target)
+Delay and communication system using vectorized tensor operations.
 """
 
 import torch
@@ -48,6 +40,10 @@ class FirstOrderLag:
                               torch.zeros(num_envs, state_dim, device=device)
         self.timestamp = torch.zeros(num_envs, device=device)
     
+    def update_time_constants(self, time_constant: float):
+        self.tau = time_constant
+        self.alpha = self.dt / (self.dt + time_constant)
+
     def update(self, measured_state: torch.Tensor, current_time: torch.Tensor) -> torch.Tensor:
         self.filtered_state = self.filtered_state + self.alpha * (measured_state - self.filtered_state)
         if isinstance(current_time, torch.Tensor):
@@ -84,7 +80,11 @@ class QuaternionFirstOrderLag:
             self.filtered_quat[:, 0] = 1.0
         
         self.timestamp = torch.zeros(num_envs, device=device)
-    
+
+    def update_time_constants(self, time_constant: float):
+        self.tau = time_constant
+        self.alpha = self.dt / (self.dt + time_constant)
+
     def update(self, measured_quat: torch.Tensor, current_time: torch.Tensor) -> torch.Tensor:
         self.filtered_quat = self._slerp(self.filtered_quat, measured_quat, self.alpha)
         if isinstance(current_time, torch.Tensor):
@@ -148,16 +148,24 @@ class LatencyBufferOptimized:
         self.write_ptr = torch.zeros(num_envs, dtype=torch.long, device=device)
         self.buffer_count = torch.zeros(num_envs, dtype=torch.long, device=device)
     
+    def update_latency_params(self, mean_latency: float, std_latency: float):
+        self.mean_latency = mean_latency
+        self.std_latency = std_latency
+
     def add_measurement(self, data: torch.Tensor, current_time: torch.Tensor,
-                       valid_mask: Optional[torch.Tensor] = None):
+                       valid_mask: Optional[torch.Tensor] = None,
+                       shared_latencies: Optional[torch.Tensor] = None):
         if valid_mask is None:
             valid_mask = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
-        
-        # Random latencies [N]
-        latencies = torch.normal(
-            mean=self.mean_latency, std=self.std_latency,
-            size=(self.num_envs,), device=self.device
-        ).clamp(min=0.0)
+
+        # Use shared latencies if provided, otherwise generate random latencies [N]
+        if shared_latencies is not None:
+            latencies = shared_latencies
+        else:
+            latencies = torch.normal(
+                mean=self.mean_latency, std=self.std_latency,
+                size=(self.num_envs,), device=self.device
+            ).clamp(min=0.0)
         
         # Delivery times [N]
         if isinstance(current_time, torch.Tensor):
@@ -188,7 +196,6 @@ class LatencyBufferOptimized:
         )
     
     def get_delayed_measurement(self, current_time: torch.Tensor) -> TimestampedData:
-        """Vectorized retrieval - NO LOOPS!"""
         current_t = current_time if isinstance(current_time, torch.Tensor) else \
                     torch.full((self.num_envs,), current_time, device=self.device)
         
@@ -250,6 +257,11 @@ class CommManagerOptimized:
         self.buffer_count = torch.zeros(num_envs, num_agents, num_agents, dtype=torch.long, device=device)
         self.last_received_time = torch.zeros(num_envs, num_agents, num_agents, device=device)
     
+    def update_comm_params(self, mean_comm_delay: float, std_comm_delay: float, dropout_rate: float):
+        self.mean_comm_delay = mean_comm_delay
+        self.std_comm_delay = std_comm_delay
+        self.dropout_rate = dropout_rate
+
     def send_message(self, sender_id: int, data: Dict[str, torch.Tensor], current_time: torch.Tensor,
                     valid_mask: Optional[torch.Tensor] = None):
         """OPTIMIZED: Vectorized send."""
@@ -381,6 +393,7 @@ class DelayedObservationManager:
     def __init__(self, num_envs: int, num_agents: int, dt: float, device: torch.device,
                  motion_time_constant: float = 0.1, gimbal_time_constant: float = 0.03,
                  detection_mean_latency: float = 0.05, detection_std_latency: float = 0.02,
+                 detection_fps: float = 30.0,
                  comm_mean_delay: float = 0.1, comm_std_delay: float = 0.03,
                  comm_dropout_rate: float = 0.05, max_buffer_size: int = 100):
         self.num_envs = num_envs
@@ -389,7 +402,11 @@ class DelayedObservationManager:
         self.device = device
         self.max_buffer_size = max_buffer_size
         
-        # Create filters (already optimized)
+        self.detection_fps = detection_fps
+        self.detection_period = 1.0 / detection_fps if detection_fps > 0 else 0.0
+        self.last_detection_time = {}  # Dict[agent_id -> Tensor[N]]
+        
+        # Create filters
         self.position_filters = {}
         self.orientation_filters = {}
         self.linear_velocity_filters = {}
@@ -417,12 +434,13 @@ class DelayedObservationManager:
                 num_envs, 1, gimbal_time_constant, dt, device
             )
         
-        # OPTIMIZED buffers
+        # buffers
         self.detection_buffers = {}
+        self.detection_valid_mask_buffers = {}
         self.detection_mean_latency = detection_mean_latency
         self.detection_std_latency = detection_std_latency
         
-        # OPTIMIZED communication
+        # communication
         self.comm_manager = CommManagerOptimized(
             num_envs, num_agents, comm_mean_delay, comm_std_delay,
             comm_dropout_rate, dt, device, self.max_buffer_size
@@ -455,23 +473,100 @@ class DelayedObservationManager:
         filtered_pitch = self.gimbal_pitch_filters[agent_id].update(true_pitch, self.current_time)
         return filtered_yaw, filtered_pitch
     
+    def update_motion_time_constants(self, motion_time_constant: float):
+        for agent_id in range(self.num_agents):
+            self.position_filters[agent_id].update_time_constants(motion_time_constant)
+            self.orientation_filters[agent_id].update_time_constants(motion_time_constant / 10.0)
+            self.linear_velocity_filters[agent_id].update_time_constants(motion_time_constant / 5.0)
+            self.angular_velocity_filters[agent_id].update_time_constants(motion_time_constant / 100.0)
+
+    def update_gimbal_time_constants(self, gimbal_time_constant: float):
+        for agent_id in range(self.num_agents):
+            self.gimbal_yaw_filters[agent_id].update_time_constants(gimbal_time_constant)
+            self.gimbal_pitch_filters[agent_id].update_time_constants(gimbal_time_constant)
+
+    def update_detection_fps(self, detection_fps: float):
+        self.detection_fps = detection_fps
+        self.detection_period = 1.0 / detection_fps if detection_fps > 0 else 0.0
+
+    def update_detection_latency(self, mean_latency: float, std_latency: float):
+        self.detection_mean_latency = mean_latency
+        self.detection_std_latency = std_latency
+        for buffer in self.detection_buffers.values():
+            buffer.update_latency_params(mean_latency, std_latency)
+
+    def update_comm_parameters(self, mean_comm_delay: float, std_comm_delay: float, dropout_rate: float):
+        self.comm_manager.update_comm_params(mean_comm_delay, std_comm_delay, dropout_rate)
+
     def add_detection(self, agent_id: int, detection_data: torch.Tensor,
-                     valid_mask: Optional[torch.Tensor] = None):
+                     valid_mask: torch.Tensor):
+        # Initialize last detection time for this agent if needed
+        if agent_id not in self.last_detection_time:
+            self.last_detection_time[agent_id] = torch.full(
+                (self.num_envs,), -float('inf'), device=self.device
+            )
+        
+        # Check if enough time has passed since last detection (FPS throttling)
+        # fps_mask determines which frames to capture, independent of detection validity
+        time_since_last = self.current_time - self.last_detection_time[agent_id]
+        fps_mask = time_since_last >= self.detection_period  # [N]
+        
         if agent_id not in self.detection_buffers:
             self.detection_buffers[agent_id] = LatencyBufferOptimized(
                 self.num_envs, detection_data.shape[1:], self.detection_mean_latency,
                 self.detection_std_latency, self.dt, self.device, self.max_buffer_size
             )
-        self.detection_buffers[agent_id].add_measurement(detection_data, self.current_time, valid_mask)
-    
-    def get_delayed_detection(self, agent_id: int) -> TimestampedData:
+        if agent_id not in self.detection_valid_mask_buffers:
+            self.detection_valid_mask_buffers[agent_id] = LatencyBufferOptimized(
+                self.num_envs, (1,), self.detection_mean_latency,
+                self.detection_std_latency, self.dt, self.device, self.max_buffer_size
+            )
+
+        # Generate shared latencies for both bbox and valid_mask
+        # This ensures they arrive at the same time (synchronized)
+        shared_latencies = torch.normal(
+            mean=self.detection_mean_latency,
+            std=self.detection_std_latency,
+            size=(self.num_envs,),
+            device=self.device
+        ).clamp(min=0.0)
+
+        # Add detection data for all frames that pass FPS throttling
+        # Use shared latencies to ensure bbox and valid_mask arrive together
+        self.detection_buffers[agent_id].add_measurement(
+            detection_data, self.current_time, fps_mask, shared_latencies
+        )
+
+        # Store detection validity for the captured frames
+        # This tracks: "for frames we captured, was the bbox within image bounds?"
+        # Use SAME latencies to ensure synchronization
+        self.detection_valid_mask_buffers[agent_id].add_measurement(
+            valid_mask.unsqueeze(-1), self.current_time, fps_mask, shared_latencies
+        )
+
+        # Update last detection time for environments that passed FPS throttling
+        self.last_detection_time[agent_id] = torch.where(
+            fps_mask,
+            self.current_time,
+            self.last_detection_time[agent_id]
+        )
+
+    def get_delayed_detection(self, agent_id: int) -> Tuple[TimestampedData, torch.Tensor]:
         if agent_id not in self.detection_buffers:
-            return TimestampedData(
-                data=torch.zeros(self.num_envs, 0, device=self.device),
+            detection = TimestampedData(
+                data=torch.zeros(self.num_envs, 4, device=self.device),
                 timestamp=torch.zeros(self.num_envs, device=self.device),
                 valid=torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
             )
-        return self.detection_buffers[agent_id].get_delayed_measurement(self.current_time)
+        else:
+            detection = self.detection_buffers[agent_id].get_delayed_measurement(self.current_time)
+        
+        if agent_id not in self.detection_valid_mask_buffers:
+            valid_mask = torch.zeros(self.num_envs, 1, dtype=torch.bool, device=self.device)
+        else:
+            valid_mask = self.detection_valid_mask_buffers[agent_id].get_delayed_measurement(self.current_time).data
+        
+        return detection, valid_mask
     
     def broadcast_state(self, sender_id: int, state_dict: Dict[str, torch.Tensor],
                        valid_mask: Optional[torch.Tensor] = None):
@@ -510,6 +605,12 @@ class DelayedObservationManager:
         
         for buffer in self.detection_buffers.values():
             buffer.reset(env_ids)
+
+        for buffer in self.detection_valid_mask_buffers.values():
+            buffer.reset(env_ids)
+
+        for agent_id in self.last_detection_time.keys():
+            self.last_detection_time[agent_id][env_ids] = -float('inf')
         
         self.comm_manager.reset(env_ids)
         self.current_time[env_ids] = 0.0

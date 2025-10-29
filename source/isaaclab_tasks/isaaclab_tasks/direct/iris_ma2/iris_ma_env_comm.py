@@ -31,6 +31,7 @@ from isaaclab.utils.math import (
     quat_mul,
     quat_inv,
     quat_rotate,
+    yaw_quat
 )
 
 # Pre-defined configs
@@ -111,6 +112,8 @@ class AgentStates:
         self.bboxes_delayed_noisy = torch.zeros(num_envs, num_agents, 1, 4, device=device)
         self.valid_mask_delayed = torch.zeros(num_envs, num_agents, 1, device=device, dtype=torch.bool)
         self.valid_mask_delayed_noisy = torch.zeros(num_envs, num_agents, 1, device=device, dtype=torch.bool)
+        self.time_since_detection_delayed = torch.zeros(num_envs, num_agents, 1, device=device)
+        self.time_since_detection_delayed_noisy = torch.zeros(num_envs, num_agents, 1, device=device)
         
         # Camera poses in world frame (delayed and delayed+noisy)
         self.camera_pos_delayed = torch.zeros(num_envs, num_agents, 3, device=device)
@@ -145,6 +148,7 @@ class AgentStates:
         self.received_timestamps = {}         # Dict[agent_id] -> [N, C-1] generation timestamps
         self.received_valid = {}              # Dict[agent_id] -> [N, C-1] bool flags (True if data received)
         self.received_age = {}                # Dict[agent_id] -> [N, C-1] age of received data in seconds
+        self.received_time_since_detection = {} # Dict[agent_id] -> [N, C-1, T]
         
     def compute_camera_poses(
         self,
@@ -280,7 +284,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
-        dt=2 / 100,
+        dt=1/100,
         render_interval=decimation,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -369,7 +373,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
         load_agent_meshes=False,
         agent_mesh_simplification=1.1,
         use_collision_proxy=False,
-        min_bbox_size=(0.02, 0.02),
+        min_bbox_size=(0.01, 0.01),
         max_bbox_size=(0.90, 0.90),
         partial_detection_allowed=False,
         min_bbox_area_pixels=400.0,
@@ -396,7 +400,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     max_ang_acc = 15.0
     max_gimbal_yaw_angle = [math.radians(-180.0), math.radians(180.0)]
     max_gimbal_pitch_angle = [math.radians(-60.0), math.radians(10.0)]
-    max_gimbal_angle_rate = [math.radians(-180.0), math.radians(180.0)]
+    max_gimbal_angle_rate = [math.radians(-360.0), math.radians(360.0)]
     max_zoom_rate = [-1.0, 1.0]
     max_no_detection_sec = episode_length_s / 2.0
 
@@ -436,26 +440,28 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     intrinsic_std = 10.0
 
     # Curriculum
-    curriculum_coordination_start_step: int = 10000
-    curriculum_coordination_end_step: int = 20000
-    curriculum_tracking_start_step: int = -1
-    curriculum_tracking_end_step: int = 10000
-    curriculum_moving_target_start_step: int = 20000
-    curriculum_moving_target_end_step: int = 90000
+    curriculum_tracking_start_step: int = 10000
+    curriculum_tracking_end_step: int = 50000
+    curriculum_coordination_start_step: int = 50000
+    curriculum_coordination_end_step: int = 100000
+    curriculum_moving_target_start_step: int = 100000
+    curriculum_moving_target_end_step: int = 150000
     
     # Delay and Communication System Parameters
     enable_delay_system: bool = True
-    detection_fps: float = 20.0
+    enable_noise_in_observations: bool = True
+    detection_fps: float = 10.0
     motion_time_constant: float = 0.1
-    gimbal_time_constant: float = 0.03
-    detection_mean_latency: float = 0.05
+    gimbal_time_constant: float = 0.01
+    detection_mean_latency: float = 0.1
     detection_std_latency: float = 0.01
     comm_mean_delay: float = 0.1
     comm_std_delay: float = 0.03
     comm_dropout_rate: float = 0.05
     delay_buffer_size: int = 100
     max_time_since_comm: float = 10.0  # Default value when no comm received (seconds)
-
+    max_time_since_detection: float = 10.0  # Normalize time since detection with this value
+    detection_decay_time_constant: float = 1.0  # Time constant for exponential decay of detection confidence
 
 class IrisMAEnv(DirectMARLEnv):
     cfg: IrisMAEnvCfg
@@ -762,7 +768,7 @@ class IrisMAEnv(DirectMARLEnv):
             self.detection_period = 1.0 / self.cfg.detection_fps
             self.time_since_last_detection = torch.zeros(self.num_envs, len(self.cfg.possible_agents), device=self.device)
             self.last_detection_time = torch.zeros(self.num_envs, len(self.cfg.possible_agents), device=self.device)
-            
+
             print(f"[IrisMAEnv] Comm system enabled:")
             print(f"  - Detection FPS: {self.cfg.detection_fps:.1f} Hz ({self.detection_period*1000:.1f}ms period)")
             print(f"  - Motion lag: {self.cfg.motion_time_constant*1000:.1f}ms")
@@ -771,7 +777,7 @@ class IrisMAEnv(DirectMARLEnv):
             print(f"  - Comm delay: {self.cfg.comm_mean_delay*1000:.1f}±{self.cfg.comm_std_delay*1000:.1f}ms")
             print(f"  - Comm dropout: {self.cfg.comm_dropout_rate*100:.1f}%")
         else:
-            self.delay_manager = None
+            self.delay_manager: DelayedObservationManager = None
             self.agent_name_to_id = None
             self.time_since_last_detection = None
             self.last_detection_time = None
@@ -883,21 +889,26 @@ class IrisMAEnv(DirectMARLEnv):
             # Update gimbal targets
             gimbal_idx = self.gimbal_joint_idx[agent_id]
             self.gimbal_dof_targets[agent_id][:, gimbal_idx["yaw"]] = torch.clamp(
-                self.gimbal_dof_targets[agent_id][:, gimbal_idx["yaw"]] + gimbal_yaw_rate.squeeze(-1) * self.step_dt,
+                self.gimbal_dof_targets[agent_id][:, gimbal_idx["yaw"]] + gimbal_yaw_rate.squeeze(-1) * self.step_dt * 2 * math.pi,
                 min=self.cfg.max_gimbal_yaw_angle[0],
                 max=self.cfg.max_gimbal_yaw_angle[1]
             )
             self.gimbal_dof_targets[agent_id][:, gimbal_idx["pitch"]] = torch.clamp(
-                self.gimbal_dof_targets[agent_id][:, gimbal_idx["pitch"]] + gimbal_pitch_rate.squeeze(-1) * self.step_dt,
+                self.gimbal_dof_targets[agent_id][:, gimbal_idx["pitch"]] + gimbal_pitch_rate.squeeze(-1) * self.step_dt * 2 * math.pi,
                 min=self.cfg.max_gimbal_pitch_angle[0],
                 max=self.cfg.max_gimbal_pitch_angle[1]
             )
+            roll, pitch, yaw = euler_xyz_from_quat(robot.data.root_state_w[:, 3:7])
+            curr_quat_w_yaw = quat_from_euler_xyz(torch.zeros_like(roll), torch.zeros_like(pitch), self._stabilizers[agent_id].wrap_to_pi(yaw + self.gimbal_dof_targets[agent_id][:, gimbal_idx["yaw"]]))
+            roll_b, pitch_b, _ = euler_xyz_from_quat(quat_mul(robot.data.root_state_w[:, 3:7], quat_inv(curr_quat_w_yaw)))
+
+            self.gimbal_dof_targets[agent_id][:, gimbal_idx["roll"]] = self._stabilizers[agent_id].wrap_to_pi(-roll_b)
             
             # Update zoom level
             self.zoom_level[agent_id] = torch.clamp(
                 self.zoom_level[agent_id] + zoom_rate.squeeze(-1) * self.step_dt,
                 min=1.0,
-                max=5.0
+                max=6.0
             )
             
             # Apply joint targets
@@ -939,13 +950,50 @@ class IrisMAEnv(DirectMARLEnv):
             up_vel[..., 2], 
             self.target_vel[..., 2]
         )
-        start = self.cfg.curriculum_moving_target_start_step
-        end = self.cfg.curriculum_moving_target_end_step
-        progress = (self.common_step_counter - start) / (end - start)
-        progress = 0 if progress < 0 else (1 if progress > 1 else progress)
-        progress = 1 if DEBUG_DRAW else progress
+        # phase1: stationary target
+        # phase2: moving target (self.cfg.curriculum_tracking_start_step self.cfg.curriculum_tracking_end_step)
+        # phase3: stationary for triangulation testing (self.cfg.curriculum_coordination_start_step self.cfg.curriculum_coordination_end_step)
+        # phase4: moving target even in triangulation testing (self.cfg.curriculum_moving_target_start_step self.cfg.curriculum_moving_target_end_step)
+        
+        # Compute progress considering all phases
+        current_step = self.common_step_counter
+        
+        # Phase 1: Stationary target (before tracking curriculum starts)
+        if current_step < self.cfg.curriculum_tracking_start_step:
+            progress = 0.0
+        # Phase 2: Moving target during tracking curriculum
+        elif current_step < self.cfg.curriculum_tracking_end_step:
+            tracking_progress = (current_step - self.cfg.curriculum_tracking_start_step) / \
+                       (self.cfg.curriculum_tracking_end_step - self.cfg.curriculum_tracking_start_step)
+            progress = max(0.0, min(1.0, tracking_progress))
+        # Phase 3: Stationary target during coordination phase
+        elif current_step < self.cfg.curriculum_coordination_end_step:
+            progress = 0.0
+        # Phase 4: Moving target during final phase
+        elif current_step < self.cfg.curriculum_moving_target_end_step:
+            moving_progress = (current_step - self.cfg.curriculum_moving_target_start_step) / \
+                     (self.cfg.curriculum_moving_target_end_step - self.cfg.curriculum_moving_target_start_step)
+            progress = max(0.0, min(1.0, moving_progress))
+        # After all phases: Full movement
+        else:
+            progress = 1.0
+        
+                
         # Apply target velocity
         self.target.write_root_com_velocity_to_sim(self.target_vel * progress)
+
+        # Override in debug mode
+        progress = 1 if DEBUG_DRAW else progress
+        if self.delay_manager is not None:
+            self.delay_manager.update_detection_fps(self.cfg.detection_fps * progress + (1.0/self.step_dt) * (1-progress))
+            self.delay_manager.update_motion_time_constants(self.cfg.motion_time_constant * progress)
+            self.delay_manager.update_gimbal_time_constants(self.cfg.gimbal_time_constant * progress)
+            self.delay_manager.update_detection_latency(self.cfg.detection_mean_latency * progress, self.cfg.detection_std_latency * progress)
+            self.delay_manager.update_comm_parameters(
+                self.cfg.comm_mean_delay * progress,
+                self.cfg.comm_std_delay * progress,
+                self.cfg.comm_dropout_rate * progress
+            )
 
     def _apply_action(self):
         """Apply actions to the environment."""
@@ -964,12 +1012,12 @@ class IrisMAEnv(DirectMARLEnv):
             self.time_since_last_detection += self.step_dt
         
         # Generate noise samples (used later for delayed+noisy states)
-        self.sampled_noise_pix.normal_(mean=0.0, std=self.cfg.pix_std, generator=self.sampled_noise_generator)
-        self.sampled_noise_twb.normal_(mean=0.0, std=self.cfg.pos_std, generator=self.sampled_noise_generator)
-        self.sampled_noise_phiwb.normal_(mean=0.0, std=self.cfg.ori_std, generator=self.sampled_noise_generator)
-        self.sampled_noise_alpha.normal_(mean=0.0, std=self.cfg.gimbal_std, generator=self.sampled_noise_generator)
-        self.sampled_noise_beta.normal_(mean=0.0, std=self.cfg.gimbal_std, generator=self.sampled_noise_generator)
-        self.sampled_noise_K.normal_(mean=0.0, std=self.cfg.intrinsic_std, generator=self.sampled_noise_generator)
+        if self.cfg.enable_noise_in_observations:
+            self.sampled_noise_pix.normal_(mean=0.0, std=self.cfg.pix_std, generator=self.sampled_noise_generator)
+            self.sampled_noise_twb.normal_(mean=0.0, std=self.cfg.pos_std, generator=self.sampled_noise_generator)
+            self.sampled_noise_phiwb.normal_(mean=0.0, std=self.cfg.ori_std, generator=self.sampled_noise_generator)
+            self.sampled_noise_alpha.normal_(mean=0.0, std=self.cfg.gimbal_std, generator=self.sampled_noise_generator)
+            self.sampled_noise_beta.normal_(mean=0.0, std=self.cfg.gimbal_std, generator=self.sampled_noise_generator)
         
         # ===== 1. COLLECT GROUND TRUTH STATES =====
         # These are used for reward computation
@@ -1118,35 +1166,67 @@ class IrisMAEnv(DirectMARLEnv):
                 zoom_level=self.states.delayed_zoom_level,
             )
             
-            # Compute ray directions from delayed states (without noise)
-            # We need bboxes first, so we'll compute them from the raycaster
-            self.bbox_raycaster.update(
-                camera_poses={
-                    str(agent_id): (self.states.camera_pos_delayed[:, i, :], self.states.camera_quat_delayed[:, i, :])
-                    for i, agent_id in enumerate(self.cfg.possible_agents)
-                },
-                camera_intrinsics={
-                    str(agent_id): self.states.camera_intrinsics_delayed[:, i, :, :]
-                    for i, agent_id in enumerate(self.cfg.possible_agents)
-                },
-                target_poses=(target_pos, target_quat),
-                agent_poses={
-                    str(agent_id): (self.states.delayed_robot_pos[:, i, :], self.states.delayed_robot_quat[:, i, :])
-                    for i, agent_id in enumerate(self.cfg.possible_agents)
-                },
-                image_shapes=image_shapes,
-                target_scale=self.target_scale
-            )
             for i, agent_id in enumerate(self.cfg.possible_agents):
-                self.delay_manager.add_detection(i, self.bbox_raycaster.data.bboxes[:, i, :, :], self.bbox_raycaster.data.valid_mask[:, i, :])
-            self.states.bboxes_delayed = self.bbox_raycaster.data.bboxes  # (N, C, T, 4)
-            self.states.valid_mask_delayed = self.bbox_raycaster.data.valid_mask  # (N, C, T)
+                # Add current detection to the delay system (FPS-throttled internally)
+                # - All frames are sent to the delay manager at each sim step
+                # - Frames are captured at detection_fps rate (independent of bbox validity)
+                # - Each captured frame stores bbox data and validity status
+                self.delay_manager.add_detection(
+                    i,
+                    self.bbox_raycaster.data.bboxes[:, i, 0, :],  # Current bbox data [N, 4]
+                    self.bbox_raycaster.data.valid_mask[:, i, 0]  # Current bbox validity [N]
+                )
+
+                # Retrieve delayed detection after latency
+                # delayed_detection.data: ALL delayed frames?
+                # delayed_detection.valid: whether a frame has arrived (after delay)
+                # detection_valid_mask: whether the frame contains valid bbox
+                delayed_detection, detection_valid_mask = self.delay_manager.get_delayed_detection(i)
+
+                # Update states when a new frame arrives (delayed_detection.valid == True)
+                # Keep previous states when no new frame (delayed_detection.valid == False)
+
+                # Update bbox data: use new data if frame arrived, else keep old
+                self.states.bboxes_delayed[:, i, 0, :] = torch.where(
+                    delayed_detection.valid.unsqueeze(-1),  # [N] -> [N, 1]
+                    delayed_detection.data,  # New bbox data [N, 4]
+                    self.states.bboxes_delayed[:, i, 0, :]  # Previous bbox data [N, 4]
+                )
+
+                # Update validity mask: use new validity if frame arrived, else keep old
+                self.states.valid_mask_delayed[:, i, 0] = torch.where(
+                    delayed_detection.valid,  # [N]
+                    detection_valid_mask.squeeze(-1),  # New validity [N, 1] -> [N]
+                    self.states.valid_mask_delayed[:, i, 0]  # Previous validity [N]
+                )
+                self.states.bboxes_delayed[:, i, 0, :] = torch.where(
+                    self.states.valid_mask_delayed[:, i, 0].unsqueeze(-1),  # [N] -> [N, 1]
+                    self.states.bboxes_delayed[:, i, 0, :],  # Keep bbox if valid
+                    torch.zeros_like(self.states.bboxes_delayed[:, i, 0, :])  # Zero bbox if invalid
+                )
+
+                # Update time since detection:
+                # - If new frame arrived: reset to detection_age (timestamp age)
+                # - If no new frame: increment by step_dt (time keeps increasing)
+                current_time = self.delay_manager.current_time  # [N]
+                detection_age = current_time - delayed_detection.timestamp  # [N]
+
+                self.states.time_since_detection_delayed[:, i, 0] = torch.where(
+                    torch.logical_and(delayed_detection.valid, detection_valid_mask.squeeze(-1)),  # [N] - did we receive a new frame AND does it have a valid bbox?
+                    detection_age,  # Reset to age of received frame
+                    self.states.time_since_detection_delayed[:, i, 0] + self.step_dt  # Increment time
+                )
             
             self.states.ray_dir_delayed = get_ray_dir_from_bbox(
                 self.states.bboxes_delayed,
                 self.states.camera_intrinsics_delayed,
                 self.states.camera_quat_delayed,
                 self.states.camera_pos_delayed,
+            )
+            self.states.ray_dir_delayed = torch.where(
+                self.states.valid_mask_delayed.unsqueeze(-1),  # [N, C, T] -> [N, C, T, 1]
+                self.states.ray_dir_delayed,
+                torch.zeros_like(self.states.ray_dir_delayed)
             )
             
             # ===== 2.5. BROADCAST AND RECEIVE AGENT STATES (INTER-AGENT COMMUNICATION) =====
@@ -1167,6 +1247,7 @@ class IrisMAEnv(DirectMARLEnv):
                     'camera_quat': self.states.camera_quat_delayed[:, i, :],   # [N, 4]
                     'bbox': self.states.bboxes_delayed[:, i, 0, :],            # [N, 4] (only first target)
                     'bbox_valid': self.states.valid_mask_delayed[:, i, 0].float(),  # [N]
+                    'time_since_detection': self.states.time_since_detection_delayed[:, i, 0],  # [N]
                     'ray_dir': self.states.ray_dir_delayed[:, i, 0, :],        # [N, 3] (only first target)
                 }
                 
@@ -1231,6 +1312,9 @@ class IrisMAEnv(DirectMARLEnv):
                     )
                     self.states.received_age[agent_id] = torch.full(
                         (self.num_envs, num_other_agents), self.cfg.max_time_since_comm, device=self.device
+                    )
+                    self.states.received_time_since_detection[agent_id] = torch.full(
+                        (self.num_envs, num_other_agents, 1), self.cfg.max_time_since_detection, device=self.device
                     )
                 
                 # Process received data from each sender
@@ -1319,6 +1403,16 @@ class IrisMAEnv(DirectMARLEnv):
                                 bbox_valid_data.data.bool(),
                                 self.states.received_bbox_valid[agent_id][:, other_agent_idx, 0]
                             )
+                        tsd_valid_data = data['time_since_detection']
+                        if tsd_valid_data.valid.any():
+                            current_time = self.delay_manager.current_time
+                            comm_delay = current_time - tsd_valid_data.timestamp
+                            tsd_comm_delay_time = tsd_valid_data.data + comm_delay
+                            self.states.received_time_since_detection[agent_id][:, other_agent_idx, 0] = torch.where(
+                                tsd_valid_data.valid,
+                                tsd_comm_delay_time,
+                                self.states.received_time_since_detection[agent_id][:, other_agent_idx, 0]
+                            )
                         
                         ray_dir_data = data['ray_dir']
                         if ray_dir_data.valid.any():
@@ -1398,12 +1492,18 @@ class IrisMAEnv(DirectMARLEnv):
             self.states.bboxes_delayed_noisy[:, :, :, :2] += self.sampled_noise_pix[:, :, :, :2]  # x, y
             self.states.bboxes_delayed_noisy[:, :, :, 2:] += self.sampled_noise_pix[:, :, :, 2:]  # w, h
             self.states.valid_mask_delayed_noisy = self.states.valid_mask_delayed.clone()
+            self.states.time_since_detection_delayed_noisy = self.states.time_since_detection_delayed.clone()
             
             self.states.ray_dir_delayed_noisy = get_ray_dir_from_bbox(
                 self.states.bboxes_delayed_noisy,
                 self.states.camera_intrinsics_delayed_noisy,
                 self.states.camera_quat_delayed_noisy,
                 self.states.camera_pos_delayed_noisy,
+            )
+            self.states.ray_dir_delayed_noisy = torch.where(
+                self.states.valid_mask_delayed_noisy.unsqueeze(-1),  # [N, C, T] -> [N, C, T, 1]
+                self.states.ray_dir_delayed_noisy,
+                torch.zeros_like(self.states.ray_dir_delayed_noisy)
             )
         else:
             # No delay system - just copy GT states
@@ -1424,6 +1524,11 @@ class IrisMAEnv(DirectMARLEnv):
                 self.states.camera_intrinsics_delayed,
                 self.states.camera_quat_delayed,
                 self.states.camera_pos_delayed,
+            )
+            self.states.ray_dir_delayed = torch.where(
+                self.states.valid_mask_delayed.unsqueeze(-1),  # [N, C, T] -> [N, C, T, 1]
+                self.states.ray_dir_delayed,
+                torch.zeros_like(self.states.ray_dir_delayed)
             )
             
             # Delayed+noisy is same as delayed when delay system is off
@@ -1509,7 +1614,7 @@ class IrisMAEnv(DirectMARLEnv):
                 dirs=self.states.ray_dir_delayed,
             )
         self.states.Sigma_X_delayed, self.states.trace_cov_delayed, is_tri_cov_valid = self._compute_triangulation_covariance(
-            X_w=self.X_w_est,
+            X_w=self.X_w_est, # Use estimated target position instead of GT target_pos_stacked for reward computation
             robot_positions=self.states.delayed_robot_pos,
             robot_quats=self.states.delayed_robot_quat,
             gimbal_yaws=self.states.delayed_gimbal_yaw,
@@ -1577,13 +1682,24 @@ class IrisMAEnv(DirectMARLEnv):
             
             # Bounding box rewards
             self.bboxes[agent_id] = self.states.bboxes_delayed_noisy[:, i, 0, :]
+            # Case 1) Bounding box valid mask based on boolean valid mask
             self.bbox_valid_mask[agent_id] = self.states.valid_mask_delayed_noisy[:, i]
+            # self.bbox_valid_mask[agent_id] = torch.where(
+            #     self.states.time_since_detection_delayed_noisy[:, i, 0] < self.cfg.max_time_since_detection,
+            #     torch.ones_like(self.states.valid_mask_delayed_noisy[:, i, 0], dtype=torch.bool),
+            #     torch.zeros_like(self.states.valid_mask_delayed_noisy[:, i, 0], dtype=torch.bool)
+            # )
+            # Case 2) Bounding box valid mask based on time since detection
+            # detection_period = 1 / self.cfg.detection_fps * progress + (self.step_dt) * (1-progress)
+            # detection_weight = torch.exp(-self.states.time_since_detection_delayed_noisy[:, i, 0] / (detection_period + self.cfg.detection_mean_latency))
             bbox = (torch.square((self.bboxes[agent_id][:, 0] + self.bboxes[agent_id][:, 2])/2 - agent_cam_cfg.width/2) / agent_cam_cfg.width**2 
                     + torch.square((self.bboxes[agent_id][:, 1] + self.bboxes[agent_id][:, 3])/2 - agent_cam_cfg.height/2) / agent_cam_cfg.height**2)
             bbox_center_mapped = torch.exp(-((bbox)**2)/self.cfg.bbox_reward_shape_width**2) * self.bbox_valid_mask[agent_id].squeeze(-1).float()
+            # bbox_center_mapped = torch.exp(-((bbox)**2)/self.cfg.bbox_reward_shape_width**2) * detection_weight
             
             bbox_size = (self.bboxes[agent_id][:, 2] - self.bboxes[agent_id][:, 0]) * (self.bboxes[agent_id][:, 3] - self.bboxes[agent_id][:, 1]) / (agent_cam_cfg.width * agent_cam_cfg.height)
             bbox_size_mapped = torch.exp(-((bbox_size - self.cfg.bbox_size_preferred)**2)/self.cfg.bbox_reward_shape_width**2) * self.bbox_valid_mask[agent_id].squeeze(-1).float()
+            # bbox_size_mapped = torch.exp(-((bbox_size - self.cfg.bbox_size_preferred)**2)/self.cfg.bbox_reward_shape_width**2) * detection_weight
             
             # Zoom penalty
             zoom_penalty = torch.square((self.zoom_level[agent_id] - 1.0)/10)
@@ -1699,10 +1815,17 @@ class IrisMAEnv(DirectMARLEnv):
             # Use delayed+noisy bboxes for observations
             bbox_obs = self.states.bboxes_delayed_noisy[:, i, 0, :]  # (N, 4)
             bbox_valid = self.states.valid_mask_delayed_noisy[:, i, 0]  # (N,)
+            time_since_detection = self.states.time_since_detection_delayed_noisy[:, i, 0]  # (N,)
+            time_since_norm = torch.clamp(time_since_detection / self.cfg.max_time_since_detection, max=1.0).unsqueeze(-1)  # (N, 1)
             
             # Normalize bbox
             bbox_norm = self.bbox_raycaster.get_normalized_bboxes(bbox_obs.unsqueeze(1).unsqueeze(1))[:, 0, 0, :]  # (N, 4)
-            
+            bbox_norm = torch.where(
+                bbox_valid.unsqueeze(-1),
+                bbox_norm,
+                torch.zeros_like(bbox_norm)
+            )
+
             # ===== PHASE 4: USE RECEIVED STATES FOR OTHER AGENTS =====
             # Instead of using ground truth delayed+noisy states, use received states with comm latency
             if self.cfg.enable_delay_system and agent_id in self.states.received_positions:
@@ -1711,6 +1834,7 @@ class IrisMAEnv(DirectMARLEnv):
                 other_velocities = self.states.received_linear_velocities[agent_id]  # [N, C-1, 3]
                 other_ray_dirs = self.states.received_ray_dirs[agent_id]  # [N, C-1, T, 3]
                 other_bbox_valid = self.states.received_bbox_valid[agent_id]  # [N, C-1, T]
+                other_bbox_age = self.states.received_time_since_detection[agent_id]  # [N, C-1, 1]
                 
                 # For received states that are not valid yet, use defaults
                 # Default: position at [0,0,0], velocity at [0,0,0]
@@ -1718,6 +1842,7 @@ class IrisMAEnv(DirectMARLEnv):
                 default_vel = torch.zeros_like(other_velocities)
                 default_ray_dir = torch.zeros_like(other_ray_dirs)
                 default_bbox_valid = torch.zeros_like(other_bbox_valid)
+                default_time_since_detection = torch.full_like(other_bbox_age, self.cfg.max_time_since_detection)
                 
                 # Use received data where valid, otherwise use defaults
                 valid_mask = self.states.received_valid[agent_id]  # [N, C-1]
@@ -1741,12 +1866,18 @@ class IrisMAEnv(DirectMARLEnv):
                     other_bbox_valid.float(),
                     default_bbox_valid.float()
                 )
+                other_bbox_age_obs = torch.where(
+                    valid_mask.unsqueeze(-1),
+                    other_bbox_age,
+                    default_time_since_detection
+                )
             else:
                 # Fallback: use delayed+noisy states from all agents (no comm system)
                 other_positions_obs = self.robot_positions_stacked[:, other_agent_idxs, :]
                 other_velocities_obs = self.robot_velocity_stacked[:, other_agent_idxs, :]
                 other_ray_dirs_obs = self.states.ray_dir_delayed_noisy[:, other_agent_idxs, :, :]
                 other_bbox_valid_obs = self.states.valid_mask_delayed_noisy[:, other_agent_idxs, :]
+                other_bbox_age_obs = self.states.time_since_detection_delayed_noisy[:, other_agent_idxs, :]
             
             obs = torch.cat([
                 self.robot_positions_stacked[:, i, :],  # 3: pos
@@ -1757,9 +1888,11 @@ class IrisMAEnv(DirectMARLEnv):
                 self.gimbal_yaws_stacked[:, i].unsqueeze(-1),  # 1
                 bbox_norm,  # 4: normalized bbox
                 bbox_valid.float().unsqueeze(-1),  # 1: validity
+                # time_since_norm,  # 1: time since detection (normalized)
                 self.zoom_level[agent_id].unsqueeze(-1),  # 1: zoom level
                 other_ray_dirs_obs[:, :, 0, :].flatten(start_dim=1),  # 3*(C-1): ray dirs from other agents
                 other_bbox_valid_obs[:, :, 0].flatten(start_dim=1),  # 1*(C-1): validity from other agents
+                # other_bbox_age_obs.flatten(start_dim=1),  # 1*(C-1): time since detection from other agents
                 other_positions_obs.flatten(start_dim=1),  # 3*(C-1): positions of other agents
                 other_velocities_obs.flatten(start_dim=1),  # 3*(C-1): velocities of other agents
                 Sigma_diag_sqrt[:, 0, :],  # 3: X, Y, Z std deviations
@@ -1842,12 +1975,12 @@ class IrisMAEnv(DirectMARLEnv):
         end = self.cfg.curriculum_tracking_end_step
         progress = (self.common_step_counter - start) / (end - start)
         progress = 0.1 if (progress < 0.1 or start < 0) else (1 if progress > 1 else progress)
-        progress = 1 if DEBUG_DRAW else progress  # Always use full range in debug mode
+        # progress = 1 if DEBUG_DRAW else progress  # Always use full range in debug mode
 
         target_pos = formation_center.clone()
         target_pos[:, 0] += torch.zeros_like(target_pos[:, 0]).uniform_(4.0, 80.0 * progress)
         target_pos[:, 1] += torch.zeros_like(target_pos[:, 1]).uniform_(-30.0 * progress, 30.0 * progress)
-        target_pos[:, 2] += torch.zeros_like(target_pos[:, 2]).uniform_(-5.0, 35.0)
+        target_pos[:, 2] += torch.zeros_like(target_pos[:, 2]).uniform_(-5.0, 35.0 * progress)
         target_pos = quat_apply(formation_rotation, target_pos) + self._env_origins[env_ids]
         
         default_target_state = self.target.data.default_root_state[env_ids].clone()
@@ -1861,9 +1994,42 @@ class IrisMAEnv(DirectMARLEnv):
         self.target.write_root_velocity_to_sim(default_target_state[:, 7:], env_ids)
         
         # Reset target velocity
-        self.target_vel[env_ids, :3] = torch.zeros_like(self.target_vel[env_ids, :3]).uniform_(-self.cfg.max_target_speed, self.cfg.max_target_speed)
+        # phase1: stationary target
+        # phase2: moving target (self.cfg.curriculum_tracking_start_step self.cfg.curriculum_tracking_end_step)
+        # phase3: stationary for triangulation testing (self.cfg.curriculum_coordination_start_step self.cfg.curriculum_coordination_end_step)
+        # phase4: moving target even in triangulation testing (self.cfg.curriculum_moving_target_start_step self.cfg.curriculum_moving_target_end_step)
+        
+        # Compute progress considering all phases
+        current_step = self.common_step_counter
+        
+        # Phase 1: Stationary target (before tracking curriculum starts)
+        if current_step < self.cfg.curriculum_tracking_start_step:
+            progress = 0.0
+        # Phase 2: Moving target during tracking curriculum
+        elif current_step < self.cfg.curriculum_tracking_end_step:
+            tracking_progress = (current_step - self.cfg.curriculum_tracking_start_step) / \
+                       (self.cfg.curriculum_tracking_end_step - self.cfg.curriculum_tracking_start_step)
+            progress = max(0.0, min(1.0, tracking_progress))
+        # Phase 3: Stationary target during coordination phase
+        elif current_step < self.cfg.curriculum_coordination_end_step:
+            progress = 0.0
+        # Phase 4: Moving target during final phase
+        elif current_step < self.cfg.curriculum_moving_target_end_step:
+            moving_progress = (current_step - self.cfg.curriculum_moving_target_start_step) / \
+                     (self.cfg.curriculum_moving_target_end_step - self.cfg.curriculum_moving_target_start_step)
+            progress = max(0.0, min(1.0, moving_progress))
+        # After all phases: Full movement
+        else:
+            progress = 1.0
+        
+        # Override in debug mode
+        # progress = 1.0 if DEBUG_DRAW else progress
+        
+        max_target_speed = self.cfg.max_target_speed * progress
+        max_target_ang_speed = self.cfg.max_target_ang_speed * progress
+        self.target_vel[env_ids, :3] = torch.zeros_like(self.target_vel[env_ids, :3]).uniform_(-max_target_speed, max_target_speed)
         self.target_vel[env_ids, 3:5] = torch.zeros_like(self.target_vel[env_ids, 3:5])
-        self.target_vel[env_ids, 5] = torch.zeros_like(self.target_vel[env_ids, 5]).uniform_(-self.cfg.max_target_ang_speed, self.cfg.max_target_ang_speed)
+        self.target_vel[env_ids, 5] = torch.zeros_like(self.target_vel[env_ids, 5]).uniform_(-max_target_ang_speed, max_target_ang_speed)
         self.last_target_vel[env_ids] = self.target_vel[env_ids].clone()
 
         # Reset robots
@@ -1894,8 +2060,8 @@ class IrisMAEnv(DirectMARLEnv):
                 default_root_state[:, 3:7],
                 target_pos
             )
-            joint_pos[:, gimbal_idx["yaw"]] = gimbal_yaw
-            joint_pos[:, gimbal_idx["pitch"]] = gimbal_pitch
+            joint_pos[:, gimbal_idx["yaw"]] = torch.clamp(gimbal_yaw, min=self.cfg.max_gimbal_yaw_angle[0], max=self.cfg.max_gimbal_yaw_angle[1])
+            joint_pos[:, gimbal_idx["pitch"]] = torch.clamp(gimbal_pitch, min=self.cfg.max_gimbal_pitch_angle[0], max=self.cfg.max_gimbal_pitch_angle[1])
             joint_pos[:, gimbal_idx["roll"]] = torch.zeros_like(joint_pos[:, gimbal_idx["roll"]])
             self.gimbal_dof_targets[agent_id][env_ids] = joint_pos
 
@@ -1906,7 +2072,8 @@ class IrisMAEnv(DirectMARLEnv):
             
             self._stabilizers[agent_id].reset(env_ids)
 
-        self.sampled_noise_K.normal_(mean=0.0, std=self.cfg.intrinsic_std, generator=self.sampled_noise_generator)
+        if self.cfg.enable_noise_in_observations:
+            self.sampled_noise_K.normal_(mean=0.0, std=self.cfg.intrinsic_std, generator=self.sampled_noise_generator)
         
         # Reset Delay and Communication System
         if self.cfg.enable_delay_system and self.delay_manager is not None:
@@ -2231,7 +2398,7 @@ class IrisMAEnv(DirectMARLEnv):
             self.draw_interface.clear_lines()
         
             for agent_id in self.cfg.possible_agents:
-                line_colors_yellow = torch.tensor([[1.0, 1.0, 0.0, 1.0]], device=self.device).repeat(self.num_envs, 1)
+                line_colors_yellow = torch.tensor([[1.0, 1.0, 0.0, 1.0]], device=self.device).repeat(self.num_envs, 1) # (N, 4)
                 line_colors_green = torch.tensor([[0.0, 1.0, 0.0, 1.0]], device=self.device).repeat(self.num_envs, 1)
                 line_colors_red = torch.tensor([[1.0, 0.0, 0.0, 1.0]], device=self.device).repeat(self.num_envs, 1)
                 
@@ -2242,15 +2409,31 @@ class IrisMAEnv(DirectMARLEnv):
                 else:
                     is_visible = torch.ones_like(is_valid) > 0
 
+                # line_colors = torch.where(
+                #     is_valid, 
+                #     line_colors_green,
+                #     torch.where(
+                #         is_visible,
+                #         line_colors_yellow,
+                #         line_colors_red
+                #     )
+                # ).tolist()
                 line_colors = torch.where(
                     is_valid, 
                     line_colors_green,
-                    torch.where(
-                        is_visible,
-                        line_colors_yellow,
-                        line_colors_red
-                    )
+                    line_colors_yellow,
                 ).tolist()
+                # time_since_detection = self.states.time_since_detection_delayed_noisy[:, i, 0]  # (N,)
+                # time_since_norm = torch.clamp(time_since_detection / self.cfg.max_time_since_detection, max=1.0).unsqueeze(-1)  # (N, 1)
+                # freshness = time_since_norm
+                # line_colors = (line_colors_red * (1.0 - freshness) +
+                #                line_colors_green * freshness).tolist()
+                # line_colors = torch.stack([
+                #     1.0 - freshness,  # R: staler is redder
+                #     freshness,        # G: fresher is greener
+                #     torch.zeros_like(freshness),  # B
+                #     torch.ones_like(freshness)    # A
+                # ], dim=-1).tolist()
                 
                 line_thicknesses = [1.0] * self.camera_pos_world[agent_id].shape[0]
                 self.draw_interface.draw_lines(
