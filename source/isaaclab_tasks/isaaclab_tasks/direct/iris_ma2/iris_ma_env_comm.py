@@ -428,8 +428,8 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     # Single-agent tracking rewards
     bbox_center_reward_scale = 60
     bbox_size_reward_scale = 60
-    bbox_size_preferred = 0.04**2
-    bbox_reward_shape_width = 0.3
+    bbox_size_preferred = 0.10**2
+    bbox_reward_shape_width = 0.35
     
     # Multi-agent coordination rewards
     triangulation_reward_scale = 5
@@ -441,28 +441,28 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     # Triangulation parameters
     pix_std = 7.0
     pos_std = 0.1
-    ori_std = 0.02
+    ori_std = 0.01
     gimbal_std = 0.01
     intrinsic_std = 10.0
 
     # Curriculum
     curriculum_all_end_step: int = 200000
-    curriculum_tracking_start_step: int = 20000 # Phase 1. Single-agent tracking
-    curriculum_tracking_end_step: int = 80000
-    curriculum_delay_start_step: int = 60000 # Phase 2. Delay and noise system
-    curriculum_delay_end_step: int = 150000
-    curriculum_coordination_start_step: int = 120000 # Phase 3. Triangulation, collision, TTC
-    curriculum_coordination_end_step: int = 200000
-    curriculum_moving_target_start_step: int = 20000 # Phase 1&2. Target speed, acceleration
-    curriculum_moving_target_end_step: int = 80000
-    curriculum_dynamics_start_step: int = 40000 # Phase 0. Dynamics randomization
-    curriculum_dynamics_end_step: int = 120000
+    curriculum_tracking_start_step: int = 2 * 20000 # Phase 1. Single-agent tracking
+    curriculum_tracking_end_step: int = 2 * 80000
+    curriculum_delay_start_step: int = 2 * 60000 # Phase 2. Delay and noise system
+    curriculum_delay_end_step: int = 2 * 150000
+    curriculum_coordination_start_step: int = 2 * 120000 # Phase 3. Triangulation, collision, TTC
+    curriculum_coordination_end_step: int = 2 * 200000
+    curriculum_moving_target_start_step: int = 2 * 20000 # Phase 1&2. Target speed, acceleration
+    curriculum_moving_target_end_step: int = 2 * 80000
+    curriculum_dynamics_start_step: int = 2 * 40000 # Phase 0. Dynamics randomization
+    curriculum_dynamics_end_step: int = 2 * 120000
     
     # Delay and Communication System Parameters
     enable_delay_system: bool = True
     enable_noise_in_observations: bool = True
     dynamics_time_constant: float = 0.1
-    detection_fps: float = 10.0
+    detection_fps: float = 20.0
     motion_time_constant: float = 0.1
     gimbal_time_constant: float = 0.01
     detection_mean_latency: float = 0.1
@@ -474,6 +474,8 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     max_time_since_comm: float = 10.0  # Default value when no comm received (seconds)
     max_time_since_detection: float = 10.0  # Normalize time since detection with this value
     detection_decay_time_constant: float = 1.0  # Time constant for exponential decay of detection confidence
+
+    play_sim_at_step: int = 200000
 
 class IrisMAEnv(DirectMARLEnv):
     cfg: IrisMAEnvCfg
@@ -1050,12 +1052,13 @@ class IrisMAEnv(DirectMARLEnv):
         # Phase 1&2. Target speed, acceleration
         # Phase 2. Delay and noise system
         # Phase 3. Triangulation, collision, TTC
-        self.progress_all = self._linear_progress(0, self.cfg.curriculum_all_end_step)
-        self.progress_delay = self._linear_progress(self.cfg.curriculum_delay_start_step, self.cfg.curriculum_delay_end_step)
-        self.progress_tracking = self._linear_progress(self.cfg.curriculum_tracking_start_step, self.cfg.curriculum_tracking_end_step)
-        self.progress_coord = self._linear_progress(self.cfg.curriculum_coordination_start_step, self.cfg.curriculum_coordination_end_step)
-        self.progress_move = self._linear_progress(self.cfg.curriculum_moving_target_start_step, self.cfg.curriculum_moving_target_end_step)
-        self.progress_dynamics = self._linear_progress(self.cfg.curriculum_dynamics_start_step, self.cfg.curriculum_dynamics_end_step)
+        current_step = self.cfg.play_sim_at_step if DEBUG_DRAW else self.common_step_counter
+        self.progress_all = self._linear_progress(0, self.cfg.curriculum_all_end_step, current_step)
+        self.progress_delay = self._linear_progress(self.cfg.curriculum_delay_start_step, self.cfg.curriculum_delay_end_step, current_step)
+        self.progress_tracking = self._linear_progress(self.cfg.curriculum_tracking_start_step, self.cfg.curriculum_tracking_end_step, current_step)
+        self.progress_coord = self._linear_progress(self.cfg.curriculum_coordination_start_step, self.cfg.curriculum_coordination_end_step, current_step)
+        self.progress_move = self._linear_progress(self.cfg.curriculum_moving_target_start_step, self.cfg.curriculum_moving_target_end_step, current_step)
+        self.progress_dynamics = self._linear_progress(self.cfg.curriculum_dynamics_start_step, self.cfg.curriculum_dynamics_end_step, current_step)
 
         # Override in debug mode
         # progress = 1 if DEBUG_DRAW else progress
@@ -1084,10 +1087,12 @@ class IrisMAEnv(DirectMARLEnv):
         """Apply actions to the environment."""
         pass
 
-    def _linear_progress(self, start, end):
+    def _linear_progress(self, start: int, end: int, current=None):
         if end <= start: 
             return 1.0
-        x = (self.common_step_counter - start) / (end - start)
+        if current is None:
+            current = self.common_step_counter
+        x = (current - start) / (end - start)
         return 0.0 if x < 0 else (1.0 if x > 1 else float(x))
 
     def _compute_intermediate_values(self):
@@ -1789,8 +1794,8 @@ class IrisMAEnv(DirectMARLEnv):
 
         self.cam_to_cam_distance[:, range(len(self.cfg.possible_agents)), range(len(self.cfg.possible_agents))] = float('inf')
         self.cam_to_cam_ttc[:, range(len(self.cfg.possible_agents)), range(len(self.cfg.possible_agents))] = float('inf')
-        cam_to_cam_collision = self.cam_to_cam_distance < self.cfg.min_safe_distance
-        cam_to_target_collision = self.cam_to_target_distance < self.cfg.min_safe_distance
+        cam_to_cam_collision = self.cam_to_cam_distance < self.cfg.min_safe_distance * (0.5 + 0.5 * self.progress_coord)
+        cam_to_target_collision = self.cam_to_target_distance < self.cfg.min_safe_distance * (0.5 + 0.5 * self.progress_coord)
         
         # STEP 4: Compute per-agent rewards
         for i, agent_id in enumerate(self.cfg.possible_agents):
@@ -2141,7 +2146,7 @@ class IrisMAEnv(DirectMARLEnv):
             gimbal_yaw, gimbal_pitch = self.point_to_region(
                 default_root_state[:, :3],
                 default_root_state[:, 3:7],
-                target_pos
+                target_pos + torch.zeros_like(target_pos).uniform_(-5.0 * self.progress_tracking, 5.0 * self.progress_tracking)
             )
             gimbal_yaw = self._stabilizers[agent_id].wrap_to_pi(gimbal_yaw)
             gimbal_pitch = self._stabilizers[agent_id].wrap_to_pi(gimbal_pitch)

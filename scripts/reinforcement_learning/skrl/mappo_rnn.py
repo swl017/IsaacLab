@@ -21,6 +21,7 @@ MAPPO_RNN_DEFAULT_CONFIG = copy.deepcopy(PPO_DEFAULT_CONFIG)
 MAPPO_RNN_DEFAULT_CONFIG.update({
     "shared_state_preprocessor": None,
     "shared_state_preprocessor_kwargs": {},
+    "burn_in_steps": 0,  # (0 = disabled, >0 = enabled)
 })
 
 
@@ -63,7 +64,7 @@ class MAPPO_RNN(MultiAgent):
         self._rnn_initial_states = {
             uid: {"policy": [], "value": []} for uid in self.possible_agents
         }
-        self._rnn_sequence_lengths = {uid: 1 for uid in self.possible_agents}
+        self._rnn_sequence_lengths = {}
         
         # configuration
         self._learning_epochs = self._as_dict(self.cfg["learning_epochs"])
@@ -100,6 +101,10 @@ class MAPPO_RNN(MultiAgent):
         
         self._rewards_shaper = self.cfg["rewards_shaper"]
         self._time_limit_bootstrap = self._as_dict(self.cfg["time_limit_bootstrap"])
+        
+        self._burn_in_steps = self.cfg.get("burn_in_steps", 0)
+        if self._burn_in_steps > 0:
+            logger.info(f"RNN burn-in enabled: {self._burn_in_steps} steps will be used for hidden state warm-up")
         
         self._mixed_precision = self.cfg["mixed_precision"]
         
@@ -162,6 +167,8 @@ class MAPPO_RNN(MultiAgent):
         
         # create tensors in memories
         if self.memories:
+            self._rnn_tensors_names = {}
+            
             for uid in self.possible_agents:
                 self.memories[uid].create_tensor(name="states", size=self.observation_spaces[uid], dtype=torch.float32)
                 self.memories[uid].create_tensor(
@@ -176,14 +183,13 @@ class MAPPO_RNN(MultiAgent):
                 self.memories[uid].create_tensor(name="returns", size=1, dtype=torch.float32)
                 self.memories[uid].create_tensor(name="advantages", size=1, dtype=torch.float32)
                 
-                # RNN specifications for each agent
-                self._rnn_tensors_names = {}
-                
                 # Initialize RNN states for each agent's policy
                 policy_spec = self.policies[uid].get_specification()
                 policy_rnn_spec = policy_spec.get("rnn", {})
                 if policy_rnn_spec:
-                    self._rnn_sequence_lengths[uid] = policy_rnn_spec.get("sequence_length", 1)
+                    seq_len = policy_rnn_spec.get("sequence_length", 32)
+                    self._rnn_sequence_lengths[uid] = seq_len
+                    logger.info(f"Agent {uid}: RNN sequence_length set to {seq_len}")
                     self._rnn_tensors_names[uid] = []
                     
                     for i, size in enumerate(policy_rnn_spec.get("sizes", [])):
@@ -196,6 +202,10 @@ class MAPPO_RNN(MultiAgent):
                         self._rnn_initial_states[uid]["policy"].append(
                             torch.zeros(size, dtype=torch.float32, device=self.device)
                         )
+                else:
+                    # No RNN, default to sequence length of 1
+                    self._rnn_sequence_lengths[uid] = 1
+                    self._rnn_tensors_names[uid] = []
                 
                 # Initialize RNN states for each agent's value function
                 if self.policies[uid] is self.values[uid]:
@@ -523,6 +533,35 @@ class MAPPO_RNN(MultiAgent):
                             {"states": sampled_states, "taken_actions": sampled_actions, **rnn_policy}, role="policy"
                         )
                         
+                        # compute value predictions
+                        predicted_values, _, _ = value.act({"states": sampled_shared_states, **rnn_value}, role="value")
+                        
+                        # Apply burn-in masking
+                        # If burn-in is enabled and we have sequence data, exclude burn-in steps from losses
+                        if self._burn_in_steps > 0 and next_log_prob.dim() > 1:  # Sequence data
+                            burn_in = self._burn_in_steps
+                            seq_len = next_log_prob.shape[1] if next_log_prob.dim() == 2 else next_log_prob.shape[0]
+                            
+                            if seq_len > burn_in:
+                                # Slice out burn-in steps - only use post-burn-in steps for loss
+                                next_log_prob = next_log_prob[:, burn_in:] if next_log_prob.dim() == 2 else next_log_prob[burn_in:]
+                                predicted_values = predicted_values[:, burn_in:] if predicted_values.dim() == 2 else predicted_values[burn_in:]
+                                
+                                # Also slice the targets
+                                sampled_log_prob = sampled_log_prob[:, burn_in:] if sampled_log_prob.dim() == 2 else sampled_log_prob[burn_in:]
+                                sampled_values = sampled_values[:, burn_in:] if sampled_values.dim() == 2 else sampled_values[burn_in:]
+                                sampled_returns = sampled_returns[:, burn_in:] if sampled_returns.dim() == 2 else sampled_returns[burn_in:]
+                                sampled_advantages = sampled_advantages[:, burn_in:] if sampled_advantages.dim() == 2 else sampled_advantages[burn_in:]
+                        
+                        # Flatten if still multi-dimensional
+                        if next_log_prob.dim() > 1:
+                            next_log_prob = next_log_prob.flatten()
+                            sampled_log_prob = sampled_log_prob.flatten()
+                            sampled_advantages = sampled_advantages.flatten()
+                            predicted_values = predicted_values.flatten()
+                            sampled_values = sampled_values.flatten()
+                            sampled_returns = sampled_returns.flatten()
+                        
                         # compute approximate KL divergence
                         with torch.no_grad():
                             ratio = next_log_prob - sampled_log_prob
@@ -548,10 +587,7 @@ class MAPPO_RNN(MultiAgent):
                         
                         policy_loss = -torch.min(surrogate, surrogate_clipped).mean()
                         
-                        # compute value loss
-                        predicted_values, _, _ = value.act({"states": sampled_shared_states, **rnn_value}, role="value")
-                        
-                        if self._clip_predicted_values:
+                        if self._clip_predicted_values[uid]:
                             predicted_values = sampled_values + torch.clip(
                                 predicted_values - sampled_values, min=-self._value_clip[uid], max=self._value_clip[uid]
                             )
@@ -622,10 +658,11 @@ class MAPPO_RNN(MultiAgent):
 class MAPPORNNBaseModel(Model):
     """Base class for MAPPO RNN models with shared logic."""
     def __init__(self, observation_space, action_space, device,
-                 hidden_size=256, gru_num_layers=2, gru_hidden_size=256, num_envs=1):
+                 hidden_size=256, gru_num_layers=2, gru_hidden_size=256, num_envs=1, sequence_length=128):
         super().__init__(observation_space, action_space, device)
         
         self.num_envs = num_envs
+        self.sequence_length = sequence_length
         
         self.net = nn.Sequential(
             nn.Linear(self.num_observations, hidden_size),
@@ -641,45 +678,95 @@ class MAPPORNNBaseModel(Model):
 
     def get_specification(self):
         # The batch size in the RNN state should correspond to the number of parallel environments
-        return {"rnn": {"sequence_length": 32,
+        return {"rnn": {"sequence_length": self.sequence_length,
                        "sizes": [(self.gru_num_layers, self.num_envs, self.gru_hidden_size)]}}
 
     def compute_base(self, inputs):
-        """Shared forward pass logic for both policy and value networks."""
+        """Shared forward pass logic with proper episode masking.
+        
+        This method processes sequences step-by-step, zeroing the hidden state
+        whenever an episode terminates within the sequence. This prevents
+        gradient contamination across episode boundaries.
+        """
         x = self.net(inputs["states"])
-        hidden_states = inputs.get("rnn", [None])[0]
+        h = inputs.get("rnn", [None])[0]  # (layers, batch, hidden)
+        dones = inputs.get("terminated", None)  # (batch, seq) or None
 
         # Check if we are processing a single time-step (e.g., during interaction)
         is_single_step = x.dim() == 2
         if is_single_step:
             # Add a sequence dimension: (batch, features) -> (batch, 1, features)
             x = x.unsqueeze(1)
+            if dones is not None:
+                dones = dones.unsqueeze(1)  # (batch, 1)
 
-        # GRU forward pass
-        gru_output, hidden_states = self.gru(x, hidden_states.contiguous() if hidden_states is not None else None)
-
-        # If it was a single step, remove the sequence dimension
+        B, S, F = x.shape
+        
+        # Initialize hidden state if None
+        if h is None:
+            h = torch.zeros(self.gru_num_layers, B, self.gru_hidden_size, 
+                           device=x.device, dtype=x.dtype)
+        
+        # Process sequence step-by-step to handle episode boundaries
+        outputs = []
+        for t in range(S):
+            # Zero hidden state for terminated episodes at this timestep
+            if dones is not None and dones.any():
+                done_mask = dones[:, t]  # (B,) boolean tensor
+                if done_mask.any():
+                    # Convert boolean mask to indices
+                    done_indices = done_mask.nonzero(as_tuple=False).squeeze(-1)  # (num_done,)
+                    # Zero out hidden state for finished environments
+                    # Clone to avoid in-place modification issues with autograd
+                    h = h.clone()
+                    h[:, done_indices, :] = 0.0
+            # CRITICAL: Ensure h is contiguous after indexing
+            h = h.contiguous()
+            
+            # Forward pass for this timestep
+            out_t, h = self.gru(x[:, t:t+1, :], h)  # (B, 1, H), (L, B, H)
+            outputs.append(out_t)
+        
+        gru_output = torch.cat(outputs, dim=1)  # (B, S, H)
+        
+        # Format output based on input shape
         if is_single_step:
             # (batch, 1, hidden_size) -> (batch, hidden_size)
             output = gru_output.squeeze(1)
         else:
             # Otherwise, flatten batch and sequence dimensions for the final layer
             # (batch, sequence, hidden_size) -> (batch * sequence, hidden_size)
-            output = torch.flatten(gru_output, start_dim=0, end_dim=1)
+            output = gru_output.flatten(0, 1)
             
-        return output, hidden_states
+        return output, h
 
 
 class MAPPORNNPolicy(GaussianMixin, MAPPORNNBaseModel):
     """Policy network with RNN for MAPPO."""
     def __init__(self, observation_space, action_space, device,
-                 hidden_size=256, gru_num_layers=2, gru_hidden_size=256, num_envs=1):
+                 hidden_size=256, gru_num_layers=2, gru_hidden_size=256, num_envs=1,
+                 initial_log_std=-0.5, min_log_std=-5.0, max_log_std=0.7, sequence_length=128):
+        """
+        Args:
+            observation_space: Observation space
+            action_space: Action space
+            device: Device to use
+            hidden_size: Hidden layer size for preprocessing network
+            gru_num_layers: Number of GRU layers
+            gru_hidden_size: Hidden size of GRU
+            num_envs: Number of parallel environments
+            initial_log_std: Initial log standard deviation (default: -0.5, σ≈0.6)
+            min_log_std: Minimum log standard deviation (default: -5.0, σ≈0.007)
+            max_log_std: Maximum log standard deviation (default: 0.7, σ≈2.0)
+            sequence_length: RNN sequence length for training (default: 128)
+        """
         MAPPORNNBaseModel.__init__(self, observation_space, action_space, device, hidden_size,
-                                   gru_num_layers, gru_hidden_size, num_envs)
-        GaussianMixin.__init__(self, clip_actions=True, clip_log_std=True)
+                                   gru_num_layers, gru_hidden_size, num_envs, sequence_length)
+        GaussianMixin.__init__(self, clip_actions=True, clip_log_std=True,
+                               min_log_std=min_log_std, max_log_std=max_log_std)
 
         self.policy_layer = nn.Linear(self.gru_hidden_size, self.num_actions)
-        self.log_std_parameter = nn.Parameter(torch.zeros(self.num_actions))
+        self.log_std_parameter = nn.Parameter(torch.ones(self.num_actions) * initial_log_std)
 
     def compute(self, inputs, role):
         output, hidden_states = self.compute_base(inputs)
@@ -689,9 +776,9 @@ class MAPPORNNPolicy(GaussianMixin, MAPPORNNBaseModel):
 class MAPPORNNValue(DeterministicMixin, MAPPORNNBaseModel):
     """Value network with RNN for MAPPO (uses shared/global observations)."""
     def __init__(self, observation_space, action_space, device,
-                 hidden_size=256, gru_num_layers=2, gru_hidden_size=256, num_envs=1):
+                 hidden_size=256, gru_num_layers=2, gru_hidden_size=256, num_envs=1, sequence_length=128):
         MAPPORNNBaseModel.__init__(self, observation_space, action_space, device, hidden_size,
-                                   gru_num_layers, gru_hidden_size, num_envs)
+                                   gru_num_layers, gru_hidden_size, num_envs, sequence_length)
         DeterministicMixin.__init__(self)
 
         self.value_layer = nn.Linear(self.gru_hidden_size, 1)

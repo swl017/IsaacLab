@@ -24,9 +24,9 @@ import yaml
 
 # Parse arguments
 parser = argparse.ArgumentParser(description="Train MAPPO RNN agents for Iris Multi-Agent task")
-parser.add_argument("--task", type=str, default="Isaac-Iris-MA2-Direct-Delay-v0", help="Name of the task.")
+parser.add_argument("--task", type=str, default="Isaac-Iris-MA2-Direct-Comm-v0", help="Name of the task.")
 parser.add_argument("--tuning-param", type=str, help="Custom tuning parameter")
-parser.add_argument("--experiment-name", type=str, default="sweep14_noise_o_delay_o_rnn_obsdim29", help="Name of the experiment")
+parser.add_argument("--experiment-name", type=str, default="Comm-v0_rnn_fix", help="Name of the experiment")
 args_cli = parser.parse_args()
 
 # Set seed for reproducibility
@@ -66,25 +66,30 @@ except Exception as e:
 
 # Configure MAPPO_RNN
 cfg = MAPPO_RNN_DEFAULT_CONFIG.copy()
-cfg["rollouts"] = 64
+cfg["rollouts"] = 256
 cfg["learning_epochs"] = 4
-cfg["mini_batches"] = 8
+cfg["mini_batches"] = 4  # Lower the better sequence sampling
 cfg["discount_factor"] = 0.99
 cfg["lambda"] = 0.95
-cfg["learning_rate"] = 1e-5
+cfg["learning_rate"] = 5e-5  # Lower the better RNN stability
 cfg["learning_rate_scheduler"] = KLAdaptiveRL
-cfg["learning_rate_scheduler_kwargs"] = {"kl_threshold": 0.004}
+cfg["learning_rate_scheduler_kwargs"] = {"kl_threshold": 0.008}  # High the better stability
 cfg["random_timesteps"] = 0
 cfg["learning_starts"] = 0
-cfg["grad_norm_clip"] = 1.0
+cfg["grad_norm_clip"] = 0.5  # Lower the more conservative clipping
 cfg["ratio_clip"] = 0.2
 cfg["value_clip"] = 0.2
 cfg["clip_predicted_values"] = True
 cfg["entropy_loss_scale"] = 0.01
 cfg["value_loss_scale"] = 1.0
-cfg["kl_threshold"] = 0
+cfg["kl_threshold"] = 0.02  # Enabled to prevent policy collapse
 cfg["rewards_shaper"] = None
 cfg["time_limit_bootstrap"] = True
+
+# RNN Burn-in configuration
+# This warms up the RNN hidden state before computing losses
+# MUST be less than sequence_length used during training
+cfg["burn_in_steps"] = 32  # Set to 0 to disable burn-in, Use 16 steps for burn-in, etc. (12.5% of sequence_length=128)
 cfg["state_preprocessor"] = RunningStandardScaler
 cfg["state_preprocessor_kwargs"] = {"size": env.observation_spaces[possible_agents[0]], "device": device}
 cfg["shared_state_preprocessor"] = RunningStandardScaler
@@ -152,7 +157,10 @@ else:
         hidden_size=256,
         gru_num_layers=2,
         gru_hidden_size=256,
-        num_envs=env.num_envs
+        num_envs=env.num_envs,
+        initial_log_std=-0.5,   # σ ≈ 0.6, more conservative than σ=1
+        min_log_std=-5.0,       # σ_min ≈ 0.007, prevents collapse
+        max_log_std=0.7         # σ_max ≈ 2.0, caps exploration
     )
 
     # Create the shared value network once
@@ -218,7 +226,7 @@ agent = MAPPO_RNN(
 
 # Configure trainer
 cfg_trainer = {
-    "timesteps": 200000,
+    "timesteps": 400000,
     "headless": True,
     "environment_info": "log"
 }
