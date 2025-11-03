@@ -128,31 +128,52 @@ class AgentStates:
         self.Sigma_X_delayed = torch.eye(3, device=self.device).unsqueeze(0).unsqueeze(0).expand(
             self.num_envs, 1, 3, 3
         ) * (-1.0)  # (N, T, 3, 3)
+        self.Sigma_X_delayed_belief = torch.eye(3, device=self.device).unsqueeze(0).unsqueeze(0).expand(
+            self.num_envs, num_agents, 1, 3, 3
+        ) * (-1.0)  # (N, C, T, 3, 3)
         self.trace_cov_delayed = torch.ones(self.num_envs, 1, device=self.device) * (-1.0)  # (N, T)
+        self.trace_cov_delayed_belief = torch.ones(self.num_envs, num_agents, 1, device=self.device) * (-1.0)  # (N, C, T)
         self.Sigma_X_delayed_noisy = torch.eye(3, device=self.device).unsqueeze(0).unsqueeze(0).expand(
             self.num_envs, 1, 3, 3
         ) * (-1.0)
+        self.Sigma_X_delayed_noisy_belief = torch.eye(3, device=self.device).unsqueeze(0).unsqueeze(0).expand(
+            self.num_envs, num_agents, 1, 3, 3
+        ) * (-1.0)
         self.trace_cov_delayed_noisy = torch.ones(self.num_envs, 1, device=self.device) * (-1.0)
-        
+        self.trace_cov_delayed_noisy_belief = torch.ones(self.num_envs, num_agents, 1, device=self.device) * (-1.0)
+
         # ===== RECEIVED STATES FROM OTHER AGENTS (WITH COMM LATENCY) =====
         # These store the most recent received data from other agents
-        # Structure: Dict[agent_id] -> tensor of shape [N, C-1, ...]
+        # Structure: Dict[agent_id] -> tensor of shape [N, C, ...]
         # where C-1 is the number of other agents
-        self.received_positions = {}          # Dict[agent_id] -> [N, C-1, 3]
-        self.received_orientations = {}       # Dict[agent_id] -> [N, C-1, 4]
-        self.received_linear_velocities = {}  # Dict[agent_id] -> [N, C-1, 3]
-        self.received_angular_velocities = {} # Dict[agent_id] -> [N, C-1, 3]
-        self.received_linear_accelerations = {} # Dict[agent_id] -> [N, C-1, 3]
-        self.received_gimbal_yawpitch = {}    # Dict[agent_id] -> [N, C-1, 2]
-        self.received_camera_pos = {}         # Dict[agent_id] -> [N, C-1, 3]
-        self.received_camera_quat = {}        # Dict[agent_id] -> [N, C-1, 4]
-        self.received_bboxes = {}             # Dict[agent_id] -> [N, C-1, T, 4]
-        self.received_bbox_valid = {}         # Dict[agent_id] -> [N, C-1, T]
-        self.received_ray_dirs = {}           # Dict[agent_id] -> [N, C-1, T, 3]
-        self.received_timestamps = {}         # Dict[agent_id] -> [N, C-1] generation timestamps
-        self.received_valid = {}              # Dict[agent_id] -> [N, C-1] bool flags (True if data received)
-        self.received_age = {}                # Dict[agent_id] -> [N, C-1] age of received data in seconds
-        self.received_time_since_detection = {} # Dict[agent_id] -> [N, C-1, T]
+        self.received_positions = {}          # Dict[agent_id] -> [N, C, 3]
+        self.received_orientations = {}       # Dict[agent_id] -> [N, C, 4]
+        self.received_linear_velocities = {}  # Dict[agent_id] -> [N, C, 3]
+        self.received_angular_velocities = {} # Dict[agent_id] -> [N, C, 3]
+        self.received_linear_accelerations = {} # Dict[agent_id] -> [N, C, 3]
+        self.received_gimbal_yaw = {}         # Dict[agent_id] -> [N, C, 1]
+        self.received_gimbal_pitch = {}       # Dict[agent_id] -> [N, C, 1]
+        self.received_camera_pos = {}         # Dict[agent_id] -> [N, C, 3]
+        self.received_camera_quat = {}        # Dict[agent_id] -> [N, C, 4]
+        self.received_camera_intrinsics = {}  # Dict[agent_id] -> [N, C, 3, 3]
+        self.received_bboxes = {}             # Dict[agent_id] -> [N, C, T, 4]
+        self.received_bbox_valid = {}         # Dict[agent_id] -> [N, C, T]
+        self.received_ray_dirs = {}           # Dict[agent_id] -> [N, C, T, 3]
+        self.received_timestamps = {}         # Dict[agent_id] -> [N, C] generation timestamps
+        self.received_valid = {}              # Dict[agent_id] -> [N, C] bool flags (True if data received)
+        self.received_age = {}                # Dict[agent_id] -> [N, C] age of received data in seconds
+        self.received_time_since_detection = {} # Dict[agent_id] -> [N, C, T]
+        self.received_camera_pos_noisy = {}
+        self.received_ray_dirs_noisy = {}
+        self.received_positions_noisy = {}
+        self.received_orientations_noisy = {}
+        self.received_linear_velocities_noisy = {}
+        self.received_angular_velocities_noisy = {}
+        self.received_gimbal_yaw_noisy = {}
+        self.received_gimbal_pitch_noisy = {}
+        self.received_camera_intrinsics_noisy = {}
+        self.received_bbox_valid_noisy = {}
+        self.received_bboxes_noisy = {}
         
     def compute_camera_poses(
         self,
@@ -266,7 +287,7 @@ class ResearchLoggingCfg:
 @configclass
 class IrisMAEnvCfg(DirectMARLEnvCfg):
     # env
-    episode_length_s = 20.0
+    episode_length_s = 32.0
     decimation = 2
     
     # Define agents
@@ -278,8 +299,8 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
         "drone_1": 7,
     }
     observation_spaces = {
-        "drone_0": 32,
-        "drone_1": 32,
+        "drone_0": 34,
+        "drone_1": 34,
     }
     state_space = -1
     
@@ -447,16 +468,18 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
 
     # Curriculum
     curriculum_all_end_step: int = 200000
-    curriculum_tracking_start_step: int = 2 * 20000 # Phase 1. Single-agent tracking
-    curriculum_tracking_end_step: int = 2 * 80000
-    curriculum_delay_start_step: int = 2 * 60000 # Phase 2. Delay and noise system
-    curriculum_delay_end_step: int = 2 * 150000
-    curriculum_coordination_start_step: int = 2 * 120000 # Phase 3. Triangulation, collision, TTC
-    curriculum_coordination_end_step: int = 2 * 200000
-    curriculum_moving_target_start_step: int = 2 * 20000 # Phase 1&2. Target speed, acceleration
-    curriculum_moving_target_end_step: int = 2 * 80000
-    curriculum_dynamics_start_step: int = 2 * 40000 # Phase 0. Dynamics randomization
-    curriculum_dynamics_end_step: int = 2 * 120000
+    curriculum_tracking_start_step: int = 10000 # Phase 1. Single-agent tracking
+    curriculum_tracking_end_step: int = 80000
+    curriculum_delay_start_step: int = 60000 # Phase 2. Delay and noise system
+    curriculum_delay_end_step: int = 150000
+    curriculum_coordination_start_step: int = 120000 # Phase 3. Triangulation
+    curriculum_coordination_end_step: int = 200000
+    curriculum_safety_start_step: int = 180000 # Phase 2&3. Min safe distance, TTC
+    curriculum_safety_end_step: int = 230000
+    curriculum_moving_target_start_step: int = 10000 # Phase 1&2. Target speed, acceleration
+    curriculum_moving_target_end_step: int = 80000
+    curriculum_dynamics_start_step: int = 40000 # Phase 0. Dynamics randomization
+    curriculum_dynamics_end_step: int = 120000
     
     # Delay and Communication System Parameters
     enable_delay_system: bool = True
@@ -475,7 +498,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     max_time_since_detection: float = 10.0  # Normalize time since detection with this value
     detection_decay_time_constant: float = 1.0  # Time constant for exponential decay of detection confidence
 
-    play_sim_at_step: int = 200000
+    play_sim_at_step: int = 180000
 
 class IrisMAEnv(DirectMARLEnv):
     cfg: IrisMAEnvCfg
@@ -661,7 +684,8 @@ class IrisMAEnv(DirectMARLEnv):
         self.no_detection_counts = torch.zeros(self.num_envs, len(self.cfg.possible_agents), 1, device=self.device, dtype=torch.int)
 
         # Define uncertainty covariances
-        self.X_w_est = torch.zeros(self.num_envs, 1, 3, device=self.device)
+        self.X_w_est = torch.zeros(self.num_envs, 1, 3, device=self.device) # [N, T, 3]
+        self.X_w_est_belief = torch.zeros(self.num_envs, len(self.cfg.possible_agents), 1, 3, device=self.device) # [N, C, T, 3]
         self.Sigma_X_invalid = torch.eye(3, device=self.device).unsqueeze(0).unsqueeze(0).expand(
             self.num_envs, 1, 3, 3
         ) * (-1.0)
@@ -794,7 +818,12 @@ class IrisMAEnv(DirectMARLEnv):
                     ),
                 }
             )
-            self.tri_cov_visualizer = VisualizationMarkers(marker_cfg)
+            if self.cfg.enable_delay_system:
+                self.tri_cov_visualizer_delayed = {
+                    agent_id: VisualizationMarkers(marker_cfg) for agent_id in self.cfg.possible_agents
+                }
+            else:
+                self.tri_cov_visualizer = VisualizationMarkers(marker_cfg)
         
         # Initialize states container
         self.states = AgentStates(self.num_envs, len(self.cfg.possible_agents), self.device)
@@ -932,24 +961,26 @@ class IrisMAEnv(DirectMARLEnv):
         for agent_id, agent_actions in actions.items():
             if torch.isnan(agent_actions).any():
                 continue
-                
+
+            agent_actions = torch.clamp(agent_actions, min=-1.0, max=1.0)
+
             robot = self._robots[agent_id]
             stabilizer = self._stabilizers[agent_id]
             
-            # Process actions (implementation continues with existing logic...)
+            # Process actions
             self._actions[agent_id] = agent_actions.clone()
             
             # Extract actions
-            vel_target_world = agent_actions[:, 0:3]
-            yaw_rate_target_body = agent_actions[:, 3:4]
-            gimbal_yaw_rate = agent_actions[:, 4:5]
-            gimbal_pitch_rate = agent_actions[:, 5:6]
+            vel_target_world = agent_actions[:, 0:3] * 0.0
+            yaw_rate_target_body = agent_actions[:, 3:4] * 0.0
+            gimbal_yaw_rate = agent_actions[:, 4:5] * 0.0
+            gimbal_pitch_rate = agent_actions[:, 5:6] * 0.0
             zoom_rate = agent_actions[:, 6:7]
             
             # Velocity commands
-            self._cmd_vel[agent_id][:, 0, 0:3] = vel_target_world * self.cfg.max_lin_vel
-            self._cmd_vel[agent_id][:, 0, 5:6] = yaw_rate_target_body * self.cfg.max_yaw_rate
-            
+            self._cmd_vel[agent_id][:, 0, 0:3] = vel_target_world * self.cfg.max_lin_vel * (0.05 * self.progress_tracking)
+            self._cmd_vel[agent_id][:, 0, 5:6] = yaw_rate_target_body * self.cfg.max_yaw_rate * (0.05 * self.progress_tracking)
+
             # Update gimbal targets
             gimbal_idx = self.gimbal_joint_idx[agent_id]
 
@@ -994,7 +1025,7 @@ class IrisMAEnv(DirectMARLEnv):
             gains = {k: v.clone() for k, v in stabilizer.default_gains.items()}
             if self.cfg.enable_delay_system and self.delay_manager is not None:
                 for gain_idx, key in enumerate(stabilizer.default_gains.keys()):
-                    gains[key] *= self.sampled_noise_control_gains[:, i, gain_idx].clone()
+                    gains[key] *= (1 + self.sampled_noise_control_gains[:, i, gain_idx])
             self._thrust[agent_id][:,0,:], self._moment[agent_id][:,0,:] = stabilizer.compute_control(
                 cmd_lin_vel_w=self._cmd_vel[agent_id][:, 0, :3],
                 cmd_yaw_vel=self._cmd_vel[agent_id][:, 0, 5],
@@ -1057,6 +1088,7 @@ class IrisMAEnv(DirectMARLEnv):
         self.progress_delay = self._linear_progress(self.cfg.curriculum_delay_start_step, self.cfg.curriculum_delay_end_step, current_step)
         self.progress_tracking = self._linear_progress(self.cfg.curriculum_tracking_start_step, self.cfg.curriculum_tracking_end_step, current_step)
         self.progress_coord = self._linear_progress(self.cfg.curriculum_coordination_start_step, self.cfg.curriculum_coordination_end_step, current_step)
+        self.progress_safety = self._linear_progress(self.cfg.curriculum_safety_start_step, self.cfg.curriculum_safety_end_step, current_step)
         self.progress_move = self._linear_progress(self.cfg.curriculum_moving_target_start_step, self.cfg.curriculum_moving_target_end_step, current_step)
         self.progress_dynamics = self._linear_progress(self.cfg.curriculum_dynamics_start_step, self.cfg.curriculum_dynamics_end_step, current_step)
 
@@ -1333,234 +1365,6 @@ class IrisMAEnv(DirectMARLEnv):
                 torch.zeros_like(self.states.ray_dir_delayed)
             )
             
-            # ===== 2.5. BROADCAST AND RECEIVE AGENT STATES (INTER-AGENT COMMUNICATION) =====
-            # Phase 1: Each agent broadcasts its delayed state to all other agents
-            for i, agent_id in enumerate(self.cfg.possible_agents):
-                agent_numeric_id = self.agent_name_to_idx[agent_id]
-                
-                # Prepare state dictionary with delayed states (WITHOUT noise)
-                # These will be transmitted with communication latency and dropouts
-                state_dict = {
-                    'position': self.states.delayed_robot_pos[:, i, :],        # [N, 3]
-                    'orientation': self.states.delayed_robot_quat[:, i, :],    # [N, 4]
-                    'linear_velocity': self.states.delayed_robot_lin_vel[:, i, :],  # [N, 3]
-                    'angular_velocity': self.states.delayed_robot_ang_vel[:, i, :],  # [N, 3]
-                    'linear_acceleration': self.states.delayed_robot_lin_acc[:, i, :],  # [N, 3]
-                    'gimbal_yaw': self.states.delayed_gimbal_yaw[:, i].unsqueeze(-1),  # [N, 1]
-                    'gimbal_pitch': self.states.delayed_gimbal_pitch[:, i].unsqueeze(-1),  # [N, 1]
-                    'camera_pos': self.states.camera_pos_delayed[:, i, :],     # [N, 3]
-                    'camera_quat': self.states.camera_quat_delayed[:, i, :],   # [N, 4]
-                    'bbox': self.states.bboxes_delayed[:, i, 0, :],            # [N, 4] (only first target)
-                    'bbox_valid': self.states.valid_mask_delayed[:, i, 0].float(),  # [N]
-                    'time_since_detection': self.states.time_since_detection_delayed[:, i, 0],  # [N]
-                    'ray_dir': self.states.ray_dir_delayed[:, i, 0, :],        # [N, 3] (only first target)
-                }
-                
-                # Broadcast to all other agents (with latency and dropouts)
-                self.delay_manager.broadcast_state(
-                    sender_id=agent_numeric_id,
-                    state_dict=state_dict,
-                    valid_mask=None  # All messages are valid
-                )
-            
-            # Phase 2: Each agent receives states from other agents
-            for i, agent_id in enumerate(self.cfg.possible_agents):
-                agent_numeric_id = self.agent_name_to_idx[agent_id]
-                
-                # Receive messages from other agents
-                received_data = self.delay_manager.receive_other_agent_states(
-                    receiver_id=agent_numeric_id,
-                    state_template=None
-                )
-                
-                # Initialize storage for this agent's received data
-                num_other_agents = len(self.cfg.possible_agents) - 1
-                if agent_id not in self.states.received_positions:
-                    # Initialize with default values
-                    self.states.received_positions[agent_id] = torch.zeros(
-                        self.num_envs, num_other_agents, 3, device=self.device
-                    )
-                    self.states.received_orientations[agent_id] = torch.zeros(
-                        self.num_envs, num_other_agents, 4, device=self.device
-                    )
-                    self.states.received_orientations[agent_id][:, :, 0] = 1.0  # Identity quaternion
-                    self.states.received_linear_velocities[agent_id] = torch.zeros(
-                        self.num_envs, num_other_agents, 3, device=self.device
-                    )
-                    self.states.received_angular_velocities[agent_id] = torch.zeros(
-                        self.num_envs, num_other_agents, 3, device=self.device
-                    )
-                    self.states.received_linear_accelerations[agent_id] = torch.zeros(
-                        self.num_envs, num_other_agents, 3, device=self.device
-                    )
-                    self.states.received_gimbal_yawpitch[agent_id] = torch.zeros(
-                        self.num_envs, num_other_agents, 2, device=self.device
-                    )
-                    self.states.received_camera_pos[agent_id] = torch.zeros(
-                        self.num_envs, num_other_agents, 3, device=self.device
-                    )
-                    self.states.received_camera_quat[agent_id] = torch.zeros(
-                        self.num_envs, num_other_agents, 4, device=self.device
-                    )
-                    self.states.received_camera_quat[agent_id][:, :, 0] = 1.0  # Identity quaternion
-                    self.states.received_bboxes[agent_id] = torch.zeros(
-                        self.num_envs, num_other_agents, 1, 4, device=self.device
-                    )
-                    self.states.received_bbox_valid[agent_id] = torch.zeros(
-                        self.num_envs, num_other_agents, 1, device=self.device, dtype=torch.bool
-                    )
-                    self.states.received_ray_dirs[agent_id] = torch.zeros(
-                        self.num_envs, num_other_agents, 1, 3, device=self.device
-                    )
-                    self.states.received_timestamps[agent_id] = torch.zeros(
-                        self.num_envs, num_other_agents, device=self.device
-                    )
-                    self.states.received_valid[agent_id] = torch.zeros(
-                        self.num_envs, num_other_agents, device=self.device, dtype=torch.bool
-                    )
-                    self.states.received_age[agent_id] = torch.full(
-                        (self.num_envs, num_other_agents), self.cfg.max_time_since_comm, device=self.device
-                    )
-                    self.states.received_time_since_detection[agent_id] = torch.full(
-                        (self.num_envs, num_other_agents, 1), self.cfg.max_time_since_detection, device=self.device
-                    )
-                
-                # Process received data from each sender
-                other_agent_idx = 0
-                for sender_numeric_id in range(len(self.cfg.possible_agents)):
-                    if sender_numeric_id == agent_numeric_id:
-                        continue  # Skip self
-                    
-                    if sender_numeric_id in received_data:
-                        # Extract timestamped data
-                        data = received_data[sender_numeric_id]
-                        
-                        # Update received states for this sender
-                        pos_data = data['position']
-                        if pos_data.valid.any():
-                            # Update positions where valid
-                            self.states.received_positions[agent_id][:, other_agent_idx, :] = torch.where(
-                                pos_data.valid.unsqueeze(-1),
-                                pos_data.data,
-                                self.states.received_positions[agent_id][:, other_agent_idx, :]
-                            )
-                        
-                        ori_data = data['orientation']
-                        if ori_data.valid.any():
-                            self.states.received_orientations[agent_id][:, other_agent_idx, :] = torch.where(
-                                ori_data.valid.unsqueeze(-1),
-                                ori_data.data,
-                                self.states.received_orientations[agent_id][:, other_agent_idx, :]
-                            )
-                        
-                        lin_vel_data = data['linear_velocity']
-                        if lin_vel_data.valid.any():
-                            self.states.received_linear_velocities[agent_id][:, other_agent_idx, :] = torch.where(
-                                lin_vel_data.valid.unsqueeze(-1),
-                                lin_vel_data.data,
-                                self.states.received_linear_velocities[agent_id][:, other_agent_idx, :]
-                            )
-                        
-                        ang_vel_data = data['angular_velocity']
-                        if ang_vel_data.valid.any():
-                            self.states.received_angular_velocities[agent_id][:, other_agent_idx, :] = torch.where(
-                                ang_vel_data.valid.unsqueeze(-1),
-                                ang_vel_data.data,
-                                self.states.received_angular_velocities[agent_id][:, other_agent_idx, :]
-                            )
-
-                        lin_acc_data = data['linear_acceleration']
-                        if lin_acc_data.valid.any():
-                            self.states.received_linear_accelerations[agent_id][:, other_agent_idx, :] = torch.where(
-                                lin_acc_data.valid.unsqueeze(-1),
-                                lin_acc_data.data,
-                                self.states.received_linear_accelerations[agent_id][:, other_agent_idx, :]
-                            )
-                        
-                        # Combine gimbal yaw and pitch
-                        yaw_data = data['gimbal_yaw']
-                        pitch_data = data['gimbal_pitch']
-                        if yaw_data.valid.any() and pitch_data.valid.any():
-                            gimbal_combined = torch.stack([yaw_data.data.squeeze(-1), pitch_data.data.squeeze(-1)], dim=-1)
-                            self.states.received_gimbal_yawpitch[agent_id][:, other_agent_idx, :] = torch.where(
-                                yaw_data.valid.unsqueeze(-1),
-                                gimbal_combined,
-                                self.states.received_gimbal_yawpitch[agent_id][:, other_agent_idx, :]
-                            )
-                        
-                        cam_pos_data = data['camera_pos']
-                        if cam_pos_data.valid.any():
-                            self.states.received_camera_pos[agent_id][:, other_agent_idx, :] = torch.where(
-                                cam_pos_data.valid.unsqueeze(-1),
-                                cam_pos_data.data,
-                                self.states.received_camera_pos[agent_id][:, other_agent_idx, :]
-                            )
-                        
-                        cam_quat_data = data['camera_quat']
-                        if cam_quat_data.valid.any():
-                            self.states.received_camera_quat[agent_id][:, other_agent_idx, :] = torch.where(
-                                cam_quat_data.valid.unsqueeze(-1),
-                                cam_quat_data.data,
-                                self.states.received_camera_quat[agent_id][:, other_agent_idx, :]
-                            )
-                        
-                        bbox_data = data['bbox']
-                        if bbox_data.valid.any():
-                            self.states.received_bboxes[agent_id][:, other_agent_idx, 0, :] = torch.where(
-                                bbox_data.valid.unsqueeze(-1),
-                                bbox_data.data,
-                                self.states.received_bboxes[agent_id][:, other_agent_idx, 0, :]
-                            )
-                        
-                        bbox_valid_data = data['bbox_valid']
-                        if bbox_valid_data.valid.any():
-                            self.states.received_bbox_valid[agent_id][:, other_agent_idx, 0] = torch.where(
-                                bbox_valid_data.valid,
-                                bbox_valid_data.data.bool(),
-                                self.states.received_bbox_valid[agent_id][:, other_agent_idx, 0]
-                            )
-                        tsd_valid_data = data['time_since_detection']
-                        if tsd_valid_data.valid.any():
-                            current_time = self.delay_manager.current_time
-                            comm_delay = current_time - tsd_valid_data.timestamp
-                            tsd_comm_delay_time = tsd_valid_data.data + comm_delay
-                            self.states.received_time_since_detection[agent_id][:, other_agent_idx, 0] = torch.where(
-                                tsd_valid_data.valid,
-                                tsd_comm_delay_time,
-                                self.states.received_time_since_detection[agent_id][:, other_agent_idx, 0]
-                            )
-                        
-                        ray_dir_data = data['ray_dir']
-                        if ray_dir_data.valid.any():
-                            self.states.received_ray_dirs[agent_id][:, other_agent_idx, 0, :] = torch.where(
-                                ray_dir_data.valid.unsqueeze(-1),
-                                ray_dir_data.data,
-                                self.states.received_ray_dirs[agent_id][:, other_agent_idx, 0, :]
-                            )
-                        
-                        # Update metadata (use position data as representative)
-                        current_time = self.delay_manager.current_time
-                        self.states.received_timestamps[agent_id][:, other_agent_idx] = torch.where(
-                            pos_data.valid,
-                            pos_data.timestamp,
-                            self.states.received_timestamps[agent_id][:, other_agent_idx]
-                        )
-                        self.states.received_valid[agent_id][:, other_agent_idx] = torch.where(
-                            pos_data.valid,
-                            torch.ones_like(pos_data.valid),
-                            self.states.received_valid[agent_id][:, other_agent_idx]
-                        )
-                        
-                        # Compute age of received data
-                        age = current_time - self.states.received_timestamps[agent_id][:, other_agent_idx]
-                        self.states.received_age[agent_id][:, other_agent_idx] = torch.where(
-                            self.states.received_valid[agent_id][:, other_agent_idx],
-                            age,
-                            torch.full_like(age, self.cfg.max_time_since_comm)
-                        )
-                    
-                    other_agent_idx += 1
-            
             # ===== 3. COMPUTE DELAYED + NOISY STATES FOR OBSERVATIONS =====
             # Apply measurement noise to delayed states
             for i, agent_id in enumerate(self.cfg.possible_agents):
@@ -1627,6 +1431,386 @@ class IrisMAEnv(DirectMARLEnv):
                 self.states.ray_dir_delayed_noisy,
                 torch.zeros_like(self.states.ray_dir_delayed_noisy)
             )
+
+            # ===== 4. BROADCAST AND RECEIVE AGENT STATES (INTER-AGENT COMMUNICATION) =====
+            # Phase 1: Each agent broadcasts its delayed state to all other agents
+            for i, agent_id in enumerate(self.cfg.possible_agents):
+                agent_numeric_id = self.agent_name_to_idx[agent_id]
+                
+                # Prepare state dictionary with delayed (+noisy) states
+                # These will be transmitted with communication latency and dropouts
+                state_dict = {
+                    'position': self.states.delayed_robot_pos[:, i, :],        # [N, 3]
+                    'orientation': self.states.delayed_robot_quat[:, i, :],    # [N, 4]
+                    'linear_velocity': self.states.delayed_robot_lin_vel[:, i, :],  # [N, 3]
+                    'angular_velocity': self.states.delayed_robot_ang_vel[:, i, :],  # [N, 3]
+                    'linear_acceleration': self.states.delayed_robot_lin_acc[:, i, :],  # [N, 3]
+                    'gimbal_yaw': self.states.delayed_gimbal_yaw[:, i].unsqueeze(-1),  # [N, 1]
+                    'gimbal_pitch': self.states.delayed_gimbal_pitch[:, i].unsqueeze(-1),  # [N, 1]
+                    'camera_intrinsics': self.states.camera_intrinsics_delayed[:, i, :, :],  # [N, 3, 3]
+                    'camera_pos': self.states.camera_pos_delayed[:, i, :],     # [N, 3]
+                    'camera_quat': self.states.camera_quat_delayed[:, i, :],   # [N, 4]
+                    'bbox': self.states.bboxes_delayed[:, i, 0, :],            # [N, 4] (only first target)
+                    'bbox_valid': self.states.valid_mask_delayed[:, i, 0].float(),  # [N]
+                    'time_since_detection': self.states.time_since_detection_delayed[:, i, 0],  # [N]
+                    'ray_dir': self.states.ray_dir_delayed[:, i, 0, :],        # [N, 3] (only first target)
+                    'camera_pos_noisy': self.states.camera_pos_delayed_noisy[:, i, :],
+                    'ray_dir_noisy': self.states.ray_dir_delayed_noisy[:, i, 0, :],
+                    'position_noisy': self.states.delayed_noisy_robot_pos[:, i, :],
+                    'orientation_noisy': self.states.delayed_noisy_robot_quat[:, i, :],
+                    'gimbal_yaw_noisy': self.states.delayed_noisy_gimbal_yaw[:, i].unsqueeze(-1),
+                    'gimbal_pitch_noisy': self.states.delayed_noisy_gimbal_pitch[:, i].unsqueeze(-1),
+                    'camera_intrinsics_noisy': self.states.camera_intrinsics_delayed_noisy[:, i, :, :],
+                    'bbox_valid_noisy': self.states.valid_mask_delayed_noisy[:, i, 0].float(),
+                    'bboxes_noisy': self.states.bboxes_delayed_noisy[:, i, 0, :],
+                    'linear_velocity_noisy': self.states.delayed_noisy_robot_lin_vel[:, i, :],
+                    'angular_velocity_noisy': self.states.delayed_noisy_robot_ang_vel[:, i, :],
+                }
+                
+                # Broadcast to all other agents (with latency and dropouts)
+                self.delay_manager.broadcast_state(
+                    sender_id=agent_numeric_id,
+                    state_dict=state_dict,
+                    valid_mask=None  # All messages are valid
+                )
+            
+            # Phase 2: Each agent receives states from other agents
+            for i, agent_id in enumerate(self.cfg.possible_agents):
+                agent_numeric_id = self.agent_name_to_idx[agent_id]
+                
+                # Receive messages from other agents
+                received_data = self.delay_manager.receive_other_agent_states(
+                    receiver_id=agent_numeric_id,
+                    state_template=None
+                )
+                
+                # Initialize storage for this agent's received data
+                num_agents = len(self.cfg.possible_agents) # Keep self in the count for consistent indexing
+                if agent_id not in self.states.received_positions:
+                    # Initialize with default values
+                    self.states.received_positions[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 3, device=self.device
+                    )
+                    self.states.received_orientations[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 4, device=self.device
+                    )
+                    self.states.received_orientations[agent_id][:, :, 0] = 1.0  # Identity quaternion
+                    self.states.received_linear_velocities[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 3, device=self.device
+                    )
+                    self.states.received_angular_velocities[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 3, device=self.device
+                    )
+                    self.states.received_linear_accelerations[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 3, device=self.device
+                    )
+                    self.states.received_gimbal_yaw[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 1, device=self.device
+                    )
+                    self.states.received_gimbal_pitch[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 1, device=self.device
+                    )
+                    self.states.received_camera_pos[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 3, device=self.device
+                    )
+                    self.states.received_camera_quat[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 4, device=self.device
+                    )
+                    self.states.received_camera_quat[agent_id][:, :, 0] = 1.0  # Identity quaternion
+                    self.states.received_camera_intrinsics[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 3, 3, device=self.device
+                    )
+                    self.states.received_bboxes[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 1, 4, device=self.device
+                    )
+                    self.states.received_bbox_valid[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 1, device=self.device, dtype=torch.bool
+                    )
+                    self.states.received_ray_dirs[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 1, 3, device=self.device
+                    )
+                    self.states.received_timestamps[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, device=self.device
+                    )
+                    self.states.received_valid[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, device=self.device, dtype=torch.bool
+                    )
+                    self.states.received_age[agent_id] = torch.full(
+                        (self.num_envs, num_agents), self.cfg.max_time_since_comm, device=self.device
+                    )
+                    self.states.received_time_since_detection[agent_id] = torch.full(
+                        (self.num_envs, num_agents, 1), self.cfg.max_time_since_detection, device=self.device
+                    )
+                    self.states.received_camera_pos_noisy[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 3, device=self.device
+                    )
+                    self.states.received_ray_dirs_noisy[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 1, 3, device=self.device
+                    )
+                    self.states.received_positions_noisy[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 3, device=self.device
+                    )
+                    self.states.received_orientations_noisy[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 4, device=self.device
+                    )
+                    self.states.received_linear_velocities_noisy[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 3, device=self.device
+                    )
+                    self.states.received_angular_velocities_noisy[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 3, device=self.device
+                    )
+                    self.states.received_gimbal_yaw_noisy[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 1, device=self.device
+                    )
+                    self.states.received_gimbal_pitch_noisy[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 1, device=self.device
+                    )
+                    self.states.received_camera_intrinsics_noisy[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 3, 3, device=self.device
+                    )
+                    self.states.received_bbox_valid_noisy[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 1, device=self.device, dtype=torch.bool
+                    )
+                    self.states.received_bboxes_noisy[agent_id] = torch.zeros(
+                        self.num_envs, num_agents, 1, 4, device=self.device, dtype=torch.bool
+                    )
+                
+                # Process received data from each sender
+                for sender_numeric_id in range(len(self.cfg.possible_agents)):
+                    if sender_numeric_id == agent_numeric_id:
+                        continue  # Skip self
+                    
+                    if sender_numeric_id in received_data:
+                        # Extract timestamped data
+                        data = received_data[sender_numeric_id]
+                        
+                        # Update received states for this sender
+                        pos_data = data['position']
+                        if pos_data.valid.any():
+                            # Update positions where valid
+                            self.states.received_positions[agent_id][:, sender_numeric_id, :] = torch.where(
+                                pos_data.valid.unsqueeze(-1),
+                                pos_data.data,
+                                self.states.received_positions[agent_id][:, sender_numeric_id, :]
+                            )
+                        
+                        ori_data = data['orientation']
+                        if ori_data.valid.any():
+                            self.states.received_orientations[agent_id][:, sender_numeric_id, :] = torch.where(
+                                ori_data.valid.unsqueeze(-1),
+                                ori_data.data,
+                                self.states.received_orientations[agent_id][:, sender_numeric_id, :]
+                            )
+                        
+                        lin_vel_data = data['linear_velocity']
+                        if lin_vel_data.valid.any():
+                            self.states.received_linear_velocities[agent_id][:, sender_numeric_id, :] = torch.where(
+                                lin_vel_data.valid.unsqueeze(-1),
+                                lin_vel_data.data,
+                                self.states.received_linear_velocities[agent_id][:, sender_numeric_id, :]
+                            )
+                        
+                        ang_vel_data = data['angular_velocity']
+                        if ang_vel_data.valid.any():
+                            self.states.received_angular_velocities[agent_id][:, sender_numeric_id, :] = torch.where(
+                                ang_vel_data.valid.unsqueeze(-1),
+                                ang_vel_data.data,
+                                self.states.received_angular_velocities[agent_id][:, sender_numeric_id, :]
+                            )
+
+                        lin_acc_data = data['linear_acceleration']
+                        if lin_acc_data.valid.any():
+                            self.states.received_linear_accelerations[agent_id][:, sender_numeric_id, :] = torch.where(
+                                lin_acc_data.valid.unsqueeze(-1),
+                                lin_acc_data.data,
+                                self.states.received_linear_accelerations[agent_id][:, sender_numeric_id, :]
+                            )
+                        
+                        # Combine gimbal yaw and pitch
+                        yaw_data = data['gimbal_yaw']
+                        if yaw_data.valid.any():
+                            self.states.received_gimbal_yaw[agent_id][:, sender_numeric_id, :] = torch.where(
+                                yaw_data.valid.unsqueeze(-1),
+                                yaw_data.data,
+                                self.states.received_gimbal_yaw[agent_id][:, sender_numeric_id, :]
+                            )
+                        pitch_data = data['gimbal_pitch']
+                        if pitch_data.valid.any():
+                            self.states.received_gimbal_pitch[agent_id][:, sender_numeric_id, :] = torch.where(
+                                pitch_data.valid.unsqueeze(-1),
+                                pitch_data.data,
+                                self.states.received_gimbal_pitch[agent_id][:, sender_numeric_id, :]
+                            )
+
+                        cam_pos_data = data['camera_pos']
+                        if cam_pos_data.valid.any():
+                            self.states.received_camera_pos[agent_id][:, sender_numeric_id, :] = torch.where(
+                                cam_pos_data.valid.unsqueeze(-1),
+                                cam_pos_data.data,
+                                self.states.received_camera_pos[agent_id][:, sender_numeric_id, :]
+                            )
+                        
+                        cam_quat_data = data['camera_quat']
+                        if cam_quat_data.valid.any():
+                            self.states.received_camera_quat[agent_id][:, sender_numeric_id, :] = torch.where(
+                                cam_quat_data.valid.unsqueeze(-1),
+                                cam_quat_data.data,
+                                self.states.received_camera_quat[agent_id][:, sender_numeric_id, :]
+                            )
+
+                        cam_intrinsics_data = data['camera_intrinsics']
+                        if cam_intrinsics_data.valid.any():
+                            self.states.received_camera_intrinsics[agent_id][:, sender_numeric_id, :, :] = torch.where(
+                                cam_intrinsics_data.valid.unsqueeze(-1).unsqueeze(-1),
+                                cam_intrinsics_data.data,
+                                self.states.received_camera_intrinsics[agent_id][:, sender_numeric_id, :, :]
+                            )
+                        
+                        bbox_data = data['bbox']
+                        if bbox_data.valid.any():
+                            self.states.received_bboxes[agent_id][:, sender_numeric_id, 0, :] = torch.where(
+                                bbox_data.valid.unsqueeze(-1),
+                                bbox_data.data,
+                                self.states.received_bboxes[agent_id][:, sender_numeric_id, 0, :]
+                            )
+                        
+                        bbox_valid_data = data['bbox_valid']
+                        if bbox_valid_data.valid.any():
+                            self.states.received_bbox_valid[agent_id][:, sender_numeric_id, 0] = torch.where(
+                                bbox_valid_data.valid,
+                                bbox_valid_data.data.bool(),
+                                self.states.received_bbox_valid[agent_id][:, sender_numeric_id, 0]
+                            )
+                        
+                        tsd_valid_data = data['time_since_detection']
+                        if tsd_valid_data.valid.any():
+                            current_time = self.delay_manager.current_time
+                            comm_delay = current_time - tsd_valid_data.timestamp
+                            tsd_comm_delay_time = tsd_valid_data.data + comm_delay
+                            self.states.received_time_since_detection[agent_id][:, sender_numeric_id, 0] = torch.where(
+                                tsd_valid_data.valid,
+                                tsd_comm_delay_time,
+                                self.states.received_time_since_detection[agent_id][:, sender_numeric_id, 0]
+                            )
+                        
+                        ray_dir_data = data['ray_dir']
+                        if ray_dir_data.valid.any():
+                            self.states.received_ray_dirs[agent_id][:, sender_numeric_id, 0, :] = torch.where(
+                                ray_dir_data.valid.unsqueeze(-1),
+                                ray_dir_data.data,
+                                self.states.received_ray_dirs[agent_id][:, sender_numeric_id, 0, :]
+                            )
+
+                        # Noisy data
+                        cam_pos_noisy_data = data['camera_pos_noisy']
+                        if cam_pos_noisy_data.valid.any():
+                            self.states.received_camera_pos_noisy[agent_id][:, sender_numeric_id, :] = torch.where(
+                                cam_pos_noisy_data.valid.unsqueeze(-1),
+                                cam_pos_noisy_data.data,
+                                self.states.received_camera_pos_noisy[agent_id][:, sender_numeric_id, :]
+                            )
+
+                        ray_dir_noisy_data = data['ray_dir_noisy']
+                        if ray_dir_noisy_data.valid.any():
+                            self.states.received_ray_dirs_noisy[agent_id][:, sender_numeric_id, 0, :] = torch.where(
+                                ray_dir_noisy_data.valid.unsqueeze(-1),
+                                ray_dir_noisy_data.data,
+                                self.states.received_ray_dirs_noisy[agent_id][:, sender_numeric_id, 0, :]
+                            )
+
+                        position_noisy_data = data['position_noisy']
+                        if position_noisy_data.valid.any():
+                            self.states.received_positions_noisy[agent_id][:, sender_numeric_id, :] = torch.where(
+                                position_noisy_data.valid.unsqueeze(-1),
+                                position_noisy_data.data,
+                                self.states.received_positions_noisy[agent_id][:, sender_numeric_id, :]
+                            )
+
+                        orientation_noisy_data = data['orientation_noisy']
+                        if orientation_noisy_data.valid.any():
+                            self.states.received_orientations_noisy[agent_id][:, sender_numeric_id, :] = torch.where(
+                                orientation_noisy_data.valid.unsqueeze(-1),
+                                orientation_noisy_data.data,
+                                self.states.received_orientations_noisy[agent_id][:, sender_numeric_id, :]
+                            )
+
+                        linear_velocities_noisy_data = data['linear_velocity_noisy']
+                        if linear_velocities_noisy_data.valid.any():
+                            self.states.received_linear_velocities_noisy[agent_id][:, sender_numeric_id, :] = torch.where(
+                                linear_velocities_noisy_data.valid.unsqueeze(-1),
+                                linear_velocities_noisy_data.data,
+                                self.states.received_linear_velocities_noisy[agent_id][:, sender_numeric_id, :]
+                            )
+
+                        angular_velocities_noisy_data = data['angular_velocity_noisy']
+                        if angular_velocities_noisy_data.valid.any():
+                            self.states.received_angular_velocities_noisy[agent_id][:, sender_numeric_id, :] = torch.where(
+                                angular_velocities_noisy_data.valid.unsqueeze(-1),
+                                angular_velocities_noisy_data.data,
+                                self.states.received_angular_velocities_noisy[agent_id][:, sender_numeric_id, :]
+                            )
+
+                        gimbal_yaw_noisy_data = data['gimbal_yaw_noisy']
+                        if gimbal_yaw_noisy_data.valid.any():
+                            self.states.received_gimbal_yaw_noisy[agent_id][:, sender_numeric_id, :] = torch.where(
+                                gimbal_yaw_noisy_data.valid.unsqueeze(-1),
+                                gimbal_yaw_noisy_data.data,
+                                self.states.received_gimbal_yaw_noisy[agent_id][:, sender_numeric_id, :]
+                            )
+
+                        gimbal_pitch_noisy_data = data['gimbal_pitch_noisy']
+                        if gimbal_pitch_noisy_data.valid.any():
+                            self.states.received_gimbal_pitch_noisy[agent_id][:, sender_numeric_id, :] = torch.where(
+                                gimbal_pitch_noisy_data.valid.unsqueeze(-1),
+                                gimbal_pitch_noisy_data.data,
+                                self.states.received_gimbal_pitch_noisy[agent_id][:, sender_numeric_id, :]
+                            )
+                        
+                        cam_intrinsics_noisy_data = data['camera_intrinsics_noisy']
+                        if cam_intrinsics_noisy_data.valid.any():
+                            self.states.received_camera_intrinsics_noisy[agent_id][:, sender_numeric_id, :, :] = torch.where(
+                                cam_intrinsics_noisy_data.valid.unsqueeze(-1).unsqueeze(-1),
+                                cam_intrinsics_noisy_data.data,
+                                self.states.received_camera_intrinsics_noisy[agent_id][:, sender_numeric_id, :, :]
+                            )
+
+                        bbox_valid_noisy_data = data['bbox_valid_noisy']
+                        if bbox_valid_noisy_data.valid.any():
+                            self.states.received_bbox_valid_noisy[agent_id][:, sender_numeric_id, 0] = torch.where(
+                                bbox_valid_noisy_data.valid,
+                                bbox_valid_noisy_data.data.bool(),
+                                self.states.received_bbox_valid_noisy[agent_id][:, sender_numeric_id, 0]
+                            )
+
+                        bboxes_noisy_data = data['bboxes_noisy']
+                        if bboxes_noisy_data.valid.any():
+                            self.states.received_bboxes_noisy[agent_id][:, sender_numeric_id, 0, :] = torch.where(
+                                bboxes_noisy_data.valid.unsqueeze(-1),
+                                bboxes_noisy_data.data,
+                                self.states.received_bboxes_noisy[agent_id][:, sender_numeric_id, 0, :]
+                            )
+
+                        # Update metadata (use position data as representative)
+                        current_time = self.delay_manager.current_time
+                        self.states.received_timestamps[agent_id][:, sender_numeric_id] = torch.where(
+                            pos_data.valid,
+                            pos_data.timestamp,
+                            self.states.received_timestamps[agent_id][:, sender_numeric_id]
+                        )
+                        self.states.received_valid[agent_id][:, sender_numeric_id] = torch.where(
+                            pos_data.valid,
+                            torch.ones_like(pos_data.valid),
+                            self.states.received_valid[agent_id][:, sender_numeric_id]
+                        )
+                        
+                        # Compute age of received data
+                        age = current_time - self.states.received_timestamps[agent_id][:, sender_numeric_id]
+                        self.states.received_age[agent_id][:, sender_numeric_id] = torch.where(
+                            self.states.received_valid[agent_id][:, sender_numeric_id],
+                            age,
+                            torch.full_like(age, self.cfg.max_time_since_comm)
+                        )
+            
         else:
             # No delay system - just copy GT states
             self.states.delayed_robot_pos = robot_positions_gt.clone()
@@ -1674,6 +1858,7 @@ class IrisMAEnv(DirectMARLEnv):
                                           camera_intrinsics, bbox_valid_mask) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
         try:
+            progress_coord = (0.1 + self.progress_coord)/1.1 if self.cfg.enable_delay_system else 1.0
             Sigma_X, trace_cov = triangulation_covariance_multi_camera(
                 X_w=X_w,
                 robot_positions=robot_positions,
@@ -1681,12 +1866,12 @@ class IrisMAEnv(DirectMARLEnv):
                 gimbal_yaws=gimbal_yaws,
                 gimbal_pitches=gimbal_pitches,
                 camera_intrinsics=camera_intrinsics,
-                Sigma_pix=self.Sigma_pix * self.progress_coord,
-                Sigma_twb=self.Sigma_twb * self.progress_coord,
-                Sigma_phiwb=self.Sigma_phiwb * self.progress_coord,
-                Sigma_alpha=self.Sigma_alpha * self.progress_coord,
-                Sigma_beta=self.Sigma_beta * self.progress_coord,
-                Sigma_K=self.Sigma_K * self.progress_coord,
+                Sigma_pix=self.Sigma_pix * progress_coord,
+                Sigma_twb=self.Sigma_twb * progress_coord,
+                Sigma_phiwb=self.Sigma_phiwb * progress_coord,
+                Sigma_alpha=self.Sigma_alpha * progress_coord,
+                Sigma_beta=self.Sigma_beta * progress_coord,
+                Sigma_K=self.Sigma_K * progress_coord,
                 include_pose=True,
                 include_gimbal=True,
                 include_intrinsics=True
@@ -1725,6 +1910,62 @@ class IrisMAEnv(DirectMARLEnv):
         
         # STEP 2: Compute triangulation quality using DELAYED (without noise) values for rewards
         target_pos_stacked = self.target.data.root_state_w[:, :3].unsqueeze(1)  # [N, 1, 3]
+        if self.cfg.enable_delay_system and self.delay_manager is not None:
+            agent_beliefs_delayed = {}
+            for i, agent_id in enumerate( self.cfg.possible_agents):
+                # ego state beliefs
+                camera_pos_delayed = self.states.camera_pos_delayed[:, i, :].unsqueeze(1).clone()  # [N, 1, 3]
+                ray_dir_delayed = self.states.ray_dir_delayed[:, i, :, :].unsqueeze(1).clone()  # [N, 1, T, 3]
+                robot_pos_delayed = self.states.delayed_robot_pos[:, i, :].unsqueeze(1).clone()  # [N, 1, 3]
+                robot_quat_delayed = self.states.delayed_robot_quat[:, i, :].unsqueeze(1).clone()  # [N, 1, 4]
+                gimbal_yaw_delayed = self.states.delayed_gimbal_yaw[:, i].unsqueeze(1).clone()  # [N, 1]
+                gimbal_pitch_delayed = self.states.delayed_gimbal_pitch[:, i].unsqueeze(1).clone()  # [N, 1]
+                camera_intrinsics_delayed = self.states.camera_intrinsics_delayed[:, i, :].unsqueeze(1).clone()  # [N, 1, 3, 3]
+                valid_mask_delayed = self.states.valid_mask_delayed[:, i, :].unsqueeze(1).clone()  # [N, 1, T]
+                # other agents' state beliefs
+                other_agent_idxs = list(range(len(self.cfg.possible_agents)))
+                other_agent_idxs.pop(i)
+                other_camera_pos = self.states.received_camera_pos[agent_id][:, other_agent_idxs, :].clone()  # [N, C-1, 3]
+                other_ray_dir = self.states.received_ray_dirs[agent_id][:, other_agent_idxs, :, :].clone()  # [N, C-1, T, 3]
+                other_robot_pos_delayed = self.states.received_positions[agent_id][:, other_agent_idxs, :].clone()  # [N, C-1, 3]
+                other_robot_quat_delayed = self.states.received_orientations[agent_id][:, other_agent_idxs, :].clone()  # [N, C-1, 4]
+                other_gimbal_yaw_delayed = self.states.received_gimbal_yaw[agent_id][:, other_agent_idxs, :].clone()  # [N, C-1, 1]
+                other_gimbal_pitch_delayed = self.states.received_gimbal_pitch[agent_id][:, other_agent_idxs, :].clone()  # [N, C-1, 1]
+                other_camera_intrinsics_delayed = self.states.received_camera_intrinsics[agent_id][:, other_agent_idxs, :, :].clone()  # [N, C-1, 3, 3]
+                other_valid_mask_delayed = self.states.received_bbox_valid[agent_id][:, other_agent_idxs, :].clone()  # [N, C-1, T]
+                # Combine ego and other agents' beliefs
+                combined_camera_pos = torch.cat([camera_pos_delayed, other_camera_pos], dim=1)  # [N, C, 3]
+                combined_ray_dir = torch.cat([ray_dir_delayed, other_ray_dir], dim=1)  # [N, C, 3]
+                agent_beliefs_delayed[agent_id] = {
+                    'camera_pos': combined_camera_pos,
+                    'ray_dir': combined_ray_dir,
+                    'robot_pos': torch.cat([robot_pos_delayed, other_robot_pos_delayed], dim=1),  # [N, C, 3]
+                    'robot_quat': torch.cat([robot_quat_delayed, other_robot_quat_delayed], dim=1),  # [N, C, 4]
+                    'gimbal_yaw': torch.cat([gimbal_yaw_delayed, other_gimbal_yaw_delayed.squeeze(-1)], dim=1),  # [N, C, 1]
+                    'gimbal_pitch': torch.cat([gimbal_pitch_delayed, other_gimbal_pitch_delayed.squeeze(-1)], dim=1),  # [N, C, 1]
+                    'camera_intrinsics': torch.cat([camera_intrinsics_delayed, other_camera_intrinsics_delayed], dim=1),  # [N, C, 3, 3]
+                    'valid_mask': torch.cat([valid_mask_delayed, other_valid_mask_delayed], dim=1),  # [N, C, T]
+                }
+                self.X_w_est_belief[:, i] = midpoint_method_batched(
+                    pts=agent_beliefs_delayed[agent_id]['camera_pos'],
+                    dirs=agent_beliefs_delayed[agent_id]['ray_dir'],
+                )
+                self.states.Sigma_X_delayed_belief[:, i], self.states.trace_cov_delayed_belief[:, i], is_tri_cov_valid_belief = self._compute_triangulation_covariance(
+                    X_w=self.X_w_est_belief[:, i],
+                    robot_positions=agent_beliefs_delayed[agent_id]['robot_pos'],
+                    robot_quats=agent_beliefs_delayed[agent_id]['robot_quat'],
+                    gimbal_yaws=agent_beliefs_delayed[agent_id]['gimbal_yaw'],
+                    gimbal_pitches=agent_beliefs_delayed[agent_id]['gimbal_pitch'],
+                    camera_intrinsics=agent_beliefs_delayed[agent_id]['camera_intrinsics'],
+                    bbox_valid_mask=agent_beliefs_delayed[agent_id]['valid_mask'],
+                )
+                trace_cov_per_agent_belief = self.states.trace_cov_delayed_belief[:, i, 0]
+                triangulation_quality_belief = torch.where(
+                    is_tri_cov_valid_belief[:, 0],
+                    1.0 / torch.sqrt(trace_cov_per_agent_belief + 1e-12),
+                    torch.zeros(self.num_envs, device=self.device)
+                )
+                agent_beliefs_delayed[agent_id]['triangulation_quality'] = triangulation_quality_belief
         self.X_w_est = midpoint_method_batched(
                 pts=torch.stack([self.states.camera_pos_delayed[:,i,:] for i, _ in enumerate(self.cfg.possible_agents)], dim=1),
                 dirs=self.states.ray_dir_delayed,
@@ -1794,8 +2035,8 @@ class IrisMAEnv(DirectMARLEnv):
 
         self.cam_to_cam_distance[:, range(len(self.cfg.possible_agents)), range(len(self.cfg.possible_agents))] = float('inf')
         self.cam_to_cam_ttc[:, range(len(self.cfg.possible_agents)), range(len(self.cfg.possible_agents))] = float('inf')
-        cam_to_cam_collision = self.cam_to_cam_distance < self.cfg.min_safe_distance * (0.5 + 0.5 * self.progress_coord)
-        cam_to_target_collision = self.cam_to_target_distance < self.cfg.min_safe_distance * (0.5 + 0.5 * self.progress_coord)
+        cam_to_cam_collision = self.cam_to_cam_distance < self.cfg.min_safe_distance * (0.5 + 0.5 * self.progress_safety)
+        cam_to_target_collision = self.cam_to_target_distance < self.cfg.min_safe_distance * (0.5 + 0.5 * self.progress_safety)
         
         # STEP 4: Compute per-agent rewards
         for i, agent_id in enumerate(self.cfg.possible_agents):
@@ -1832,6 +2073,9 @@ class IrisMAEnv(DirectMARLEnv):
             # Zoom penalty
             zoom_penalty = torch.square((self.zoom_level[agent_id] - 1.0)/10)
 
+            # Triangulation quality reward
+            # triangulation_quality = agent_beliefs_delayed[agent_id]['triangulation_quality']
+
             # Collision penalty
             has_collision = torch.any(cam_to_cam_collision[:, i, :], dim=1) | torch.any(cam_to_target_collision[:, i, :], dim=1)
             collision_penalty = torch.where(
@@ -1854,15 +2098,17 @@ class IrisMAEnv(DirectMARLEnv):
                 ttc_penalty_cam_to_target[:, i]
             )
 
+            progress_tri = min(max(self.progress_coord * 10, 0), 1)
+
             # Combine rewards
             rewards = {
                 "action_sum": action_sum * self.cfg.action_sum_penalty_scale * self.step_dt,
                 "action_delta": action_delta * self.cfg.action_delta_penalty_scale * self.step_dt,
                 "bbox_center": bbox_center_mapped * self.cfg.bbox_center_reward_scale * self.step_dt,
                 "bbox_size": bbox_size_mapped * self.cfg.bbox_size_reward_scale * self.step_dt,
-                "triangulation": triangulation_quality * self.cfg.triangulation_reward_scale * self.step_dt * self.progress_coord,
-                "collision": collision_penalty * self.cfg.collision_penalty_scale * self.step_dt * self.progress_coord,
-                "ttc_penalty": ttc_penalty * self.cfg.ttc_penalty_scale * self.step_dt * self.progress_coord,
+                "triangulation": triangulation_quality * self.cfg.triangulation_reward_scale * self.step_dt * progress_tri,
+                "collision": collision_penalty * self.cfg.collision_penalty_scale * self.step_dt * self.progress_safety,
+                "ttc_penalty": ttc_penalty * self.cfg.ttc_penalty_scale * self.step_dt * self.progress_safety,
             }
             
             # Store for logging
@@ -1892,8 +2138,8 @@ class IrisMAEnv(DirectMARLEnv):
         """Get observations for all agents using delayed+noisy states."""
         observations = {}
         
-        if self.cfg.enable_delay_system:
-            # Compute triangulation covariance with DELAYED + NOISY states for observations
+        if self.cfg.enable_delay_system and self.delay_manager is not None:
+            # (WRONG IMPLEMENTATION) Compute triangulation covariance with DELAYED + NOISY states for observations
             self.X_w_est = midpoint_method_batched(
                 pts=torch.stack([self.states.camera_pos_delayed_noisy[:,i,:] for i, _ in enumerate(self.cfg.possible_agents)], dim=1),
                 dirs=self.states.ray_dir_delayed_noisy,
@@ -1907,15 +2153,93 @@ class IrisMAEnv(DirectMARLEnv):
                 camera_intrinsics=self.states.camera_intrinsics_delayed_noisy,
                 bbox_valid_mask=self.states.valid_mask_delayed_noisy,
             )
+
+            # (correct implementation) Compute using belief states from received data
+            agent_beliefs_delayed_noisy = {}
+            fallback = False
+            for i, agent_id in enumerate( self.cfg.possible_agents):
+                if self.cfg.enable_delay_system and agent_id in self.states.received_positions:
+                    # ego state beliefs
+                    camera_pos_delayed_noisy = self.states.camera_pos_delayed_noisy[:, i, :].unsqueeze(1).clone()  # [N, 1, 3]
+                    ray_dir_delayed_noisy = self.states.ray_dir_delayed_noisy[:, i, :, :].unsqueeze(1).clone()  # [N, 1, T, 3]
+                    robot_pos_delayed_noisy = self.states.delayed_robot_pos[:, i, :].unsqueeze(1).clone()  # [N, 1, 3]
+                    robot_quat_delayed_noisy = self.states.delayed_robot_quat[:, i, :].unsqueeze(1).clone()  # [N, 1, 4]
+                    gimbal_yaw_delayed_noisy = self.states.delayed_gimbal_yaw[:, i].unsqueeze(1).clone()  # [N, 1]
+                    gimbal_pitch_delayed_noisy = self.states.delayed_gimbal_pitch[:, i].unsqueeze(1).clone()  # [N, 1]
+                    camera_intrinsics_delayed_noisy = self.states.camera_intrinsics_delayed_noisy[:, i, :].unsqueeze(1).clone()  # [N, 1, 3, 3]
+                    valid_mask_delayed_noisy = self.states.valid_mask_delayed_noisy[:, i, :].unsqueeze(1).clone()  # [N, 1, T]
+                    # other agents' state beliefs
+                    other_agent_idxs = list(range(len(self.cfg.possible_agents)))
+                    other_agent_idxs.pop(i)
+                    other_camera_pos = self.states.received_camera_pos_noisy[agent_id][:, other_agent_idxs, :].clone()  # [N, C-1, 3]
+                    other_ray_dir = self.states.received_ray_dirs_noisy[agent_id][:, other_agent_idxs, :, :].clone()  # [N, C-1, T, 3]
+                    other_robot_pos_delayed_noisy = self.states.received_positions_noisy[agent_id][:, other_agent_idxs, :].clone()  # [N, C-1, 3]
+                    other_robot_quat_delayed_noisy = self.states.received_orientations_noisy[agent_id][:, other_agent_idxs, :].clone()  # [N, C-1, 4]
+                    other_gimbal_yaw_delayed_noisy = self.states.received_gimbal_yaw_noisy[agent_id][:, other_agent_idxs, :].clone()  # [N, C-1, 1]
+                    other_gimbal_pitch_delayed_noisy = self.states.received_gimbal_pitch_noisy[agent_id][:, other_agent_idxs, :].clone()  # [N, C-1, 1]
+                    other_camera_intrinsics_delayed_noisy = self.states.received_camera_intrinsics_noisy[agent_id][:, other_agent_idxs, :, :].clone()  # [N, C-1, 3, 3]
+                    other_valid_mask_delayed_noisy = self.states.received_bbox_valid_noisy[agent_id][:, other_agent_idxs, :].clone()  # [N, C-1, T]
+                    # Combine ego and other agents' beliefs
+                    combined_camera_pos = torch.cat([camera_pos_delayed_noisy, other_camera_pos], dim=1)  # [N, C, 3]
+                    combined_ray_dir = torch.cat([ray_dir_delayed_noisy, other_ray_dir], dim=1)  # [N, C, 3]
+                    agent_beliefs_delayed_noisy[agent_id] = {
+                        'camera_pos': combined_camera_pos,
+                        'ray_dir': combined_ray_dir,
+                        'robot_pos': torch.cat([robot_pos_delayed_noisy, other_robot_pos_delayed_noisy], dim=1),  # [N, C, 3]
+                        'robot_quat': torch.cat([robot_quat_delayed_noisy, other_robot_quat_delayed_noisy], dim=1),  # [N, C, 4]
+                        'gimbal_yaw': torch.cat([gimbal_yaw_delayed_noisy, other_gimbal_yaw_delayed_noisy.squeeze(-1)], dim=1),  # [N, C, 1]
+                        'gimbal_pitch': torch.cat([gimbal_pitch_delayed_noisy, other_gimbal_pitch_delayed_noisy.squeeze(-1)], dim=1),  # [N, C, 1]
+                        'camera_intrinsics': torch.cat([camera_intrinsics_delayed_noisy, other_camera_intrinsics_delayed_noisy], dim=1),  # [N, C, 3, 3]
+                        'valid_mask': torch.cat([valid_mask_delayed_noisy, other_valid_mask_delayed_noisy], dim=1),  # [N, C, T]
+                    }
+                    self.X_w_est_belief[:, i] = midpoint_method_batched(
+                        pts=agent_beliefs_delayed_noisy[agent_id]['camera_pos'],
+                        dirs=agent_beliefs_delayed_noisy[agent_id]['ray_dir'],
+                    )
+                    self.states.Sigma_X_delayed_noisy_belief[:, i], self.states.trace_cov_delayed_noisy_belief[:, i], is_tri_cov_valid_belief = self._compute_triangulation_covariance(
+                        X_w=self.X_w_est_belief[:, i],
+                        robot_positions=agent_beliefs_delayed_noisy[agent_id]['robot_pos'],
+                        robot_quats=agent_beliefs_delayed_noisy[agent_id]['robot_quat'],
+                        gimbal_yaws=agent_beliefs_delayed_noisy[agent_id]['gimbal_yaw'],
+                        gimbal_pitches=agent_beliefs_delayed_noisy[agent_id]['gimbal_pitch'],
+                        camera_intrinsics=agent_beliefs_delayed_noisy[agent_id]['camera_intrinsics'],
+                        bbox_valid_mask=agent_beliefs_delayed_noisy[agent_id]['valid_mask'],
+                    )
+                    trace_cov_per_agent_belief = self.states.trace_cov_delayed_belief[:, i, 0]
+                    triangulation_quality_belief = torch.where(
+                        is_tri_cov_valid_belief[:, 0],
+                        1.0 / torch.sqrt(trace_cov_per_agent_belief + 1e-12),
+                        torch.zeros(self.num_envs, device=self.device)
+                    )
+                    agent_beliefs_delayed_noisy[agent_id]['Sigma_X'] = self.states.Sigma_X_delayed_noisy_belief[:, i] # [N, 1, 3, 3]
+                    agent_beliefs_delayed_noisy[agent_id]['trace_cov'] = self.states.trace_cov_delayed_noisy_belief[:, i]
+                    agent_beliefs_delayed_noisy[agent_id]['triangulation_quality'] = triangulation_quality_belief
+                else:
+                    fallback = True
+                    break
+            if not fallback:
+                Sigma_X_obs = torch.stack(
+                    [agent_beliefs_delayed_noisy[agent_id]['Sigma_X'] for i, agent_id in enumerate(self.cfg.possible_agents)],
+                    dim=1
+                )  # (N, C, 3, 3)
+                Sigma_diag = torch.diagonal(Sigma_X_obs, dim1=-2, dim2=-1)  # (N, C, T, 3)
+                Sigma_diag_sqrt = torch.sqrt(torch.clamp(Sigma_diag, min=0.0) + 1e-12)  # (N, C, T, 3)
+            else:
+                # Fallback: use delayed+noisy covariance if received data is incomplete
+                Sigma_X_obs = self.states.Sigma_X_delayed_noisy
+                Sigma_diag = torch.diagonal(Sigma_X_obs, dim1=-2, dim2=-1)  # (N, T, 3)
+                Sigma_diag_sqrt = torch.sqrt(torch.clamp(Sigma_diag, min=0.0) + 1e-12)  # (N, T, 3)
+                Sigma_diag_sqrt = Sigma_diag_sqrt.unsqueeze(1).repeat(1, len(self.cfg.possible_agents), 1, 1)  # (N, C, T, 3)
         else:
-            # No delay system - use same as delayed
+            # Fallback: No delay system - use same as delayed
             self.states.Sigma_X_delayed_noisy = self.states.Sigma_X_delayed.clone()
             self.states.trace_cov_delayed_noisy = self.states.trace_cov_delayed.clone()
         
-        # Extract Sigma diagonal for observations (using delayed+noisy covariance)
-        Sigma_X_obs = self.states.Sigma_X_delayed_noisy
-        Sigma_diag = torch.diagonal(Sigma_X_obs, dim1=-2, dim2=-1)  # (N, T, 3)
-        Sigma_diag_sqrt = torch.sqrt(torch.clamp(Sigma_diag, min=0.0) + 1e-12)  # (N, T, 3)
+            # Extract Sigma diagonal for observations (using delayed+noisy covariance)
+            Sigma_X_obs = self.states.Sigma_X_delayed_noisy
+            Sigma_diag = torch.diagonal(Sigma_X_obs, dim1=-2, dim2=-1)  # (N, T, 3)
+            Sigma_diag_sqrt = torch.sqrt(torch.clamp(Sigma_diag, min=0.0) + 1e-12)  # (N, T, 3)
+            Sigma_diag_sqrt = Sigma_diag_sqrt.unsqueeze(1).repeat(1, len(self.cfg.possible_agents), 1, 1)  # (N, C, T, 3)
         
         # Update stacked arrays with delayed+noisy states for observations
         self.robot_positions_stacked = self.states.delayed_noisy_robot_pos
@@ -1950,54 +2274,56 @@ class IrisMAEnv(DirectMARLEnv):
             # Instead of using ground truth delayed+noisy states, use received states with comm latency
             if self.cfg.enable_delay_system and agent_id in self.states.received_positions:
                 # Use received states from other agents (already have comm latency applied)
-                other_positions = self.states.received_positions[agent_id]  # [N, C-1, 3]
-                other_velocities = self.states.received_linear_velocities[agent_id]  # [N, C-1, 3]
-                other_ray_dirs = self.states.received_ray_dirs[agent_id]  # [N, C-1, T, 3]
-                other_bbox_valid = self.states.received_bbox_valid[agent_id]  # [N, C-1, T]
-                other_bbox_age = self.states.received_time_since_detection[agent_id]  # [N, C-1, 1]
+                other_positions_obs = self.states.received_positions_noisy[agent_id][:, other_agent_idxs, :]  # [N, C-1, 3]
+                other_velocities_obs = self.states.received_linear_velocities_noisy[agent_id][:, other_agent_idxs, :]  # [N, C-1, 3]
+                other_ray_dirs_obs = self.states.received_ray_dirs_noisy[agent_id][:, other_agent_idxs, :, :]  # [N, C-1, T, 3]
+                other_bbox_valid_obs = self.states.received_bbox_valid_noisy[agent_id][:, other_agent_idxs, :]  # [N, C-1, T]
+                other_bbox_age_obs = self.states.received_time_since_detection[agent_id][:, other_agent_idxs, :]  # [N, C-1, 1]
                 
-                # For received states that are not valid yet, use defaults
-                # Default: position at [0,0,0], velocity at [0,0,0]
-                default_pos = torch.zeros_like(other_positions)
-                default_vel = torch.zeros_like(other_velocities)
-                default_ray_dir = torch.zeros_like(other_ray_dirs)
-                default_bbox_valid = torch.zeros_like(other_bbox_valid)
-                default_time_since_detection = torch.full_like(other_bbox_age, self.cfg.max_time_since_detection)
+                # # For received states that are not valid yet, use defaults
+                # # Default: position at [0,0,0], velocity at [0,0,0]
+                # default_pos = torch.zeros_like(other_positions)
+                # default_vel = torch.zeros_like(other_velocities)
+                # default_ray_dir = torch.zeros_like(other_ray_dirs)
+                # default_bbox_valid = torch.zeros_like(other_bbox_valid)
+                # default_time_since_detection = torch.full_like(other_bbox_age, self.cfg.max_time_since_detection)
                 
-                # Use received data where valid, otherwise use defaults
-                valid_mask = self.states.received_valid[agent_id]  # [N, C-1]
-                other_positions_obs = torch.where(
-                    valid_mask.unsqueeze(-1),
-                    other_positions,
-                    default_pos
-                )
-                other_velocities_obs = torch.where(
-                    valid_mask.unsqueeze(-1),
-                    other_velocities,
-                    default_vel
-                )
-                other_ray_dirs_obs = torch.where(
-                    valid_mask.unsqueeze(-1).unsqueeze(-1),
-                    other_ray_dirs,
-                    default_ray_dir
-                )
-                other_bbox_valid_obs = torch.where(
-                    valid_mask.unsqueeze(-1),
-                    other_bbox_valid.float(),
-                    default_bbox_valid.float()
-                )
-                other_bbox_age_obs = torch.where(
-                    valid_mask.unsqueeze(-1),
-                    other_bbox_age,
-                    default_time_since_detection
-                )
+                # # Use received data where valid, otherwise use defaults
+                # valid_mask = self.states.received_valid[agent_id][:, other_agent_idxs]  # [N, C-1]
+                # other_positions_obs = torch.where(
+                #     valid_mask.unsqueeze(-1),
+                #     other_positions,
+                #     default_pos
+                # )
+                # other_velocities_obs = torch.where(
+                #     valid_mask.unsqueeze(-1),
+                #     other_velocities,
+                #     default_vel
+                # )
+                # other_ray_dirs_obs = torch.where(
+                #     valid_mask.unsqueeze(-1),
+                #     other_ray_dirs,
+                #     default_ray_dir
+                # )
+                # other_bbox_valid_obs = torch.where(
+                #     valid_mask.unsqueeze(-1),
+                #     other_bbox_valid.float(),
+                #     default_bbox_valid.float()
+                # )
+                # other_bbox_age_obs = torch.where(
+                #     valid_mask.unsqueeze(-1),
+                #     other_bbox_age,
+                #     default_time_since_detection
+                # )
+                other_bbox_age_obs_norm = torch.clamp(other_bbox_age_obs / self.cfg.max_time_since_detection, max=1.0)
             else:
                 # Fallback: use delayed+noisy states from all agents (no comm system)
-                other_positions_obs = self.robot_positions_stacked[:, other_agent_idxs, :]
-                other_velocities_obs = self.robot_velocity_stacked[:, other_agent_idxs, :]
-                other_ray_dirs_obs = self.states.ray_dir_delayed_noisy[:, other_agent_idxs, :, :]
-                other_bbox_valid_obs = self.states.valid_mask_delayed_noisy[:, other_agent_idxs, :]
-                other_bbox_age_obs = self.states.time_since_detection_delayed_noisy[:, other_agent_idxs, :]
+                other_positions_obs = self.robot_positions_stacked[:, other_agent_idxs, :].clone()
+                other_velocities_obs = self.robot_velocity_stacked[:, other_agent_idxs, :].clone()
+                other_ray_dirs_obs = self.states.ray_dir_delayed_noisy[:, other_agent_idxs, :, :].clone()
+                other_bbox_valid_obs = self.states.valid_mask_delayed_noisy[:, other_agent_idxs, :].clone()
+                other_bbox_age_obs = self.states.time_since_detection_delayed_noisy[:, other_agent_idxs, :].clone()
+                other_bbox_age_obs_norm = torch.clamp(other_bbox_age_obs / self.cfg.max_time_since_detection, max=1.0)
             
             obs = torch.cat([
                 self.robot_positions_stacked[:, i, :],  # 3: pos
@@ -2009,14 +2335,14 @@ class IrisMAEnv(DirectMARLEnv):
                 self.gimbal_yaws_stacked[:, i].unsqueeze(-1),  # 1
                 bbox_norm,  # 4: normalized bbox
                 bbox_valid.float().unsqueeze(-1),  # 1: validity
-                # time_since_norm,  # 1: time since detection (normalized)
+                time_since_norm,  # 1: time since detection (normalized)
                 self.zoom_level[agent_id].unsqueeze(-1),  # 1: zoom level
                 other_ray_dirs_obs[:, :, 0, :].flatten(start_dim=1),  # 3*(C-1): ray dirs from other agents
                 other_bbox_valid_obs[:, :, 0].flatten(start_dim=1),  # 1*(C-1): validity from other agents
-                # other_bbox_age_obs.flatten(start_dim=1),  # 1*(C-1): time since detection from other agents
+                other_bbox_age_obs_norm.flatten(start_dim=1),  # 1*(C-1): time since detection from other agents
                 other_positions_obs.flatten(start_dim=1),  # 3*(C-1): positions of other agents
                 other_velocities_obs.flatten(start_dim=1),  # 3*(C-1): velocities of other agents
-                Sigma_diag_sqrt[:, 0, :],  # 3: X, Y, Z std deviations
+                Sigma_diag_sqrt[:, i, 0, :],  # 3: X, Y, Z std deviations
             ], dim=-1)
             
             # Check for NaN values
@@ -2028,12 +2354,12 @@ class IrisMAEnv(DirectMARLEnv):
         
         return observations
 
-    def _get_states(self) -> torch.Tensor:
-        """Get global state by concatenating all agent observations."""
-        obs_list = []
-        for agent_id in self.cfg.possible_agents:
-            obs_list.append(self.obs_dict[agent_id])
-        return torch.cat(obs_list, dim=-1)
+    # def _get_states(self) -> torch.Tensor:
+    #     """Get global state by concatenating all agent observations."""
+    #     obs_list = []
+    #     for agent_id in self.cfg.possible_agents:
+    #         obs_list.append(self.obs_dict[agent_id])
+    #     return torch.cat(obs_list, dim=-1)
 
     def _get_dones(self) -> tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         """Get termination and timeout flags for all agents."""
@@ -2138,7 +2464,7 @@ class IrisMAEnv(DirectMARLEnv):
             default_root_state[:, 3:7] = quat_from_euler_xyz(
                 torch.zeros(len(env_ids), device=self.device),
                 torch.zeros(len(env_ids), device=self.device),
-                torch.zeros(len(env_ids), device=self.device).uniform_(-math.pi, math.pi)
+                torch.zeros(len(env_ids), device=self.device).uniform_(-math.pi/12, math.pi/12)
             )
 
             joint_pos = robot.data.default_joint_pos[env_ids]
@@ -2146,7 +2472,7 @@ class IrisMAEnv(DirectMARLEnv):
             gimbal_yaw, gimbal_pitch = self.point_to_region(
                 default_root_state[:, :3],
                 default_root_state[:, 3:7],
-                target_pos + torch.zeros_like(target_pos).uniform_(-5.0 * self.progress_tracking, 5.0 * self.progress_tracking)
+                target_pos + torch.zeros_like(target_pos).uniform_(-1.0 - 5.0 * self.progress_tracking, 1.0 + 5.0 * self.progress_tracking)
             )
             gimbal_yaw = self._stabilizers[agent_id].wrap_to_pi(gimbal_yaw)
             gimbal_pitch = self._stabilizers[agent_id].wrap_to_pi(gimbal_pitch)
@@ -2725,17 +3051,31 @@ class IrisMAEnv(DirectMARLEnv):
                 )
             
             # Use delayed covariance for visualization
-            Sigma_X_vis = self.states.Sigma_X_delayed_noisy
-            Sigma_diag = torch.diagonal(Sigma_X_vis, dim1=-2, dim2=-1)
-            Sigma_diag_sqrt = torch.sqrt(torch.clamp(Sigma_diag, min=0.0) + 1e-12)
-            if Sigma_diag_sqrt.ndim == 3 and Sigma_diag_sqrt.shape[1] >= 1:
-                scales = Sigma_diag_sqrt[:, 0, :]
+            if self.cfg.enable_delay_system:
+                for i, agent_id in enumerate(self.cfg.possible_agents):
+                    Sigma_X_vis = self.states.Sigma_X_delayed_noisy_belief[:, i, :, :]
+                    Sigma_diag = torch.diagonal(Sigma_X_vis, dim1=-2, dim2=-1)
+                    Sigma_diag_sqrt = torch.sqrt(torch.clamp(Sigma_diag, min=0.0) + 1e-12)
+                    if Sigma_diag_sqrt.ndim == 3 and Sigma_diag_sqrt.shape[1] >= 1:
+                        scales = Sigma_diag_sqrt[:, 0, :]
+                    else:
+                        scales = Sigma_diag_sqrt.squeeze(1)
+                    self.tri_cov_visualizer_delayed[agent_id].visualize(
+                        translations=self.X_w_est_belief[:, i].squeeze(1),
+                        scales=scales * 2.5
+                    )
             else:
-                scales = Sigma_diag_sqrt.squeeze(1)
+                Sigma_X_vis = self.states.Sigma_X_delayed_noisy
+                Sigma_diag = torch.diagonal(Sigma_X_vis, dim1=-2, dim2=-1)
+                Sigma_diag_sqrt = torch.sqrt(torch.clamp(Sigma_diag, min=0.0) + 1e-12)
+                if Sigma_diag_sqrt.ndim == 3 and Sigma_diag_sqrt.shape[1] >= 1:
+                    scales = Sigma_diag_sqrt[:, 0, :]
+                else:
+                    scales = Sigma_diag_sqrt.squeeze(1)
 
-            self.tri_cov_visualizer.visualize(
-                translations=self.X_w_est.squeeze(1),
-                scales=scales * 2.5,
-            )
-            
+                self.tri_cov_visualizer.visualize(
+                    translations=self.X_w_est.squeeze(1),
+                    scales=scales * 2.5,
+                )
+
             self.bbox_raycaster.visualize()

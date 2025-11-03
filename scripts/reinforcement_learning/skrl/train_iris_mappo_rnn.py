@@ -16,7 +16,7 @@ from skrl.envs.loaders.torch import load_isaaclab_env
 from skrl.envs.wrappers.torch import wrap_env
 from skrl.memories.torch import RandomMemory
 from skrl.resources.preprocessors.torch import RunningStandardScaler
-from skrl.resources.schedulers.torch import KLAdaptiveRL
+from skrl.resources.schedulers.torch import KLAdaptiveLR
 from skrl.trainers.torch import SequentialTrainer
 from skrl.utils import set_seed
 import yaml
@@ -35,7 +35,7 @@ set_seed(42)
 # Load and wrap the Isaac Lab multi-agent environment
 task_name = args_cli.task
 experiment_name = args_cli.experiment_name
-env = load_isaaclab_env(task_name=task_name, num_envs=1024, headless=True)
+env = load_isaaclab_env(task_name=task_name, num_envs=400, headless=True)
 env = wrap_env(env)
 device = env.device
 
@@ -66,14 +66,16 @@ except Exception as e:
 
 # Configure MAPPO_RNN
 cfg = MAPPO_RNN_DEFAULT_CONFIG.copy()
-cfg["rollouts"] = 256
-cfg["learning_epochs"] = 4
-cfg["mini_batches"] = 4  # Lower the better sequence sampling
+dt=0.02
+decimation=1
+cfg["rollouts"] = 800
+cfg["learning_epochs"] = 6
+cfg["mini_batches"] = 2  # Lower the better sequence sampling
 cfg["discount_factor"] = 0.99
 cfg["lambda"] = 0.95
-cfg["learning_rate"] = 5e-5  # Lower the better RNN stability
-cfg["learning_rate_scheduler"] = KLAdaptiveRL
-cfg["learning_rate_scheduler_kwargs"] = {"kl_threshold": 0.008}  # High the better stability
+cfg["learning_rate"] = 1e-3  # Lower the better RNN stability
+cfg["learning_rate_scheduler"] = KLAdaptiveLR
+cfg["learning_rate_scheduler_kwargs"] = {"kl_threshold": 0.02}  # Higher the better exploration
 cfg["random_timesteps"] = 0
 cfg["learning_starts"] = 0
 cfg["grad_norm_clip"] = 0.5  # Lower the more conservative clipping
@@ -86,10 +88,18 @@ cfg["kl_threshold"] = 0.02  # Enabled to prevent policy collapse
 cfg["rewards_shaper"] = None
 cfg["time_limit_bootstrap"] = True
 
-# RNN Burn-in configuration
-# This warms up the RNN hidden state before computing losses
-# MUST be less than sequence_length used during training
-cfg["burn_in_steps"] = 32  # Set to 0 to disable burn-in, Use 16 steps for burn-in, etc. (12.5% of sequence_length=128)
+# RNN configuration
+sequence_length = 50  # RNN sequence length for training
+cfg["sequence_length"] = sequence_length
+cfg["burn_in_steps"] = 10  # Set to 0 to disable burn-in, Use 16 steps for burn-in, etc. (12.5% of sequence_length)
+# Note: burn_in_steps MUST be less than sequence_length
+
+# Validate burn_in_steps
+if cfg["burn_in_steps"] >= sequence_length:
+    raise ValueError(f"burn_in_steps ({cfg['burn_in_steps']}) must be less than sequence_length ({sequence_length})")
+if cfg["burn_in_steps"] > 0:
+    print(f"RNN burn-in enabled: {cfg['burn_in_steps']} steps (out of {sequence_length} sequence length)")
+
 cfg["state_preprocessor"] = RunningStandardScaler
 cfg["state_preprocessor_kwargs"] = {"size": env.observation_spaces[possible_agents[0]], "device": device}
 cfg["shared_state_preprocessor"] = RunningStandardScaler
@@ -125,7 +135,8 @@ if not obs_spaces_match or not action_spaces_match:
             hidden_size=256,
             gru_num_layers=2,
             gru_hidden_size=256,
-            num_envs=env.num_envs
+            num_envs=env.num_envs,
+            sequence_length=sequence_length
         )
         
         if agent_id != possible_agents[0]:
@@ -138,7 +149,8 @@ if not obs_spaces_match or not action_spaces_match:
                 hidden_size=256,
                 gru_num_layers=2,
                 gru_hidden_size=256,
-                num_envs=env.num_envs
+                num_envs=env.num_envs,
+                sequence_length=sequence_length
             )
 
         memory_cfg = {
@@ -160,7 +172,8 @@ else:
         num_envs=env.num_envs,
         initial_log_std=-0.5,   # σ ≈ 0.6, more conservative than σ=1
         min_log_std=-5.0,       # σ_min ≈ 0.007, prevents collapse
-        max_log_std=0.7         # σ_max ≈ 2.0, caps exploration
+        max_log_std=0.7,        # σ_max ≈ 2.0, caps exploration
+        sequence_length=sequence_length  # Use configurable sequence length
     )
 
     # Create the shared value network once
@@ -171,7 +184,8 @@ else:
         hidden_size=256,
         gru_num_layers=2,
         gru_hidden_size=256,
-        num_envs=env.num_envs
+        num_envs=env.num_envs,
+        sequence_length=sequence_length  # Use configurable sequence length
     )
 
     # Assign the same networks to all agents
@@ -251,19 +265,19 @@ for agent_id in possible_agents:
     print(f"Agent {agent_id} saved to: {agent_path}")
 
 # Save training configuration
-config_path = os.path.join(experiment_dir, "training_config.yaml")
+config_path = os.path.join(experiment_dir, "training_config.pt")
 config_to_save = {
     "agent_config": cfg,
     "trainer_config": cfg_trainer,
     "task_name": task_name,
     "num_agents": num_agents,
     "possible_agents": possible_agents,
+    "sequence_length": sequence_length,
     "timestamp": timestamp,
     "device": str(device)
 }
 
-with open(config_path, 'w') as f:
-    yaml.dump(config_to_save, f, default_flow_style=False, indent=2)
+torch.save(config_to_save, config_path)
 print(f"Training configuration saved to: {config_path}")
 
 print(f"Decentralized MAPPO training completed!")

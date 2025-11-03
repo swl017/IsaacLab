@@ -707,20 +707,23 @@ class MAPPORNNBaseModel(Model):
             h = torch.zeros(self.gru_num_layers, B, self.gru_hidden_size, 
                            device=x.device, dtype=x.dtype)
         
+        need_reset = dones is not None and dones.any()
+        if need_reset:
+            h = h.clone()  # Clone ONCE for the entire sequence
+        
         # Process sequence step-by-step to handle episode boundaries
         outputs = []
         for t in range(S):
             # Zero hidden state for terminated episodes at this timestep
-            if dones is not None and dones.any():
+            if need_reset:
                 done_mask = dones[:, t]  # (B,) boolean tensor
                 if done_mask.any():
                     # Convert boolean mask to indices
                     done_indices = done_mask.nonzero(as_tuple=False).squeeze(-1)  # (num_done,)
                     # Zero out hidden state for finished environments
                     # Clone to avoid in-place modification issues with autograd
-                    h = h.clone()
                     h[:, done_indices, :] = 0.0
-            # CRITICAL: Ensure h is contiguous after indexing
+            # Ensure h is contiguous after indexing
             h = h.contiguous()
             
             # Forward pass for this timestep
