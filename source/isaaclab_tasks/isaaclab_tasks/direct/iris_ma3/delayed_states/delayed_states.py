@@ -348,6 +348,8 @@ class AgentStatesData:
     body_linear_velocity_b: torch.Tensor
     body_angular_velocity_w: torch.Tensor
     body_angular_velocity_b: torch.Tensor
+    body_combined_angular_velocity_w: torch.Tensor  # Combined angular velocity (body + gimbal)
+    body_combined_angular_velocity_b: torch.Tensor  # Combined angular velocity in body frame
     body_linear_acceleration_w: torch.Tensor
     body_linear_acceleration_b: torch.Tensor
     body_angular_acceleration_b: torch.Tensor
@@ -381,6 +383,8 @@ class AgentStates:
         body_linear_velocity_b (torch.Tensor): Body linear velocity in body frame.
         body_angular_velocity_w (torch.Tensor): Body angular velocity in world frame.
         body_angular_velocity_b (torch.Tensor): Body angular velocity in body frame.
+        body_combined_angular_velocity_w (torch.Tensor): Combined angular velocity (body + gimbal) in world frame.
+        body_combined_angular_velocity_b (torch.Tensor): Combined angular velocity (body + gimbal) in body frame.
         body_linear_acceleration_w (torch.Tensor): Body linear acceleration in world frame.
         body_linear_acceleration_b (torch.Tensor): Body linear acceleration in body frame.
         body_angular_acceleration_b (torch.Tensor): Body angular acceleration in body frame.
@@ -394,7 +398,10 @@ class AgentStates:
         N = num_envs
         J = num_joints # convention: 0 roll, 1 pitch, 2 yaw
         T = num_targets
-        
+
+        # Initialize data container
+        self.data = AgentStatesData()
+
         self.data.num_envs = num_envs
         self.data.num_joints = num_joints
         self.data.num_targets = num_targets
@@ -405,6 +412,8 @@ class AgentStates:
         self.data.body_linear_velocity_b = torch.zeros((N, 3), device=device)
         self.data.body_angular_velocity_w = torch.zeros((N, 3), device=device)
         self.data.body_angular_velocity_b = torch.zeros((N, 3), device=device)
+        self.data.body_combined_angular_velocity_w = torch.zeros((N, 3), device=device)
+        self.data.body_combined_angular_velocity_b = torch.zeros((N, 3), device=device)
         self.data.body_linear_acceleration_w = torch.zeros((N, 3), device=device)
         self.data.body_linear_acceleration_b = torch.zeros((N, 3), device=device)
         self.data.body_angular_acceleration_b = torch.zeros((N, 3), device=device)
@@ -422,8 +431,8 @@ class AgentStates:
         self.data.camera_intrinsics = torch.zeros((N, 3, 3), device=device)
         self.data.camera_position_w = torch.zeros((N, 3), device=device)
         self.data.camera_orientation_w = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).repeat(N, 1)
-        self.data.camera_ray_directions_w = torch.zeros((N, T, 3, 0, 0), device=device)
-        self.data.camera_ray_origins_w = torch.zeros((N, 3, 0, 0), device=device)
+        self.data.camera_ray_directions_w = torch.zeros((N, T, 3), device=device)
+        self.data.camera_ray_origins_w = torch.zeros((N, T, 3), device=device)
         self.data.camera_zoom_level = torch.ones((N,), device=device)
         self.data.bboxes_2d = torch.zeros((N, T, 4), device=device)
         self.data.bboxes_2d_valid_mask = torch.zeros((N, T), device=device, dtype=torch.bool)
@@ -457,8 +466,25 @@ class AgentStates:
             self.data.camera_vertical_aperture = self.data.camera_horizontal_aperture * (self.data.camera_height / self.data.camera_width)
         else:
             self.data.camera_vertical_aperture = vertical_aperture if isinstance(vertical_aperture, torch.Tensor) else torch.full((self.data.num_envs,), vertical_aperture, device=self.data.device)
-        self.data.camera_offset_position_b = offset_position_b if isinstance(offset_position_b, torch.Tensor) else torch.full((self.data.num_envs,), offset_position_b, device=self.data.device)
-        self.data.camera_offset_rotation_b = offset_rotation_b if isinstance(offset_rotation_b, torch.Tensor) else torch.full((self.data.num_envs,), offset_rotation_b, device=self.data.device)
+        # Handle offset position (shape: [N, 3] or [3])
+        if isinstance(offset_position_b, torch.Tensor):
+            if offset_position_b.ndim == 2 and offset_position_b.shape[0] == self.data.num_envs:
+                self.data.camera_offset_position_b = offset_position_b.clone()
+            else:
+                # Single position - broadcast to all envs
+                self.data.camera_offset_position_b = offset_position_b.reshape(1, -1).repeat(self.data.num_envs, 1)
+        else:
+            self.data.camera_offset_position_b = torch.tensor([offset_position_b] * 3, device=self.data.device).unsqueeze(0).repeat(self.data.num_envs, 1)
+
+        # Handle offset rotation (shape: [N, 4] or [4])
+        if isinstance(offset_rotation_b, torch.Tensor):
+            if offset_rotation_b.ndim == 2 and offset_rotation_b.shape[0] == self.data.num_envs:
+                self.data.camera_offset_rotation_b = offset_rotation_b.clone()
+            else:
+                # Single quaternion - broadcast to all envs
+                self.data.camera_offset_rotation_b = offset_rotation_b.reshape(1, -1).repeat(self.data.num_envs, 1)
+        else:
+            self.data.camera_offset_rotation_b = torch.tensor([offset_rotation_b] * 4, device=self.data.device).unsqueeze(0).repeat(self.data.num_envs, 1)
 
     def update_intrinsic_matrix(self, zoom_level: torch.Tensor, env_idxs: Optional[torch.Tensor] = None):
         """Updates the camera intrinsic matrix based on focal length and image size."""
@@ -515,8 +541,10 @@ class AgentStates:
         """
         if env_idxs is None:
             env_idxs = torch.arange(self.data.num_envs, device=self.data.device)
+        # Expand mask to match bbox shape [N, T, 4]
+        valid_mask_expanded = valid_mask[env_idxs].unsqueeze(-1)  # [N, T] -> [N, T, 1]
         self.data.bboxes_2d[env_idxs] = torch.where(
-            valid_mask[env_idxs], bboxes_2d[env_idxs], torch.ones_like(bboxes_2d[env_idxs]) * (-1.0)
+            valid_mask_expanded, bboxes_2d[env_idxs], torch.ones_like(bboxes_2d[env_idxs]) * (-1.0)
         )
         self.data.bboxes_2d_valid_mask[env_idxs] = valid_mask[env_idxs]
 
@@ -615,6 +643,8 @@ class AgentStates:
         self.data.body_linear_velocity_b.zero_()
         self.data.body_angular_velocity_w.zero_()
         self.data.body_angular_velocity_b.zero_()
+        self.data.body_combined_angular_velocity_w.zero_()
+        self.data.body_combined_angular_velocity_b.zero_()
         self.data.body_linear_acceleration_w.zero_()
         self.data.body_linear_acceleration_b.zero_()
         self.data.body_angular_acceleration_b.zero_()
@@ -665,9 +695,9 @@ class MultiAgentStates:
     """Defines the states for multiple agents.
     """
 
-    def __init__(self, possible_agnets: list[AgentID], num_envs: int, num_joints_per_agent: dict[AgentID, int], num_targets_per_agent: dict[AgentID, int], device: torch.device):
+    def __init__(self, possible_agents: list[AgentID], num_envs: int, num_joints_per_agent: dict[AgentID, int], num_targets_per_agent: dict[AgentID, int], device: torch.device):
         self.agents: Dict[AgentID, AgentStates] = {}
-        for agent_id in possible_agnets:
+        for agent_id in possible_agents:
             self.agents[agent_id] = AgentStates(
                 num_envs=num_envs,
                 num_joints=num_joints_per_agent[agent_id],
@@ -1761,3 +1791,755 @@ class MultiAgentObservationPipeline:
         # Reset time
         self.current_time[env_ids] = 0.0
 
+
+class MultiAgentStateManager:
+    """Extended multi-agent observation pipeline with integrated state storage.
+
+    This class extends MultiAgentObservationPipeline to internally manage:
+    - Ground truth (GT) states: Direct simulation states
+    - Delayed states: GT + motion lag + detection latency (no noise) → for rewards
+    - Delayed+noisy states: Delayed + sensor noise → for observations
+    - Received states: States from other agents via communication channel
+
+    The goal is to simplify the main environment module by centralizing all state
+    processing logic inside this pipeline.
+    """
+
+    def __init__(
+        self,
+        possible_agents: list[str],
+        num_envs: int,
+        num_joints_per_agent: Dict[str, int],
+        num_targets_per_agent: Dict[str, int],
+        dt: float,
+        device: torch.device,
+        # Motion filter parameters
+        motion_time_constant: float = 0.1,
+        gimbal_time_constant: float = 0.03,
+        # Detection parameters
+        detection_fps: float = 30.0,
+        detection_mean_latency: float = 0.05,
+        detection_std_latency: float = 0.02,
+        detection_failure_rate: float = 0.0,
+        # Communication parameters
+        comm_mean_delay: float = 0.1,
+        comm_std_delay: float = 0.03,
+        comm_throttle_period: float = 0.0,
+        comm_dropout_rate: float = 0.05,
+        # Noise parameters
+        enable_noise: bool = True,
+        position_noise_std: float = 0.01,
+        orientation_noise_std: float = 0.01,
+        linear_velocity_noise_std: Optional[float] = None,
+        angular_velocity_noise_std: Optional[float] = None,
+        linear_acceleration_noise_std: float = 100e-6,
+        gimbal_noise_std: float = 0.01,
+        zoom_noise_std: float = 0.01,
+        bbox_noise_std: float = 1.0,
+        noise_seed: Optional[int] = 0,
+        max_buffer_size: int = 100
+    ):
+        """Initialize multi-agent state manager.
+
+        Args:
+            possible_agents: List of agent IDs (e.g., ["drone_0", "drone_1"]).
+            num_envs: Number of parallel environments.
+            num_joints_per_agent: Dict mapping agent_id -> number of joints.
+            num_targets_per_agent: Dict mapping agent_id -> number of targets.
+            dt: Simulation timestep in seconds.
+            device: Device to allocate tensors on.
+            motion_time_constant: Time constant for motion filters in seconds.
+            gimbal_time_constant: Time constant for gimbal filters in seconds.
+            detection_fps: Detection update frequency in Hz.
+            detection_mean_latency: Mean detection processing delay in seconds.
+            detection_std_latency: Std deviation of detection delay in seconds.
+            detection_failure_rate: Detection dropout rate (0.0 to 1.0).
+            comm_mean_delay: Mean communication delay in seconds.
+            comm_std_delay: Std deviation of communication delay in seconds.
+            comm_throttle_period: Communication bandwidth limit in seconds (0 = no limit).
+            comm_dropout_rate: Communication packet loss rate (0.0 to 1.0).
+            enable_noise: Whether to add noise to delayed states for observations.
+            position_noise_std: Position noise standard deviation in meters.
+            orientation_noise_std: Orientation noise standard deviation in radians.
+            linear_velocity_noise_std: Linear velocity noise std in m/s.
+            angular_velocity_noise_std: Angular velocity noise std in rad/s.
+            linear_acceleration_noise_std: Linear acceleration noise std in m/s^2.
+            gimbal_noise_std: Gimbal angle noise std in radians.
+            zoom_noise_std: Zoom level noise std (relative).
+            bbox_noise_std: Bbox noise std in pixels.
+            noise_seed: Random seed for noise generator. If None, uses random seed.
+            max_buffer_size: Maximum buffer size for latency buffers.
+        """
+        self.possible_agents = possible_agents
+        self.num_envs = num_envs
+        self.num_agents = len(possible_agents)
+        self.dt = dt
+        self.device = device
+        self.enable_noise = enable_noise
+
+        # Noise parameters
+        self.position_noise_std = position_noise_std
+        self.orientation_noise_std = orientation_noise_std
+        # Compute linear and angular velocity noise from formulas if not provided (matching iris_ma_env3.py)
+        self.linear_velocity_noise_std = linear_velocity_noise_std if linear_velocity_noise_std is not None else 0.1 * position_noise_std
+        self.angular_velocity_noise_std = angular_velocity_noise_std if angular_velocity_noise_std is not None else orientation_noise_std * position_noise_std
+        self.linear_acceleration_noise_std = linear_acceleration_noise_std
+        self.gimbal_noise_std = gimbal_noise_std
+        self.zoom_noise_std = zoom_noise_std
+        self.bbox_noise_std = bbox_noise_std
+
+        # Noise generator (seeded for reproducibility)
+        if noise_seed is not None:
+            self.noise_generator = torch.Generator(device=device).manual_seed(noise_seed)
+        else:
+            self.noise_generator = torch.Generator(device=device)
+
+        # Pre-allocated noise tensors (reused each step for efficiency)
+        self.sampled_noise_pos = torch.zeros(num_envs, self.num_agents, 3, device=device)
+        self.sampled_noise_ori = torch.zeros(num_envs, self.num_agents, 3, device=device)
+        self.sampled_noise_lin_vel = torch.zeros(num_envs, self.num_agents, 3, device=device)
+        self.sampled_noise_ang_vel = torch.zeros(num_envs, self.num_agents, 3, device=device)
+        self.sampled_noise_lin_acc = torch.zeros(num_envs, self.num_agents, 3, device=device)
+        self.sampled_noise_gimbal = torch.zeros(num_envs, self.num_agents, 3, device=device)
+        self.sampled_noise_zoom = torch.zeros(num_envs, self.num_agents, device=device)
+
+        # Pre-allocated bbox noise tensors (will be resized as needed)
+        # Start with reasonable max size assumption
+        max_targets = max(num_targets_per_agent.values()) if num_targets_per_agent else 1
+        self.sampled_noise_bbox = torch.zeros(num_envs, self.num_agents, max_targets, 4, device=device)
+
+        # Curriculum/progress scaling for noise (default to 1.0 = full noise)
+        self.noise_progress_scale = 1.0
+
+        # Create agent ID to index mapping
+        self.agent_id_to_idx = {agent_id: idx for idx, agent_id in enumerate(possible_agents)}
+
+        # Initialize the base observation pipeline
+        self.obs_pipeline = MultiAgentObservationPipeline(
+            num_envs=num_envs,
+            num_agents=self.num_agents,
+            dt=dt,
+            device=device,
+            motion_time_constant=motion_time_constant,
+            gimbal_time_constant=gimbal_time_constant,
+            detection_fps=detection_fps,
+            detection_mean_latency=detection_mean_latency,
+            detection_std_latency=detection_std_latency,
+            detection_failure_rate=detection_failure_rate,
+            comm_mean_delay=comm_mean_delay,
+            comm_std_delay=comm_std_delay,
+            comm_throttle_period=comm_throttle_period,
+            comm_dropout_rate=comm_dropout_rate,
+            max_buffer_size=max_buffer_size
+        )
+
+        # ===== STATE STORAGE =====
+        # Ground truth states (direct from simulation)
+        self.gt_states = MultiAgentStates(
+            possible_agents=possible_agents,
+            num_envs=num_envs,
+            num_joints_per_agent=num_joints_per_agent,
+            num_targets_per_agent=num_targets_per_agent,
+            device=device
+        )
+
+        # Delayed states (lag + latency, no noise) - for rewards
+        self.delayed_states = MultiAgentStates(
+            possible_agents=possible_agents,
+            num_envs=num_envs,
+            num_joints_per_agent=num_joints_per_agent,
+            num_targets_per_agent=num_targets_per_agent,
+            device=device
+        )
+
+        # Delayed + noisy states (lag + latency + noise) - for observations
+        self.delayed_noisy_states = MultiAgentStates(
+            possible_agents=possible_agents,
+            num_envs=num_envs,
+            num_joints_per_agent=num_joints_per_agent,
+            num_targets_per_agent=num_targets_per_agent,
+            device=device
+        )
+
+        # Received states storage (from communication channel)
+        # Dict[receiver_agent_id][sender_agent_id] -> AgentStates
+        self.received_states = {
+            receiver_id: {} for receiver_id in possible_agents
+        }
+
+    def set_camera_configs(self, agent_id: str, **kwargs):
+        """Set camera configuration for an agent.
+
+        Args:
+            agent_id: Agent ID.
+            **kwargs: Camera configuration parameters (width, height, focal_length, etc.)
+        """
+        self.gt_states.agents[agent_id].set_camera_configs(**kwargs)
+        self.delayed_states.agents[agent_id].set_camera_configs(**kwargs)
+        self.delayed_noisy_states.agents[agent_id].set_camera_configs(**kwargs)
+
+    def update_time(self, time_increment: Optional[float] = None):
+        """Update simulation time.
+
+        Args:
+            time_increment: Time increment in seconds. If None, uses dt.
+        """
+        self.obs_pipeline.update_time(time_increment)
+
+    def update_gt_states(
+        self,
+        agent_id: str,
+        body_position_w: torch.Tensor,
+        body_orientation_w: torch.Tensor,
+        body_linear_velocity_w: torch.Tensor,
+        body_angular_velocity_w: torch.Tensor,
+        body_combined_angular_velocity_w: Optional[torch.Tensor] = None,
+        body_linear_acceleration_w: Optional[torch.Tensor] = None,
+        joint_positions_b: Optional[torch.Tensor] = None,
+        joint_velocities_b: Optional[torch.Tensor] = None,
+        zoom_level: Optional[torch.Tensor] = None,
+        env_idxs: Optional[torch.Tensor] = None
+    ):
+        """Update ground truth states for an agent.
+
+        This method stores GT states and triggers delayed state processing through
+        the observation pipeline (motion filters, detection latency, etc.).
+
+        Args:
+            agent_id: Agent ID.
+            body_position_w: Body position in world frame [N, 3].
+            body_orientation_w: Body orientation quaternion in world frame [N, 4].
+            body_linear_velocity_w: Linear velocity in world frame [N, 3].
+            body_angular_velocity_w: Angular velocity in world frame [N, 3].
+            body_combined_angular_velocity_w: Combined angular velocity (body + gimbal) in world frame [N, 3].
+                This represents the angular velocity of the gimbal pitch link (or other specified body link)
+                which incorporates both the robot body rotation and gimbal joint rotations.
+            body_linear_acceleration_w: Linear acceleration in world frame [N, 3].
+            joint_positions_b: Joint positions (gimbal angles) [N, J].
+            joint_velocities_b: Joint velocities [N, J].
+            zoom_level: Camera zoom level [N].
+            env_idxs: Environment indices to update. If None, updates all.
+        """
+        if env_idxs is None:
+            env_idxs = torch.arange(self.num_envs, device=self.device)
+
+        agent_state = self.gt_states.agents[agent_id]
+
+        # Store GT states
+        agent_state.data.body_position_w[env_idxs] = body_position_w[env_idxs]
+        agent_state.data.body_orientation_w[env_idxs] = body_orientation_w[env_idxs]
+        agent_state.data.body_linear_velocity_w[env_idxs] = body_linear_velocity_w[env_idxs]
+        agent_state.data.body_angular_velocity_w[env_idxs] = body_angular_velocity_w[env_idxs]
+
+        if body_combined_angular_velocity_w is not None:
+            agent_state.data.body_combined_angular_velocity_w[env_idxs] = body_combined_angular_velocity_w[env_idxs]
+            # Also compute body frame version
+            agent_state.data.body_combined_angular_velocity_b[env_idxs] = math_utils.quat_rotate_inverse(
+                body_orientation_w[env_idxs], body_combined_angular_velocity_w[env_idxs]
+            )
+
+        if body_linear_acceleration_w is not None:
+            agent_state.data.body_linear_acceleration_w[env_idxs] = body_linear_acceleration_w[env_idxs]
+
+        if joint_positions_b is not None:
+            agent_state.data.joint_positions_b[env_idxs] = joint_positions_b[env_idxs]
+
+        if joint_velocities_b is not None:
+            agent_state.data.joint_velocities_b[env_idxs] = joint_velocities_b[env_idxs]
+
+        if zoom_level is not None:
+            agent_state.data.camera_zoom_level[env_idxs] = zoom_level[env_idxs]
+
+        # Update camera pose from body + gimbal
+        agent_state.update_camera_pose(
+            body_pos=agent_state.data.body_position_w,
+            body_quat=agent_state.data.body_orientation_w,
+            joint_pos=agent_state.data.joint_positions_b,
+            env_idxs=env_idxs
+        )
+
+        # Update camera intrinsics from zoom
+        agent_state.update_intrinsic_matrix(
+            zoom_level=agent_state.data.camera_zoom_level,
+            env_idxs=env_idxs
+        )
+
+        # ===== PROCESS DELAYED STATES (NO NOISE) =====
+        agent_idx = self.agent_id_to_idx[agent_id]
+
+        # Apply motion filters (lag only, no noise)
+        filtered_pos, filtered_quat, filtered_lin_vel, filtered_ang_vel = \
+            self.obs_pipeline.update_ego_motion(
+                agent_id=agent_idx,
+                true_position=body_position_w,
+                true_orientation=body_orientation_w,
+                true_linear_velocity=body_linear_velocity_w,
+                true_angular_velocity=body_angular_velocity_w
+            )
+
+        # Apply gimbal filters
+        if joint_positions_b is not None:
+            gimbal_yaw = joint_positions_b[:, 2:3] if joint_positions_b.shape[1] > 2 else joint_positions_b[:, 0:1]
+            gimbal_pitch = joint_positions_b[:, 1:2] if joint_positions_b.shape[1] > 1 else torch.zeros_like(gimbal_yaw)
+
+            filtered_gimbal_yaw, filtered_gimbal_pitch = self.obs_pipeline.update_ego_gimbal(
+                agent_id=agent_idx,
+                true_yaw=gimbal_yaw,
+                true_pitch=gimbal_pitch
+            )
+
+            # Reconstruct filtered joint positions
+            if joint_positions_b.shape[1] == 3:
+                filtered_joint_pos = torch.cat([
+                    joint_positions_b[:, 0:1],  # Roll (unfiltered for now)
+                    filtered_gimbal_pitch,
+                    filtered_gimbal_yaw
+                ], dim=-1)
+            else:
+                filtered_joint_pos = joint_positions_b.clone()
+        else:
+            filtered_joint_pos = None
+
+        # Store delayed states (no noise)
+        delayed_state = self.delayed_states.agents[agent_id]
+        delayed_state.data.body_position_w[env_idxs] = filtered_pos[env_idxs]
+        delayed_state.data.body_orientation_w[env_idxs] = filtered_quat[env_idxs]
+        delayed_state.data.body_linear_velocity_w[env_idxs] = filtered_lin_vel[env_idxs]
+        delayed_state.data.body_angular_velocity_w[env_idxs] = filtered_ang_vel[env_idxs]
+
+        # Combined angular velocity (body + gimbal) - store in delayed states
+        # This is a direct measurement from articulation, so we use filtered values as-is
+        if body_combined_angular_velocity_w is not None:
+            delayed_state.data.body_combined_angular_velocity_w[env_idxs] = body_combined_angular_velocity_w[env_idxs]
+            # Compute body frame version using filtered quaternion
+            delayed_state.data.body_combined_angular_velocity_b[env_idxs] = math_utils.quat_rotate_inverse(
+                filtered_quat[env_idxs], body_combined_angular_velocity_w[env_idxs]
+            )
+
+        if filtered_joint_pos is not None:
+            delayed_state.data.joint_positions_b[env_idxs] = filtered_joint_pos[env_idxs]
+
+        if zoom_level is not None:
+            delayed_state.data.camera_zoom_level[env_idxs] = zoom_level[env_idxs]
+
+        # Update delayed camera pose
+        delayed_state.update_camera_pose(
+            body_pos=delayed_state.data.body_position_w,
+            body_quat=delayed_state.data.body_orientation_w,
+            joint_pos=delayed_state.data.joint_positions_b,
+            env_idxs=env_idxs
+        )
+
+        delayed_state.update_intrinsic_matrix(
+            zoom_level=delayed_state.data.camera_zoom_level,
+            env_idxs=env_idxs
+        )
+
+        # ===== PROCESS DELAYED + NOISY STATES =====
+        if self.enable_noise and self.noise_progress_scale > 0.0:
+            # Sample noise once for this agent (using seeded generator)
+            # Note: Follows the same noise formulas as iris_ma_env3.py for consistency
+
+            # Position noise (scaled by progress)
+            self.sampled_noise_pos[:, agent_idx, :].normal_(
+                mean=0.0,
+                std=self.position_noise_std * self.noise_progress_scale,
+                generator=self.noise_generator
+            )
+            noisy_pos = filtered_pos + self.sampled_noise_pos[:, agent_idx, :]
+
+            # Orientation noise (small angle approximation, scaled by progress)
+            self.sampled_noise_ori[:, agent_idx, :].normal_(
+                mean=0.0,
+                std=self.orientation_noise_std * self.noise_progress_scale,
+                generator=self.noise_generator
+            )
+            noise_quat = math_utils.quat_from_euler_xyz(
+                self.sampled_noise_ori[:, agent_idx, 0],
+                self.sampled_noise_ori[:, agent_idx, 1],
+                self.sampled_noise_ori[:, agent_idx, 2]
+            )
+            noisy_quat = math_utils.quat_mul(filtered_quat, noise_quat)
+
+            # Linear velocity noise (10% of position noise, as in original)
+            self.sampled_noise_lin_vel[:, agent_idx, :].normal_(
+                mean=0.0,
+                std=0.1 * self.position_noise_std * self.noise_progress_scale,
+                generator=self.noise_generator
+            )
+            noisy_lin_vel = filtered_lin_vel + self.sampled_noise_lin_vel[:, agent_idx, :]
+
+            # Angular velocity noise (ori_std * pos_std, as in original)
+            self.sampled_noise_ang_vel[:, agent_idx, :].normal_(
+                mean=0.0,
+                std=self.orientation_noise_std * self.position_noise_std * self.noise_progress_scale,
+                generator=self.noise_generator
+            )
+            noisy_ang_vel = filtered_ang_vel + self.sampled_noise_ang_vel[:, agent_idx, :]
+
+            # Combined angular velocity noise (same std as angular velocity)
+            if body_combined_angular_velocity_w is not None:
+                # Reuse the same noise tensor as angular velocity for consistency
+                noisy_combined_ang_vel = body_combined_angular_velocity_w + self.sampled_noise_ang_vel[:, agent_idx, :]
+            else:
+                noisy_combined_ang_vel = None
+
+            # Linear acceleration noise
+            if body_linear_acceleration_w is not None:
+                self.sampled_noise_lin_acc[:, agent_idx, :].normal_(
+                    mean=0.0,
+                    std=self.linear_acceleration_noise_std * self.noise_progress_scale,
+                    generator=self.noise_generator
+                )
+                noisy_lin_acc = body_linear_acceleration_w + self.sampled_noise_lin_acc[:, agent_idx, :]
+            else:
+                noisy_lin_acc = None
+
+            # Gimbal noise
+            if filtered_joint_pos is not None:
+                self.sampled_noise_gimbal[:, agent_idx, :filtered_joint_pos.shape[1]].normal_(
+                    mean=0.0,
+                    std=self.gimbal_noise_std * self.noise_progress_scale,
+                    generator=self.noise_generator
+                )
+                noisy_joint_pos = filtered_joint_pos + self.sampled_noise_gimbal[:, agent_idx, :filtered_joint_pos.shape[1]]
+            else:
+                noisy_joint_pos = None
+
+            # Zoom noise
+            if zoom_level is not None:
+                self.sampled_noise_zoom[:, agent_idx].normal_(
+                    mean=0.0,
+                    std=self.zoom_noise_std * self.noise_progress_scale,
+                    generator=self.noise_generator
+                )
+                noisy_zoom = zoom_level + self.sampled_noise_zoom[:, agent_idx]
+                noisy_zoom = torch.clamp(noisy_zoom, min=1.0, max=10.0)  # Reasonable zoom range
+            else:
+                noisy_zoom = None
+        else:
+            # No noise - use filtered states directly (clone to avoid reference issues)
+            noisy_pos = filtered_pos.clone()
+            noisy_quat = filtered_quat.clone()
+            noisy_lin_vel = filtered_lin_vel.clone()
+            noisy_ang_vel = filtered_ang_vel.clone()
+            noisy_combined_ang_vel = body_combined_angular_velocity_w.clone() if body_combined_angular_velocity_w is not None else None
+            noisy_lin_acc = body_linear_acceleration_w.clone() if body_linear_acceleration_w is not None else None
+            noisy_joint_pos = filtered_joint_pos.clone() if filtered_joint_pos is not None else None
+            noisy_zoom = zoom_level.clone() if zoom_level is not None else None
+
+        # Store delayed + noisy states
+        noisy_state = self.delayed_noisy_states.agents[agent_id]
+        noisy_state.data.body_position_w[env_idxs] = noisy_pos[env_idxs]
+        noisy_state.data.body_orientation_w[env_idxs] = noisy_quat[env_idxs]
+        noisy_state.data.body_linear_velocity_w[env_idxs] = noisy_lin_vel[env_idxs]
+        noisy_state.data.body_angular_velocity_w[env_idxs] = noisy_ang_vel[env_idxs]
+
+        if noisy_combined_ang_vel is not None:
+            noisy_state.data.body_combined_angular_velocity_w[env_idxs] = noisy_combined_ang_vel[env_idxs]
+            # Compute body frame version using noisy quaternion
+            noisy_state.data.body_combined_angular_velocity_b[env_idxs] = math_utils.quat_rotate_inverse(
+                noisy_quat[env_idxs], noisy_combined_ang_vel[env_idxs]
+            )
+
+        if noisy_lin_acc is not None:
+            noisy_state.data.body_linear_acceleration_w[env_idxs] = noisy_lin_acc[env_idxs]
+
+        if noisy_joint_pos is not None:
+            noisy_state.data.joint_positions_b[env_idxs] = noisy_joint_pos[env_idxs]
+
+        if noisy_zoom is not None:
+            noisy_state.data.camera_zoom_level[env_idxs] = noisy_zoom[env_idxs]
+
+        # Update noisy camera pose
+        noisy_state.update_camera_pose(
+            body_pos=noisy_state.data.body_position_w,
+            body_quat=noisy_state.data.body_orientation_w,
+            joint_pos=noisy_state.data.joint_positions_b,
+            env_idxs=env_idxs
+        )
+
+        noisy_state.update_intrinsic_matrix(
+            zoom_level=noisy_state.data.camera_zoom_level,
+            env_idxs=env_idxs
+        )
+
+    def update_detections(
+        self,
+        agent_id: str,
+        bboxes_2d_gt: torch.Tensor,
+        valid_mask_gt: torch.Tensor,
+        env_idxs: Optional[torch.Tensor] = None
+    ):
+        """Update bbox detections with FPS throttling, dropout, and latency.
+
+        This method processes GT bboxes through the detection channel and updates
+        both delayed and delayed+noisy states with the processed detections.
+
+        Args:
+            agent_id: Agent ID.
+            bboxes_2d_gt: Ground truth 2D bboxes [N, T, 4] (xywh format).
+            valid_mask_gt: GT validity mask [N, T].
+            env_idxs: Environment indices to update. If None, updates all.
+        """
+        if env_idxs is None:
+            env_idxs = torch.arange(self.num_envs, device=self.device)
+
+        agent_idx = self.agent_id_to_idx[agent_id]
+
+        # Store GT bboxes
+        self.gt_states.agents[agent_id].update_bboxes_2d(
+            bboxes_2d=bboxes_2d_gt,
+            valid_mask=valid_mask_gt,
+            env_idxs=env_idxs
+        )
+
+        # Process through detection channel (adds FPS throttle, dropout, latency)
+        # For simplicity, we'll process each target separately
+        num_targets = bboxes_2d_gt.shape[1]
+        for t in range(num_targets):
+            bbox_t = bboxes_2d_gt[:, t, :]  # [N, 4]
+            valid_t = valid_mask_gt[:, t]   # [N]
+
+            # Add detection (applies FPS throttle, dropout, latency)
+            self.obs_pipeline.add_detection(
+                agent_id=agent_idx,
+                detection_data=bbox_t,
+                has_detection=valid_t
+            )
+
+        # Retrieve delayed detections (no noise)
+        delayed_bboxes = []
+        delayed_valid = []
+        for t in range(num_targets):
+            bbox_delayed, valid_delayed, _ = self.obs_pipeline.get_delayed_detection(agent_idx)
+            delayed_bboxes.append(bbox_delayed)
+            delayed_valid.append(valid_delayed)
+
+        delayed_bboxes_stacked = torch.stack(delayed_bboxes, dim=1)  # [N, T, 4]
+        delayed_valid_stacked = torch.stack(delayed_valid, dim=1)    # [N, T]
+
+        # Update delayed states
+        self.delayed_states.agents[agent_id].update_bboxes_2d(
+            bboxes_2d=delayed_bboxes_stacked,
+            valid_mask=delayed_valid_stacked,
+            env_idxs=env_idxs
+        )
+
+        # Add bbox noise for observations
+        if self.enable_noise:
+            # Use seeded generator and progress scaling for consistency
+            num_targets = delayed_bboxes_stacked.shape[1]
+
+            # Ensure bbox noise tensor is large enough
+            if self.sampled_noise_bbox.shape[2] < num_targets:
+                self.sampled_noise_bbox = torch.zeros(
+                    self.num_envs, self.num_agents, num_targets, 4,
+                    device=self.device
+                )
+
+            # Sample bbox noise (pixel-space noise)
+            self.sampled_noise_bbox[:, agent_idx, :num_targets, :].normal_(
+                mean=0.0,
+                std=self.bbox_noise_std * self.noise_progress_scale,
+                generator=self.noise_generator
+            )
+            noisy_bboxes = delayed_bboxes_stacked + self.sampled_noise_bbox[:, agent_idx, :num_targets, :]
+        else:
+            noisy_bboxes = delayed_bboxes_stacked
+
+        # Update delayed + noisy states
+        self.delayed_noisy_states.agents[agent_id].update_bboxes_2d(
+            bboxes_2d=noisy_bboxes,
+            valid_mask=delayed_valid_stacked,
+            env_idxs=env_idxs
+        )
+
+        # Update camera rays for both delayed and delayed+noisy states
+        for state_manager, bboxes in [
+            (self.delayed_states, delayed_bboxes_stacked),
+            (self.delayed_noisy_states, noisy_bboxes)
+        ]:
+            agent_state = state_manager.agents[agent_id]
+            agent_state.update_camera_rays_to_bboxes(
+                bboxes_2d=bboxes,
+                camera_intrinsics=agent_state.data.camera_intrinsics,
+                camera_position=agent_state.data.camera_position_w,
+                camera_orientation=agent_state.data.camera_orientation_w,
+                env_idxs=env_idxs
+            )
+
+    def broadcast_state(
+        self,
+        sender_id: str,
+        state_keys: list[str] = None,
+        has_source_data: Optional[torch.Tensor] = None
+    ):
+        """Broadcast delayed states to all other agents via communication channel.
+
+        Args:
+            sender_id: Sending agent ID.
+            state_keys: List of state keys to broadcast. If None, broadcasts all.
+            has_source_data: Boolean mask [N] indicating valid data. If None, assumes all valid.
+        """
+        agent_idx = self.agent_id_to_idx[sender_id]
+        delayed_state = self.delayed_states.agents[sender_id]
+
+        # Build state dict to broadcast
+        if state_keys is None:
+            state_keys = [
+                'position', 'orientation', 'linear_velocity', 'angular_velocity',
+                'combined_angular_velocity',
+                'camera_position', 'camera_orientation', 'camera_intrinsics',
+                'bboxes_2d', 'bboxes_2d_valid_mask', 'camera_ray_directions_w'
+            ]
+
+        state_dict = {}
+        for key in state_keys:
+            if key == 'position':
+                state_dict[key] = delayed_state.data.body_position_w
+            elif key == 'orientation':
+                state_dict[key] = delayed_state.data.body_orientation_w
+            elif key == 'linear_velocity':
+                state_dict[key] = delayed_state.data.body_linear_velocity_w
+            elif key == 'angular_velocity':
+                state_dict[key] = delayed_state.data.body_angular_velocity_w
+            elif key == 'combined_angular_velocity':
+                state_dict[key] = delayed_state.data.body_combined_angular_velocity_w
+            elif key == 'camera_position':
+                state_dict[key] = delayed_state.data.camera_position_w
+            elif key == 'camera_orientation':
+                state_dict[key] = delayed_state.data.camera_orientation_w
+            elif key == 'camera_intrinsics':
+                state_dict[key] = delayed_state.data.camera_intrinsics
+            elif key == 'bboxes_2d':
+                state_dict[key] = delayed_state.data.bboxes_2d
+            elif key == 'bboxes_2d_valid_mask':
+                state_dict[key] = delayed_state.data.bboxes_2d_valid_mask.float()
+            elif key == 'camera_ray_directions_w':
+                state_dict[key] = delayed_state.data.camera_ray_directions_w
+
+        # Broadcast through communication channel
+        self.obs_pipeline.broadcast_state(
+            sender_id=agent_idx,
+            state_dict=state_dict,
+            has_source_data=has_source_data
+        )
+
+    def receive_other_agent_states(
+        self,
+        receiver_id: str
+    ) -> Dict[str, Dict[str, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]]:
+        """Receive states from all other agents through communication channel.
+
+        Args:
+            receiver_id: Receiving agent ID.
+
+        Returns:
+            Dict mapping sender_agent_id -> {state_key -> (data, valid_mask, data_age)}
+        """
+        agent_idx = self.agent_id_to_idx[receiver_id]
+
+        # Receive from communication channel (returns with agent indices)
+        received_data = self.obs_pipeline.receive_other_agent_states(receiver_id=agent_idx)
+
+        # Convert agent indices back to agent IDs
+        received_states = {}
+        for sender_idx, data_dict in received_data.items():
+            sender_id = self.possible_agents[sender_idx]
+            received_states[sender_id] = data_dict
+
+        return received_states
+
+    def get_gt_states(self, agent_id: str) -> AgentStates:
+        """Get ground truth states for an agent.
+
+        Args:
+            agent_id: Agent ID.
+
+        Returns:
+            AgentStates object with GT states.
+        """
+        return self.gt_states.agents[agent_id]
+
+    def get_delayed_states(self, agent_id: str) -> AgentStates:
+        """Get delayed states (no noise) for an agent - use for reward computation.
+
+        Args:
+            agent_id: Agent ID.
+
+        Returns:
+            AgentStates object with delayed states (lag + latency, no noise).
+        """
+        return self.delayed_states.agents[agent_id]
+
+    def get_delayed_noisy_states(self, agent_id: str) -> AgentStates:
+        """Get delayed + noisy states for an agent - use for observations.
+
+        Args:
+            agent_id: Agent ID.
+
+        Returns:
+            AgentStates object with delayed + noisy states (lag + latency + noise).
+        """
+        return self.delayed_noisy_states.agents[agent_id]
+
+    def get_all_gt_states(self) -> MultiAgentStates:
+        """Get all GT states.
+
+        Returns:
+            MultiAgentStates object with all GT states.
+        """
+        return self.gt_states
+
+    def get_all_delayed_states(self) -> MultiAgentStates:
+        """Get all delayed states (no noise).
+
+        Returns:
+            MultiAgentStates object with all delayed states.
+        """
+        return self.delayed_states
+
+    def get_all_delayed_noisy_states(self) -> MultiAgentStates:
+        """Get all delayed + noisy states.
+
+        Returns:
+            MultiAgentStates object with all delayed + noisy states.
+        """
+        return self.delayed_noisy_states
+
+    def set_noise_progress_scale(self, progress: float):
+        """Set noise curriculum/progress scaling factor.
+
+        This scales all noise standard deviations by the given factor, allowing
+        for curriculum learning where noise gradually increases during training.
+
+        Args:
+            progress: Scaling factor for noise (0.0 to 1.0 typical range).
+                     0.0 = no noise, 1.0 = full noise as specified in init.
+        """
+        self.noise_progress_scale = progress
+
+    def update_detection_params(self, **kwargs):
+        """Update detection parameters. See MultiAgentObservationPipeline.update_detection_params."""
+        self.obs_pipeline.update_detection_params(**kwargs)
+
+    def update_comm_params(self, **kwargs):
+        """Update communication parameters. See MultiAgentObservationPipeline.update_comm_params."""
+        self.obs_pipeline.update_comm_params(**kwargs)
+
+    def get_statistics(self) -> Dict[str, Any]:
+        """Get pipeline statistics. See MultiAgentObservationPipeline.get_statistics."""
+        return self.obs_pipeline.get_statistics()
+
+    def reset(self, env_ids: Optional[torch.Tensor] = None):
+        """Reset all components for specified environments.
+
+        Args:
+            env_ids: Indices of environments to reset. If None, resets all.
+        """
+        # Reset the underlying pipeline
+        self.obs_pipeline.reset(env_ids)
+
+        # Note: We don't reset state storage here as it will be overwritten
+        # by the next update_gt_states call from the environment

@@ -77,7 +77,9 @@ def main():
         pytest_args.extend([
             "-k",
             "test_throttle_only or test_dropout_only or test_latency_only or "
-            "test_combined_impairments or test_broadcast or test_receive"
+            "test_combined_impairments or test_broadcast or test_receive or "
+            "test_initialization or test_noise_reproducibility or test_update_gt_states or "
+            "test_curriculum_learning or test_detection_processing"
         ])
     elif args.priority == "P1":
         # Critical tests
@@ -87,7 +89,10 @@ def main():
             "test_impairment_order or test_valid_mask_semantics or "
             "test_statistics_accuracy or test_reset_specific_envs or "
             "test_end_to_end_detection or test_motion_and_gimbal or "
-            "test_detection_communication_integration"
+            "test_detection_communication_integration or "
+            "test_state_consistency or test_multi_agent_integration or "
+            "test_communication_integration or test_noise_formula_consistency or "
+            "test_reset_functionality"
         ])
     elif args.priority == "P2":
         # Important tests
@@ -102,7 +107,10 @@ def main():
             "test_quaternion_shortest or test_first_order_lag_reset or "
             "test_time_management or test_detection_parameter or test_comm_parameter or "
             "test_complete_reset or test_input_validity or test_validity_persistence or "
-            "test_per_environment_validity"
+            "test_per_environment_validity or "
+            "test_camera_pose_updates or test_zoom_noise_clamping or "
+            "test_partial_env_update or test_detection_with_invalid_mask or "
+            "test_get_all_states or test_noise_disabled"
         ])
     # If priority == "all", don't add any filter
 

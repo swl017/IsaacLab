@@ -10,6 +10,7 @@ from .delayed_states import (
     FirstOrderLag,
     MultiAgentCommChannel,
     MultiAgentObservationPipeline,
+    MultiAgentStateManager,
     MultiAgentStates,
     QuaternionFirstOrderLag,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "FirstOrderLag",
     "MultiAgentCommChannel",
     "MultiAgentObservationPipeline",
+    "MultiAgentStateManager",
     "MultiAgentStates",
     "QuaternionFirstOrderLag",
 ]
