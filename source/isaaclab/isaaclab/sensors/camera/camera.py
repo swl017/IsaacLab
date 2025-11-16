@@ -279,6 +279,78 @@ class Camera(SensorBase):
         # update the internal buffers
         self._update_intrinsic_matrices(env_ids)
 
+    def set_intrinsic_matrices_batched(
+        self, matrices: torch.Tensor, focal_length: torch.tensor, env_ids: Sequence[int] | None = None
+    ):
+        """Set parameters of the USD camera from its intrinsic matrix.
+
+        The intrinsic matrix and focal length are used to set the following parameters to the USD camera:
+
+        - ``focal_length``: The focal length of the camera.
+        - ``horizontal_aperture``: The horizontal aperture of the camera.
+        - ``vertical_aperture``: The vertical aperture of the camera.
+        - ``horizontal_aperture_offset``: The horizontal offset of the camera.
+        - ``vertical_aperture_offset``: The vertical offset of the camera.
+
+        .. warning::
+
+            Due to limitations of Omniverse camera, we need to assume that the camera is a spherical lens,
+            i.e. has square pixels, and the optical center is centered at the camera eye. If this assumption
+            is not true in the input intrinsic matrix, then the camera will not set up correctly.
+
+        Args:
+            matrices: The intrinsic matrices for the camera. Shape is (N, 3, 3).
+            focal_length: Focal length to use when computing aperture values (in cm). Defaults to 1.0.
+            env_ids: A sensor ids to manipulate. Defaults to None, which means all sensor indices.
+        """
+        # resolve env_ids
+        if env_ids is None:
+            env_ids = self._ALL_INDICES
+        # convert matrices to numpy tensors
+        if isinstance(matrices, torch.Tensor):
+            matrices = matrices.cpu().numpy()
+        else:
+            matrices = np.asarray(matrices, dtype=float)
+        # iterate over env_ids
+        for i, intrinsic_matrix in zip(env_ids, matrices):
+            # extract parameters from matrix
+            f_x = intrinsic_matrix[0, 0]
+            c_x = intrinsic_matrix[0, 2]
+            f_y = intrinsic_matrix[1, 1]
+            c_y = intrinsic_matrix[1, 2]
+            # get viewport parameters
+            height, width = self.image_shape
+            height, width = float(height), float(width)
+            # resolve parameters for usd camera
+            params = {
+                "focal_length": focal_length[i].item(),
+                "horizontal_aperture": width * focal_length[i].item() / f_x,
+                "vertical_aperture": height * focal_length[i].item() / f_y,
+                "horizontal_aperture_offset": (c_x - width / 2) / f_x,
+                "vertical_aperture_offset": (c_y - height / 2) / f_y,
+            }
+
+            # TODO: Adjust to handle aperture offsets once supported by omniverse
+            #   Internal ticket from rendering team: OM-42611
+            if params["horizontal_aperture_offset"] > 1e-4 or params["vertical_aperture_offset"] > 1e-4:
+                omni.log.warn("Camera aperture offsets are not supported by Omniverse. These parameters are ignored.")
+
+            # change data for corresponding camera index
+            sensor_prim = self._sensor_prims[i]
+            # set parameters for camera
+            for param_name, param_value in params.items():
+                # convert to camel case (CC)
+                param_name = to_camel_case(param_name, to="CC")
+                # get attribute from the class
+                param_attr = getattr(sensor_prim, f"Get{param_name}Attr")
+                # set value
+                # note: We have to do it this way because the camera might be on a different
+                #   layer (default cameras are on session layer), and this is the simplest
+                #   way to set the property on the right layer.
+                omni.usd.set_prop_val(param_attr(), param_value)
+        # update the internal buffers
+        self._update_intrinsic_matrices(env_ids)
+
     """
     Operations - Set pose.
     """

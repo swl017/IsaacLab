@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# Copyright (c) 2022-2025, The Isaac Lab Project Developers.
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
@@ -41,7 +41,7 @@ parser.add_argument(
     "--algorithm",
     type=str,
     default="PPO",
-    choices=["AMP", "PPO", "IPPO", "MAPPO"],
+    choices=["AMP", "PPO", "IPPO", "MAPPO", "PPO_RNN"],
     help="The RL algorithm used for training the skrl agent.",
 )
 
@@ -66,10 +66,10 @@ import gymnasium as gym
 import os
 import random
 from datetime import datetime
+import copy
 
 import skrl
 from packaging import version
-import shutil
 
 # check for minimum supported skrl version
 SKRL_VERSION = "1.4.2"
@@ -80,10 +80,11 @@ if version.parse(skrl.__version__) < version.parse(SKRL_VERSION):
     )
     exit()
 
-if args_cli.ml_framework.startswith("torch"):
-    from skrl.utils.runner.torch import Runner
-elif args_cli.ml_framework.startswith("jax"):
-    from skrl.utils.runner.jax import Runner
+from skrl.utils.runner.torch import Runner
+# if args_cli.ml_framework.startswith("torch"):
+#     from skrl.utils.runner.torch import Runner
+# elif args_cli.ml_framework.startswith("jax"):
+#     from skrl.utils.runner.jax import Runner
 
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -101,17 +102,108 @@ from isaaclab_rl.skrl import SkrlVecEnvWrapper
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
-from isaacsim.core.utils.viewports import set_camera_view
-import numpy as np
-from pxr import Gf
-from isaaclab.sim import SimulationContext
-
 # PLACEHOLDER: Extension template (do not remove this comment)
 
 # config shortcuts
 algorithm = args_cli.algorithm.lower()
 agent_cfg_entry_point = "skrl_cfg_entry_point" if algorithm in ["ppo"] else f"skrl_{algorithm}_cfg_entry_point"
 
+import torch
+import torch.nn as nn
+from skrl.models.torch import Model, GaussianMixin
+from skrl.agents.torch.ppo import PPO_RNN, PPO_DEFAULT_CONFIG
+from skrl.memories.torch import RandomMemory
+
+class Policy(GaussianMixin, Model):
+    def __init__(self, observation_space, action_space, device, hidden_size=256, gru_num_layers=1, gru_hidden_size=256, num_envs=1):
+        Model.__init__(self, observation_space, action_space, device)
+        GaussianMixin.__init__(self, clip_actions=True, clip_log_std=True)
+
+        self.net = nn.Sequential(nn.Linear(self.num_observations, hidden_size),
+                                 nn.ReLU(),
+                                 nn.Linear(hidden_size, hidden_size),
+                                 nn.ReLU())
+        self.gru = nn.GRU(hidden_size, gru_hidden_size, num_layers=gru_num_layers, batch_first=True, device=device, dtype=torch.float32)
+        self.policy_layer = nn.Linear(gru_hidden_size, self.num_actions, device=device, dtype=torch.float32)
+        self.value_layer = nn.Linear(gru_hidden_size, 1, device=device, dtype=torch.float32)
+        self.log_std_parameter = nn.Parameter(torch.zeros(self.num_actions, device=device))
+        self.num_envs = num_envs
+
+    def get_specification(self):
+        # The agent will look for the "rnn" key to setup the recurrent states
+        # and "sequence_length" for the sampler
+        return {"rnn": {"sequence_length": 10,
+                        "sizes": [(self.gru.num_layers, self.num_envs, self.gru.hidden_size)]}}
+
+    def compute(self, inputs, role):
+        x = self.net(inputs["states"])
+        hidden_states = inputs["rnn"][0]
+        # view shape: (batch_size, sequence_length, input_size)
+        gru_input = x.view(-1, 1, x.shape[-1])
+        gru_output, hidden_states = self.gru(gru_input, hidden_states)
+        # view shape: (batch_size, hidden_size)
+        output = gru_output.view(-1, self.gru.hidden_size)
+        return self.policy_layer(output), self.log_std_parameter, self.value_layer(output), [hidden_states]
+    
+# def _process_cfg(cfg: dict) -> dict:
+#         """Convert simple types to skrl classes/components
+
+#         :param cfg: A configuration dictionary
+
+#         :return: Updated dictionary
+#         """
+#         _direct_eval = [
+#             "learning_rate_scheduler",
+#             "shared_state_preprocessor",
+#             "state_preprocessor",
+#             "value_preprocessor",
+#             "amp_state_preprocessor",
+#             "noise",
+#             "smooth_regularization_noise",
+#         ]
+
+#         def reward_shaper_function(scale):
+#             def reward_shaper(rewards, *args, **kwargs):
+#                 return rewards * scale
+
+#             return reward_shaper
+
+#         def update_dict(d):
+#             for key, value in d.items():
+#                 if isinstance(value, dict):
+#                     update_dict(value)
+#                 else:
+#                     if key in _direct_eval:
+#                         if isinstance(value, str):
+#                             d[key] = eval(value)
+#                     elif key.endswith("_kwargs"):
+#                         d[key] = value if value is not None else {}
+#                     elif key in ["rewards_shaper_scale"]:
+#                         d["rewards_shaper"] = reward_shaper_function(value)
+#             return d
+
+#         return update_dict(copy.deepcopy(cfg))
+
+def _process_agent_cfg(cfg: dict) -> dict:
+    """Process agent config to convert string class paths to class objects."""
+    config = copy.deepcopy(cfg)
+
+    # learning rate scheduler
+    scheduler_class = config.get("learning_rate_scheduler", None)
+    if isinstance(scheduler_class, str):
+        config["learning_rate_scheduler"] = eval(scheduler_class)
+
+    # state preprocessor
+    state_preprocessor_class = config.get("state_preprocessor", None)
+    if isinstance(state_preprocessor_class, str):
+        config["state_preprocessor"] = eval(state_preprocessor_class)
+
+    # value preprocessor
+    value_preprocessor_class = config.get("value_preprocessor", None)
+    if isinstance(value_preprocessor_class, str):
+        config["value_preprocessor"] = eval(value_preprocessor_class)
+
+    return config
 
 @hydra_task_config(args_cli.task, agent_cfg_entry_point)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
@@ -146,8 +238,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
     # specify directory for logging runs: {time-stamp}_{run_name}
     log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + f"_{algorithm}_{args_cli.ml_framework}"
-    # The Ray Tune workflow extracts experiment name using the logging line below, hence, do not change it (see PR #2346, comment-2819298849)
-    print(f"Exact experiment name requested from command line: {log_dir}")
+    print(f"Exact experiment name requested from command line {log_dir}")
     if agent_cfg["agent"]["experiment"]["experiment_name"]:
         log_dir += f'_{agent_cfg["agent"]["experiment"]["experiment_name"]}'
     # set directory into agent config
@@ -155,9 +246,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent_cfg["agent"]["experiment"]["experiment_name"] = log_dir
     # update log_dir
     log_dir = os.path.join(log_root_path, log_dir)
-    env_folder = "/home/usrg/IsaacPX4/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma2"
-    shutil.copytree(env_folder, os.path.join(log_dir, "iris_ma2"))
-    print(f"Env script copied to: {log_dir}")
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
@@ -190,9 +278,37 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # wrap around environment for skrl
     env = SkrlVecEnvWrapper(env, ml_framework=args_cli.ml_framework)  # same as: `wrap_env(env, wrapper="auto")`
 
+    # 1. Instantiate the RNN model
+    models = {
+        "policy": Policy(env.observation_space, env.action_space, env.device, num_envs=args_cli.num_envs),
+        "value": Policy(env.observation_space, env.action_space, env.device, num_envs=args_cli.num_envs),
+    }
+
+    # 2. Configure the memory
+    #    RNNs require a memory that can handle sequences
+    memory_cfg = {
+        "memory_size": agent_cfg["agent"]["rollouts"],  # Use rollouts from your config
+        "num_envs": env.num_envs,
+        "device": env.device,
+    }
+    memory = RandomMemory(**memory_cfg)
+
+    # 3. Instantiate the PPO_RNN agent
+    #    The agent_cfg dictionary from hydra is still used for hyperparameters
+    # processed_agent_cfg = _process_agent_cfg(agent_cfg["agent"])
+    agent = PPO_RNN(models=models,
+                  memory=memory,
+                  cfg=agent_cfg,
+                  observation_space=env.observation_space,
+                  action_space=env.action_space,
+                  device=env.device)
+
+
     # configure and instantiate the skrl runner
     # https://skrl.readthedocs.io/en/latest/api/utils/runner.html
-    runner = Runner(env, agent_cfg)
+    runner_cfg = {"trainer": agent_cfg["trainer"], "seed": agent_cfg["seed"]}
+    runner = Runner(env=env, cfg=agent_cfg, agent=agent, models=models)
+    # runner = Runner(env, cfg=runner_cfg, agent=agent)
 
     # load checkpoint (if specified)
     if resume_path:
