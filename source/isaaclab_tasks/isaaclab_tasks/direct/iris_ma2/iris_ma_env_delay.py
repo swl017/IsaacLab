@@ -1,0 +1,2033 @@
+# Copyright (c) 2022-2025, The Isaac Lab Project Developers.
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+from __future__ import annotations
+
+import gymnasium as gym
+import torch
+import math
+import numpy as np
+import copy
+from typing import Dict
+from dataclasses import dataclass
+
+import isaaclab.sim as sim_utils
+from isaaclab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg
+from isaaclab.envs import DirectMARLEnv, DirectMARLEnvCfg, ViewerCfg
+from isaaclab.envs.ui import BaseEnvWindow
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import TiledCamera, TiledCameraCfg, FrameTransformer, FrameTransformerCfg
+from isaaclab.sim import SimulationCfg
+from isaaclab.terrains import TerrainImporterCfg
+from isaaclab.utils import configclass
+from isaaclab.utils.math import (
+    subtract_frame_transforms, 
+    euler_xyz_from_quat, 
+    quat_apply,
+    quat_from_euler_xyz,
+    quat_mul,
+    quat_inv,
+    quat_rotate,
+)
+
+# Pre-defined configs
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from isaaclab_assets import IRIS_GIMBAL2_CFG, IRIS_BODY_CFG
+from isaaclab.markers import CUBOID_MARKER_CFG, FRAME_MARKER_CFG
+
+from .point_mass import PointMass
+from .bbox_generator import BBoxGenerator
+from .camera_frustrum import CameraFrustrum, create_camera_cfg_tensor, project_2d_to_3d
+from .triang_cov_reward_torch import (
+    triangulation_covariance_multi_camera, 
+    triangulation_covariance_simple, 
+    midpoint_method_batched,
+    get_ray_dir_from_bbox
+)
+
+import carb
+
+DEBUG_DRAW = True
+if DEBUG_DRAW:
+    try:
+        import isaacsim.util.debug_draw._debug_draw as omni_debug_draw
+    except ImportError:
+        try:
+            from omni.isaac.debug_draw import _debug_draw as omni_debug_draw
+        except ImportError:
+            print("Warning: Debug draw module not available. Disabling debug visualization.")
+            DEBUG_DRAW = False
+            omni_debug_draw = None
+
+from . import bbox_raycaster
+
+# Import delay and communication system
+from .delay_comm_system_optimized import DelayedObservationManager, TimestampedData
+
+
+@dataclass
+class AgentStates:
+    """Container for agent states used in computations.
+    
+    This class manages delayed and delayed+noisy states for all agents,
+    avoiding duplicate computations and making the code more maintainable.
+    """
+    
+    def __init__(self, num_envs: int, num_agents: int, device: str):
+        self.num_envs = num_envs
+        self.num_agents = num_agents
+        self.device = device
+        
+        # Delayed states (without noise) - used for rewards
+        self.delayed_robot_pos = torch.zeros(num_envs, num_agents, 3, device=device)
+        self.delayed_robot_quat = torch.zeros(num_envs, num_agents, 4, device=device)
+        self.delayed_robot_lin_vel = torch.zeros(num_envs, num_agents, 3, device=device)
+        self.delayed_robot_ang_vel = torch.zeros(num_envs, num_agents, 3, device=device)
+        self.delayed_gimbal_yaw = torch.zeros(num_envs, num_agents, device=device)
+        self.delayed_gimbal_pitch = torch.zeros(num_envs, num_agents, device=device)
+        self.delayed_zoom_level = torch.zeros(num_envs, num_agents, device=device)
+        
+        # Delayed + noisy states - used for observations
+        self.delayed_noisy_robot_pos = torch.zeros(num_envs, num_agents, 3, device=device)
+        self.delayed_noisy_robot_quat = torch.zeros(num_envs, num_agents, 4, device=device)
+        self.delayed_noisy_robot_lin_vel = torch.zeros(num_envs, num_agents, 3, device=device)
+        self.delayed_noisy_robot_ang_vel = torch.zeros(num_envs, num_agents, 3, device=device)
+        self.delayed_noisy_gimbal_yaw = torch.zeros(num_envs, num_agents, device=device)
+        self.delayed_noisy_gimbal_pitch = torch.zeros(num_envs, num_agents, device=device)
+        
+        # Camera intrinsics based on zoom (delayed and delayed+noisy)
+        self.camera_intrinsics_delayed = torch.zeros(num_envs, num_agents, 3, 3, device=device)
+        self.camera_intrinsics_delayed_noisy = torch.zeros(num_envs, num_agents, 3, 3, device=device)
+        
+        # Ray directions
+        self.ray_dir_delayed = torch.zeros(num_envs, num_agents, 1, 3, device=device)  # (N, C, T, 3)
+        self.ray_dir_delayed_noisy = torch.zeros(num_envs, num_agents, 1, 3, device=device)
+        
+        # Bounding boxes
+        self.bboxes_delayed = torch.zeros(num_envs, num_agents, 1, 4, device=device)  # (N, C, T, 4)
+        self.bboxes_delayed_noisy = torch.zeros(num_envs, num_agents, 1, 4, device=device)
+        self.valid_mask_delayed = torch.zeros(num_envs, num_agents, 1, device=device, dtype=torch.bool)
+        self.valid_mask_delayed_noisy = torch.zeros(num_envs, num_agents, 1, device=device, dtype=torch.bool)
+        
+        # Camera poses in world frame (delayed and delayed+noisy)
+        self.camera_pos_delayed = torch.zeros(num_envs, num_agents, 3, device=device)
+        self.camera_quat_delayed = torch.zeros(num_envs, num_agents, 4, device=device)
+        self.camera_pos_delayed_noisy = torch.zeros(num_envs, num_agents, 3, device=device)
+        self.camera_quat_delayed_noisy = torch.zeros(num_envs, num_agents, 4, device=device)
+        
+        # Triangulation covariance results
+        self.Sigma_X_delayed = torch.eye(3, device=self.device).unsqueeze(0).unsqueeze(0).expand(
+            self.num_envs, 1, 3, 3
+        ) * (-1.0)  # (N, T, 3, 3)
+        self.trace_cov_delayed = torch.ones(self.num_envs, 1, device=self.device) * (-1.0)  # (N, T)
+        self.Sigma_X_delayed_noisy = torch.eye(3, device=self.device).unsqueeze(0).unsqueeze(0).expand(
+            self.num_envs, 1, 3, 3
+        ) * (-1.0)
+        self.trace_cov_delayed_noisy = torch.ones(self.num_envs, 1, device=self.device) * (-1.0)
+        
+    def compute_camera_poses(
+        self,
+        robot_pos: torch.Tensor,
+        robot_quat: torch.Tensor,
+        gimbal_yaw: torch.Tensor,
+        gimbal_pitch: torch.Tensor,
+        gimbal_roll: torch.Tensor,
+        camera_offset_rot: torch.Tensor,
+        camera_offset_pos: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute camera poses from robot and gimbal states.
+        
+        Args:
+            robot_pos: (N, C, 3)
+            robot_quat: (N, C, 4)
+            gimbal_yaw: (N, C)
+            gimbal_pitch: (N, C)
+            gimbal_roll: (N, C)
+            camera_offset_rot: (N, 4)
+            camera_offset_pos: (N, 3)
+            
+        Returns:
+            camera_pos: (N, C, 3)
+            camera_quat: (N, C, 4)
+        """
+        N, C = robot_pos.shape[:2]
+        
+        # Expand camera offset for broadcasting
+        camera_offset_rot_exp = camera_offset_rot.unsqueeze(1).expand(N, C, 4)
+        camera_offset_pos_exp = camera_offset_pos.unsqueeze(1).expand(N, C, 3)
+        
+        # Compute gimbal quaternion
+        gimbal_quat = quat_mul(
+            quat_mul(
+                quat_from_euler_xyz(
+                    torch.zeros_like(gimbal_yaw),
+                    torch.zeros_like(gimbal_yaw),
+                    gimbal_yaw
+                ),
+                quat_from_euler_xyz(
+                    torch.zeros_like(gimbal_pitch),
+                    gimbal_pitch,
+                    torch.zeros_like(gimbal_pitch)
+                )
+            ),
+            quat_from_euler_xyz(gimbal_roll, torch.zeros_like(gimbal_roll), torch.zeros_like(gimbal_roll))
+        )
+        
+        # Compute camera quaternion and position
+        camera_quat = quat_mul(robot_quat, quat_mul(gimbal_quat, camera_offset_rot_exp))
+        camera_pos = robot_pos + quat_rotate(camera_quat, camera_offset_pos_exp)
+        
+        return camera_pos, camera_quat
+    
+    def compute_intrinsics_with_zoom(
+        self,
+        base_intrinsics: torch.Tensor,
+        zoom_level: torch.Tensor,
+        noise: torch.Tensor = None,
+    ) -> torch.Tensor:
+        """Compute camera intrinsics with zoom and optional noise.
+        
+        Args:
+            base_intrinsics: (N, C, 3, 3) base intrinsic matrices
+            zoom_level: (N, C) zoom levels
+            noise: Optional (N, C, 4) noise for [fx, fy, cx, cy]
+            
+        Returns:
+            intrinsics: (N, C, 3, 3) intrinsic matrices with zoom applied
+        """
+        intrinsics = base_intrinsics.clone()
+        
+        if noise is not None:
+            intrinsics[:, :, 0, 0] = (intrinsics[:, :, 0, 0] + noise[:, :, 0]) * zoom_level
+            intrinsics[:, :, 1, 1] = (intrinsics[:, :, 1, 1] + noise[:, :, 1]) * zoom_level
+            # Currently not supported in IsaacSim 4.5
+            # intrinsics[:, :, 0, 2] = intrinsics[:, :, 0, 2] + noise[:, :, 2]
+            # intrinsics[:, :, 1, 2] = intrinsics[:, :, 1, 2] + noise[:, :, 3]
+        else:
+            intrinsics[:, :, 0, 0] *= zoom_level
+            intrinsics[:, :, 1, 1] *= zoom_level
+        
+        return intrinsics
+
+
+class IrisMAEnvWindow(BaseEnvWindow):
+    """Window manager for the Multi-Agent Iris environment."""
+
+    def __init__(self, env: IrisMAEnv, window_name: str = "IsaacLab MARL"):
+        """Initialize the window."""
+        super().__init__(env, window_name)
+        with self.ui_window_elements["main_vstack"]:
+            with self.ui_window_elements["debug_frame"]:
+                with self.ui_window_elements["debug_vstack"]:
+                    self._create_debug_vis_ui_element("targets", self.env)
+
+@configclass
+class ResearchLoggingCfg:
+    log_interval_steps: int = 1
+    sample_envs: int = 64
+    tqi_opt_area: float = 0.05
+    tqi_area_sigma: float = 0.02
+    tqi_threshold: float = 0.20
+    beta_min_deg: float = 30.0
+    beta_max_deg: float = 150.0
+    pixel_pitch_m: float = 3.45e-6
+    det_std_px: float = 0.5
+    enable_step_logging: bool = DEBUG_DRAW
+
+@configclass
+class IrisMAEnvCfg(DirectMARLEnvCfg):
+    # env
+    episode_length_s = 20.0
+    decimation = 2
+    
+    # Define agents
+    possible_agents = ["drone_0", "drone_1"]
+    
+    # Define spaces for each agent
+    action_spaces = {
+        "drone_0": 7,  # [vx, vy, vz, yaw_rate, gimbal_yaw_rate, gimbal_pitch_rate, zoom_rate]
+        "drone_1": 7,
+    }
+    observation_spaces = {
+        "drone_0": 29,
+        "drone_1": 29,
+    }
+    state_space = -1
+    
+    debug_vis = True
+    ui_window_class_type = IrisMAEnvWindow
+
+    # simulation
+    sim: SimulationCfg = SimulationCfg(
+        dt=2 / 100,
+        render_interval=decimation,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
+        ),
+    )
+
+    terrain = TerrainImporterCfg(
+        prim_path="/World/ground",
+        terrain_type="plane",
+        collision_group=-1,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
+        ),
+        debug_vis=False,
+    )
+
+    # Camera configuration template
+    camera: TiledCameraCfg = TiledCameraCfg(
+        prim_path="/World/envs/env_.*/{robot_name}/pitch_link/camera",
+        update_period=0.1,
+        height=480,
+        width=640,
+        data_types=["rgb", "semantic_segmentation"],
+        colorize_semantic_segmentation=True,
+        semantic_segmentation_mapping={
+            "class:target": (255, 36, 66, 255),
+            "class:robot": (255, 36, 255, 255),
+        },
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=24.0, 
+            focus_distance=400.0, 
+            horizontal_aperture=20.955, 
+            clipping_range=(0.1, 1.0e5)
+        ),
+        offset=TiledCameraCfg.OffsetCfg(
+            pos=(0.0, 0.0, 0.0), 
+            rot=(0.5, -0.5, 0.5, -0.5), 
+            convention="ros"
+        ),
+    )
+
+    # Target configuration
+    target_cfg: RigidObjectCfg = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/target",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path="/home/usrg/IsaacPX4/PegasusSimulator/extensions/pegasus.simulator/pegasus/simulator/assets/Robots/Iris/iris_body.usda",
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=False,
+                disable_gravity=True,
+                enable_gyroscopic_forces=False,
+                rigid_body_enabled=True,
+            ),
+            copy_from_source=False,
+            scale=(1.0, 1.0, 1.0)
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(5.0, 0.0, 3.5), rot=(1.0, 0.0, 0.0, 0.0)),
+    )
+
+    # Viewer configuration
+    viewer: ViewerCfg = ViewerCfg(
+        eye=(100.0, 100.0, 100.0),
+        lookat=(0.0, 0.0, 0.0),
+    )
+
+    # Scene configuration
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=25.0, replicate_physics=True)
+    
+    # Robot configuration template
+    robot: ArticulationCfg = IRIS_GIMBAL2_CFG.replace(prim_path="/World/envs/env_.*/{robot_name}")
+    
+    research: ResearchLoggingCfg = ResearchLoggingCfg()
+
+    bbox_raycaster: bbox_raycaster.BBoxRayCasterCfg = bbox_raycaster.BBoxRayCasterCfg(
+        target_prim_paths=[],
+        mesh_prim_paths=["/World/ground"],
+        num_cameras_per_env=2,
+        num_cameras_per_agent=1,
+        load_agent_meshes=False,
+        agent_mesh_simplification=1.1,
+        use_collision_proxy=False,
+        min_bbox_size=(0.02, 0.02),
+        max_bbox_size=(0.90, 0.90),
+        partial_detection_allowed=False,
+        min_bbox_area_pixels=400.0,
+        enable_occlusion_check=False,
+        occlusion_ray_pattern="9point",
+        occlusion_visibility_threshold=0.5,
+        occlusion_ray_tolerance=1.1,
+        max_distance=100.0,
+        debug_vis=True,
+        debug_memory=False,
+    )
+
+    # Control parameters
+    thrust_to_weight = 4.0
+    moment_scale = 10.0
+    yaw_moment_scale = 1.0
+    
+    # Motion limits
+    max_target_speed = 15.0
+    max_target_ang_speed = math.radians(90.0)
+    max_lin_vel = 20.0
+    max_yaw_rate = 20.0
+    max_lin_acc = 3.0
+    max_ang_acc = 15.0
+    max_gimbal_yaw_angle = [math.radians(-180.0), math.radians(180.0)]
+    max_gimbal_pitch_angle = [math.radians(-60.0), math.radians(10.0)]
+    max_gimbal_angle_rate = [math.radians(-180.0), math.radians(180.0)]
+    max_zoom_rate = [-1.0, 1.0]
+    max_no_detection_sec = episode_length_s / 2.0
+
+    # Target movement parameters
+    target_acceleration_scale = 2.0
+    target_velocity_damping = 0.95
+    target_direction_change_prob = 0.01
+    target_max_acceleration = 3.0
+    
+    # Reward scales
+    lin_vel_penalty_scale = -0.1
+    ang_vel_penalty_scale = lin_vel_penalty_scale * 0.2
+    action_sum_penalty_scale = -1.0
+    action_weight = [1, 1, 1, 1, 1, 1, 1]
+    action_delta_weight = [1, 1, 1, 1, 1, 1, 1]
+    action_delta_penalty_scale = -0.05
+    zoom_reward_scale = -0.5
+    
+    # Single-agent tracking rewards
+    bbox_center_reward_scale = 60
+    bbox_size_reward_scale = 60
+    bbox_size_preferred = 0.04**2
+    bbox_reward_shape_width = 0.3
+    
+    # Multi-agent coordination rewards
+    triangulation_reward_scale = 5
+    collision_penalty_scale = -100
+    ttc_penalty_scale = -10
+    min_safe_distance = 20.0
+    ttc_horizon = 5.0
+
+    # Triangulation parameters
+    pix_std = 7.0
+    pos_std = 0.1
+    ori_std = 0.02
+    gimbal_std = 0.01
+    intrinsic_std = 10.0
+
+    # Curriculum
+    curriculum_coordination_start_step: int = 10000
+    curriculum_coordination_end_step: int = 20000
+    curriculum_tracking_start_step: int = -1
+    curriculum_tracking_end_step: int = 10000
+    curriculum_moving_target_start_step: int = 20000
+    curriculum_moving_target_end_step: int = 90000
+    
+    # Delay and Communication System Parameters
+    enable_delay_system: bool = True
+    detection_fps: float = 20.0
+    motion_time_constant: float = 0.1
+    gimbal_time_constant: float = 0.03
+    detection_mean_latency: float = 0.05
+    detection_std_latency: float = 0.01
+    comm_mean_delay: float = 0.1
+    comm_std_delay: float = 0.03
+    comm_dropout_rate: float = 0.05
+    delay_buffer_size: int = 100
+
+
+class IrisMAEnv(DirectMARLEnv):
+    cfg: IrisMAEnvCfg
+
+    def __init__(self, cfg: IrisMAEnvCfg, render_mode: str | None = None, **kwargs):
+        # Dynamically generate agent-specific robot and camera configs
+        self.agent_robot_cfgs = {}
+        self.agent_camera_cfgs = {}
+        for agent_id in cfg.possible_agents:
+            robot_index = agent_id.split("_")[-1]
+            robot_name = f"Robot_{robot_index}"
+
+            robot_cfg = copy.deepcopy(cfg.robot)
+            robot_cfg.prim_path = robot_cfg.prim_path.format(robot_name=robot_name)
+            self.agent_robot_cfgs[agent_id] = robot_cfg
+            
+            camera_cfg = copy.deepcopy(cfg.camera)
+            camera_cfg.prim_path = camera_cfg.prim_path.format(robot_name=robot_name)
+            self.agent_camera_cfgs[agent_id] = camera_cfg
+            
+        super().__init__(cfg, render_mode, **kwargs)
+        
+        # Initialize per-agent action and control tensors
+        self._actions = {
+            agent: torch.zeros(self.num_envs, gym.spaces.flatdim(self.action_spaces[agent]), device=self.device)
+            for agent in self.cfg.possible_agents
+        }
+        self._last_actions = {
+            agent: torch.zeros(self.num_envs, gym.spaces.flatdim(self.action_spaces[agent]), device=self.device)
+            for agent in self.cfg.possible_agents
+        }
+        self._thrust = {
+            agent: torch.zeros(self.num_envs, 1, 3, device=self.device)
+            for agent in self.cfg.possible_agents
+        }
+        self._moment = {
+            agent: torch.zeros(self.num_envs, 1, 3, device=self.device)
+            for agent in self.cfg.possible_agents
+        }
+        self._cmd_vel = {
+            agent: torch.zeros(self.num_envs, 1, 6, device=self.device)
+            for agent in self.cfg.possible_agents
+        }
+
+        # Target scale
+        num_targets_per_env = 1
+        self.base_target_scale = self.cfg.target_cfg.spawn.scale[0]
+        self.target_scale = torch.ones(self.num_envs, num_targets_per_env, 3, device=self.device) * self.base_target_scale
+
+        # Target movement
+        self.target_vel = torch.zeros(self.num_envs, 6, device=self.device).uniform_(-1.0, 1.0)
+        self.last_target_vel = self.target_vel.clone()
+        self.target_acceleration = torch.zeros(self.num_envs, 6, device=self.device)
+        self.target_desired_vel = torch.zeros(self.num_envs, 6, device=self.device).uniform_(-1.0, 1.0) * self.cfg.max_target_speed
+        self.target_desired_vel[:, 3:5] = 0.0
+        self.target_vel_change_timer = torch.zeros(self.num_envs, device=self.device)
+        self.target_motion_type = torch.randint(0, 2, (self.num_envs,), device=self.device)
+        self.target_motion_radius = torch.zeros(self.num_envs, device=self.device).uniform_(10.0, 50.0)
+        self.target_motion_yaw_vel = torch.norm(self.target_desired_vel[:, :3], dim=-1) / self.target_motion_radius
+        
+        # Camera tracking for each agent
+        self.camera_pos_world = {
+            agent: torch.zeros(self.num_envs, 3, device=self.device)
+            for agent in self.cfg.possible_agents
+        }
+        self.camera_quat_world = {
+            agent: torch.zeros(self.num_envs, 4, device=self.device)
+            for agent in self.cfg.possible_agents
+        }
+        self.bboxes = {
+            agent: torch.zeros(self.num_envs, 4, device=self.device)
+            for agent in self.cfg.possible_agents
+        }
+        self.bbox_valid_mask = {
+            agent: torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.bool)
+            for agent in self.cfg.possible_agents
+        }
+        
+        # Gimbal tracking
+        self.gimbal_dof_targets = {
+            agent: torch.zeros(self.num_envs, self._robots[agent].num_joints, device=self.device)
+            for agent in self.cfg.possible_agents
+        }
+        
+        # Zoom tracking
+        self.zoom_level = {
+            agent: torch.ones(self.num_envs, device=self.device) * 1.0
+            for agent in self.cfg.possible_agents
+        }
+        self.base_focal_length = {
+            agent: torch.full(
+                (self.num_envs,),
+                float(self.agent_camera_cfgs[agent].spawn.focal_length),
+                device=self.device,
+                dtype=torch.float32,
+            )
+            for agent in self.cfg.possible_agents
+        }
+        
+        # Camera configuration batch for each agent
+        self.camera_offset = torch.tensor((0, 0, 0.1), device=self.device).expand(self.num_envs, -1)
+        self.camera_cfg_batch = {
+            agent_id: create_camera_cfg_tensor(agent_cfg, self.num_envs, device=self.device)
+            for agent_id, agent_cfg in self.agent_camera_cfgs.items()
+        }
+        self.camera_intrinsics = {
+            agent: bbox_raycaster.utils.create_intrinsic_matrix_tensor(self.camera_cfg_batch[agent])
+            for agent in self.cfg.possible_agents
+        }
+        self.base_intrinsic_matrices = self.camera_intrinsics.copy()
+        camera_offset_rot_single = torch.tensor(cfg.camera.offset.rot, device=self.device)
+        self.camera_offset_rot_batch = camera_offset_rot_single.unsqueeze(0).expand(self.num_envs, -1)
+        camera_offset_pos_single = torch.tensor(cfg.camera.offset.pos, device=self.device)
+        self.camera_offset_pos_batch = camera_offset_pos_single.unsqueeze(0).expand(self.num_envs, -1)
+
+        # Action weights
+        self.action_weight = torch.tensor(self.cfg.action_weight, device=self.device).repeat(self.num_envs, 1)
+        self.action_delta_weight = torch.tensor(self.cfg.action_delta_weight, device=self.device).repeat(self.num_envs, 1)
+        
+        # Get body and joint indices for each robot
+        self._body_ids = {}
+        self.gimbal_joint_idx = {}
+        self._robot_mass = {}
+        self._stabilizers = {}
+        
+        for agent in self.cfg.possible_agents:
+            robot = self._robots[agent]
+            self._body_ids[agent] = robot.find_bodies("body")[0]
+            self.gimbal_joint_idx[agent] = {
+                "yaw": robot.find_joints("yaw_joint")[0][0],
+                "roll": robot.find_joints("roll_joint")[0][0],
+                "pitch": robot.find_joints("pitch_joint")[0][0],
+            }
+            self._robot_mass[agent] = robot.root_physx_view.get_masses()[0].sum()
+            robot_weight = (self._robot_mass[agent] * torch.tensor(self.sim.cfg.gravity, device=self.device).norm()).item()
+            self._stabilizers[agent] = PointMass(0, robot_weight, self.num_envs, self.device)
+
+        # Prepare data in [N, C, ...] format
+        self.robot_positions_stacked = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), 3, device=self.device
+        )
+        self.robot_quats_stacked = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), 4, device=self.device
+        )
+        self.robot_velocity_stacked = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), 3, device=self.device
+        )
+        self.robot_angular_velocity_stacked = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), 3, device=self.device
+        )
+        self.gimbal_yaws_stacked = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), device=self.device
+        )
+        self.gimbal_pitches_stacked = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), device=self.device
+        )
+        self.camera_intrinsics_stacked = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), 3, 3, device=self.device
+        )
+        for agent_idx, agent_id in enumerate(self.cfg.possible_agents):
+            default_quat = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
+            self.robot_quats_stacked[:, agent_idx, :] = default_quat.unsqueeze(0).expand(self.num_envs, -1)
+            self.camera_intrinsics_stacked[:, agent_idx, :, :] = self.camera_intrinsics[agent_id]
+
+        # Consecutive no-detection counters
+        self.no_detection_counts = torch.zeros(self.num_envs, len(self.cfg.possible_agents), 1, device=self.device, dtype=torch.int)
+
+        # Define uncertainty covariances
+        self.X_w_est = torch.zeros(self.num_envs, 1, 3, device=self.device)
+        self.Sigma_X_invalid = torch.eye(3, device=self.device).unsqueeze(0).unsqueeze(0).expand(
+            self.num_envs, 1, 3, 3
+        ) * (-1.0)
+        self.Sigma_X = self.Sigma_X_invalid.clone()
+        self.trace_cov_invalid = torch.ones(self.num_envs, 1, device=self.device) * (-1.0)
+        self.trace_cov = self.trace_cov_invalid.clone()
+        self.is_tri_cov_valid = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.bool)
+
+        # Pixel noise [N, C, 2, 2]
+        self.Sigma_pix = torch.eye(2, device=self.device).unsqueeze(0).unsqueeze(0).expand(
+            self.num_envs, len(self.cfg.possible_agents), 2, 2
+        ) * (self.cfg.pix_std ** 2)
+        # Position uncertainty [N, C, 3, 3]
+        self.Sigma_twb = torch.eye(3, device=self.device).unsqueeze(0).unsqueeze(0).expand(
+            self.num_envs, len(self.cfg.possible_agents), 3, 3
+        ) * (self.cfg.pos_std ** 2)
+        # Orientation uncertainty [N, C, 3, 3]
+        self.Sigma_phiwb = torch.eye(3, device=self.device).unsqueeze(0).unsqueeze(0).expand(
+            self.num_envs, len(self.cfg.possible_agents), 3, 3
+        ) * (self.cfg.ori_std ** 2)
+        # Gimbal uncertainties [N, C, 1, 1]
+        self.Sigma_alpha = torch.ones(self.num_envs, len(self.cfg.possible_agents), 1, 1, 
+                                device=self.device) * (self.cfg.gimbal_std ** 2)
+        self.Sigma_beta = torch.ones(self.num_envs, len(self.cfg.possible_agents), 1, 1, 
+                                device=self.device) * (self.cfg.gimbal_std ** 2)
+        # Intrinsic uncertainties [N, C, 4, 4]
+        self.Sigma_K = torch.eye(4, device=self.device).unsqueeze(0).unsqueeze(0).expand(
+            self.num_envs, len(self.cfg.possible_agents), 4, 4
+        ) * (self.cfg.intrinsic_std ** 2)
+
+        # Sampled noise values
+        self.sampled_noise_generator = torch.Generator(device=self.device).manual_seed(0)
+        self.sampled_noise_pix = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), 1, 4, device=self.device
+        )
+        self.sampled_noise_twb = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), 3, device=self.device
+        )
+        self.sampled_noise_phiwb = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), 3, device=self.device
+        )
+        self.sampled_noise_alpha = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), 1, device=self.device
+        )
+        self.sampled_noise_beta = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), 1, device=self.device
+        )
+        self.sampled_noise_K = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), 4, device=self.device
+        )
+
+        # Collision and TTC
+        self.cam_to_cam_distance = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), len(self.cfg.possible_agents), 
+            device=self.device)
+        self.cam_to_target_distance = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), 1, 
+            device=self.device)
+        self.cam_to_cam_ttc = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), len(self.cfg.possible_agents), 
+            device=self.device)
+        self.cam_to_target_ttc = torch.zeros(
+            self.num_envs, len(self.cfg.possible_agents), 1, 
+            device=self.device)
+
+        self._research = {
+            "cvtt_sec": torch.zeros(self.num_envs, device=self.device),
+            "tqi_sum": torch.zeros(self.num_envs, device=self.device),
+            "steps": torch.zeros(self.num_envs, device=self.device),
+            "last_step_logged": -1,
+        }
+        perm = torch.randperm(self.num_envs, device=self.device)
+        self._research_sample_ids = perm[:min(self.cfg.research.sample_envs, self.num_envs)]
+
+        # Episode tracking
+        self._episode_sums = {
+            agent: {
+                key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+                for key in [
+                    "action_sum", 
+                    "action_delta", 
+                    "bbox_center", 
+                    "bbox_size", 
+                    "triangulation", 
+                    "collision",
+                    "ttc_penalty",
+                    ]
+            }
+            for agent in self.cfg.possible_agents
+        }
+        
+        # Visualization
+        self.set_debug_vis(self.cfg.debug_vis)
+        if DEBUG_DRAW and omni_debug_draw is not None:
+            self.camera_frustrum = CameraFrustrum()
+            self.draw_interface = omni_debug_draw.acquire_debug_draw_interface()
+            marker_cfg = VisualizationMarkersCfg(
+                prim_path="/Visuals/myMarkers",
+                markers={
+                    "sphere": sim_utils.SphereCfg(
+                        radius=0.5,
+                        visual_material=sim_utils.PreviewSurfaceCfg(
+                            diffuse_color=(3/255, 252/255, 248/255),
+                        ),
+                    ),
+                }
+            )
+            self.tri_cov_visualizer = VisualizationMarkers(marker_cfg)
+        
+        # Initialize states container
+        self.states = AgentStates(self.num_envs, len(self.cfg.possible_agents), self.device)
+
+        # Initialize Delay and Communication System
+        if self.cfg.enable_delay_system:
+            self.delay_manager = DelayedObservationManager(
+                num_envs=self.num_envs,
+                num_agents=len(self.cfg.possible_agents),
+                dt=self.cfg.sim.dt * self.cfg.decimation,
+                device=self.device,
+                motion_time_constant=self.cfg.motion_time_constant,
+                gimbal_time_constant=self.cfg.gimbal_time_constant,
+                detection_mean_latency=self.cfg.detection_mean_latency,
+                detection_std_latency=self.cfg.detection_std_latency,
+                comm_mean_delay=self.cfg.comm_mean_delay,
+                comm_std_delay=self.cfg.comm_std_delay,
+                comm_dropout_rate=self.cfg.comm_dropout_rate,
+                max_buffer_size=self.cfg.delay_buffer_size
+            )
+            
+            self.agent_name_to_id = {
+                name: idx for idx, name in enumerate(self.cfg.possible_agents)
+            }
+            
+            self.detection_period = 1.0 / self.cfg.detection_fps
+            self.time_since_last_detection = torch.zeros(self.num_envs, len(self.cfg.possible_agents), device=self.device)
+            self.last_detection_time = torch.zeros(self.num_envs, len(self.cfg.possible_agents), device=self.device)
+            
+            print(f"[IrisMAEnv] Delay system enabled:")
+            print(f"  - Detection FPS: {self.cfg.detection_fps:.1f} Hz ({self.detection_period*1000:.1f}ms period)")
+            print(f"  - Motion lag: {self.cfg.motion_time_constant*1000:.1f}ms")
+            print(f"  - Gimbal lag: {self.cfg.gimbal_time_constant*1000:.1f}ms")
+            print(f"  - Detection latency: {self.cfg.detection_mean_latency*1000:.1f}±{self.cfg.detection_std_latency*1000:.1f}ms")
+            print(f"  - Comm delay: {self.cfg.comm_mean_delay*1000:.1f}±{self.cfg.comm_std_delay*1000:.1f}ms")
+            print(f"  - Comm dropout: {self.cfg.comm_dropout_rate*100:.1f}%")
+        else:
+            self.delay_manager = None
+            self.agent_name_to_id = None
+            self.time_since_last_detection = None
+            self.last_detection_time = None
+            print("[IrisMAEnv] Delay system disabled")
+        
+        self._env_origins = self._compute_env_origins_grid(self.num_envs, self.cfg.scene.env_spacing)
+
+    def _compute_env_origins_grid(self, num_envs: int, env_spacing: float) -> torch.Tensor:
+        """Compute the origins of the environments in a grid."""
+        env_origins = torch.zeros(num_envs, 3, device=self.device)
+        num_rows = np.ceil(num_envs / int(np.sqrt(num_envs)))
+        num_cols = np.ceil(num_envs / num_rows)
+        ii, jj = torch.meshgrid(
+            torch.arange(num_rows, device=self.device), 
+            torch.arange(num_cols, device=self.device), 
+            indexing="ij"
+        )
+        env_origins[:, 0] = -(ii.flatten()[:num_envs] - (num_rows - 1) / 2) * env_spacing
+        env_origins[:, 1] = (jj.flatten()[:num_envs] - (num_cols - 1) / 2) * env_spacing
+        env_origins[:, 2] = 0.0
+        return env_origins
+    
+    def _setup_scene(self):
+        """Setup the scene with multiple robots and shared target."""
+        # Create robots for each agent
+        self._robots = {}
+        for agent_id, robot_cfg in self.agent_robot_cfgs.items():
+            robot_cfg.spawn.semantic_tags = [("class", "robot")]
+            self._robots[agent_id] = Articulation(robot_cfg)
+        
+        # Create cameras for each agent
+        self._cameras = {}
+        if DEBUG_DRAW:
+            for agent_id, camera_cfg in self.agent_camera_cfgs.items():
+                self._cameras[agent_id] = TiledCamera(camera_cfg)
+
+        # Create terrain
+        if self.cfg.terrain is not None:
+            self.cfg.terrain.num_envs = self.scene.cfg.num_envs
+            self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
+            self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
+        else:
+            self._terrain = None
+        
+        # Create shared target
+        self.cfg.target_cfg.spawn.semantic_tags = [("class", "target")]
+        self.target = RigidObject(self.cfg.target_cfg)
+        
+        # Clone environments
+        self.scene.clone_environments(copy_from_source=False)
+        if self.cfg.terrain is not None:
+            self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
+        
+        # Register articulations, rigid objects, and sensors
+        for agent_id, robot in self._robots.items():
+            robot_index = agent_id.split("_")[-1]
+            self.scene.articulations[f"Robot_{robot_index}"] = robot
+        
+        self.scene.rigid_objects["target"] = self.target
+
+        if DEBUG_DRAW:
+            for agent_id, camera in self._cameras.items():
+                robot_index = agent_id.split("_")[-1]
+                self.scene.sensors[f"camera_{robot_index}"] = camera
+        
+        # Configure and initialize bbox raycaster
+        self.cfg.bbox_raycaster.debug_vis = DEBUG_DRAW
+        self.cfg.bbox_raycaster.target_prim_paths = self.scene.env_prim_paths
+        
+        self.bbox_raycaster = bbox_raycaster.BBoxRayCaster(
+            cfg=self.cfg.bbox_raycaster,
+            num_envs=self.num_envs,
+            num_targets_per_env=1,
+            device=self.device,
+            agent_ids=self.cfg.possible_agents,
+        )
+
+        # Add lights
+        light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
+        light_cfg.func("/World/Light", light_cfg)
+
+    def _pre_physics_step(self, actions: Dict[str, torch.Tensor]):
+        """Pre-process actions for all agents before physics step."""
+        # Update delay manager time (must be first!)
+        if self.cfg.enable_delay_system and self.delay_manager is not None:
+            self.delay_manager.update_time()
+        
+        for agent_id, agent_actions in actions.items():
+            if torch.isnan(agent_actions).any():
+                continue
+                
+            robot = self._robots[agent_id]
+            stabilizer = self._stabilizers[agent_id]
+            
+            # Process actions (implementation continues with existing logic...)
+            self._actions[agent_id] = agent_actions.clone()
+            
+            # Extract actions
+            vel_target_world = agent_actions[:, 0:3]
+            yaw_rate_target_body = agent_actions[:, 3:4]
+            gimbal_yaw_rate = agent_actions[:, 4:5]
+            gimbal_pitch_rate = agent_actions[:, 5:6]
+            zoom_rate = agent_actions[:, 6:7]
+            
+            # Velocity commands
+            self._cmd_vel[agent_id][:, 0, 0:3] = vel_target_world * self.cfg.max_lin_vel
+            self._cmd_vel[agent_id][:, 0, 5:6] = yaw_rate_target_body * self.cfg.max_yaw_rate
+            
+            # Update gimbal targets
+            gimbal_idx = self.gimbal_joint_idx[agent_id]
+            self.gimbal_dof_targets[agent_id][:, gimbal_idx["yaw"]] = torch.clamp(
+                self.gimbal_dof_targets[agent_id][:, gimbal_idx["yaw"]] + gimbal_yaw_rate.squeeze(-1) * self.step_dt,
+                min=self.cfg.max_gimbal_yaw_angle[0],
+                max=self.cfg.max_gimbal_yaw_angle[1]
+            )
+            self.gimbal_dof_targets[agent_id][:, gimbal_idx["pitch"]] = torch.clamp(
+                self.gimbal_dof_targets[agent_id][:, gimbal_idx["pitch"]] + gimbal_pitch_rate.squeeze(-1) * self.step_dt,
+                min=self.cfg.max_gimbal_pitch_angle[0],
+                max=self.cfg.max_gimbal_pitch_angle[1]
+            )
+            
+            # Update zoom level
+            self.zoom_level[agent_id] = torch.clamp(
+                self.zoom_level[agent_id] + zoom_rate.squeeze(-1) * self.step_dt,
+                min=1.0,
+                max=5.0
+            )
+            
+            # Apply joint targets
+            robot.set_joint_position_target(self.gimbal_dof_targets[agent_id])
+            
+            # Compute forces using stabilizer
+            self._thrust[agent_id][:,0,:], self._moment[agent_id][:,0,:] = stabilizer.compute_control(
+                self._cmd_vel[agent_id][:, 0, :3], 
+                self._cmd_vel[agent_id][:, 0, 5],
+                robot.data.root_state_w[:, 3:7],
+                robot.data.root_lin_vel_w, 
+                robot.data.root_ang_vel_b, 
+                self.step_dt
+            )
+            self._thrust[agent_id][:,0,:] -= robot.data.root_lin_vel_b * 0.01  # Dampen linear velocity
+
+            # Apply forces to robot
+            robot.set_external_force_and_torque(
+                self._thrust[agent_id],  # Dampen linear velocity
+                self._moment[agent_id], 
+                body_ids=self._body_ids[agent_id]
+            )
+        # Randomly assign environments to linear (0) or circular (1) motion
+        target_motion_assignment = torch.randint(0, 2, (self.num_envs,), device=self.device)
+        linear_env_ids = torch.nonzero(target_motion_assignment == 0, as_tuple=False).squeeze(-1)
+        circular_env_ids = torch.nonzero(target_motion_assignment == 1, as_tuple=False).squeeze(-1)
+
+        # Update target movement based on assignment
+        if len(linear_env_ids) > 0:
+            self._update_target_motion(mode="linear", env_ids=linear_env_ids)
+        if len(circular_env_ids) > 0:
+            self._update_target_motion(mode="circular", env_ids=circular_env_ids)
+        # Bounce targets that are too low
+        up_vel = self.target_vel.clone()
+        up_vel[..., 2] = torch.where(self.target_vel[..., 2] > 0, self.target_vel[..., 2], -self.target_vel[..., 2])
+        target_lower_bound = torch.ones_like(self.target.data.root_state_w, device=self.device) * 1.0
+        self.target_vel[..., 2] = torch.where(
+            self.target.data.root_state_w[:, 2] < target_lower_bound[:, 2], 
+            up_vel[..., 2], 
+            self.target_vel[..., 2]
+        )
+        start = self.cfg.curriculum_moving_target_start_step
+        end = self.cfg.curriculum_moving_target_end_step
+        progress = (self.common_step_counter - start) / (end - start)
+        progress = 0 if progress < 0 else (1 if progress > 1 else progress)
+        progress = 1 if DEBUG_DRAW else progress
+        # Apply target velocity
+        self.target.write_root_com_velocity_to_sim(self.target_vel * progress)
+
+    def _apply_action(self):
+        """Apply actions to the environment."""
+        pass  # Forces already applied in _pre_physics_step
+
+    def _compute_intermediate_values(self):
+        """Compute intermediate values shared by both rewards and observations.
+        
+        This method is called at the start of _get_rewards() to prepare:
+        1. Ground truth states for reward computation
+        2. Delayed states (without noise) for reward computation
+        3. Delayed+noisy states for observation computation
+        """
+        # Update time tracking
+        if self.cfg.enable_delay_system and self.delay_manager is not None:
+            self.time_since_last_detection += self.step_dt
+        
+        # Generate noise samples (used later for delayed+noisy states)
+        self.sampled_noise_pix.normal_(mean=0.0, std=self.cfg.pix_std, generator=self.sampled_noise_generator)
+        self.sampled_noise_twb.normal_(mean=0.0, std=self.cfg.pos_std, generator=self.sampled_noise_generator)
+        self.sampled_noise_phiwb.normal_(mean=0.0, std=self.cfg.ori_std, generator=self.sampled_noise_generator)
+        self.sampled_noise_alpha.normal_(mean=0.0, std=self.cfg.gimbal_std, generator=self.sampled_noise_generator)
+        self.sampled_noise_beta.normal_(mean=0.0, std=self.cfg.gimbal_std, generator=self.sampled_noise_generator)
+        self.sampled_noise_K.normal_(mean=0.0, std=self.cfg.intrinsic_std, generator=self.sampled_noise_generator)
+        
+        # ===== 1. COLLECT GROUND TRUTH STATES =====
+        # These are used for reward computation
+        robot_positions_gt = torch.zeros_like(self.robot_positions_stacked)
+        robot_quats_gt = torch.zeros_like(self.robot_quats_stacked)
+        robot_lin_vels_gt = torch.zeros_like(self.robot_velocity_stacked)
+        robot_ang_vels_gt = torch.zeros_like(self.robot_angular_velocity_stacked)
+        gimbal_yaws_gt = torch.zeros_like(self.gimbal_yaws_stacked)
+        gimbal_pitches_gt = torch.zeros_like(self.gimbal_pitches_stacked)
+        gimbal_rolls_gt = torch.zeros_like(self.gimbal_yaws_stacked)
+        zoom_levels_gt = torch.zeros_like(self.gimbal_yaws_stacked)
+        
+        for i, agent_id in enumerate(self.cfg.possible_agents):
+            robot = self._robots[agent_id]
+            gimbal_idx = self.gimbal_joint_idx[agent_id]
+            
+            robot_positions_gt[:, i, :] = robot.data.root_pos_w
+            robot_quats_gt[:, i, :] = robot.data.root_state_w[:, 3:7]
+            gimbal_yaws_gt[:, i] = robot.data.joint_pos[:, gimbal_idx["yaw"]]
+            gimbal_pitches_gt[:, i] = robot.data.joint_pos[:, gimbal_idx["pitch"]]
+            gimbal_rolls_gt[:, i] = robot.data.joint_pos[:, gimbal_idx["roll"]]
+            zoom_levels_gt[:, i] = self.zoom_level[agent_id]
+        
+            width = self.camera_cfg_batch[agent_id][:, 0]
+            horizontal_aperture = self.camera_cfg_batch[agent_id][:, 3]
+            current_focal_length = (self.base_focal_length[agent_id] + self.sampled_noise_K[:, i, 0] / width * horizontal_aperture) * self.zoom_level[agent_id]
+            self.camera_cfg_batch[agent_id][:, 2] = current_focal_length
+        
+        # Compute GT camera poses and intrinsics
+        camera_pos_gt, camera_quat_gt = self.states.compute_camera_poses(
+            robot_pos=robot_positions_gt,
+            robot_quat=robot_quats_gt,
+            gimbal_yaw=gimbal_yaws_gt,
+            gimbal_pitch=gimbal_pitches_gt,
+            gimbal_roll=gimbal_rolls_gt,
+            camera_offset_rot=self.camera_offset_rot_batch,
+            camera_offset_pos=self.camera_offset_pos_batch,
+        )
+        
+        # Stack base intrinsics (N, C, 3, 3)
+        base_intrinsics_stacked = torch.stack([
+            self.base_intrinsic_matrices[agent_id] for agent_id in self.cfg.possible_agents
+        ], dim=1)
+        
+        camera_intrinsics_gt = self.states.compute_intrinsics_with_zoom(
+            base_intrinsics=base_intrinsics_stacked,
+            zoom_level=zoom_levels_gt,
+        )
+
+        # Update bbox raycaster with GT states
+        target_pos = self.target.data.root_pos_w
+        target_quat = self.target.data.root_quat_w
+        if target_pos.ndim == 2:
+            target_pos = target_pos.unsqueeze(1)
+        if target_quat.ndim == 2:
+            target_quat = target_quat.unsqueeze(1)
+        
+        camera_poses_gt = {
+            str(agent_id): (camera_pos_gt[:, i, :], camera_quat_gt[:, i, :])
+            for i, agent_id in enumerate(self.cfg.possible_agents)
+        }
+        camera_intrinsics_gt_dict = {
+            str(agent_id): camera_intrinsics_gt[:, i, :, :]
+            for i, agent_id in enumerate(self.cfg.possible_agents)
+        }
+        agent_poses_gt = {
+            str(agent_id): (robot_positions_gt[:, i, :], robot_quats_gt[:, i, :])
+            for i, agent_id in enumerate(self.cfg.possible_agents)
+        }
+        image_shapes = {
+            str(agent_id): (self.agent_camera_cfgs[agent_id].height, self.agent_camera_cfgs[agent_id].width)
+            for agent_id in self.cfg.possible_agents
+        }
+        
+        self.bbox_raycaster.update(
+            camera_poses=camera_poses_gt,
+            camera_intrinsics=camera_intrinsics_gt_dict,
+            target_poses=(target_pos, target_quat),
+            agent_poses=agent_poses_gt,
+            image_shapes=image_shapes,
+            target_scale=self.target_scale
+        )
+        
+        # Update per-agent bbox storage
+        for i, agent_id in enumerate(self.cfg.possible_agents):
+            self.bboxes[agent_id] = self.bbox_raycaster.data.bboxes[:, i, 0, :]
+            self.bbox_valid_mask[agent_id] = self.bbox_raycaster.data.valid_mask[:, i, 0:1]
+            self.camera_pos_world[agent_id] = camera_pos_gt[:, i, :]
+            self.camera_quat_world[agent_id] = camera_quat_gt[:, i, :]
+        
+        # ===== 2. PROCESS DELAYED STATES (WITHOUT NOISE) FOR REWARDS =====
+        if self.cfg.enable_delay_system and self.delay_manager is not None:
+            for i, agent_id in enumerate(self.cfg.possible_agents):
+                robot = self._robots[agent_id]
+                gimbal_idx = self.gimbal_joint_idx[agent_id]
+                
+                # Get true states WITHOUT noise
+                robot_pos_true = robot.data.root_pos_w
+                robot_quat_true = robot.data.root_state_w[:, 3:7]
+                robot_lin_vel_true = robot.data.root_lin_vel_w
+                robot_ang_vel_true = robot.data.root_ang_vel_b
+                gimbal_yaw_true = robot.data.joint_pos[:, gimbal_idx["yaw"]].unsqueeze(-1)
+                gimbal_pitch_true = robot.data.joint_pos[:, gimbal_idx["pitch"]].unsqueeze(-1)
+                
+                # Apply first-order lag (this simulates delays without adding noise)
+                robot_pos_delayed, robot_quat_delayed, robot_lin_vel_delayed, robot_ang_vel_delayed = self.delay_manager.update_ego_motion(
+                    self.agent_name_to_id[agent_id],
+                    robot_pos_true,
+                    robot_quat_true,
+                    robot_lin_vel_true,
+                    robot_ang_vel_true
+                )
+                
+                gimbal_yaw_delayed, gimbal_pitch_delayed = self.delay_manager.update_ego_gimbal(
+                    self.agent_name_to_id[agent_id],
+                    gimbal_yaw_true,
+                    gimbal_pitch_true
+                )
+                
+                # Store delayed states (without noise)
+                self.states.delayed_robot_pos[:, i, :] = robot_pos_delayed
+                self.states.delayed_robot_quat[:, i, :] = robot_quat_delayed
+                self.states.delayed_robot_lin_vel[:, i, :] = robot_lin_vel_delayed
+                self.states.delayed_robot_ang_vel[:, i, :] = robot_ang_vel_delayed
+                self.states.delayed_gimbal_yaw[:, i] = gimbal_yaw_delayed.squeeze(-1)
+                self.states.delayed_gimbal_pitch[:, i] = gimbal_pitch_delayed.squeeze(-1)
+                self.states.delayed_zoom_level[:, i] = self.zoom_level[agent_id]
+            
+            # Compute delayed camera poses (without noise)
+            gimbal_roll_delayed = gimbal_rolls_gt  # Roll is not delayed (assuming no control)
+            camera_pos_delayed, camera_quat_delayed = self.states.compute_camera_poses(
+                robot_pos=self.states.delayed_robot_pos,
+                robot_quat=self.states.delayed_robot_quat,
+                gimbal_yaw=self.states.delayed_gimbal_yaw,
+                gimbal_pitch=self.states.delayed_gimbal_pitch,
+                gimbal_roll=gimbal_roll_delayed,
+                camera_offset_rot=self.camera_offset_rot_batch,
+                camera_offset_pos=self.camera_offset_pos_batch,
+            )
+            self.states.camera_pos_delayed = camera_pos_delayed
+            self.states.camera_quat_delayed = camera_quat_delayed
+            
+            # Compute delayed intrinsics (without noise)
+            self.states.camera_intrinsics_delayed = self.states.compute_intrinsics_with_zoom(
+                base_intrinsics=base_intrinsics_stacked,
+                zoom_level=self.states.delayed_zoom_level,
+            )
+            
+            # Compute ray directions from delayed states (without noise)
+            # We need bboxes first, so we'll compute them from the raycaster
+            self.bbox_raycaster.update(
+                camera_poses={
+                    str(agent_id): (self.states.camera_pos_delayed[:, i, :], self.states.camera_quat_delayed[:, i, :])
+                    for i, agent_id in enumerate(self.cfg.possible_agents)
+                },
+                camera_intrinsics={
+                    str(agent_id): self.states.camera_intrinsics_delayed[:, i, :, :]
+                    for i, agent_id in enumerate(self.cfg.possible_agents)
+                },
+                target_poses=(target_pos, target_quat),
+                agent_poses={
+                    str(agent_id): (self.states.delayed_robot_pos[:, i, :], self.states.delayed_robot_quat[:, i, :])
+                    for i, agent_id in enumerate(self.cfg.possible_agents)
+                },
+                image_shapes=image_shapes,
+                target_scale=self.target_scale
+            )
+            self.states.bboxes_delayed = self.bbox_raycaster.data.bboxes  # (N, C, T, 4)
+            self.states.valid_mask_delayed = self.bbox_raycaster.data.valid_mask  # (N, C, T)
+            
+            self.states.ray_dir_delayed = get_ray_dir_from_bbox(
+                self.states.bboxes_delayed,
+                self.states.camera_intrinsics_delayed,
+                self.states.camera_quat_delayed,
+                self.states.camera_pos_delayed,
+            )
+            
+            # ===== 3. COMPUTE DELAYED + NOISY STATES FOR OBSERVATIONS =====
+            # Apply measurement noise to delayed states
+            for i, agent_id in enumerate(self.cfg.possible_agents):
+                # Add noise to delayed position
+                self.states.delayed_noisy_robot_pos[:, i, :] = \
+                    self.states.delayed_robot_pos[:, i, :] + self.sampled_noise_twb[:, i, :]
+                
+                # Add noise to delayed orientation
+                robot_roll, robot_pitch, robot_yaw = euler_xyz_from_quat(self.states.delayed_robot_quat[:, i, :])
+                self.states.delayed_noisy_robot_quat[:, i, :] = quat_from_euler_xyz(
+                    robot_roll + self.sampled_noise_phiwb[:, i, 0],
+                    robot_pitch + self.sampled_noise_phiwb[:, i, 1],
+                    robot_yaw + self.sampled_noise_phiwb[:, i, 2],
+                )
+                
+                # Add noise to delayed gimbal angles
+                self.states.delayed_noisy_gimbal_yaw[:, i] = \
+                    self.states.delayed_gimbal_yaw[:, i] + self.sampled_noise_alpha[:, i, 0]
+                self.states.delayed_noisy_gimbal_pitch[:, i] = \
+                    self.states.delayed_gimbal_pitch[:, i] + self.sampled_noise_beta[:, i, 0]
+            
+            # Compute delayed+noisy camera poses
+            camera_pos_delayed_noisy, camera_quat_delayed_noisy = self.states.compute_camera_poses(
+                robot_pos=self.states.delayed_noisy_robot_pos,
+                robot_quat=self.states.delayed_noisy_robot_quat,
+                gimbal_yaw=self.states.delayed_noisy_gimbal_yaw,
+                gimbal_pitch=self.states.delayed_noisy_gimbal_pitch,
+                gimbal_roll=gimbal_roll_delayed,
+                camera_offset_rot=self.camera_offset_rot_batch,
+                camera_offset_pos=self.camera_offset_pos_batch,
+            )
+            self.states.camera_pos_delayed_noisy = camera_pos_delayed_noisy
+            self.states.camera_quat_delayed_noisy = camera_quat_delayed_noisy
+            
+            # Compute delayed+noisy intrinsics
+            self.states.camera_intrinsics_delayed_noisy = self.states.compute_intrinsics_with_zoom(
+                base_intrinsics=base_intrinsics_stacked,
+                zoom_level=self.states.delayed_zoom_level,
+                noise=self.sampled_noise_K,
+            )
+            
+            # Compute ray directions from delayed+noisy states
+            # Use delayed+noisy bboxes (with pixel noise)
+            self.states.bboxes_delayed_noisy = self.states.bboxes_delayed.clone()
+            self.states.bboxes_delayed_noisy[:, :, :, :2] += self.sampled_noise_pix[:, :, :, :2]  # x, y
+            self.states.bboxes_delayed_noisy[:, :, :, 2:] += self.sampled_noise_pix[:, :, :, 2:]  # w, h
+            self.states.valid_mask_delayed_noisy = self.states.valid_mask_delayed.clone()
+            
+            self.states.ray_dir_delayed_noisy = get_ray_dir_from_bbox(
+                self.states.bboxes_delayed_noisy,
+                self.states.camera_intrinsics_delayed_noisy,
+                self.states.camera_quat_delayed_noisy,
+                self.states.camera_pos_delayed_noisy,
+            )
+        else:
+            # No delay system - just copy GT states
+            self.states.delayed_robot_pos = robot_positions_gt
+            self.states.delayed_robot_quat = robot_quats_gt
+            self.states.delayed_robot_lin_vel = robot_lin_vels_gt
+            self.states.delayed_robot_ang_vel = robot_ang_vels_gt
+            self.states.delayed_gimbal_yaw = gimbal_yaws_gt
+            self.states.delayed_gimbal_pitch = gimbal_pitches_gt
+            self.states.delayed_zoom_level = zoom_levels_gt
+            self.states.camera_pos_delayed = camera_pos_gt
+            self.states.camera_quat_delayed = camera_quat_gt
+            self.states.camera_intrinsics_delayed = camera_intrinsics_gt
+            self.states.bboxes_delayed = self.bbox_raycaster.data.bboxes
+            self.states.valid_mask_delayed = self.bbox_raycaster.data.valid_mask
+            self.states.ray_dir_delayed = get_ray_dir_from_bbox(
+                self.states.bboxes_delayed,
+                self.states.camera_intrinsics_delayed,
+                self.states.camera_quat_delayed,
+                self.states.camera_pos_delayed,
+            )
+            
+            # Delayed+noisy is same as delayed when delay system is off
+            self.states.delayed_noisy_robot_pos = self.states.delayed_robot_pos
+            self.states.delayed_noisy_robot_quat = self.states.delayed_robot_quat
+            self.states.delayed_noisy_robot_lin_vel = self.states.delayed_robot_lin_vel
+            self.states.delayed_noisy_robot_ang_vel = self.states.delayed_robot_ang_vel
+            self.states.delayed_noisy_gimbal_yaw = self.states.delayed_gimbal_yaw
+            self.states.delayed_noisy_gimbal_pitch = self.states.delayed_gimbal_pitch
+            self.states.camera_pos_delayed_noisy = self.states.camera_pos_delayed
+            self.states.camera_quat_delayed_noisy = self.states.camera_quat_delayed
+            self.states.camera_intrinsics_delayed_noisy = self.states.camera_intrinsics_delayed
+            self.states.bboxes_delayed_noisy = self.states.bboxes_delayed
+            self.states.valid_mask_delayed_noisy = self.states.valid_mask_delayed
+            self.states.ray_dir_delayed_noisy = self.states.ray_dir_delayed
+
+    def _compute_triangulation_covariance(self, X_w, robot_positions, robot_quats,
+                                          gimbal_yaws, gimbal_pitches,
+                                          camera_intrinsics, bbox_valid_mask) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+        try:
+            Sigma_X, trace_cov = triangulation_covariance_multi_camera(
+                X_w=X_w,
+                robot_positions=robot_positions,
+                robot_quats=robot_quats,
+                gimbal_yaws=gimbal_yaws,
+                gimbal_pitches=gimbal_pitches,
+                camera_intrinsics=camera_intrinsics,
+                Sigma_pix=self.Sigma_pix,
+                Sigma_twb=self.Sigma_twb,
+                Sigma_phiwb=self.Sigma_phiwb,
+                Sigma_alpha=self.Sigma_alpha,
+                Sigma_beta=self.Sigma_beta,
+                Sigma_K=self.Sigma_K,
+                include_pose=True,
+                include_gimbal=True,
+                include_intrinsics=True
+            )
+            
+            is_trace_valid = (trace_cov >= 0.0) & torch.isfinite(trace_cov)
+            is_sigma_finite = torch.isfinite(Sigma_X).all(dim=(-2, -1))
+            is_not_nan = ~torch.isnan(Sigma_X).any(dim=(-2, -1))
+            is_all_bboxes_valid = bbox_valid_mask.all(dim=1)
+            is_tri_cov_valid = is_trace_valid & is_sigma_finite & is_not_nan & is_all_bboxes_valid
+            
+            Sigma_X = torch.where(
+                is_tri_cov_valid.unsqueeze(-1).unsqueeze(-1),
+                Sigma_X,
+                self.Sigma_X_invalid
+            )
+            trace_cov = torch.where(
+                is_tri_cov_valid,
+                trace_cov,
+                self.trace_cov_invalid
+            )
+        except Exception as e:
+            print(f"Warning: Triangulation covariance (delayed) computation failed: {e}")
+            is_tri_cov_valid = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.bool)
+            Sigma_X = self.Sigma_X_invalid.clone()
+            trace_cov = self.trace_cov_invalid.clone()
+
+        return Sigma_X, trace_cov, is_tri_cov_valid
+
+    def _get_rewards(self) -> Dict[str, torch.Tensor]:
+        """Compute rewards for all agents."""
+        # STEP 1: Compute all intermediate values (GT, delayed, delayed+noisy)
+        self._compute_intermediate_values()
+        
+        rewards_dict = {}
+
+        # Calculate curriculum progress
+        start = self.cfg.curriculum_coordination_start_step
+        end = self.cfg.curriculum_coordination_end_step
+        progress = (self.common_step_counter - start) / (end - start)
+        progress = 0 if progress < 0 else (1 if progress > 1 else progress)
+        progress = 1 if DEBUG_DRAW else progress  # Force full curriculum in debug mode
+        curriculum_alpha = torch.tensor(progress, device=self.device)
+        
+        # STEP 2: Compute triangulation quality using DELAYED (without noise) values for rewards
+        target_pos_stacked = self.target.data.root_state_w[:, :3].unsqueeze(1)  # [N, 1, 3]
+        self.X_w_est = midpoint_method_batched(
+                pts=torch.stack([self.states.camera_pos_delayed[:,i,:] for i, _ in enumerate(self.cfg.possible_agents)], dim=1),
+                dirs=self.states.ray_dir_delayed,
+            )
+        self.states.Sigma_X_delayed, self.states.trace_cov_delayed, is_tri_cov_valid = self._compute_triangulation_covariance(
+            X_w=self.X_w_est,
+            robot_positions=self.states.delayed_robot_pos,
+            robot_quats=self.states.delayed_robot_quat,
+            gimbal_yaws=self.states.delayed_gimbal_yaw,
+            gimbal_pitches=self.states.delayed_gimbal_pitch,
+            camera_intrinsics=self.states.camera_intrinsics_delayed,
+            bbox_valid_mask=self.states.valid_mask_delayed,
+        )
+        trace_cov_per_env = self.states.trace_cov_delayed[:, 0]
+        triangulation_quality = torch.where(
+            is_tri_cov_valid[:, 0],
+            1.0 / torch.sqrt(trace_cov_per_env + 1e-12),
+            torch.zeros(self.num_envs, device=self.device)
+        )
+
+        # STEP 3: Compute distances and collisions
+        for i, ego_agent_id in enumerate(self.cfg.possible_agents):
+            ego_pos = self.states.delayed_robot_pos[:, i, :]
+            ego_vel = self.states.delayed_robot_lin_vel[:, i, :]
+            target_pos = self.target.data.root_pos_w
+            target_vel = self.target.data.root_lin_vel_w
+            self.cam_to_target_distance[:, i, 0] = torch.norm(target_pos - ego_pos, dim=1)
+
+            self.cam_to_target_ttc[:, i, 0] = self.compute_ttc(
+                ego_pos=ego_pos,
+                ego_vel=ego_vel,
+                other_pos=target_pos,
+                other_vel=target_vel,
+                safe_distance=self.cfg.min_safe_distance
+            )
+            
+            for j, other_agent_id in enumerate(self.cfg.possible_agents):
+                if i >= j:
+                    continue
+                other_pos = self.states.delayed_robot_pos[:, j, :]
+                other_vel = self.states.delayed_robot_lin_vel[:, j, :]
+
+                distance = torch.norm(other_pos - ego_pos, dim=1)
+                self.cam_to_cam_distance[:, i, j] = distance
+                self.cam_to_cam_distance[:, j, i] = distance
+                
+                ttc_penalty = self.compute_ttc(
+                    ego_pos=ego_pos,
+                    ego_vel=ego_vel,
+                    other_pos=other_pos,
+                    other_vel=other_vel,
+                )
+                self.cam_to_cam_ttc[:, i, j] = ttc_penalty
+                self.cam_to_cam_ttc[:, j, i] = ttc_penalty
+        
+        self.cam_to_cam_distance[:, range(len(self.cfg.possible_agents)), range(len(self.cfg.possible_agents))] = float('inf')
+        self.cam_to_cam_ttc[:, range(len(self.cfg.possible_agents)), range(len(self.cfg.possible_agents))] = float('inf')
+        cam_to_cam_collision = self.cam_to_cam_distance < self.cfg.min_safe_distance
+        cam_to_target_collision = self.cam_to_target_distance < self.cfg.min_safe_distance
+        
+        # STEP 4: Compute per-agent rewards
+        for i, agent_id in enumerate(self.cfg.possible_agents):
+            agent_cam_cfg = self.agent_camera_cfgs[agent_id]
+            
+            # Individual tracking rewards
+            action_sum = torch.sum(torch.square(self.action_weight * self._actions[agent_id]), dim=1)
+            action_delta = torch.sum(
+                torch.square(self.action_delta_weight * (self._actions[agent_id] - self._last_actions[agent_id])), 
+                dim=1
+            )
+            
+            # Bounding box rewards
+            self.bboxes[agent_id] = self.states.bboxes_delayed_noisy[:, i, 0, :]
+            self.bbox_valid_mask[agent_id] = self.states.valid_mask_delayed_noisy[:, i]
+            bbox = (torch.square((self.bboxes[agent_id][:, 0] + self.bboxes[agent_id][:, 2])/2 - agent_cam_cfg.width/2) / agent_cam_cfg.width**2 
+                    + torch.square((self.bboxes[agent_id][:, 1] + self.bboxes[agent_id][:, 3])/2 - agent_cam_cfg.height/2) / agent_cam_cfg.height**2)
+            bbox_center_mapped = torch.exp(-((bbox)**2)/self.cfg.bbox_reward_shape_width**2) * self.bbox_valid_mask[agent_id].squeeze(-1).float()
+            
+            bbox_size = (self.bboxes[agent_id][:, 2] - self.bboxes[agent_id][:, 0]) * (self.bboxes[agent_id][:, 3] - self.bboxes[agent_id][:, 1]) / (agent_cam_cfg.width * agent_cam_cfg.height)
+            bbox_size_mapped = torch.exp(-((bbox_size - self.cfg.bbox_size_preferred)**2)/self.cfg.bbox_reward_shape_width**2) * self.bbox_valid_mask[agent_id].squeeze(-1).float()
+            
+            # Zoom penalty
+            zoom_penalty = torch.square((self.zoom_level[agent_id] - 1.0)/10)
+
+            # Collision penalty
+            has_collision = torch.any(cam_to_cam_collision[:, i, :], dim=1) | torch.any(cam_to_target_collision[:, i, :], dim=1)
+            collision_penalty = torch.where(
+                has_collision,
+                torch.ones(self.num_envs, device=self.device),
+                torch.zeros(self.num_envs, device=self.device)
+            )
+
+            ttc_cam_to_cam_normalized = torch.clamp(
+                (self.cam_to_cam_ttc[:, i, :] / self.cfg.ttc_horizon), min=0, max=1
+            )
+            ttc_cam_to_target_normalized = torch.clamp(
+                (self.cam_to_target_ttc[:, i, :] / self.cfg.ttc_horizon), min=0, max=1
+            )
+            ttc = torch.concat((
+                self.cam_to_cam_ttc[:, i, :],
+                self.cam_to_target_ttc[:, i, :]
+            ), dim=1)
+            ttc_normalized = torch.concat((
+                ttc_cam_to_cam_normalized,
+                ttc_cam_to_target_normalized
+            ), dim=1)
+
+            ttc_penalty = (1.0 - ttc_normalized) ** 2
+            ttc_penalty = torch.where(
+                (ttc < self.cfg.ttc_horizon) & (ttc > 0),
+                ttc_penalty,
+                torch.zeros_like(ttc_penalty)
+            )
+            ttc_penalty = torch.sum(ttc_penalty, dim=1)
+            
+            # Combine rewards
+            rewards = {
+                "action_sum": action_sum * self.cfg.action_sum_penalty_scale * self.step_dt,
+                "action_delta": action_delta * self.cfg.action_delta_penalty_scale * self.step_dt,
+                "bbox_center": bbox_center_mapped * self.cfg.bbox_center_reward_scale * self.step_dt,
+                "bbox_size": bbox_size_mapped * self.cfg.bbox_size_reward_scale * self.step_dt,
+                "triangulation": triangulation_quality * self.cfg.triangulation_reward_scale * self.step_dt * curriculum_alpha,
+                "collision": collision_penalty * self.cfg.collision_penalty_scale * self.step_dt * curriculum_alpha,
+                "ttc_penalty": ttc_penalty * self.cfg.ttc_penalty_scale * self.step_dt * curriculum_alpha,
+            }
+            
+            # Store for logging
+            for key, value in rewards.items():
+                self._episode_sums[agent_id][key] += value
+
+            total_reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
+            
+            # Check for NaN values
+            for reward_name, reward_value in rewards.items():
+                if torch.isnan(reward_value).any():
+                    nan_envs = torch.nonzero(torch.isnan(reward_value)).flatten()
+                    raise ValueError(f"NaN detected in {agent_id} reward '{reward_name}' at environments: {nan_envs.tolist()}")
+            
+            if torch.isnan(total_reward).any():
+                nan_envs = torch.nonzero(torch.isnan(total_reward)).flatten()
+                raise ValueError(f"NaN detected in {agent_id} total reward at environments: {nan_envs.tolist()}")
+            
+            rewards_dict[agent_id] = torch.sum(torch.stack(list(rewards.values())), dim=0)
+            
+            # Update last actions
+            self._last_actions[agent_id] = self._actions[agent_id].clone()
+    
+        return rewards_dict
+
+    def _get_observations(self) -> Dict[str, torch.Tensor]:
+        """Get observations for all agents using delayed+noisy states."""
+        observations = {}
+        
+        if self.cfg.enable_delay_system:
+            # Compute triangulation covariance with DELAYED + NOISY states for observations
+            self.X_w_est = midpoint_method_batched(
+                pts=torch.stack([self.states.camera_pos_delayed_noisy[:,i,:] for i, _ in enumerate(self.cfg.possible_agents)], dim=1),
+                dirs=self.states.ray_dir_delayed_noisy,
+            )
+            self.states.Sigma_X_delayed_noisy, self.states.trace_cov_delayed_noisy, is_tri_cov_valid = self._compute_triangulation_covariance(
+                X_w=self.X_w_est,
+                robot_positions=self.states.delayed_noisy_robot_pos,
+                robot_quats=self.states.delayed_noisy_robot_quat,
+                gimbal_yaws=self.states.delayed_noisy_gimbal_yaw,
+                gimbal_pitches=self.states.delayed_noisy_gimbal_pitch,
+                camera_intrinsics=self.states.camera_intrinsics_delayed_noisy,
+                bbox_valid_mask=self.states.valid_mask_delayed_noisy,
+            )
+        else:
+            # No delay system - use same as delayed
+            self.states.Sigma_X_delayed_noisy = self.states.Sigma_X_delayed
+            self.states.trace_cov_delayed_noisy = self.states.trace_cov_delayed
+        
+        # Extract Sigma diagonal for observations (using delayed+noisy covariance)
+        Sigma_X_obs = self.states.Sigma_X_delayed_noisy
+        Sigma_diag = torch.diagonal(Sigma_X_obs, dim1=-2, dim2=-1)  # (N, T, 3)
+        Sigma_diag_sqrt = torch.sqrt(torch.clamp(Sigma_diag, min=0.0) + 1e-12)  # (N, T, 3)
+        
+        # Update stacked arrays with delayed+noisy states for observations
+        self.robot_positions_stacked = self.states.delayed_noisy_robot_pos
+        self.robot_quats_stacked = self.states.delayed_noisy_robot_quat
+        self.robot_velocity_stacked = self.states.delayed_noisy_robot_lin_vel
+        self.robot_angular_velocity_stacked = self.states.delayed_noisy_robot_ang_vel
+        self.gimbal_yaws_stacked = self.states.delayed_noisy_gimbal_yaw
+        self.gimbal_pitches_stacked = self.states.delayed_noisy_gimbal_pitch
+        
+        for i, agent_id in enumerate(self.cfg.possible_agents):
+            other_agent_idxs = list(range(len(self.cfg.possible_agents)))
+            other_agent_idxs.pop(i)
+            
+            _, _, ego_yaw = euler_xyz_from_quat(self.robot_quats_stacked[:, i, :])
+            
+            # Use delayed+noisy bboxes for observations
+            bbox_obs = self.states.bboxes_delayed_noisy[:, i, 0, :]  # (N, 4)
+            bbox_valid = self.states.valid_mask_delayed_noisy[:, i, 0]  # (N,)
+            
+            # Normalize bbox
+            bbox_norm = self.bbox_raycaster.get_normalized_bboxes(bbox_obs.unsqueeze(1).unsqueeze(1))[:, 0, 0, :]  # (N, 4)
+            
+            relative_positions = self.robot_positions_stacked[:, other_agent_idxs, :] - self.robot_positions_stacked[:, i, :].unsqueeze(1).expand(-1, len(other_agent_idxs), -1)
+            relative_velocities = self.robot_velocity_stacked[:, other_agent_idxs, :] - self.robot_velocity_stacked[:, i, :].unsqueeze(1).expand(-1, len(other_agent_idxs), -1)
+
+            obs = torch.cat([
+                self.robot_positions_stacked[:, i, :],  # 3: pos
+                ego_yaw.unsqueeze(-1),  # 1: yaw
+                self.robot_velocity_stacked[:, i, :],  # 3: linear vel
+                self.robot_angular_velocity_stacked[:, i, 2:3],  # 1: yaw rate
+                self.gimbal_pitches_stacked[:, i].unsqueeze(-1),  # 1
+                self.gimbal_yaws_stacked[:, i].unsqueeze(-1),  # 1
+                bbox_norm,  # 4: normalized bbox
+                bbox_valid.float().unsqueeze(-1),  # 1: validity
+                self.zoom_level[agent_id].unsqueeze(-1),  # 1: zoom level
+                self.states.ray_dir_delayed_noisy[:, other_agent_idxs, 0, :].flatten(start_dim=1),  # 3*(C-1)
+                self.states.valid_mask_delayed_noisy[:, other_agent_idxs, 0].float().flatten(start_dim=1),  # 1*(C-1)
+                self.robot_positions_stacked[:, other_agent_idxs, :].flatten(start_dim=1),  # 3*(C-1)
+                # relative_positions.flatten(start_dim=1),  # 3*(C-1)
+                self.robot_velocity_stacked[:, other_agent_idxs, :].flatten(start_dim=1),  # 3*(C-1)
+                # relative_velocities.flatten(start_dim=1),  # 3*(C-1)
+                Sigma_diag_sqrt[:, 0, :],  # 3: X, Y, Z std deviations
+            ], dim=-1)
+            
+            # Check for NaN values
+            if torch.isnan(obs).any():
+                nan_envs = torch.nonzero(torch.isnan(obs)).flatten()
+                raise ValueError(f"NaN detected in {agent_id} observation at environments: {nan_envs.tolist()}")
+
+            observations[agent_id] = obs
+        
+        return observations
+
+    def _get_states(self) -> torch.Tensor:
+        """Get global state by concatenating all agent observations."""
+        obs_list = []
+        for agent_id in self.cfg.possible_agents:
+            obs_list.append(self.obs_dict[agent_id])
+        return torch.cat(obs_list, dim=-1)
+
+    def _get_dones(self) -> tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+        """Get termination and timeout flags for all agents."""
+        time_out = self.episode_length_buf >= self.max_episode_length - 1
+        no_detection_too_long = self.no_detection_counts >= self.cfg.max_no_detection_sec / self.step_dt
+        time_out = time_out
+        terminated_dict = {}
+        time_out_dict = {}
+        
+        for agent_id in self.cfg.possible_agents:
+            robot = self._robots[agent_id]
+            died = robot.data.root_pos_w[:, 2] < 5.0
+            terminated_dict[agent_id] = died
+            time_out_dict[agent_id] = time_out
+        
+        return terminated_dict, time_out_dict
+
+    def _reset_idx(self, env_ids: torch.Tensor | None):
+        """Reset environments at specified indices."""
+        if env_ids is None or len(env_ids) == self.num_envs:
+            env_ids = self._robots[self.cfg.possible_agents[0]]._ALL_INDICES
+        
+        # Logging
+        all_extras = {}
+        for agent_id in self.cfg.possible_agents:
+            for key, value in self._episode_sums[agent_id].items():
+                episodic_sum_avg = torch.mean(value[env_ids])
+                all_extras[f"Episode_Reward/{agent_id}_{key}"] = episodic_sum_avg / self.max_episode_length_s
+                self._episode_sums[agent_id][key][env_ids] = 0.0
+        if "log" not in self.extras:
+            self.extras["log"] = {}
+        self.extras["log"].update(all_extras)
+
+        if self.cfg.curriculum_tracking_start_step < 0:
+            curriculum_tracking_state = 0
+            for agent_id in self.cfg.possible_agents:
+                curriculum_tracking_state += 1 if all_extras[f"Episode_Reward/{agent_id}_bbox_center"] > 50 else 0
+            if curriculum_tracking_state == len(self.cfg.possible_agents):
+                self.cfg.curriculum_tracking_start_step = self.common_step_counter
+                self.cfg.curriculum_tracking_end_step += self.cfg.curriculum_tracking_start_step
+
+        formation_center = torch.zeros(len(env_ids), 3, device=self.device)
+        formation_center[:, 0] = torch.zeros_like(formation_center[:, 0]).uniform_(-5.0, 5.0)
+        formation_center[:, 1] = torch.zeros_like(formation_center[:, 1]).uniform_(0, 10.0)
+        formation_center[:, 2] = torch.zeros_like(formation_center[:, 2]).uniform_(15.0, 30.0)
+
+        gap_ref = torch.zeros(len(env_ids), 3, device=self.device)
+        gap_ref[:, 0] = torch.zeros_like(gap_ref[:, 0]).uniform_(-5.0, 5.0)
+        gap_ref[:, 1] = torch.zeros_like(gap_ref[:, 1]).uniform_(0, 10.0)
+        gap_ref[:, 2] = torch.zeros_like(gap_ref[:, 2]).uniform_(5.0, 7.0)
+
+        formation_rotation = quat_from_euler_xyz(
+            torch.zeros(len(env_ids), device=self.device),
+            torch.zeros(len(env_ids), device=self.device),
+            torch.zeros(len(env_ids), device=self.device).uniform_(-math.pi, math.pi)
+        )
+
+        # Reset target
+        start = self.cfg.curriculum_tracking_start_step
+        end = self.cfg.curriculum_tracking_end_step
+        progress = (self.common_step_counter - start) / (end - start)
+        progress = 0.1 if (progress < 0.1 or start < 0) else (1 if progress > 1 else progress)
+        progress = 1 if DEBUG_DRAW else progress  # Always use full range in debug mode
+
+        target_pos = formation_center.clone()
+        target_pos[:, 0] += torch.zeros_like(target_pos[:, 0]).uniform_(4.0, 80.0 * progress)
+        target_pos[:, 1] += torch.zeros_like(target_pos[:, 1]).uniform_(-30.0 * progress, 30.0 * progress)
+        target_pos[:, 2] += torch.zeros_like(target_pos[:, 2]).uniform_(-5.0, 35.0)
+        target_pos = quat_apply(formation_rotation, target_pos) + self._env_origins[env_ids]
+        
+        default_target_state = self.target.data.default_root_state[env_ids].clone()
+        default_target_state[:, :3] = target_pos
+        default_target_state[:, 3:7] = quat_from_euler_xyz(
+            torch.zeros(len(env_ids), device=self.device),
+            torch.zeros(len(env_ids), device=self.device),
+            torch.zeros(len(env_ids), device=self.device).uniform_(-math.pi, math.pi)
+        )
+        self.target.write_root_pose_to_sim(default_target_state[:, :7], env_ids)
+        # self.target.write_root_velocity_to_sim(default_target_state[:, 7:], env_ids)
+        
+        # Reset target velocity
+        self.target_vel[env_ids, :3] = torch.zeros_like(self.target_vel[env_ids, :3]).uniform_(-self.cfg.max_target_speed, self.cfg.max_target_speed)
+        self.target_vel[env_ids, 3:5] = torch.zeros_like(self.target_vel[env_ids, 3:5])
+        self.target_vel[env_ids, 5] = torch.zeros_like(self.target_vel[env_ids, 5]).uniform_(-self.cfg.max_target_ang_speed, self.cfg.max_target_ang_speed)
+        self.last_target_vel[env_ids] = self.target_vel[env_ids].clone()
+
+        # Reset robots
+        for idx, agent_id in enumerate(self.cfg.possible_agents):
+            robot = self._robots[agent_id]
+            robot.reset(env_ids)
+            
+            self._actions[agent_id][env_ids] = 0.0
+            self._last_actions[agent_id][env_ids] = 0.0
+            
+            self.zoom_level[agent_id][env_ids] = torch.zeros_like(self.zoom_level[agent_id][env_ids]).uniform_(1.0, 2.0)
+            
+            default_root_state = robot.data.default_root_state[env_ids].clone()
+            default_root_state[:, 0:2] = formation_center[:, 0:2] + gap_ref[:, 0:2] * (idx + 1) * (-1)**(idx + gap_ref[:, 0:2].int())
+            default_root_state[:, 2] = formation_center[:, 2] + gap_ref[:, 2] * (-1)**(idx + gap_ref[:, 2].int())
+            default_root_state[:, :3] = quat_apply(formation_rotation, default_root_state[:, :3])
+            default_root_state[:, :3] += self._env_origins[env_ids]
+            default_root_state[:, 3:7] = quat_from_euler_xyz(
+                torch.zeros(len(env_ids), device=self.device),
+                torch.zeros(len(env_ids), device=self.device),
+                torch.zeros(len(env_ids), device=self.device).uniform_(-math.pi, math.pi)
+            )
+
+            joint_pos = robot.data.default_joint_pos[env_ids]
+            gimbal_idx = self.gimbal_joint_idx[agent_id]
+            gimbal_yaw, gimbal_pitch = self.point_to_region(
+                default_root_state[:, :3],
+                default_root_state[:, 3:7],
+                target_pos
+            )
+            joint_pos[:, gimbal_idx["yaw"]] = gimbal_yaw
+            joint_pos[:, gimbal_idx["pitch"]] = gimbal_pitch
+            joint_pos[:, gimbal_idx["roll"]] = torch.zeros_like(joint_pos[:, gimbal_idx["roll"]])
+            self.gimbal_dof_targets[agent_id][env_ids] = joint_pos
+
+            robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
+            robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
+            joint_vel = robot.data.default_joint_vel[env_ids]
+            robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+            
+            self._stabilizers[agent_id].reset(env_ids)
+
+        self.sampled_noise_K.normal_(mean=0.0, std=self.cfg.intrinsic_std, generator=self.sampled_noise_generator)
+        
+        # Reset Delay and Communication System
+        if self.cfg.enable_delay_system and self.delay_manager is not None:
+            self.delay_manager.reset(env_ids)
+            self.time_since_last_detection[env_ids] = 0.0
+            self.last_detection_time[env_ids] = 0.0
+            
+            # Reset filter states to current true values
+            for agent_idx, agent_id in enumerate(self.cfg.possible_agents):
+                robot = self._robots[agent_id]
+                gimbal_idx = self.gimbal_joint_idx[agent_id]
+                
+                self.delay_manager.position_filters[agent_idx].filtered_state[env_ids] = \
+                    robot.data.root_pos_w[env_ids]
+                self.delay_manager.orientation_filters[agent_idx].filtered_quat[env_ids] = \
+                    robot.data.root_state_w[env_ids, 3:7]
+                
+                self.delay_manager.gimbal_yaw_filters[agent_idx].filtered_state[env_ids] = \
+                    robot.data.joint_pos[env_ids, gimbal_idx["yaw"]].unsqueeze(-1)
+                self.delay_manager.gimbal_pitch_filters[agent_idx].filtered_state[env_ids] = \
+                    robot.data.joint_pos[env_ids, gimbal_idx["pitch"]].unsqueeze(-1)
+        
+        super()._reset_idx(env_ids)
+
+    def point_to_region(self, drone_pos_w, drone_quat_w, target_pos):
+        """Calculate gimbal angles to point at target."""
+        target_vector_w = target_pos - drone_pos_w
+        drone_quat_inv = quat_inv(drone_quat_w)
+        target_vector_b = quat_rotate(drone_quat_inv, target_vector_w)
+        
+        gimbal_yaw = torch.atan2(target_vector_b[:, 1], target_vector_b[:, 0])
+        horizontal_distance = torch.sqrt(target_vector_b[:, 0]**2 + target_vector_b[:, 1]**2)
+        gimbal_pitch = torch.atan2(-target_vector_b[:, 2], horizontal_distance)
+        
+        return gimbal_yaw, gimbal_pitch
+
+    def compute_ttc(self, ego_pos, ego_vel, other_pos, other_vel, safe_distance: float | None = None) -> torch.Tensor:
+        """Compute Time-To-Collision (TTC)."""
+        rel_pos = other_pos - ego_pos
+        rel_vel = other_vel - ego_vel
+        
+        distance = torch.norm(rel_pos, dim=1)
+        rel_speed = torch.norm(rel_vel, dim=1)
+        
+        rel_pos_normalized = rel_pos / (distance.unsqueeze(-1) + 1e-8)
+        closing_speed = -torch.sum(rel_vel * rel_pos_normalized, dim=1)
+        
+        ttc = torch.where(
+            closing_speed > 0,
+            (distance - (safe_distance if safe_distance is not None else 0)) / closing_speed,
+            torch.full_like(distance, float('inf'))
+        )
+        
+        return ttc
+
+    def _update_target_motion(self, mode: str = "default", env_ids: torch.Tensor | None = None):
+        """Update target motion."""
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+        
+        self.target_vel_change_timer += self.step_dt
+        change_mask = torch.rand(self.num_envs, device=self.device) < self.cfg.target_direction_change_prob
+        
+        if mode == "linear" or mode == "default":
+            new_desired_vel = torch.zeros_like(self.target_desired_vel)
+            new_desired_vel[:, :3] = torch.rand(self.num_envs, 3, device=self.device) * 2.0 - 1.0
+            new_desired_vel[:, :3] = new_desired_vel[:, :3] / (torch.norm(new_desired_vel[:, :3], dim=-1, keepdim=True) + 1e-8)
+            new_desired_vel[:, :3] *= torch.rand(self.num_envs, 1, device=self.device) * self.cfg.max_target_speed
+            new_desired_vel[:, 3:5] = 0.0
+            new_desired_vel[:, 5] = torch.rand(self.num_envs, device=self.device) * self.cfg.max_target_speed * 0.1
+            
+            self.target_desired_vel[env_ids] = torch.where(
+                change_mask.unsqueeze(-1).expand(-1, 6)[env_ids],
+                new_desired_vel[env_ids],
+                self.target_desired_vel[env_ids]
+            )
+            
+            self.target_vel_change_timer = torch.where(
+                change_mask, 
+                torch.zeros_like(self.target_vel_change_timer), 
+                self.target_vel_change_timer
+            )
+            
+            vel_error = self.target_desired_vel[env_ids] - self.target_vel[env_ids]
+            self.target_acceleration[env_ids] = vel_error * self.cfg.target_acceleration_scale
+            
+            self.target_acceleration[env_ids] = torch.clamp(
+                self.target_acceleration[env_ids], 
+                -self.cfg.target_max_acceleration, 
+                self.cfg.target_max_acceleration
+            )
+        
+        if mode == "circular" or mode == "default":
+            t = self.common_step_counter * self.step_dt
+            self.target_motion_radius = torch.where(
+                change_mask,
+                torch.rand_like(self.target_motion_radius) * 30.0 + 40.0,
+                self.target_motion_radius
+            )
+            radius = self.target_motion_radius
+            
+            self.target_motion_yaw_vel = torch.where(
+                change_mask,
+                torch.rand_like(self.target_motion_yaw_vel) * self.cfg.max_target_ang_speed / radius,
+                self.target_motion_yaw_vel
+            )
+            angular_speed = self.target_motion_yaw_vel
+            
+            center = self._env_origins
+            desired_x = center[:, 0] + radius * torch.cos(angular_speed * t)
+            desired_y = center[:, 1] + radius * torch.sin(angular_speed * t)
+            desired_z = center[:, 2] + torch.rand(self.num_envs, device=self.device) * 10.0 + 30.0
+
+            desired_pos = torch.stack([desired_x, desired_y, desired_z], dim=1)
+            pos_error = desired_pos - self.target.data.root_state_w[:, :3]
+            
+            kp = 1.0
+            self.target_desired_vel[env_ids, :2] = kp * pos_error[env_ids, :2]
+            self.target_desired_vel[env_ids, 2] = torch.where(
+                change_mask[env_ids],
+                kp * pos_error[env_ids, 2],
+                self.target_desired_vel[env_ids, 2]
+            )
+            
+            speed = torch.norm(self.target_desired_vel[env_ids, :3], dim=1, keepdim=True)
+            speed_clamped = torch.clamp(speed, max=self.cfg.max_target_speed)
+            self.target_desired_vel[env_ids, :3] = self.target_desired_vel[env_ids, :3] / (speed + 1e-6) * speed_clamped
+            
+            self.target_desired_vel[env_ids, 3:] = 0.0
+            
+            vel_error = self.target_desired_vel[env_ids] - self.target_vel[env_ids]
+            self.target_acceleration[env_ids] = vel_error * self.cfg.target_acceleration_scale
+
+            self.target_acceleration[env_ids] = torch.clamp(
+                self.target_acceleration[env_ids], 
+                -self.cfg.target_max_acceleration, 
+                self.cfg.target_max_acceleration
+            )
+        
+        self.target_vel += self.target_acceleration * self.step_dt
+        self.target_vel *= self.cfg.target_velocity_damping
+        
+        self.target_vel[:, :3] = torch.clamp(
+            self.target_vel[:, :3], 
+            -self.cfg.max_target_speed, 
+            self.cfg.max_target_speed
+        )
+
+    def _update_research_metrics(self):
+        """Update research metrics."""
+        p0 = self._robots["drone_0"].data.root_pos_w
+        p1 = self._robots["drone_1"].data.root_pos_w
+        pt = self.target.data.root_pos_w
+
+        d01 = torch.norm(p0 - p1, dim=1)
+
+        v0 = pt - p0
+        v1 = pt - p1
+        cosb = torch.sum(v0 * v1, dim=1) / (torch.norm(v0, dim=1) * torch.norm(v1, dim=1) + 1e-8)
+        cosb = torch.clamp(cosb, -1.0, 1.0)
+        beta = torch.acos(cosb)
+        beta_deg = torch.rad2deg(beta)
+        w_geom = torch.sin(beta) ** 2
+
+        def bbox_area_frac(b, cam_cfg):
+            area = (b[:, 2] - b[:, 0]).clamp(min=0) * (b[:, 3] - b[:, 1]).clamp(min=0)
+            return area / (cam_cfg.width * cam_cfg.height)
+
+        a0 = bbox_area_frac(self.bboxes["drone_0"], self.agent_camera_cfgs["drone_0"])
+        a1 = bbox_area_frac(self.bboxes["drone_1"], self.agent_camera_cfgs["drone_1"])
+        valid0 = self.bbox_valid_mask["drone_0"][:, 0]
+        valid1 = self.bbox_valid_mask["drone_1"][:, 0]
+        both_valid = valid0 & valid1
+
+        a = torch.minimum(a0, a1)
+        mu = self.cfg.research.tqi_opt_area
+        sig = self.cfg.research.tqi_area_sigma
+        w_scale = torch.exp(-((a - mu) ** 2) / (sig ** 2 + 1e-12))
+        tqi = both_valid.float() * w_geom * w_scale
+
+        self._research["cvtt_sec"] += (tqi >= self.cfg.research.tqi_threshold).float() * self.step_dt
+        self._research["tqi_sum"] += tqi
+        self._research["steps"] += 1
+
+        f0_m = (self.base_focal_length["drone_0"] * self.zoom_level["drone_0"]) * 1e-3
+        f1_m = (self.base_focal_length["drone_1"] * self.zoom_level["drone_1"]) * 1e-3
+        pitch = self.cfg.research.pixel_pitch_m
+        sig_px = self.cfg.research.det_std_px
+        sig_th0 = sig_px * pitch / (f0_m + 1e-12)
+        sig_th1 = sig_px * pitch / (f1_m + 1e-12)
+
+        d0 = torch.norm(v0, dim=1) + 1e-6
+        d1 = torch.norm(v1, dim=1) + 1e-6
+        fim_scalar = w_geom * (1.0 / (d0 * d0 * sig_th0 * sig_th0) + 1.0 / (d1 * d1 * sig_th1 * sig_th1))
+        ig_approx = torch.log(fim_scalar + 1e-12)
+
+        if not self.cfg.research.enable_step_logging:
+            return
+        if (self._research["last_step_logged"] == -1) or \
+           ((self.common_step_counter - self._research["last_step_logged"]) >= self.cfg.research.log_interval_steps):
+
+            ids = self._research_sample_ids
+            def mean_std(x):
+                return torch.mean(x).item(), torch.std(x).item()
+
+            m_d, s_d = mean_std(d01)
+            m_b, s_b = mean_std(beta_deg)
+            m_tqi, s_tqi = mean_std(tqi)
+            m_ig, s_ig = mean_std(ig_approx)
+            valid_rate0 = valid0.float().mean().item()
+            valid_rate1 = valid1.float().mean().item()
+            both_valid_rate = both_valid.float()[ids].mean().item()
+
+            p50_ang = torch.quantile(beta_deg[ids], 0.5).item()
+            p90_ang = torch.quantile(beta_deg[ids], 0.9).item()
+
+            if "step" not in self.extras:
+                self.extras["step"] = {}
+            self.extras["step"].update({
+                "Step/baseline_m_mean": m_d,
+                "Step/baseline_m_std": s_d,
+                "Step/angle_deg_mean": m_b,
+                "Step/angle_deg_std": s_b,
+                "Step/angle_deg_p50": p50_ang,
+                "Step/angle_deg_p90": p90_ang,
+                "Step/tqi_mean": m_tqi,
+                "Step/tqi_std": s_tqi,
+                "Step/ig_approx_mean": m_ig,
+                "Step/ig_approx_std": s_ig,
+                "Step/valid_rate_d0": valid_rate0,
+                "Step/valid_rate_d1": valid_rate1,
+                "Step/both_valid_rate_sample": both_valid_rate,
+                "Step/curriculum_alpha": float(
+                    max(0.0, min(1.0, (self.common_step_counter - self.cfg.curriculum_coordination_start_step) /
+                        (self.cfg.curriculum_coordination_end_step - self.cfg.curriculum_coordination_start_step + 1e-6))))
+            })
+            
+            if self.cfg.enable_delay_system and self.delay_manager is not None:
+                delay_stats = self.delay_manager.get_statistics()
+                self.extras["step"].update({
+                    "Delay/comm_buffer_mean": delay_stats['comm_buffer_sizes'].float().mean().item(),
+                    "Delay/comm_buffer_max": delay_stats['comm_buffer_sizes'].max().item(),
+                    "Delay/det_buffer_mean": sum(
+                        delay_stats['detection_buffer_sizes'][i].float().mean().item() 
+                        for i in range(len(self.cfg.possible_agents))
+                    ) / len(self.cfg.possible_agents),
+                })
+            
+            self._research["last_step_logged"] = self.common_step_counter
+
+    def _set_debug_vis_impl(self, debug_vis: bool):
+        """Set debug visualization."""
+        pass
+
+    def _debug_vis_callback(self, event):
+        """Debug visualization callback."""
+
+        """Apply camera intrinsics based on zoom level."""
+        if DEBUG_DRAW:
+            for i, agent_id in enumerate(self.cfg.possible_agents):
+                current_focal_length = self.base_focal_length[agent_id] * self.zoom_level[agent_id]
+                self._cameras[agent_id].set_intrinsic_matrices_batched(
+                    self.camera_intrinsics[agent_id], 
+                    current_focal_length
+                )
+                """
+                @file: source/isaaclab/isaaclab/sensors/camera/camera.py (modified)
+                ️@description: Added method to set different focal lengths for envs in batch.
+                def set_intrinsic_matrices_batched(
+                    self, matrices: torch.Tensor, focal_length: torch.tensor, env_ids: Sequence[int] | None = None
+                ):
+                    # resolve env_ids
+                    if env_ids is None:
+                        env_ids = self._ALL_INDICES
+                    # convert matrices to numpy tensors
+                    if isinstance(matrices, torch.Tensor):
+                        matrices = matrices.cpu().numpy()
+                    else:
+                        matrices = np.asarray(matrices, dtype=float)
+                    # iterate over env_ids
+                    for i, intrinsic_matrix in zip(env_ids, matrices):
+                        # extract parameters from matrix
+                        f_x = intrinsic_matrix[0, 0]
+                        c_x = intrinsic_matrix[0, 2]
+                        f_y = intrinsic_matrix[1, 1]
+                        c_y = intrinsic_matrix[1, 2]
+                        # get viewport parameters
+                        height, width = self.image_shape
+                        height, width = float(height), float(width)
+                        # resolve parameters for usd camera
+                        params = {
+                            "focal_length": focal_length[i].item(),
+                            "horizontal_aperture": width * focal_length[i].item() / f_x,
+                            "vertical_aperture": height * focal_length[i].item() / f_y,
+                            "horizontal_aperture_offset": (c_x - width / 2) / f_x,
+                            "vertical_aperture_offset": (c_y - height / 2) / f_y,
+                        }
+
+                        # TODO: Adjust to handle aperture offsets once supported by omniverse
+                        #   Internal ticket from rendering team: OM-42611
+                        if params["horizontal_aperture_offset"] > 1e-4 or params["vertical_aperture_offset"] > 1e-4:
+                            omni.log.warn("Camera aperture offsets are not supported by Omniverse. These parameters are ignored.")
+
+                        # change data for corresponding camera index
+                        sensor_prim = self._sensor_prims[i]
+                        # set parameters for camera
+                        for param_name, param_value in params.items():
+                            # convert to camel case (CC)
+                            param_name = to_camel_case(param_name, to="CC")
+                            # get attribute from the class
+                            param_attr = getattr(sensor_prim, f"Get{param_name}Attr")
+                            # set value
+                            # note: We have to do it this way because the camera might be on a different
+                            #   layer (default cameras are on session layer), and this is the simplest
+                            #   way to set the property on the right layer.
+                            omni.usd.set_prop_val(param_attr(), param_value)
+                    # update the internal buffers
+                    self._update_intrinsic_matrices(env_ids)
+                """
+
+        if DEBUG_DRAW and hasattr(self, 'draw_interface'):
+            self.draw_interface.clear_lines()
+        
+            for agent_id in self.cfg.possible_agents:
+                line_colors_yellow = torch.tensor([[1.0, 1.0, 0.0, 1.0]], device=self.device).repeat(self.num_envs, 1)
+                line_colors_green = torch.tensor([[0.0, 1.0, 0.0, 1.0]], device=self.device).repeat(self.num_envs, 1)
+                line_colors_red = torch.tensor([[1.0, 0.0, 0.0, 1.0]], device=self.device).repeat(self.num_envs, 1)
+                
+                is_valid = self.bbox_valid_mask[agent_id]
+                agent_idx = self.cfg.possible_agents.index(agent_id)
+                if self.bbox_raycaster.data.valid_bbox_visibility_mask is not None:
+                    is_visible = self.bbox_raycaster.data.valid_bbox_visibility_mask[:, agent_idx, 0].unsqueeze(-1)
+                else:
+                    is_visible = torch.ones_like(is_valid) > 0
+
+                line_colors = torch.where(
+                    is_valid, 
+                    line_colors_green,
+                    torch.where(
+                        is_visible,
+                        line_colors_yellow,
+                        line_colors_red
+                    )
+                ).tolist()
+                
+                line_thicknesses = [1.0] * self.camera_pos_world[agent_id].shape[0]
+                self.draw_interface.draw_lines(
+                    self.camera_pos_world[agent_id].tolist(), 
+                    self.target.data.root_pos_w.tolist(), 
+                    line_colors, 
+                    line_thicknesses
+                )
+                
+                if hasattr(self, 'camera_frustrum'):
+                    self.camera_frustrum.draw_frustrum(
+                        camera_position=self.camera_pos_world[agent_id],
+                        camera_orientation=self.camera_quat_world[agent_id],
+                        camera_intrinsics=self.camera_cfg_batch[agent_id],
+                        zoom_level=self.zoom_level[agent_id],
+                        device=self.device
+                    )
+
+            # Visualize triangulation covariance ellipsoids
+            if self.cfg.enable_delay_system and self.states is not None:
+                ray_dir_for_vis = self.states.ray_dir_delayed
+            else:
+                ray_dir_for_vis = get_ray_dir_from_bbox(
+                    self.bbox_raycaster.data.bboxes,
+                    torch.stack([self.camera_intrinsics[agent_id] for agent_id in self.cfg.possible_agents], dim=1),
+                    torch.stack([self.camera_quat_world[agent_id] for agent_id in self.cfg.possible_agents], dim=1),
+                    torch.stack([self.camera_pos_world[agent_id] for agent_id in self.cfg.possible_agents], dim=1),
+                )
+            
+            # Use delayed covariance for visualization
+            Sigma_X_vis = self.states.Sigma_X_delayed_noisy
+            Sigma_diag = torch.diagonal(Sigma_X_vis, dim1=-2, dim2=-1)
+            Sigma_diag_sqrt = torch.sqrt(torch.clamp(Sigma_diag, min=0.0) + 1e-12)
+            if Sigma_diag_sqrt.ndim == 3 and Sigma_diag_sqrt.shape[1] >= 1:
+                scales = Sigma_diag_sqrt[:, 0, :]
+            else:
+                scales = Sigma_diag_sqrt.squeeze(1)
+
+            self.tri_cov_visualizer.visualize(
+                translations=self.X_w_est.squeeze(1),
+                scales=scales * 2.5,
+            )
+            
+            self.bbox_raycaster.visualize()

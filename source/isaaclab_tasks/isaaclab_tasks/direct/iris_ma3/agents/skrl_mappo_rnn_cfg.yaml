@@ -1,0 +1,84 @@
+seed: 42
+
+
+# RNN-specific configuration
+# Note: This config is for custom MAPPO_RNN implementation, not standard skrl MAPPO
+rnn:
+  sequence_length: 50  # RNN sequence length for training
+  burn_in_steps: 10    # Burn-in steps (must be < sequence_length). Use 0 to disable, ~20% of sequence_length recommended
+
+
+# Models configuration for RNN-based MAPPO
+# Note: These are custom MAPPORNNPolicy and MAPPORNNValue models
+models:
+  separate: False  # All agents share the same policy and value networks
+  policy:
+    hidden_size: 256
+    gru_num_layers: 2
+    gru_hidden_size: 256
+    # Action distribution parameters (σ ≈ 0.6, more conservative than σ=1)
+    initial_log_std: -0.5
+    # σ_min ≈ 0.007, prevents collapse
+    min_log_std: -5.0
+    # σ_max ≈ 2.0, caps exploration
+    max_log_std: 0.7
+    clip_actions: True
+  value:
+    hidden_size: 256
+    gru_num_layers: 2
+    gru_hidden_size: 256
+
+
+# Rollout memory
+# https://skrl.readthedocs.io/en/latest/api/memories/random.html
+memory:
+  class: RandomMemory
+  memory_size: -1  # automatically determined (same as agent:rollouts)
+
+
+# MAPPO_RNN agent configuration (custom implementation)
+# Based on MAPPO_RNN_DEFAULT_CONFIG from mappo_rnn.py
+agent:
+  class: MAPPO_RNN
+  rollouts: 800  # Increased from 750 for RNN training
+  learning_epochs: 6
+  mini_batches: 2  # Lower the better sequence sampling
+  discount_factor: 0.99
+  lambda: 0.95
+  learning_rate: 1.0e-3  # Lower the better RNN stability
+  learning_rate_scheduler: KLAdaptiveLR
+  learning_rate_scheduler_kwargs:
+    kl_threshold: 0.02  # Higher the better exploration
+  state_preprocessor: RunningStandardScaler
+  state_preprocessor_kwargs: null
+  shared_state_preprocessor: RunningStandardScaler
+  shared_state_preprocessor_kwargs: null
+  value_preprocessor: RunningStandardScaler
+  value_preprocessor_kwargs: null
+  random_timesteps: 0
+  learning_starts: 0
+  grad_norm_clip: 0.5  # Lower the more conservative clipping
+  ratio_clip: 0.2
+  value_clip: 0.2
+  clip_predicted_values: True
+  entropy_loss_scale: 0.01
+  value_loss_scale: 1.0
+  kl_threshold: 0.02  # Enabled to prevent policy collapse
+  rewards_shaper: null
+  time_limit_bootstrap: True
+  # logging and checkpoint
+  experiment:
+    directory: "iris_ma3"
+    experiment_name: "rnn"
+    write_interval: auto
+    checkpoint_interval: auto
+    wandb: False
+
+
+# Sequential trainer
+# https://skrl.readthedocs.io/en/latest/api/trainers/sequential.html
+trainer:
+  class: SequentialTrainer
+  timesteps: 400000
+  headless: True
+  environment_info: log
