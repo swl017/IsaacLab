@@ -599,6 +599,214 @@ Reset all components.
 
 ---
 
+### MultiAgentStateManager
+
+**User-Facing API** - Simplified multi-agent state management with integrated GT, delayed, and delayed+noisy states.
+
+This is the **recommended API** for most users. It provides a high-level interface that manages all the complexity of state filtering, noise generation, and communication internally.
+
+#### Constructor
+
+```python
+MultiAgentStateManager(
+    possible_agents: list[str],
+    num_envs: int,
+    num_joints_per_agent: Dict[str, int],
+    num_targets_per_agent: Dict[str, int],
+    dt: float,
+    device: torch.device,
+    # Motion filter parameters
+    motion_time_constant: float = 0.1,
+    gimbal_time_constant: float = 0.03,
+    # Detection parameters
+    detection_fps: float = 30.0,
+    detection_mean_latency: float = 0.05,
+    detection_std_latency: float = 0.02,
+    detection_failure_rate: float = 0.0,
+    # Communication parameters
+    comm_mean_delay: float = 0.1,
+    comm_std_delay: float = 0.03,
+    comm_throttle_period: float = 0.0,
+    comm_dropout_rate: float = 0.05,
+    # Noise parameters
+    enable_noise: bool = True,
+    position_noise_std: float = 0.01,
+    orientation_noise_std: float = 0.01,
+    linear_velocity_noise_std: Optional[float] = None,
+    angular_velocity_noise_std: Optional[float] = None,
+    linear_acceleration_noise_std: float = 100e-6,
+    gimbal_noise_std: float = 0.01,
+    zoom_noise_std: float = 0.01,
+    bbox_noise_std: float = 1.0,
+    noise_seed: Optional[int] = 0,
+    max_buffer_size: int = 100
+)
+```
+
+**Parameters:**
+- `possible_agents` (list[str]): Agent IDs (e.g., `["drone_0", "drone_1"]`)
+- `num_envs` (int): Number of parallel environments
+- `num_joints_per_agent` (dict): Number of joints per agent (e.g., `{"drone_0": 3}`)
+- `num_targets_per_agent` (dict): Number of targets per agent
+- `dt` (float): Simulation timestep in seconds
+- `device` (torch.device): Device to allocate tensors on
+- `motion_time_constant` (float): Motion filter time constant. Default: 0.1
+- `gimbal_time_constant` (float): Gimbal filter time constant. Default: 0.03
+- `detection_fps` (float): Detection frame rate in Hz. Default: 30.0
+- `detection_mean_latency` (float): Mean detection delay in seconds. Default: 0.05
+- `detection_std_latency` (float): Std of detection delay. Default: 0.02
+- `detection_failure_rate` (float): Detection dropout rate [0, 1]. Default: 0.0
+- `comm_mean_delay` (float): Mean communication delay in seconds. Default: 0.1
+- `comm_std_delay` (float): Std of communication delay. Default: 0.03
+- `comm_throttle_period` (float): Communication bandwidth limit. Default: 0.0
+- `comm_dropout_rate` (float): Communication packet loss rate [0, 1]. Default: 0.05
+- `enable_noise` (bool): Enable sensor noise. Default: True
+- `position_noise_std` (float): Position noise std in meters. Default: 0.01
+- `orientation_noise_std` (float): Orientation noise std in radians. Default: 0.01
+- `linear_velocity_noise_std` (float): Linear velocity noise std. Default: 10% of position_noise_std
+- `angular_velocity_noise_std` (float): Angular velocity noise std. Default: ori_std × pos_std
+- `linear_acceleration_noise_std` (float): Linear acceleration noise std. Default: 100e-6
+- `gimbal_noise_std` (float): Gimbal angle noise std in radians. Default: 0.01
+- `zoom_noise_std` (float): Zoom level noise std (relative). Default: 0.01
+- `bbox_noise_std` (float): Bbox pixel noise std. Default: 1.0
+- `noise_seed` (int): Random seed for reproducibility. Default: 0
+- `max_buffer_size` (int): Maximum buffer size. Default: 100
+
+#### Methods
+
+##### `set_camera_configs(agent_id, width, height, focal_length, horizontal_aperture, offset_position_b, offset_rotation_b) -> None`
+
+Configure camera parameters for an agent. **Must be called before using camera features**.
+
+##### `update_time(time_increment=None) -> None`
+
+Update simulation time. Call once per step.
+
+##### `update_gt_states(agent_id, body_position_w, body_orientation_w, body_linear_velocity_w, body_angular_velocity_w, ...) -> None`
+
+**Single call, triple output**: Updates GT states and automatically produces delayed and delayed+noisy states.
+
+**This automatically:**
+1. Stores GT states
+2. Applies motion filters (first-order lag)
+3. Applies gimbal filters
+4. Stores delayed states (no noise)
+5. Adds sensor noise
+6. Stores delayed+noisy states
+7. Updates camera poses for all state types
+8. Updates camera intrinsics
+
+**Parameters:**
+- `agent_id` (str): Agent ID
+- `body_position_w` (Tensor): Body position [N, 3]
+- `body_orientation_w` (Tensor): Body quaternion [N, 4] (w, x, y, z)
+- `body_linear_velocity_w` (Tensor): Linear velocity [N, 3]
+- `body_angular_velocity_w` (Tensor): Angular velocity [N, 3]
+- `body_combined_angular_velocity_w` (Optional[Tensor]): Combined angular velocity [N, 3]
+- `body_linear_acceleration_w` (Optional[Tensor]): Linear acceleration [N, 3]
+- `joint_positions_b` (Optional[Tensor]): Joint positions [N, J]
+- `joint_velocities_b` (Optional[Tensor]): Joint velocities [N, J]
+- `zoom_level` (Optional[Tensor]): Camera zoom [N]
+- `env_idxs` (Optional[Tensor]): Environment indices to update
+
+##### `update_detections(agent_id, bboxes_2d_gt, valid_mask_gt, env_idxs=None) -> None`
+
+Process GT bboxes through detection pipeline (FPS throttle + dropout + latency + noise).
+
+**This automatically:**
+1. Stores GT bboxes
+2. Applies FPS throttling
+3. Applies detection dropout
+4. Applies detection latency
+5. Stores delayed bboxes (no noise)
+6. Adds bbox pixel noise
+7. Stores delayed+noisy bboxes
+8. Updates `bboxes_2d_age` field (time since detection)
+9. Updates camera ray directions
+
+##### `broadcast_state(sender_id, state_keys=None, has_source_data=None) -> None`
+
+Broadcast delayed states to other agents via communication channel.
+
+**Parameters:**
+- `sender_id` (str): Sending agent ID
+- `state_keys` (list[str]): List of state keys to broadcast. If None, broadcasts all.
+- `has_source_data` (Optional[Tensor]): Boolean mask [N] indicating valid data
+
+##### `receive_other_agent_states(receiver_id) -> Dict[str, Dict[str, Tuple]]`
+
+Receive states from other agents (with comm delay and dropout).
+
+**Returns:**
+Dict mapping `sender_agent_id -> {state_key -> (data, valid_mask, data_age)}`
+
+##### State Retrieval Methods
+
+```python
+get_gt_states(agent_id: str) -> AgentStates
+get_delayed_states(agent_id: str) -> AgentStates
+get_delayed_noisy_states(agent_id: str) -> AgentStates
+
+get_all_gt_states() -> MultiAgentStates
+get_all_delayed_states() -> MultiAgentStates
+get_all_delayed_noisy_states() -> MultiAgentStates
+```
+
+##### `set_noise_progress_scale(progress: float) -> None`
+
+Scale noise for curriculum learning.
+
+**Parameters:**
+- `progress` (float): Progress in [0, 1]. 0=no noise, 1=full noise.
+
+##### `update_detection_params(**kwargs) -> None`
+
+Update detection parameters at runtime.
+
+##### `update_comm_params(**kwargs) -> None`
+
+Update communication parameters at runtime.
+
+##### `get_statistics() -> Dict[str, Any]`
+
+Get pipeline statistics.
+
+##### `reset(env_ids=None) -> None`
+
+Reset state manager for specified environments.
+
+#### AgentStates Data Structure
+
+Each `AgentStates` object contains:
+
+```python
+agent_state.data.body_position_w              # [N, 3]
+agent_state.data.body_orientation_w           # [N, 4] - quat (w,x,y,z)
+agent_state.data.body_linear_velocity_w       # [N, 3]
+agent_state.data.body_angular_velocity_w      # [N, 3]
+agent_state.data.joint_positions_b            # [N, J] - [roll, pitch, yaw]
+agent_state.data.camera_position_w            # [N, 3]
+agent_state.data.camera_orientation_w         # [N, 4]
+agent_state.data.camera_intrinsics            # [N, 3, 3]
+agent_state.data.camera_zoom_level            # [N]
+agent_state.data.bboxes_2d                    # [N, T, 4] - xywh
+agent_state.data.bboxes_2d_valid_mask         # [N, T] - boolean
+agent_state.data.bboxes_2d_age                # [N, T] - time since detection (seconds)
+agent_state.data.camera_ray_directions_w      # [N, T, 3]
+```
+
+#### State Types
+
+| State Type | Characteristics | Usage |
+|------------|----------------|--------|
+| **GT States** | Direct simulation states | Bbox raycasting, debugging |
+| **Delayed States** | Lag + latency, **no noise** | **Reward computation** |
+| **Delayed+Noisy States** | Lag + latency + noise | **Observations** |
+
+**Key principle**: Use delayed (no noise) for rewards to ensure fair comparison, and delayed+noisy for observations to match realistic sensors.
+
+---
+
 ## Usage Examples
 
 ### Example 1: Basic Channel Buffer
@@ -851,6 +1059,410 @@ done_env_ids = torch.where(dones)[0]
 if len(done_env_ids) > 0:
     pipeline.reset(done_env_ids)
 ```
+
+---
+
+## Testing
+
+### Test Suite Overview
+
+The `MultiAgentStateManager` has a comprehensive test suite validating the integrated state management system with GT, delayed, and delayed+noisy states, including seeded noise generation and curriculum learning.
+
+**Test File**: `test_multi_agent_state_manager.py`
+**Total Tests**: 16 tests
+**Coverage**: Initialization, state updates, noise generation, curriculum learning, detection processing, communication, and edge cases
+
+Tests are organized by priority:
+- **P0 (5 tests)**: Critical user-facing functionality
+- **P1 (5 tests)**: Important integration and edge cases
+- **P2 (6 tests)**: Validation and robustness tests
+
+---
+
+### P0 Tests: Critical Functionality
+
+#### 1. `test_initialization`
+**Purpose**: Verify state manager initializes correctly
+
+**What it tests**:
+- ✅ Basic attributes (num_envs, num_agents, device)
+- ✅ State storage creation (gt_states, delayed_states, delayed_noisy_states)
+- ✅ All agents present in all state types
+- ✅ Noise tensors pre-allocated with correct shapes
+
+**Expected behavior**:
+- All state containers exist
+- Noise tensors match `[num_envs, num_agents, state_dim]` shape
+- Agent ID to index mapping created
+
+---
+
+#### 2. `test_noise_reproducibility`
+**Purpose**: Verify seeded noise produces identical results
+
+**What it tests**:
+- ✅ Same seed → identical noise sequence
+- ✅ Two managers with seed=42 produce same noisy states
+- ✅ Reproducibility across position, orientation, velocity
+
+**Expected behavior**:
+```python
+manager1 = MultiAgentStateManager(..., noise_seed=42)
+manager2 = MultiAgentStateManager(..., noise_seed=42)
+
+# Update both with same GT
+manager1.update_gt_states(...)
+manager2.update_gt_states(...)
+
+# Noisy states should be identical
+assert torch.allclose(
+    manager1.get_delayed_noisy_states("drone_0").data.body_position_w,
+    manager2.get_delayed_noisy_states("drone_0").data.body_position_w
+)
+```
+
+**Why important**: Essential for reproducible training and debugging
+
+---
+
+#### 3. `test_update_gt_states`
+**Purpose**: Verify GT state updates propagate correctly
+
+**What it tests**:
+- ✅ GT states stored exactly as provided
+- ✅ Delayed states created (with filtering)
+- ✅ Delayed+noisy states created (with filtering + noise)
+- ✅ Camera poses updated for all state types
+- ✅ Gimbal and zoom handled correctly
+
+**Expected behavior**:
+- GT matches input exactly
+- Delayed differs from GT (due to motion filters)
+- Noisy differs from delayed (due to noise)
+- All states have updated camera poses and intrinsics
+
+---
+
+#### 4. `test_curriculum_learning`
+**Purpose**: Verify noise scales with progress parameter
+
+**What it tests**:
+- ✅ `progress=0.0` → no noise (delayed = noisy)
+- ✅ `progress=0.5` → half noise
+- ✅ `progress=1.0` → full noise
+- ✅ Noise magnitude increases with progress
+
+**Expected behavior**:
+```python
+manager.set_noise_progress_scale(0.0)
+manager.update_gt_states(...)
+state_no_noise = manager.get_delayed_noisy_states(...)
+
+# With progress=0, noisy should equal delayed
+assert torch.allclose(state_no_noise, delayed_state)
+
+manager.set_noise_progress_scale(1.0)
+manager.update_gt_states(...)
+state_full_noise = manager.get_delayed_noisy_states(...)
+
+# Full noise should differ more from delayed
+```
+
+**Why important**: Enables curriculum learning for training stability
+
+---
+
+#### 5. `test_detection_processing`
+**Purpose**: Verify bbox detection pipeline works correctly
+
+**What it tests**:
+- ✅ GT bboxes stored correctly
+- ✅ Delayed bboxes processed (FPS throttle + latency)
+- ✅ Noisy bboxes created (delayed + pixel noise)
+- ✅ Validity masks propagate
+- ✅ Camera ray directions updated
+
+**Expected behavior**:
+- GT bboxes match input
+- Delayed bboxes may differ (due to FPS throttle/latency)
+- Noisy bboxes differ from delayed (pixel noise)
+- Shapes consistent across all state types
+
+---
+
+### P1 Tests: Integration & Edge Cases
+
+#### 6. `test_state_consistency`
+**Purpose**: Verify GT → delayed → noisy chain is consistent
+
+**What it tests**:
+- ✅ GT matches input exactly
+- ✅ Delayed differs from GT (filtering)
+- ✅ Noisy has same shape as delayed
+- ✅ Camera poses updated for all
+- ✅ Intrinsics updated for all
+
+**Expected behavior**: State pipeline maintains consistency while applying transformations
+
+---
+
+#### 7. `test_multi_agent_integration`
+**Purpose**: Verify multiple agents work independently
+
+**What it tests**:
+- ✅ Each agent has independent states
+- ✅ Updating one agent doesn't affect others
+- ✅ Different GT states → different agent states
+
+**Expected behavior**:
+```python
+manager.update_gt_states("drone_0", pos0, ...)
+manager.update_gt_states("drone_1", pos1, ...)
+
+# States should be independent
+assert not torch.allclose(
+    manager.get_gt_states("drone_0").data.body_position_w,
+    manager.get_gt_states("drone_1").data.body_position_w
+)
+```
+
+---
+
+#### 8. `test_communication_integration`
+**Purpose**: Verify state broadcasting and receiving works
+
+**What it tests**:
+- ✅ Broadcast delayed states to other agents
+- ✅ Receive states with delay/dropout
+- ✅ Communication channel integration
+
+**Expected behavior**:
+```python
+manager.update_gt_states("drone_0", ...)
+manager.broadcast_state("drone_0", state_keys=['position'])
+
+# drone_1 receives with delay
+received = manager.receive_other_agent_states("drone_1")
+# Structure correct (may be empty initially due to latency)
+```
+
+---
+
+#### 9. `test_noise_formula_consistency`
+**Purpose**: Verify noise formulas match iris_ma_env3.py
+
+**What it tests**:
+- ✅ Linear velocity noise = 10% of position noise
+- ✅ Angular velocity noise = ori_std × pos_std
+- ✅ Linear acceleration noise = 100e-6
+
+**Expected behavior**:
+```python
+assert manager.linear_velocity_noise_std == 0.1 * position_noise_std
+assert manager.angular_velocity_noise_std == ori_std * pos_std
+assert manager.linear_acceleration_noise_std == 100e-6
+```
+
+**Why important**: Ensures exact match with original implementation
+
+---
+
+#### 10. `test_reset_functionality`
+**Purpose**: Verify reset clears state properly
+
+**What it tests**:
+- ✅ Reset specific environments
+- ✅ Reset all environments
+- ✅ Filters and buffers cleared
+
+**Expected behavior**: After reset, pipeline state is cleared
+
+---
+
+### P2 Tests: Validation
+
+#### 11. `test_camera_pose_updates`
+**Purpose**: Verify camera poses automatically updated
+
+**What it tests**:
+- ✅ Camera config can be set
+- ✅ Camera poses computed from body + gimbal
+- ✅ All state types have updated camera poses
+
+---
+
+#### 12. `test_zoom_noise_clamping`
+**Purpose**: Verify zoom noise clamped to [1.0, 10.0]
+
+**What it tests**:
+- ✅ Extreme zoom values clamped
+- ✅ Noisy zoom stays in valid range
+
+**Expected behavior**:
+```python
+extreme_zoom = torch.tensor([15.0])  # Above max
+manager.update_gt_states(..., zoom_level=extreme_zoom)
+
+noisy = manager.get_delayed_noisy_states(...)
+assert torch.all(noisy.data.camera_zoom_level >= 1.0)
+assert torch.all(noisy.data.camera_zoom_level <= 10.0)
+```
+
+---
+
+#### 13. `test_partial_env_update`
+**Purpose**: Verify updating only specific environments
+
+**What it tests**:
+- ✅ `env_idxs` parameter works correctly
+- ✅ Only specified envs updated
+- ✅ Others remain unchanged
+
+---
+
+#### 14. `test_detection_with_invalid_mask`
+**Purpose**: Verify detection validity handling
+
+**What it tests**:
+- ✅ Mixed valid/invalid detections processed
+- ✅ Validity masks propagate through pipeline
+- ✅ Channel impairments applied correctly
+
+---
+
+#### 15. `test_get_all_states`
+**Purpose**: Verify get_all_* methods return correct types
+
+**What it tests**:
+- ✅ `get_all_gt_states()` returns MultiAgentStates
+- ✅ `get_all_delayed_states()` returns MultiAgentStates
+- ✅ `get_all_delayed_noisy_states()` returns MultiAgentStates
+- ✅ All agents present in returned objects
+
+---
+
+#### 16. `test_noise_disabled`
+**Purpose**: Verify behavior when noise disabled
+
+**What it tests**:
+- ✅ With `enable_noise=False`, delayed = noisy
+- ✅ No noise added to states
+
+**Expected behavior**:
+```python
+manager = MultiAgentStateManager(..., enable_noise=False)
+manager.update_gt_states(...)
+
+delayed = manager.get_delayed_states(...)
+noisy = manager.get_delayed_noisy_states(...)
+
+# Should be identical
+assert torch.allclose(delayed.data.body_position_w, noisy.data.body_position_w)
+```
+
+---
+
+### Running the Tests
+
+**Run All Tests**:
+```bash
+cd source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma3/delayed_states/tests
+python run_all_tests.py
+```
+
+**Run by Priority**:
+```bash
+# P0 tests only (critical)
+python run_all_tests.py --priority P0
+
+# P1 tests only (important)
+python run_all_tests.py --priority P1
+
+# P2 tests only (validation)
+python run_all_tests.py --priority P2
+```
+
+**Run Specific Test**:
+```bash
+python run_all_tests.py -k test_noise_reproducibility
+```
+
+**Run with Coverage**:
+```bash
+python run_all_tests.py --coverage
+```
+
+---
+
+### Test Coverage Summary
+
+| Component | Coverage |
+|-----------|----------|
+| Initialization | ✅ P0 |
+| Noise Reproducibility | ✅ P0 |
+| GT State Updates | ✅ P0 |
+| Curriculum Learning | ✅ P0 |
+| Detection Processing | ✅ P0 |
+| State Consistency | ✅ P1 |
+| Multi-Agent | ✅ P1 |
+| Communication | ✅ P1 |
+| Noise Formulas | ✅ P1 |
+| Reset | ✅ P1 |
+| Camera Poses | ✅ P2 |
+| Zoom Clamping | ✅ P2 |
+| Partial Updates | ✅ P2 |
+| Invalid Masks | ✅ P2 |
+| Batch Access | ✅ P2 |
+| Noise Disabled | ✅ P2 |
+
+**Total**: 16 tests covering all aspects of MultiAgentStateManager
+
+---
+
+### Expected Test Results
+
+All tests should pass with output similar to:
+```
+================================================================================
+Running delayed_states.py Test Suite
+================================================================================
+Priority: P0
+Coverage: No
+Test directory: .../tests
+================================================================================
+
+test_multi_agent_state_manager.py::test_initialization PASSED
+✓ Initialization test passed
+
+test_multi_agent_state_manager.py::test_noise_reproducibility PASSED
+✓ Noise reproducibility test passed
+
+test_multi_agent_state_manager.py::test_update_gt_states PASSED
+✓ Update GT states test passed
+
+test_multi_agent_state_manager.py::test_curriculum_learning PASSED
+✓ Curriculum learning test passed
+
+test_multi_agent_state_manager.py::test_detection_processing PASSED
+✓ Detection processing test passed
+
+================================================================================
+✓ All tests passed!
+================================================================================
+```
+
+---
+
+### Troubleshooting
+
+**Test Fails: "CUDA out of memory"**
+Solution: Reduce `num_envs` in fixtures or run on CPU
+
+**Test Fails: "Noise not matching"**
+Solution: Check `noise_seed` is set correctly and identical between managers
+
+**Test Fails: "State shape mismatch"**
+Solution: Verify `num_joints_per_agent` and `num_targets_per_agent` match expectations
 
 ---
 

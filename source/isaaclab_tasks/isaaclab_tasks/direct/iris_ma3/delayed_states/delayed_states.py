@@ -372,6 +372,7 @@ class AgentStatesData:
     camera_zoom_level: torch.Tensor
     bboxes_2d: torch.Tensor # xywh format
     bboxes_2d_valid_mask: torch.Tensor # boolean mask indicating valid bounding boxes
+    bboxes_2d_age: torch.Tensor # time elapsed since detection was captured (seconds) [N, T]
 
 class AgentStates:
     """Defines the agent states to be used in the task.
@@ -436,6 +437,7 @@ class AgentStates:
         self.data.camera_zoom_level = torch.ones((N,), device=device)
         self.data.bboxes_2d = torch.zeros((N, T, 4), device=device)
         self.data.bboxes_2d_valid_mask = torch.zeros((N, T), device=device, dtype=torch.bool)
+        self.data.bboxes_2d_age = torch.zeros((N, T), device=device)
 
     def set_camera_configs(
         self,
@@ -491,7 +493,8 @@ class AgentStates:
         if env_idxs is None:
             env_idxs = torch.arange(self.data.num_envs, device=self.data.device)
         fx = zoom_level * (self.data.camera_width * self.data.camera_focal_length) / self.data.camera_horizontal_aperture
-        fy = zoom_level * (self.data.camera_height * self.data.camera_focal_length) / self.data.camera_horizontal_aperture
+        vertical_aperture = self.data.camera_horizontal_aperture * (self.data.camera_height / self.data.camera_width)
+        fy = zoom_level * (self.data.camera_height * self.data.camera_focal_length) / vertical_aperture
         cx = self.data.camera_width / 2.0
         cy = self.data.camera_height / 2.0
 
@@ -2311,13 +2314,16 @@ class MultiAgentStateManager:
         # Retrieve delayed detections (no noise)
         delayed_bboxes = []
         delayed_valid = []
+        delayed_ages = []
         for t in range(num_targets):
-            bbox_delayed, valid_delayed, _ = self.obs_pipeline.get_delayed_detection(agent_idx)
+            bbox_delayed, valid_delayed, data_age = self.obs_pipeline.get_delayed_detection(agent_idx)
             delayed_bboxes.append(bbox_delayed)
             delayed_valid.append(valid_delayed)
+            delayed_ages.append(data_age)
 
         delayed_bboxes_stacked = torch.stack(delayed_bboxes, dim=1)  # [N, T, 4]
         delayed_valid_stacked = torch.stack(delayed_valid, dim=1)    # [N, T]
+        delayed_ages_stacked = torch.stack(delayed_ages, dim=1)      # [N, T]
 
         # Update delayed states
         self.delayed_states.agents[agent_id].update_bboxes_2d(
@@ -2325,6 +2331,9 @@ class MultiAgentStateManager:
             valid_mask=delayed_valid_stacked,
             env_idxs=env_idxs
         )
+
+        # Store detection ages in delayed states
+        self.delayed_states.agents[agent_id].data.bboxes_2d_age[env_idxs] = delayed_ages_stacked[env_idxs]
 
         # Add bbox noise for observations
         if self.enable_noise:
@@ -2354,6 +2363,9 @@ class MultiAgentStateManager:
             valid_mask=delayed_valid_stacked,
             env_idxs=env_idxs
         )
+
+        # Store detection ages in delayed+noisy states (same age, different bbox due to noise)
+        self.delayed_noisy_states.agents[agent_id].data.bboxes_2d_age[env_idxs] = delayed_ages_stacked[env_idxs]
 
         # Update camera rays for both delayed and delayed+noisy states
         for state_manager, bboxes in [

@@ -390,6 +390,7 @@ agent_state.data.camera_zoom_level            # [N]
 # Detection states
 agent_state.data.bboxes_2d                    # [N, T, 4] - xywh (pixels)
 agent_state.data.bboxes_2d_valid_mask         # [N, T] - boolean
+agent_state.data.bboxes_2d_age                # [N, T] - time since detection (seconds)
 agent_state.data.camera_ray_directions_w      # [N, T, 3] - from bbox centers
 ```
 
@@ -398,6 +399,134 @@ agent_state.data.camera_ray_directions_w      # [N, T, 3] - from bbox centers
 - Quaternions use **(w, x, y, z)** convention
 - Gimbal joint order is **[roll, pitch, yaw]** at indices **[0, 1, 2]**
 - Bbox format is **[x, y, w, h]** in pixel coordinates
+
+---
+
+## Detection Age Usage
+
+The `bboxes_2d_age` field tracks **time elapsed since each bbox was detected** (in seconds). This is useful for curriculum learning, staleness penalties, and monitoring detection pipeline performance.
+
+### What Detection Age Represents
+
+**Age = Current time - Detection capture time**
+
+Includes:
+- FPS throttling delay (e.g., 30 Hz detection rate)
+- Processing latency (mean + std from config)
+- Buffer delays
+
+**Age is 0 when:**
+- No detection received yet
+- Detection was dropped/invalid
+- Environment was just reset
+
+### Basic Access
+
+```python
+# Get delayed+noisy states for observations
+noisy_state = state_manager.get_delayed_noisy_states("drone_0")
+
+# Access detection age for first target
+bbox_age = noisy_state.data.bboxes_2d_age[:, 0]  # [N] - seconds
+
+# Access all targets
+all_ages = noisy_state.data.bboxes_2d_age  # [N, T]
+```
+
+### Using in Observations
+
+```python
+def _get_observations(self):
+    noisy_states = state_manager.get_all_delayed_noisy_states()
+
+    for agent_id in possible_agents:
+        noisy_state = noisy_states.agents[agent_id]
+
+        # Get detection with age
+        bbox = noisy_state.data.bboxes_2d[:, 0, :]  # [N, 4]
+        bbox_valid = noisy_state.data.bboxes_2d_valid_mask[:, 0:1]  # [N, 1]
+        bbox_age = noisy_state.data.bboxes_2d_age[:, 0:1]  # [N, 1] - NEW!
+
+        # Include in observation
+        obs = torch.cat([
+            # ... other observations ...
+            bbox,        # [N, 4]
+            bbox_valid,  # [N, 1]
+            bbox_age,    # [N, 1] - Agent knows data freshness
+        ], dim=-1)
+```
+
+### Penalizing Stale Detections in Rewards
+
+```python
+def _get_rewards(self):
+    delayed_states = state_manager.get_all_delayed_states()
+
+    for agent_id in possible_agents:
+        delayed_state = delayed_states.agents[agent_id]
+
+        bbox_valid = delayed_state.data.bboxes_2d_valid_mask[:, 0]  # [N]
+        bbox_age = delayed_state.data.bboxes_2d_age[:, 0]  # [N]
+
+        # Exponential decay penalty for stale detections
+        max_age = 0.5  # Max acceptable age (seconds)
+        staleness_penalty = torch.exp(-bbox_age / max_age)  # 1.0 → 0.37
+
+        # Apply only when detection is valid
+        detection_quality = torch.where(
+            bbox_valid,
+            staleness_penalty,
+            torch.zeros_like(staleness_penalty)
+        )
+
+        reward = detection_quality * cfg.detection_quality_scale
+```
+
+### Curriculum: Gradually Increase Age Tolerance
+
+```python
+class IrisMA3Env(DirectMARLEnv):
+    def __init__(self, cfg, **kwargs):
+        super().__init__(cfg, **kwargs)
+        self.max_acceptable_age = 0.05  # Start with 50ms max age
+
+    def update_curriculum(self, progress: float):
+        """Gradually increase tolerance for old detections."""
+        # 0.05s (easy) → 0.3s (hard)
+        self.max_acceptable_age = 0.05 + progress * 0.25
+
+    def _get_rewards(self):
+        # Use curriculum-adjusted threshold
+        staleness_penalty = torch.exp(-bbox_age / self.max_acceptable_age)
+```
+
+### Detection Age vs Communication Age
+
+**Detection age** (`bboxes_2d_age`):
+- Time since **local** bbox was detected
+- Includes FPS throttle + detection latency
+
+**Communication age** (from `receive_other_agent_states`):
+- Time since **received** data was captured by **other agent**
+- Includes detection latency + communication delay
+
+```python
+# Local detection age
+bbox_age = noisy_state.data.bboxes_2d_age[:, 0]  # [N]
+
+# Received detection age (from other agent)
+received = state_manager.receive_other_agent_states("drone_0")
+if "drone_1" in received:
+    _, _, comm_age = received["drone_1"]['position']  # [N]
+    # comm_age >= bbox_age (includes communication delay)
+```
+
+### Important Notes
+
+- **Always check `bboxes_2d_valid_mask` before using age**
+- Age is **0** when no data or detection failed
+- Age **resets to 0** after environment reset
+- Age is **per-target**: shape `[N, T]` matches `bboxes_2d`
 
 ---
 
@@ -753,6 +882,7 @@ def _get_observations(self) -> Dict[str, torch.Tensor]:
         # Detection (delayed + noisy)
         bbox = noisy_state.data.bboxes_2d[:, 0, :]  # [N, 4]
         bbox_valid = noisy_state.data.bboxes_2d_valid_mask[:, 0:1].float()  # [N, 1]
+        bbox_age = noisy_state.data.bboxes_2d_age[:, 0:1]  # [N, 1] - time since detection
         zoom = noisy_state.data.camera_zoom_level.unsqueeze(-1)  # [N, 1]
 
         # Received states from other agents (communication)
@@ -788,6 +918,7 @@ def _get_observations(self) -> Dict[str, torch.Tensor]:
             ego_vel,           # [N, 3]
             bbox,              # [N, 4]
             bbox_valid,        # [N, 1]
+            bbox_age,          # [N, 1]
             zoom,              # [N, 1]
             *other_positions,  # [N, 3] x (C-1)
             *other_rays,       # [N, 3] x (C-1)

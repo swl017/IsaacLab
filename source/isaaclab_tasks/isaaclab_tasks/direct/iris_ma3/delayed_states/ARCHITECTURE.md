@@ -124,6 +124,7 @@ MultiAgentStates
         ├── camera_zoom_level       [N]
         ├── bboxes_2d              [N, T, 4]
         ├── bboxes_2d_valid_mask   [N, T]
+        ├── bboxes_2d_age          [N, T] - time since detection (seconds)
         └── camera_ray_directions_w [N, T, 3]
 ```
 
@@ -385,6 +386,58 @@ Each class has one clear job:
 | Shape mismatch | Assert in update | Check tensor dimensions |
 | Invalid env_ids | Index out of bounds | Validate indices |
 | Missing agent ID | KeyError | Check agent in `possible_agents` |
+
+## Detection Age Tracking
+
+The system automatically tracks **time elapsed since each bbox detection was captured** via the `bboxes_2d_age` field.
+
+### What Detection Age Represents
+
+**Detection age = Current time - Detection capture time**
+
+The age accounts for:
+1. **FPS throttling**: Detection runs at limited frame rate (e.g., 30 Hz)
+2. **Processing latency**: Random delay from detection to availability
+3. **Buffer delays**: Time spent waiting in latency buffers
+
+### Age Semantics
+
+- **Age = 0**: No detection received yet, or detection was dropped/invalid
+- **Age > 0**: Valid detection with known freshness
+- **Resets to 0**: On environment reset or when detection fails
+
+### Availability Across State Types
+
+| State Type | Age Behavior |
+|------------|--------------|
+| **GT States** | Always 0 (instant detection) |
+| **Delayed States** | Real age including FPS throttle + latency |
+| **Delayed+Noisy States** | Same age as delayed (noise doesn't affect timing) |
+
+### Use Cases
+
+1. **Observations**: Agent awareness of data freshness
+   ```python
+   bbox_age = noisy_state.data.bboxes_2d_age[:, 0]  # [N] seconds
+   ```
+
+2. **Rewards**: Penalize stale detections
+   ```python
+   staleness_penalty = torch.exp(-bbox_age / max_acceptable_age)
+   ```
+
+3. **Curriculum Learning**: Gradually increase tolerance for old data
+   ```python
+   max_acceptable_age = 0.05 + progress * 0.25  # 50ms → 300ms
+   ```
+
+4. **Debugging**: Monitor detection pipeline latency
+
+### Important Considerations
+
+- Always check `bboxes_2d_valid_mask` before using age
+- Age is different from communication age (which includes comm delay)
+- Age is per-target: shape is `[N, T]` matching `bboxes_2d`
 
 ## Testing Strategy
 
