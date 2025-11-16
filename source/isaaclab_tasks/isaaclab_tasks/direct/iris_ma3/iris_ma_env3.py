@@ -444,6 +444,132 @@ class IrisMAEnv(DirectMARLEnv):
 
         return Sigma_X, trace_cov, is_tri_cov_valid
 
+    def compute_ttc_from_pos_vel(self, ego_pos, ego_vel, other_pos, other_vel, safe_distance: float | None = None) -> torch.Tensor:
+        """Compute Time-To-Collision (TTC) based on position and velocity."""
+        rel_pos = other_pos - ego_pos
+        rel_vel = other_vel - ego_vel
+
+        distance = torch.norm(rel_pos, dim=1)
+        rel_speed = torch.norm(rel_vel, dim=1)
+
+        # Only compute TTC if objects are approaching (rel_vel pointing toward each other)
+        approaching = torch.sum(rel_pos * rel_vel, dim=1) < 0
+
+        ttc = torch.where(
+            approaching & (rel_speed > 1e-3),
+            distance / (rel_speed + 1e-6),
+            torch.full_like(distance, float('inf'))
+        )
+
+        return ttc
+
+    def compute_looming_ttc_penalty_zoom_invariant(
+        self,
+        bbox_w_dn, bbox_h_dn, valid_dn,          # [N, A], delayed+noisy (causal)
+        fx_delayed, fy_delayed,                  # [N, A], delayed intrinsics in pixels (causal, noiseless)
+        dt,                                      # scalar
+        horizon_sec=6.0,
+        ema_alpha_s=0.6,                         # EMA for log-size
+        ema_alpha_f=0.6,                         # EMA for log-focal
+        deriv_clip=0.5,
+        eps=1e-6,
+        stale_half_life=1.0,
+        zoom_gate_k=0.2,                         # gate aggressiveness for |d ln f|
+        aggregate="max",
+    ):
+        """
+        Compute looming TTC penalty based on bbox size change (zoom-invariant).
+        This method tracks the rate of change of bbox size relative to focal length
+        to estimate time-to-collision with the target.
+        """
+        N, A = bbox_w_dn.shape
+        self._ensure_loom_buffers(N, A, bbox_w_dn.device)
+
+        # ---- 1) Build size and focal terms ----
+        s = torch.sqrt(torch.clamp(bbox_w_dn, min=0) * torch.clamp(bbox_h_dn, min=0))  # [N, A]
+        f_eff = torch.sqrt(torch.clamp(fx_delayed, min=eps) * torch.clamp(fy_delayed, min=eps))
+        valid = valid_dn & (s > 0)
+
+        g_s  = torch.log(s + eps)        # log size
+        g_f  = torch.log(f_eff + eps)    # log focal
+
+        # Keep separate EMAs for size and focal
+        if not hasattr(self, "ttc_loom_logsize_ema"):
+            self.ttc_loom_logsize_ema = torch.zeros_like(g_s)
+            self.ttc_loom_logf_ema    = torch.zeros_like(g_f)
+            self.ttc_loom_log_g_prev  = torch.zeros_like(g_s)   # previous g = log(s/f)
+
+        # EMA updates only where valid
+        size_ema_new = ema_alpha_s * self.ttc_loom_logsize_ema + (1.0 - ema_alpha_s) * g_s
+        focal_ema_new= ema_alpha_f * self.ttc_loom_logf_ema    + (1.0 - ema_alpha_f) * g_f
+        self.ttc_loom_logsize_ema = torch.where(valid, size_ema_new, self.ttc_loom_logsize_ema)
+        self.ttc_loom_logf_ema    = torch.where(valid, focal_ema_new, self.ttc_loom_logf_ema)
+
+        # ---- 2) Zoom-invariant log-size: g = log(s/f) ----
+        g_now = self.ttc_loom_logsize_ema - self.ttc_loom_logf_ema   # [N, A]
+
+        # ---- 3) Derivative using previous g (CRITICAL) ----
+        dg = (g_now - self.ttc_loom_log_g_prev) / max(dt, 1e-6)
+        self.ttc_loom_log_g_prev = g_now.clone()
+
+        # Robustify derivative
+        dg = torch.clamp(dg, min=-deriv_clip, max=deriv_clip)
+
+        # ---- 4) Optional gates ----
+        # Zoom motion gate: large |d ln f| means active zoom; soften penalty
+        dlogf = (self.ttc_loom_logf_ema - focal_ema_new).abs() / max(dt, 1e-6)  # use pre-update vs new for smoother gate
+        w_zoom = torch.exp(-dlogf / max(zoom_gate_k, 1e-6))
+        w_zoom = torch.clamp(w_zoom, 0.0, 1.0)
+
+        # Aspect gate (optional)
+        aspect = torch.log( (bbox_w_dn + eps) / (bbox_h_dn + eps) )
+
+        # ---- 5) Looming TTC from zoom-invariant derivative ----
+        tau = torch.full_like(dg, float("inf"))
+        approaching = (dg < -1e-4) & valid
+        tau = torch.where(approaching, -1.0 / torch.clamp(dg, max=-1e-4), tau)
+
+        # ---- 6) Shape to [0,1] and apply staleness + gates ----
+        H = float(horizon_sec)
+        phi = (H - torch.clamp(tau, max=H)) / H
+        phi = torch.clamp(phi, 0.0, 1.0)
+
+        # staleness
+        if not hasattr(self, "ttc_loom_time_since_valid"):
+            self.ttc_loom_time_since_valid = torch.zeros_like(phi)
+        self.ttc_loom_time_since_valid = torch.where(valid,
+                                                torch.zeros_like(self.ttc_loom_time_since_valid),
+                                                self.ttc_loom_time_since_valid + dt)
+        stale_decay = torch.exp(-self.ttc_loom_time_since_valid / max(stale_half_life, 1e-6))
+
+        # combine gates
+        gate = stale_decay * w_zoom
+        phi = phi * gate
+
+        # ---- 7) Aggregate ----
+        if aggregate == "max":
+            team_phi = torch.max(phi, dim=1).values
+        elif aggregate == "mean":
+            denom = torch.clamp(valid.float().sum(dim=1), min=1.0)
+            team_phi = (phi * valid.float()).sum(dim=1) / denom
+        else:
+            raise ValueError(f"Unknown aggregate={aggregate}")
+
+        return team_phi, phi, tau
+
+    @torch.no_grad()
+    def _ensure_loom_buffers(self, N: int, A: int, device):
+        """Ensure looming TTC buffers are initialized."""
+        # Zoom-invariant looming TTC buffers
+        if not hasattr(self, "ttc_loom_logsize_ema"):
+            self.ttc_loom_logsize_ema   = torch.zeros((N, A), device=device)
+        if not hasattr(self, "ttc_loom_logf_ema"):
+            self.ttc_loom_logf_ema      = torch.zeros((N, A), device=device)
+        if not hasattr(self, "ttc_loom_log_g_prev"):
+            self.ttc_loom_log_g_prev    = torch.zeros((N, A), device=device)
+        if not hasattr(self, "ttc_loom_time_since_valid"):
+            self.ttc_loom_time_since_valid = torch.zeros((N, A), device=device)
+
     def _get_rewards(self) -> Dict[str, torch.Tensor]:
         self._compute_intermediate_values()
         rewards_dict = {}
@@ -515,6 +641,78 @@ class IrisMAEnv(DirectMARLEnv):
 
             triangulation_results[agent_id] = (Sigma_X, trace_cov, is_tri_cov_valid)
 
+        # ========== Compute TTC penalties ==========
+        # Initialize TTC tracking tensors
+        num_agents = len(self.cfg.possible_agents)
+        cam_to_cam_ttc = torch.full((self.num_envs, num_agents, num_agents), float('inf'), device=self.device)
+
+        # Compute cam-to-cam TTC for all agent pairs
+        for i, ego_agent_id in enumerate(self.cfg.possible_agents):
+            ego_delayed_state = self.state_manager.get_delayed_states(ego_agent_id)
+            ego_pos = ego_delayed_state.data.body_position_w
+            ego_vel = ego_delayed_state.data.body_linear_velocity_w
+
+            for j, other_agent_id in enumerate(self.cfg.possible_agents):
+                if i >= j:
+                    continue
+
+                other_delayed_state = self.state_manager.get_delayed_states(other_agent_id)
+                other_pos = other_delayed_state.data.body_position_w
+                other_vel = other_delayed_state.data.body_linear_velocity_w
+
+                ttc = self.compute_ttc_from_pos_vel(
+                    ego_pos=ego_pos,
+                    ego_vel=ego_vel,
+                    other_pos=other_pos,
+                    other_vel=other_vel
+                )
+                cam_to_cam_ttc[:, i, j] = ttc
+                cam_to_cam_ttc[:, j, i] = ttc
+
+        # Compute cam-to-target looming TTC for all agents
+        # Collect delayed+noisy bbox data and delayed camera intrinsics for all agents
+        bbox_w_list = []
+        bbox_h_list = []
+        bbox_valid_list = []
+        fx_list = []
+        fy_list = []
+
+        for agent_id in self.cfg.possible_agents:
+            delayed_noisy_state = self.state_manager.get_delayed_noisy_states(agent_id)
+            bbox_w_list.append(delayed_noisy_state.data.bboxes_2d[:, 0, 2])  # [N], width
+            bbox_h_list.append(delayed_noisy_state.data.bboxes_2d[:, 0, 3])  # [N], height
+            bbox_valid_list.append(delayed_noisy_state.data.bboxes_2d_valid_mask[:, 0, 0])  # [N], valid mask
+
+            # Camera intrinsics from delayed state (no noise)
+            delayed_state = self.state_manager.get_delayed_states(agent_id)
+            fx_list.append(delayed_state.data.camera_intrinsics[:, 0])  # [N], fx
+            fy_list.append(delayed_state.data.camera_intrinsics[:, 1])  # [N], fy
+
+        # Stack to [N, A] format
+        bbox_w_dn = torch.stack(bbox_w_list, dim=1)  # [N, A]
+        bbox_h_dn = torch.stack(bbox_h_list, dim=1)  # [N, A]
+        valid_dn = torch.stack(bbox_valid_list, dim=1)  # [N, A]
+        fx_delayed = torch.stack(fx_list, dim=1)  # [N, A]
+        fy_delayed = torch.stack(fy_list, dim=1)  # [N, A]
+
+        # Compute looming TTC
+        _, ttc_penalty_cam_to_target, cam_to_target_ttc = self.compute_looming_ttc_penalty_zoom_invariant(
+            bbox_w_dn=bbox_w_dn,
+            bbox_h_dn=bbox_h_dn,
+            valid_dn=valid_dn,
+            fx_delayed=fx_delayed,
+            fy_delayed=fy_delayed,
+            dt=self.step_dt,
+            horizon_sec=self.cfg.ttc_horizon,
+            ema_alpha_s=0.6,
+            ema_alpha_f=0.6,
+            deriv_clip=0.5,
+            eps=1e-6,
+            stale_half_life=0.2,
+            zoom_gate_k=0.2,
+            aggregate="max"
+        )
+
         # ========== Compute rewards for each agent ==========
         for i, agent_id in enumerate(self.cfg.possible_agents):
             delayed_state = self.state_manager.get_delayed_states(agent_id)
@@ -565,8 +763,29 @@ class IrisMAEnv(DirectMARLEnv):
             else:
                 collision_penalty = torch.zeros(self.num_envs, device=self.device)
 
-            # Time-to-collision penalty (simplified version)
-            ttc_penalty = torch.zeros(self.num_envs, device=self.device)
+            # Time-to-collision penalty
+            # Combine cam-to-cam and cam-to-target TTCs
+            other_agent_idxs = [j for j, _ in enumerate(self.cfg.possible_agents) if j != i]
+
+            # Normalize cam-to-cam TTC and convert to penalty [0, 1]
+            ttc_cam_to_cam_normalized = torch.clamp(
+                cam_to_cam_ttc[:, i, :] / self.cfg.ttc_horizon, min=0, max=1
+            )
+            ttc_penalty_cam_to_cam_all = 1.0 - ttc_cam_to_cam_normalized  # [N, num_agents]
+
+            # Remove self-comparison (i-th column)
+            if len(other_agent_idxs) > 0:
+                ttc_penalty_cam_to_cam = ttc_penalty_cam_to_cam_all[:, other_agent_idxs]  # [N, num_agents-1]
+                # Take max across other agents
+                max_cam_to_cam_penalty = torch.max(ttc_penalty_cam_to_cam, dim=1).values
+            else:
+                max_cam_to_cam_penalty = torch.zeros(self.num_envs, device=self.device)
+
+            # Combine with cam-to-target looming TTC penalty
+            ttc_penalty = torch.max(
+                max_cam_to_cam_penalty,
+                ttc_penalty_cam_to_target[:, i]
+            )
 
             # Combine rewards
             rewards = {
@@ -792,6 +1011,16 @@ class IrisMAEnv(DirectMARLEnv):
 
         # Reset bbox raycaster
         self.bbox_raycaster.reset(env_idxs=env_ids)
+
+        # Reset TTC looming buffers
+        if hasattr(self, "ttc_loom_logsize_ema"):
+            self.ttc_loom_logsize_ema[env_ids] = 0.0
+        if hasattr(self, "ttc_loom_logf_ema"):
+            self.ttc_loom_logf_ema[env_ids] = 0.0
+        if hasattr(self, "ttc_loom_log_g_prev"):
+            self.ttc_loom_log_g_prev[env_ids] = 0.0
+        if hasattr(self, "ttc_loom_time_since_valid"):
+            self.ttc_loom_time_since_valid[env_ids] = 0.0
 
         # Reset dynamics filters
         for agent_id in self.cfg.possible_agents:
