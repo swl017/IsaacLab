@@ -786,6 +786,14 @@ class QuaternionFirstOrderLag:
         return self.filtered_quat.clone()
     
     def _slerp(self, q0: torch.Tensor, q1: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            q0: Starting quaternion (N, 4).
+            q1: Ending quaternion (N, 4).
+            t: Interpolation factor (N,).
+        Returns:
+            Interpolated quaternion (N, 4).
+        """
         q0 = q0 / (torch.norm(q0, dim=-1, keepdim=True) + 1e-8)
         q1 = q1 / (torch.norm(q1, dim=-1, keepdim=True) + 1e-8)
         
@@ -798,11 +806,12 @@ class QuaternionFirstOrderLag:
         sin_theta = torch.sin(theta)
         sin_theta = torch.where(sin_theta < 1e-8, torch.ones_like(sin_theta), sin_theta)
         
-        w0 = torch.sin((1 - t) * theta) / sin_theta
-        w1 = torch.sin(t * theta) / sin_theta
+        t_exp = t.unsqueeze(-1).clone()
+        w0 = torch.sin((1 - t_exp) * theta) / sin_theta
+        w1 = torch.sin(t_exp * theta) / sin_theta
         result_slerp = w0 * q0 + w1 * q1
         
-        result_lerp = (1 - t) * q0 + t * q1
+        result_lerp = (1 - t_exp) * q0 + t_exp * q1
         result_lerp = result_lerp / (torch.norm(result_lerp, dim=-1, keepdim=True) + 1e-8)
         
         return torch.where(mask.unsqueeze(-1), result_lerp, result_slerp)
@@ -2430,6 +2439,8 @@ class MultiAgentStateManager:
                 state_dict[key] = delayed_state.data.bboxes_2d_valid_mask.float()
             elif key == 'camera_ray_directions_w':
                 state_dict[key] = delayed_state.data.camera_ray_directions_w
+            elif key == 'joint_positions':
+                state_dict[key] = delayed_state.data.joint_positions_b
 
         # Broadcast through communication channel
         self.obs_pipeline.broadcast_state(

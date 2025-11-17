@@ -41,8 +41,8 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
         "drone_1": 7,
     }
     observation_spaces = {
-        "drone_0": 34,
-        "drone_1": 34,
+        "drone_0": 47,
+        "drone_1": 47,
     }
     state_space = -1  # Concatenate all observations
     
@@ -132,7 +132,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     
 
     bbox_raycaster: bbox_raycaster.BBoxRayCasterCfg = bbox_raycaster.BBoxRayCasterCfg(
-        target_prim_paths=[],
+        target_prim_paths=[],  # Empty because we provide target poses directly via update()
         mesh_prim_paths=["/World/ground"],
         num_cameras_per_env=2,
         num_cameras_per_agent=1,
@@ -148,7 +148,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
         occlusion_visibility_threshold=0.5,
         occlusion_ray_tolerance=1.1,
         max_distance=100.0,
-        debug_vis=True,
+        debug_vis=False,  # Disable debug vis in headless mode
         debug_memory=False,
     )
 
@@ -238,5 +238,10 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     max_time_since_comm: float = 10.0  # Default value when no comm received (seconds)
     max_time_since_detection: float = 10.0  # Normalize time since detection with this value
     detection_decay_time_constant: float = 1.0  # Time constant for exponential decay of detection confidence
+
+    # BBox detection parameters
+    bbox_fps: float = 30.0  # FPS throttle for bbox detections
+    bbox_latency_steps: int = 2  # Latency steps for bbox
+    bbox_dropout: float = 0.05  # Dropout probability for bbox
 
     play_sim_at_step: int = 180000

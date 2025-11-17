@@ -154,31 +154,30 @@ class IrisMAEnv(DirectMARLEnv):
         focal_length = self.cfg.camera.spawn.focal_length
         horizontal_aperture = self.cfg.camera.spawn.horizontal_aperture
         vertical_aperture = horizontal_aperture * (height / width)
-        camera_intrinsics = create_camera_cfg_tensor(
-            fx=focal_length * width / horizontal_aperture,
-            fy=focal_length * height / vertical_aperture,
-            cx=width / 2.0,
-            cy=height / 2.0,
-            device=self.device
-        )
-        self.state_manager.set_camera_config(camera_intrinsics)
 
-        # Initialize BBoxRayCaster
-        bbox_cfg = BBoxRayCasterCfg(
-            num_envs=self.num_envs,
-            num_cameras=len(cfg.possible_agents),
-            num_targets=1,
-            target_half_extents=[0.05, 0.05, 0.05],  # Target size
-            image_width=width,
-            image_height=height,
-            fps_throttle=cfg.bbox_fps if hasattr(cfg, 'bbox_fps') else None,
-            latency_steps=cfg.bbox_latency_steps if hasattr(cfg, 'bbox_latency_steps') else 0,
-            dropout_prob=cfg.bbox_dropout if hasattr(cfg, 'bbox_dropout') else 0.0,
-            check_body_occlusion=True,
-            device=self.device
-        )
-        self.bbox_raycaster = BBoxRayCaster(bbox_cfg)
+        # Get camera offset from config
+        offset_pos = torch.tensor(self.cfg.camera.offset.pos, device=self.device)
+        offset_rot = torch.tensor(self.cfg.camera.offset.rot, device=self.device)
 
+        # Set camera configs for all agents
+        for agent_id in cfg.possible_agents:
+            self.state_manager.set_camera_configs(
+                agent_id,
+                width=width,
+                height=height,
+                focal_length=focal_length,
+                horizontal_aperture=horizontal_aperture,
+                vertical_aperture=vertical_aperture,
+                offset_position_b=offset_pos,
+                offset_rotation_b=offset_rot
+            )
+
+        # Initialize BBoxRayCaster (lazy - will be created on first use)
+        self.bbox_raycaster = None
+        self._bbox_raycaster_initialized = False
+
+        # Initialize BBoxRayCaster on first use
+        self._initialize_bbox_raycaster()
 
         # Curriculum parameters
         self.progress_delay = 0.0  # Will be updated during training
@@ -280,6 +279,23 @@ class IrisMAEnv(DirectMARLEnv):
         self.cfg.target_cfg.spawn.semantic_tags = [("class", "target")]
         self.target = RigidObject(self.cfg.target_cfg)
 
+        # Clone environments
+        self.scene.clone_environments(copy_from_source=False)
+        if self.cfg.terrain is not None:
+            self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
+        
+        # Register articulations, rigid objects, and sensors
+        for agent_id, robot in self._robots.items():
+            robot_index = agent_id.split("_")[-1]
+            self.scene.articulations[f"Robot_{robot_index}"] = robot
+        
+        self.scene.rigid_objects["target"] = self.target
+
+        if DEBUG_DRAW:
+            for agent_id, camera in self._cameras.items():
+                robot_index = agent_id.split("_")[-1]
+                self.scene.sensors[f"camera_{robot_index}"] = camera
+
         # Add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
@@ -295,19 +311,37 @@ class IrisMAEnv(DirectMARLEnv):
         self.progress_move = self._linear_progress(self.cfg.curriculum_moving_target_start_step, self.cfg.curriculum_moving_target_end_step, current_step)
         self.progress_dynamics = self._linear_progress(self.cfg.curriculum_dynamics_start_step, self.cfg.curriculum_dynamics_end_step, current_step)
 
-        pass
-
     def _apply_action(self):
         """Apply actions to the environment."""
         pass
 
     def _linear_progress(self, start: int, end: int, current=None):
-        if end <= start: 
+        if end <= start:
             return 1.0
         if current is None:
             current = self.common_step_counter
         x = (current - start) / (end - start)
         return 0.0 if x < 0 else (1.0 if x > 1 else float(x))
+
+    def _initialize_bbox_raycaster(self):
+        """Lazy initialization of BBoxRayCaster after targets are spawned."""
+        if self._bbox_raycaster_initialized:
+            return
+
+        # Create a modified config with actual target paths
+        bbox_cfg = copy.deepcopy(self.cfg.bbox_raycaster)
+        debug_vis = DEBUG_DRAW
+        target_prim_paths = self.scene.env_prim_paths # [f"/World/envs/env_{i}/target" for i in range(self.num_envs)]
+        bbox_cfg.target_prim_paths = target_prim_paths
+
+        self.bbox_raycaster = BBoxRayCaster(
+            cfg=bbox_cfg,
+            num_envs=self.num_envs,
+            num_targets_per_env=1,
+            device=self.device,
+            agent_ids=self.cfg.possible_agents
+        )
+        self._bbox_raycaster_initialized = True
 
     def _compute_intermediate_values(self):
         """Compute intermediate values shared by both rewards and observations.
@@ -336,7 +370,7 @@ class IrisMAEnv(DirectMARLEnv):
                 body_orientation_w=robot.data.root_quat_w,
                 body_linear_velocity_w=robot.data.root_lin_vel_w,
                 body_angular_velocity_w=robot.data.root_ang_vel_w,
-                body_linear_acceleration_w=self._stabilizers[agent_id].get_linear_acceleration(),
+                body_linear_acceleration_w=robot.data.body_lin_acc_w[:, self._body_ids[agent_id][0], :],
                 body_combined_angular_velocity_w=body_link_ang_vel_w,  # Combined angular velocity
                 joint_positions_b=robot.data.joint_pos[:, :3],  # [yaw, pitch, roll]
                 zoom_level=torch.ones(self.num_envs, device=self.device) * 1.0,  # Default zoom
@@ -358,7 +392,12 @@ class IrisMAEnv(DirectMARLEnv):
         # Get target GT pose
         target_pos = self.target.data.root_pos_w
         target_quat = self.target.data.root_quat_w
-
+        # Placeholder for multiple targets pos (N, T, 3) and quat (N, T, 4)
+        if target_pos.ndim == 2:
+            target_pos = target_pos.unsqueeze(1)
+        if target_quat.ndim == 2:
+            target_quat = target_quat.unsqueeze(1)
+        
         # Collect agent body poses for occlusion checking
         agent_body_poses = {
             agent_id: (robot.data.root_pos_w, robot.data.root_quat_w)
@@ -382,17 +421,18 @@ class IrisMAEnv(DirectMARLEnv):
             # Update detections (applies FPS throttle, latency, dropout, pixel noise)
             self.state_manager.update_detections(
                 agent_id=agent_id,
-                target_bboxes_gt=gt_bbox,  # [N, 1, 4]
-                target_valid_mask=bbox_valid  # [N, 1]
+                bboxes_2d_gt=gt_bbox.squeeze(1),  # [N, T, 4] -> [N, 1, 4]
+                valid_mask_gt=bbox_valid.squeeze(1)  # [N, T] -> [N, 1]
             )
 
         # ========== Broadcast and receive states ==========
         for agent_id in self.cfg.possible_agents:
             # Broadcast this agent's delayed states to others
             self.state_manager.broadcast_state(
-                agent_id=agent_id,
-                state_keys=['position', 'linear_velocity', 'combined_angular_velocity',
-                           'bbox', 'bbox_valid', 'ray_direction']
+                sender_id=agent_id,
+                state_keys=['position', 'orientation', 'linear_velocity', 'combined_angular_velocity',
+                           'bboxes_2d', 'bboxes_2d_valid_mask', 'camera_ray_directions_w',
+                           'camera_intrinsics', 'joint_positions']
             )
 
     def _compute_triangulation_covariance(self, X_w, robot_positions, robot_quats,
@@ -466,21 +506,27 @@ class IrisMAEnv(DirectMARLEnv):
             gimbal_yaws_list = [delayed_state.data.joint_positions_b[:, 0:1]]  # [N, 1]
             gimbal_pitches_list = [delayed_state.data.joint_positions_b[:, 1:2]]  # [N, 1]
             camera_intrinsics_list = [delayed_state.data.camera_intrinsics]  # [N, 4]
-            bbox_valid_list = [delayed_state.data.bboxes_2d_valid_mask[:, 0, 0]]  # [N]
+            bbox_valid_list = [delayed_state.data.bboxes_2d_valid_mask[:, 0]]  # [N]
 
             # Add received states from other agents
             for other_agent_id in self.cfg.possible_agents:
                 if other_agent_id == agent_id:
                     continue  # Skip self
 
+                # received_states is Dict[sender_agent_id -> {state_key -> (data, valid_mask, data_age)}]
                 if other_agent_id in received_states and received_states[other_agent_id] is not None:
-                    other_state = received_states[other_agent_id]
-                    robot_positions_list.append(other_state.data.body_position_w)
-                    robot_quats_list.append(other_state.data.body_orientation_w)
-                    gimbal_yaws_list.append(other_state.data.joint_positions_b[:, 0:1])
-                    gimbal_pitches_list.append(other_state.data.joint_positions_b[:, 1:2])
-                    camera_intrinsics_list.append(other_state.data.camera_intrinsics)
-                    bbox_valid_list.append(other_state.data.bboxes_2d_valid_mask[:, 0, 0])
+                    other_state_dict = received_states[other_agent_id]
+                    # Extract data from tuples (index 0 is data, 1 is valid_mask, 2 is data_age)
+                    robot_positions_list.append(other_state_dict['position'][0])
+                    robot_quats_list.append(other_state_dict['orientation'][0])
+
+                    # Extract gimbal joints from joint_positions [N, J] where J=3 (yaw, pitch, roll)
+                    joint_pos = other_state_dict['joint_positions'][0]  # [N, 3]
+                    gimbal_yaws_list.append(joint_pos[:, 0:1])  # [N, 1]
+                    gimbal_pitches_list.append(joint_pos[:, 1:2])  # [N, 1]
+
+                    camera_intrinsics_list.append(other_state_dict['camera_intrinsics'][0])
+                    bbox_valid_list.append(other_state_dict['bboxes_2d_valid_mask'][0][:, 0].bool())
                 else:
                     # Agent didn't receive this state (dropout/delay)
                     # Use dummy invalid data
@@ -532,7 +578,7 @@ class IrisMAEnv(DirectMARLEnv):
             # Bbox rewards (from delayed detections)
             bbox_center = delayed_state.data.bboxes_2d[:, 0, 0:2]  # [N, 2] (x, y)
             bbox_size = delayed_state.data.bboxes_2d[:, 0, 2:4]  # [N, 2] (w, h)
-            bbox_valid = delayed_state.data.bboxes_2d_valid_mask[:, 0, 0]  # [N]
+            bbox_valid = delayed_state.data.bboxes_2d_valid_mask[:, 0]  # [N]
 
             # Map to rewards (centered and sized appropriately)
             bbox_center_dist = torch.norm(bbox_center - 0.5, dim=1)  # Distance from center [N]
@@ -565,8 +611,21 @@ class IrisMAEnv(DirectMARLEnv):
             else:
                 collision_penalty = torch.zeros(self.num_envs, device=self.device)
 
-            # Time-to-collision penalty (simplified version)
-            ttc_penalty = torch.zeros(self.num_envs, device=self.device)
+            # Time-to-collision penalty (looming TTC)
+            # Compute looming TTC penalty for camera-to-target
+            phi_ttc, tau_ttc = self.compute_looming_ttc_penalty_zoom_invariant(
+                bbox_w_dn=delayed_state.data.bboxes_2d[:, 0, 2],  # [N], bbox width
+                bbox_h_dn=delayed_state.data.bboxes_2d[:, 0, 3],  # [N], bbox height
+                valid_dn=delayed_state.data.bboxes_2d_valid_mask[:, 0],  # [N], bool for valid
+                fx_delayed=delayed_state.data.camera_intrinsics[:, 0, 0],  # [N], fx
+                fy_delayed=delayed_state.data.camera_intrinsics[:, 1, 1],  # [N], fy
+                dt=self.step_dt,
+                horizon_sec=self.cfg.ttc_horizon if hasattr(self.cfg, 'ttc_horizon') else 6.0,
+                ema_alpha_s=0.6,
+                ema_alpha_f=0.6,
+                deriv_clip=0.5,
+            )
+            ttc_penalty = phi_ttc
 
             # Combine rewards
             rewards = {
@@ -622,7 +681,7 @@ class IrisMAEnv(DirectMARLEnv):
             gimbal_yaws_list = [noisy_state.data.joint_positions_b[:, 0:1]]
             gimbal_pitches_list = [noisy_state.data.joint_positions_b[:, 1:2]]
             camera_intrinsics_list = [noisy_state.data.camera_intrinsics]
-            bbox_valid_list = [noisy_state.data.bboxes_2d_valid_mask[:, 0, 0]]
+            bbox_valid_list = [noisy_state.data.bboxes_2d_valid_mask[:, 0]]
             ray_dirs_list = [noisy_state.data.camera_ray_directions_w[:, 0, :]]  # [N, 3]
 
             # Add received states from other agents
@@ -630,15 +689,21 @@ class IrisMAEnv(DirectMARLEnv):
                 if other_agent_id == agent_id:
                     continue
 
+                # received_states is Dict[sender_agent_id -> {state_key -> (data, valid_mask, data_age)}]
                 if other_agent_id in received_states and received_states[other_agent_id] is not None:
-                    other_state = received_states[other_agent_id]
-                    robot_positions_list.append(other_state.data.body_position_w)
-                    robot_quats_list.append(other_state.data.body_orientation_w)
-                    gimbal_yaws_list.append(other_state.data.joint_positions_b[:, 0:1])
-                    gimbal_pitches_list.append(other_state.data.joint_positions_b[:, 1:2])
-                    camera_intrinsics_list.append(other_state.data.camera_intrinsics)
-                    bbox_valid_list.append(other_state.data.bboxes_2d_valid_mask[:, 0, 0])
-                    ray_dirs_list.append(other_state.data.camera_ray_directions_w[:, 0, :])
+                    other_state_dict = received_states[other_agent_id]
+                    # Extract data from tuples (index 0 is data, 1 is valid_mask, 2 is data_age)
+                    robot_positions_list.append(other_state_dict['position'][0])
+                    robot_quats_list.append(other_state_dict['orientation'][0])
+
+                    # Extract gimbal joints from joint_positions [N, J] where J=3 (yaw, pitch, roll)
+                    joint_pos = other_state_dict['joint_positions'][0]  # [N, 3]
+                    gimbal_yaws_list.append(joint_pos[:, 0:1])  # [N, 1]
+                    gimbal_pitches_list.append(joint_pos[:, 1:2])  # [N, 1]
+
+                    camera_intrinsics_list.append(other_state_dict['camera_intrinsics'][0])
+                    bbox_valid_list.append(other_state_dict['bboxes_2d_valid_mask'][0][:, 0].bool())
+                    ray_dirs_list.append(other_state_dict['camera_ray_directions_w'][0][:, 0, :])  # [N, T, 3] -> [N, 3]
                 else:
                     # No received state
                     robot_positions_list.append(torch.zeros_like(noisy_state.data.body_position_w))
@@ -659,10 +724,12 @@ class IrisMAEnv(DirectMARLEnv):
             ray_dirs = torch.stack(ray_dirs_list, dim=1)  # [N, C, 3]
 
             # Triangulate from noisy perspective
+            # midpoint_method_batched expects pts [N, C, 3] and dirs [N, C, T, 3]
+            # We need to add a target dimension to ray_dirs
+            ray_dirs_expanded = ray_dirs.unsqueeze(2)  # [N, C, 1, 3]
             X_w_triangulated = midpoint_method_batched(
-                camera_positions=robot_positions,
-                ray_directions=ray_dirs,
-                valid_mask=bbox_valid_mask
+                pts=robot_positions,
+                dirs=ray_dirs_expanded
             )  # [N, 1, 3]
 
             # Compute covariance
@@ -696,7 +763,8 @@ class IrisMAEnv(DirectMARLEnv):
 
             # Extract ego observations
             pos = noisy_state.data.body_position_w  # [N, 3]
-            yaw = euler_xyz_from_quat(noisy_state.data.body_orientation_w)[:, 2:3]  # [N, 1]
+            roll, pitch, yaw = euler_xyz_from_quat(noisy_state.data.body_orientation_w)  # Each [N]
+            yaw = yaw.unsqueeze(-1)  # [N, 1]
             lin_vel = noisy_state.data.body_linear_velocity_w  # [N, 3]
             yaw_rate = noisy_state.data.body_angular_velocity_w[:, 2:3]  # [N, 1]
             lin_acc = noisy_state.data.body_linear_acceleration_w  # [N, 3]
@@ -706,9 +774,9 @@ class IrisMAEnv(DirectMARLEnv):
 
             # Detection observations
             bbox = noisy_state.data.bboxes_2d[:, 0, :]  # [N, 4]
-            bbox_valid = noisy_state.data.bboxes_2d_valid_mask[:, 0, 0:1].float()  # [N, 1]
-            time_since_detection = noisy_state.data.target_time_since_detection[:, 0:1]  # [N, 1]
-            zoom = noisy_state.data.camera_zoom_level[:, :1]  # [N, 1]
+            bbox_valid = noisy_state.data.bboxes_2d_valid_mask[:, 0].unsqueeze(-1).float()  # [N, 1]
+            time_since_detection = noisy_state.data.bboxes_2d_age[:, 0:1]  # [N, 1]
+            zoom = noisy_state.data.camera_zoom_level.unsqueeze(-1)  # [N, 1]
             ray_dir = noisy_state.data.camera_ray_directions_w[:, 0, :]  # [N, 3]
 
             # Received states from other agents
@@ -716,28 +784,32 @@ class IrisMAEnv(DirectMARLEnv):
             other_lin_vels = []
             other_combined_ang_vels = []
             other_bbox_valids = []
-            other_times = []
+            other_pos_age = []
+            other_detection_age = []
             other_ray_dirs = []
 
             for other_agent_id in self.cfg.possible_agents:
                 if other_agent_id == agent_id:
                     continue
 
+                # received_states is Dict[sender_agent_id -> {state_key -> (data, valid_mask, data_age)}]
                 if other_agent_id in received_states and received_states[other_agent_id] is not None:
-                    other_state = received_states[other_agent_id]
-                    other_positions.append(other_state.data.body_position_w)
-                    other_lin_vels.append(other_state.data.body_linear_velocity_w)
-                    other_combined_ang_vels.append(other_state.data.body_combined_angular_velocity_w)
-                    other_bbox_valids.append(other_state.data.bboxes_2d_valid_mask[:, 0, 0:1].float())
-                    other_times.append(other_state.data.target_time_since_detection[:, 0:1])
-                    other_ray_dirs.append(other_state.data.camera_ray_directions_w[:, 0, :])
+                    other_state_dict = received_states[other_agent_id]
+                    # Extract data from tuples (index 0 is data, 1 is valid_mask, 2 is data_age)
+                    other_positions.append(other_state_dict['position'][0])
+                    other_lin_vels.append(other_state_dict['linear_velocity'][0])
+                    other_combined_ang_vels.append(other_state_dict['combined_angular_velocity'][0])
+                    other_bbox_valids.append(other_state_dict['bboxes_2d_valid_mask'][0][:, 0].unsqueeze(-1))
+                    other_pos_age.append(other_state_dict['position'][2].unsqueeze(-1))  # data age from position in seconds
+                    other_detection_age.append(other_state_dict['bbox_2d_age'][2].unsqueeze(-1))  # TODO: Add bbox_2d_age to comms in seconds
+                    other_ray_dirs.append(other_state_dict['camera_ray_directions_w'][0][:, 0, :])  # [N, T, 3] -> [N, 3]
                 else:
                     # No received state - use zeros
                     other_positions.append(torch.zeros(self.num_envs, 3, device=self.device))
                     other_lin_vels.append(torch.zeros(self.num_envs, 3, device=self.device))
                     other_combined_ang_vels.append(torch.zeros(self.num_envs, 3, device=self.device))
                     other_bbox_valids.append(torch.zeros(self.num_envs, 1, device=self.device))
-                    other_times.append(torch.ones(self.num_envs, 1, device=self.device) * 1e6)
+                    other_detection_age.append(torch.ones(self.num_envs, 1, device=self.device) * 1e6)
                     other_ray_dirs.append(torch.zeros(self.num_envs, 3, device=self.device))
 
             # Concatenate all observations
@@ -750,20 +822,21 @@ class IrisMAEnv(DirectMARLEnv):
                 gimbal_pitch,  # 1
                 gimbal_yaw,  # 1
                 combined_ang_vel,  # 3
-                bbox,  # 4
+                bbox,  # 4 ## 20
                 bbox_valid,  # 1
                 time_since_detection,  # 1
                 zoom,  # 1
-                ray_dir,  # 3
+                ray_dir,  # 3 ## 26
+                *other_pos_age,  # 1 * (C-1)
                 *other_positions,  # 3 * (C-1)
                 *other_lin_vels,  # 3 * (C-1)
                 *other_combined_ang_vels,  # 3 * (C-1)
-                *other_bbox_valids,  # 1 * (C-1)
-                *other_times,  # 1 * (C-1)
-                *other_ray_dirs,  # 3 * (C-1)
-                X_w_tri[:, 0, :],  # 3 (triangulation estimate)
-                std_tri[:, 0, :],  # 3 (triangulation std deviations)
-            ], dim=-1)
+                *other_bbox_valids,  # 1 * (C-1) ## 26 + 11*(C-1)
+                *other_detection_age,  # 1 * (C-1)
+                *other_ray_dirs,  # 3 * (C-1) ## 26 + 15*(C-1)
+                X_w_tri[:, 0, :],  # 3*T (triangulation estimate)
+                std_tri[:, 0, :],  # 3*T (triangulation std deviations)
+            ], dim=-1) ## 26 + 15*(C-1) + 6*T
 
             # Check for NaN values
             if torch.isnan(obs).any():
@@ -788,14 +861,24 @@ class IrisMAEnv(DirectMARLEnv):
             env_ids = self._robots[self.cfg.possible_agents[0]]._ALL_INDICES
 
         # Reset state manager
-        self.state_manager.reset(env_idxs=env_ids)
-
-        # Reset bbox raycaster
-        self.bbox_raycaster.reset(env_idxs=env_ids)
+        self.state_manager.reset(env_ids=env_ids)
 
         # Reset dynamics filters
         for agent_id in self.cfg.possible_agents:
-            self._robot_dynamics[agent_id].reset(env_idxs=env_ids)
+            self._robot_dynamics[agent_id].reset(env_ids=env_ids)
+
+        # Reset TTC looming buffers (needs to be called after state updates)
+        # We need to get the delayed+noisy states first
+        for agent_id in self.cfg.possible_agents:
+            delayed_noisy_state = self.state_manager.get_delayed_noisy_states(agent_id)
+            self.reset_ttc_buffers(
+                reset_env_ids=env_ids,
+                bbox_w_dn=delayed_noisy_state.data.bboxes_2d[:, 0, 2],
+                bbox_h_dn=delayed_noisy_state.data.bboxes_2d[:, 0, 3],
+                valid_dn=delayed_noisy_state.data.bboxes_2d_valid_mask[:, 0],
+                fx_delayed=delayed_noisy_state.data.camera_intrinsics[:, 0, 0],
+                fy_delayed=delayed_noisy_state.data.camera_intrinsics[:, 1, 1],
+            )
 
         # Logging
         all_extras = {}
@@ -809,18 +892,162 @@ class IrisMAEnv(DirectMARLEnv):
         self.extras["log"].update(all_extras)
 
         super()._reset_idx(env_ids)
+
     def _set_debug_vis_impl(self, debug_vis: bool):
         """Set debug visualization."""
         pass
 
     def _debug_vis_callback(self, event):
         """Debug visualization callback."""
+        pass
 
-        """Apply camera intrinsics based on zoom level."""
-        if DEBUG_DRAW:
-            for i, agent_id in enumerate(self.cfg.possible_agents):
-                current_focal_length = self.base_focal_length[agent_id] * self.zoom_level[agent_id]
-                self._cameras[agent_id].set_intrinsic_matrices_batched(
-                    self.camera_intrinsics[agent_id], 
-                    current_focal_length
-                )
+    def compute_looming_ttc_penalty_zoom_invariant(
+        self,
+        bbox_w_dn, bbox_h_dn, valid_dn,          # [N], delayed+noisy (causal)
+        fx_delayed, fy_delayed,                  # [N], delayed intrinsics in pixels (causal, noiseless)
+        dt,                                      # scalar
+        horizon_sec=6.0,
+        ema_alpha_s=0.6,                         # EMA for log-size
+        ema_alpha_f=0.6,                         # EMA for log-focal
+        deriv_clip=0.5,
+        eps=1e-6,
+        stale_half_life=1.0,
+        zoom_gate_k=0.2,                         # gate aggressiveness for |d ln f|
+    ):
+        """
+        Compute zoom-invariant looming TTC penalty for a single agent.
+
+        Args:
+            bbox_w_dn: [N] bbox width (delayed+noisy)
+            bbox_h_dn: [N] bbox height (delayed+noisy)
+            valid_dn: [N] bool for valid detections
+            fx_delayed: [N] focal length x in pixels
+            fy_delayed: [N] focal length y in pixels
+            dt: timestep
+            horizon_sec: TTC horizon in seconds
+            ema_alpha_s: EMA alpha for log-size
+            ema_alpha_f: EMA alpha for log-focal
+            deriv_clip: clip derivative to this range
+            eps: small epsilon for numerical stability
+            stale_half_life: half-life for staleness decay
+            zoom_gate_k: zoom gate aggressiveness
+
+        Returns:
+            phi: [N] penalty in [0, 1]
+            tau: [N] estimated TTC in seconds
+        """
+        N = bbox_w_dn.shape[0]
+        self._ensure_loom_buffers(N, bbox_w_dn.device)
+
+        # ---- 1) Build size and focal terms ----
+        s = torch.sqrt(torch.clamp(bbox_w_dn, min=0) * torch.clamp(bbox_h_dn, min=0))  # [N]
+        f_eff = torch.sqrt(torch.clamp(fx_delayed, min=eps) * torch.clamp(fy_delayed, min=eps))
+        valid = valid_dn & (s > 0)
+
+        g_s  = torch.log(s + eps)        # log size
+        g_f  = torch.log(f_eff + eps)    # log focal
+
+        # EMA updates only where valid
+        size_ema_new = ema_alpha_s * self.ttc_loom_logsize_ema + (1.0 - ema_alpha_s) * g_s
+        focal_ema_new= ema_alpha_f * self.ttc_loom_logf_ema    + (1.0 - ema_alpha_f) * g_f
+        self.ttc_loom_logsize_ema = torch.where(valid, size_ema_new, self.ttc_loom_logsize_ema)
+        self.ttc_loom_logf_ema    = torch.where(valid, focal_ema_new, self.ttc_loom_logf_ema)
+
+        # ---- 2) Zoom-invariant log-size: g = log(s/f) ----
+        g_now = self.ttc_loom_logsize_ema - self.ttc_loom_logf_ema   # [N]
+
+        # ---- 3) Derivative using previous g (CRITICAL) ----
+        dg = (g_now - self.ttc_loom_log_g_prev) / max(dt, 1e-6)
+        self.ttc_loom_log_g_prev = g_now.clone()
+
+        # Robustify derivative
+        dg = torch.clamp(dg, min=-deriv_clip, max=deriv_clip)
+
+        # ---- 4) Optional gates ----
+        # Zoom motion gate: large |d ln f| means active zoom; soften penalty
+        dlogf = (self.ttc_loom_logf_ema - focal_ema_new).abs() / max(dt, 1e-6)
+        w_zoom = torch.exp(-dlogf / max(zoom_gate_k, 1e-6))
+        w_zoom = torch.clamp(w_zoom, 0.0, 1.0)
+
+        # ---- 5) Looming TTC from zoom-invariant derivative ----
+        tau = torch.full_like(dg, float("inf"))
+        approaching = (dg < -1e-4) & valid
+        tau = torch.where(approaching, -1.0 / torch.clamp(dg, max=-1e-4), tau)
+
+        # ---- 6) Shape to [0,1] and apply staleness + gates ----
+        H = float(horizon_sec)
+        phi = (H - torch.clamp(tau, max=H)) / H
+        phi = torch.clamp(phi, 0.0, 1.0)
+
+        # staleness
+        self.ttc_loom_time_since_valid = torch.where(valid,
+                                                torch.zeros_like(self.ttc_loom_time_since_valid),
+                                                self.ttc_loom_time_since_valid + dt)
+        stale_decay = torch.exp(-self.ttc_loom_time_since_valid / max(stale_half_life, 1e-6))
+
+        # combine gates
+        gate = stale_decay * w_zoom
+        phi = phi * gate
+
+        return phi, tau
+
+    @torch.no_grad()
+    def _ensure_loom_buffers(self, N: int, device):
+        """Ensure looming TTC buffers exist for per-agent computation."""
+        if not hasattr(self, "ttc_loom_logsize_ema"):
+            self.ttc_loom_logsize_ema   = torch.zeros(N, device=device)
+        if not hasattr(self, "ttc_loom_logf_ema"):
+            self.ttc_loom_logf_ema      = torch.zeros(N, device=device)
+        if not hasattr(self, "ttc_loom_log_g_prev"):
+            self.ttc_loom_log_g_prev    = torch.zeros(N, device=device)
+        if not hasattr(self, "ttc_loom_time_since_valid"):
+            self.ttc_loom_time_since_valid = torch.zeros(N, device=device)
+
+    @torch.no_grad()
+    def reset_ttc_buffers(
+        self,
+        reset_env_ids: torch.LongTensor,
+        bbox_w_dn: torch.Tensor,             # [N] delayed+noisy
+        bbox_h_dn: torch.Tensor,             # [N] delayed+noisy
+        valid_dn: torch.Tensor,              # [N] bool, delayed+noisy
+        fx_delayed: torch.Tensor,            # [N] delayed intrinsics (pixels)
+        fy_delayed: torch.Tensor,            # [N] delayed intrinsics (pixels)
+        eps: float = 1e-6,
+    ):
+        """
+        Reset zoom-invariant looming TTC buffers for the specified environments.
+        Call this on both full and partial resets right after observations are refreshed.
+
+        Args:
+            reset_env_ids: 1D LongTensor of env indices to reset (can be empty)
+            bbox_w_dn, bbox_h_dn, valid_dn: delayed+noisy bboxes and validity mask
+            fx_delayed, fy_delayed: delayed intrinsics, in pixels
+        """
+        if reset_env_ids is None or reset_env_ids.numel() == 0:
+            return
+
+        N = bbox_w_dn.shape[0]
+        device = bbox_w_dn.device
+        self._ensure_loom_buffers(N, device)
+
+        ridx = reset_env_ids
+
+        # Current scale and focal (for those envs)
+        w = torch.clamp(bbox_w_dn[ridx], min=0.0)
+        h = torch.clamp(bbox_h_dn[ridx], min=0.0)
+        s = torch.sqrt(w * h)
+        f_eff = torch.sqrt(torch.clamp(fx_delayed[ridx], min=eps) *
+                        torch.clamp(fy_delayed[ridx], min=eps))
+
+        valid = (valid_dn[ridx]) & (s > 0.0)
+
+        # Log terms
+        g_s   = torch.log(s + eps)
+        g_f   = torch.log(f_eff + eps)
+        g_now = g_s - g_f
+
+        # Initialize EMAs/prev only where valid; zero where invalid
+        self.ttc_loom_logsize_ema[ridx] = torch.where(valid, g_s, torch.zeros_like(g_s))
+        self.ttc_loom_logf_ema[ridx]    = torch.where(valid, g_f, torch.zeros_like(g_f))
+        self.ttc_loom_log_g_prev[ridx]  = torch.where(valid, g_now, torch.zeros_like(g_now))
+        self.ttc_loom_time_since_valid[ridx] = torch.zeros_like(self.ttc_loom_time_since_valid[ridx])
