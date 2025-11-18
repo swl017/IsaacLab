@@ -433,11 +433,35 @@ The age accounts for:
 
 4. **Debugging**: Monitor detection pipeline latency
 
+### How Age Increments During FPS Throttling
+
+**Key behavior**: Age **grows every simulation step**, even when detections are throttled.
+
+**Implementation**: Uses timestamp-based tracking instead of manual counters:
+```
+data_age = current_time - data_added_time
+```
+
+**Example** (10 Hz detection @ 50 Hz simulation):
+
+| Time (s) | Event | `data_added_time` | `bbox_2d_age` |
+|----------|-------|-------------------|---------------|
+| 0.00 | Detection passes throttle | 0.00 | 0.00s |
+| 0.02 | Throttled (no update) | 0.00 | **0.02s** ✓ |
+| 0.04 | Throttled (no update) | 0.00 | **0.04s** ✓ |
+| 0.10 | Detection passes throttle | 0.10 | 0.00s (reset) |
+
+**Why this matters**:
+- Agents observe realistic data staleness
+- Curriculum learning can gradually increase age tolerance
+- No special handling needed for FPS throttling
+
 ### Important Considerations
 
 - Always check `bboxes_2d_valid_mask` before using age
 - Age is different from communication age (which includes comm delay)
 - Age is per-target: shape is `[N, T]` matching `bboxes_2d`
+- Age **automatically increments** every step via timestamp subtraction
 
 ## Testing Strategy
 

@@ -521,12 +521,37 @@ if "drone_1" in received:
     # comm_age >= bbox_age (includes communication delay)
 ```
 
+### FPS Throttling and Age Increment
+
+**Critical feature**: `bboxes_2d_age` **increments every simulation step**, even when detections are throttled by FPS limits.
+
+**How it works**:
+- Uses timestamp tracking: `age = current_time - capture_time`
+- When FPS throttle blocks a detection:
+  - Capture timestamp stays unchanged
+  - Age automatically grows with `current_time`
+- When new detection passes throttle:
+  - Capture timestamp updates
+  - Age resets to near-zero (plus latency)
+
+**Example timeline** (30 Hz detection @ 50 Hz simulation):
+
+```
+Step 0 (t=0.00s): Detection captured → age = 0.00s
+Step 1 (t=0.02s): Throttled         → age = 0.02s (grows!)
+Step 2 (t=0.04s): Throttled         → age = 0.04s (grows!)
+Step 5 (t=0.10s): New detection     → age = 0.00s (reset)
+```
+
+This ensures agents receive realistic staleness information in observations.
+
 ### Important Notes
 
 - **Always check `bboxes_2d_valid_mask` before using age**
 - Age is **0** when no data or detection failed
 - Age **resets to 0** after environment reset
 - Age is **per-target**: shape `[N, T]` matches `bboxes_2d`
+- Age **automatically increments** via timestamp-based calculation
 
 ---
 

@@ -316,7 +316,7 @@ class CommManager:
             env_ids_list = None  # Reset all
             env_ids_tensor = torch.arange(self.num_envs, device=self.device)
         else:
-            env_ids_list = env_ids.cpu().tolist()
+            env_ids_list = env_ids.tolist()
             env_ids_tensor = env_ids
 
         # Reset all buffers
@@ -510,7 +510,7 @@ class AgentStates:
         Args:
             body_pos: Body position in world frame of shape (N, 3).
             body_quat: Body orientation in world frame of shape (N, 4).
-            joint_pos: Joint positions in body frame of shape (N, J). ZYX Euler angles.
+            joint_pos: Joint positions in body frame of shape (N, J). ZXY Euler angles. RPY order.
             env_idxs: Indices of environments to update. If None, updates all.
         """
         if env_idxs is None:
@@ -1165,7 +1165,7 @@ class ChannelBuffer:
             env_ids = torch.arange(self.num_envs, device=self.device)
             env_ids_list = None
         else:
-            env_ids_list = env_ids.cpu().tolist()
+            env_ids_list = env_ids.tolist()
 
         # Reset throttle state
         self.last_throttle_time[env_ids] = -float('inf')
@@ -2027,7 +2027,7 @@ class MultiAgentStateManager:
                 This represents the angular velocity of the gimbal pitch link (or other specified body link)
                 which incorporates both the robot body rotation and gimbal joint rotations.
             body_linear_acceleration_w: Linear acceleration in world frame [N, 3].
-            joint_positions_b: Joint positions (gimbal angles) [N, J].
+            joint_positions_b: Joint positions (gimbal angles) [N, J]. ZXY Euler angles. Roll, pitch, yaw order.
             joint_velocities_b: Joint velocities [N, J].
             zoom_level: Camera zoom level [N].
             env_idxs: Environment indices to update. If None, updates all.
@@ -2038,29 +2038,29 @@ class MultiAgentStateManager:
         agent_state = self.gt_states.agents[agent_id]
 
         # Store GT states
-        agent_state.data.body_position_w[env_idxs] = body_position_w[env_idxs]
-        agent_state.data.body_orientation_w[env_idxs] = body_orientation_w[env_idxs]
-        agent_state.data.body_linear_velocity_w[env_idxs] = body_linear_velocity_w[env_idxs]
-        agent_state.data.body_angular_velocity_w[env_idxs] = body_angular_velocity_w[env_idxs]
+        agent_state.data.body_position_w[env_idxs] = body_position_w[env_idxs].clone()
+        agent_state.data.body_orientation_w[env_idxs] = body_orientation_w[env_idxs].clone()
+        agent_state.data.body_linear_velocity_w[env_idxs] = body_linear_velocity_w[env_idxs].clone()
+        agent_state.data.body_angular_velocity_w[env_idxs] = body_angular_velocity_w[env_idxs].clone()
 
         if body_combined_angular_velocity_w is not None:
-            agent_state.data.body_combined_angular_velocity_w[env_idxs] = body_combined_angular_velocity_w[env_idxs]
+            agent_state.data.body_combined_angular_velocity_w[env_idxs] = body_combined_angular_velocity_w[env_idxs].clone()
             # Also compute body frame version
             agent_state.data.body_combined_angular_velocity_b[env_idxs] = math_utils.quat_rotate_inverse(
                 body_orientation_w[env_idxs], body_combined_angular_velocity_w[env_idxs]
             )
 
         if body_linear_acceleration_w is not None:
-            agent_state.data.body_linear_acceleration_w[env_idxs] = body_linear_acceleration_w[env_idxs]
+            agent_state.data.body_linear_acceleration_w[env_idxs] = body_linear_acceleration_w[env_idxs].clone()
 
         if joint_positions_b is not None:
-            agent_state.data.joint_positions_b[env_idxs] = joint_positions_b[env_idxs]
+            agent_state.data.joint_positions_b[env_idxs] = joint_positions_b[env_idxs].clone()
 
         if joint_velocities_b is not None:
-            agent_state.data.joint_velocities_b[env_idxs] = joint_velocities_b[env_idxs]
+            agent_state.data.joint_velocities_b[env_idxs] = joint_velocities_b[env_idxs].clone()
 
         if zoom_level is not None:
-            agent_state.data.camera_zoom_level[env_idxs] = zoom_level[env_idxs]
+            agent_state.data.camera_zoom_level[env_idxs] = zoom_level[env_idxs].clone()
 
         # Update camera pose from body + gimbal
         agent_state.update_camera_pose(
@@ -2437,6 +2437,8 @@ class MultiAgentStateManager:
                 state_dict[key] = delayed_state.data.bboxes_2d
             elif key == 'bboxes_2d_valid_mask':
                 state_dict[key] = delayed_state.data.bboxes_2d_valid_mask.float()
+            elif key == 'bboxes_2d_age':
+                state_dict[key] = delayed_state.data.bboxes_2d_age
             elif key == 'camera_ray_directions_w':
                 state_dict[key] = delayed_state.data.camera_ray_directions_w
             elif key == 'joint_positions':
