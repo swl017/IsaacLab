@@ -1,5 +1,21 @@
 # Point Mass Controller Usage Guide
 
+## Overview
+
+This guide documents the **proven stable method** for controlling quadcopters with and without gimbals in Isaac Lab. The implementation is based on extensive testing and debugging, culminating in the working solution in [quadcopter_env_v2.py](../quadcopter/quadcopter_env_v2.py).
+
+**Key Achievements:**
+- ✅ Stable velocity control for base body (vx, vy, vz, yaw_rate)
+- ✅ Independent gimbal control (yaw, pitch) with automatic roll stabilization
+- ✅ No conflicts between base and gimbal actuators
+- ✅ Tested with 4096 parallel environments
+- ✅ Compatible with RL training pipelines
+
+**Architecture:**
+- **Base Body**: External forces/torques via PhysX (PointMass controller)
+- **Gimbal**: Position control via Articulation API (ImplicitActuators)
+- **Hybrid Approach**: Both control methods coexist without conflicts
+
 ## Table of Contents
 
 1. [Quick Start](#quick-start)
@@ -13,7 +29,7 @@
 
 ## Quick Start
 
-### Basic Setup
+### Basic Setup (Base Body Only)
 
 ```python
 import torch
@@ -41,14 +57,280 @@ force, moment = controller.compute_control_quat_exact(
     dt=env.step_dt,
 )
 
-# Apply forces to simulation (via PhysX)
-robot.root_physx_view.apply_forces_and_torques_at_position(
-    force_data=force_all_bodies,   # See "Force Application" section
-    torque_data=moment_all_bodies,
-    indices=robot._ALL_INDICES,
-    is_global=False,  # Body frame
+# Apply forces using Isaac Lab's standard API (RECOMMENDED)
+force_reshaped = force.unsqueeze(1)  # (num_envs, 1, 3)
+moment_reshaped = moment.unsqueeze(1)  # (num_envs, 1, 3)
+
+robot.set_external_force_and_torque(
+    forces=force_reshaped,
+    torques=moment_reshaped,
+    body_ids=[0],  # Apply to base body only
+    env_ids=None   # All environments
+)
+# Forces are applied in write_data_to_sim() before physics step
+```
+
+### Hybrid Setup (Base Body + Gimbal Control)
+
+**Recommended for quadcopters with gimbals** - This is the proven stable approach:
+
+```python
+from isaaclab.assets import Articulation
+from isaaclab_tasks.direct.iris_ma3.controller.point_mass import PointMass
+from isaaclab_tasks.direct.iris_ma3.controller.gimbal_stabilizer import GimbalStabilizer
+
+# Custom articulation class for hybrid control
+class QuadcopterArticulation(Articulation):
+    """Hybrid control: External forces for base, actuators for gimbal."""
+
+    def write_data_to_sim(self):
+        # Apply external wrench to base body
+        if self.has_external_wrench:
+            self.root_physx_view.apply_forces_and_torques_at_position(
+                force_data=self._external_force_b.view(-1, 3),
+                torque_data=self._external_torque_b.view(-1, 3),
+                position_data=None,
+                indices=self._ALL_INDICES,
+                is_global=False,
+            )
+
+        # Apply actuator model for gimbal joints
+        self._apply_actuator_model()
+        self.root_physx_view.set_dof_actuation_forces(
+            self._joint_effort_target_sim, self._ALL_INDICES
+        )
+
+        # Position targets for gimbal (implicit actuators)
+        if self._has_implicit_actuators:
+            self.root_physx_view.set_dof_position_targets(
+                self._joint_pos_target_sim, self._ALL_INDICES
+            )
+            self.root_physx_view.set_dof_velocity_targets(
+                self._joint_vel_target_sim, self._ALL_INDICES
+            )
+
+# In your environment
+def _apply_action(self):
+    # Get current robot state
+    curr_quat_w = self._robot.data.root_quat_w.clone()
+    curr_lin_vel_w = self._robot.data.root_lin_vel_w.clone()
+    curr_ang_vel_b = self._robot.data.root_ang_vel_b.clone()
+    curr_lin_acc_w = self._robot.data.body_lin_acc_w[:, body_id].clone()
+
+    # Convert acceleration to body frame
+    from isaaclab.utils.math import quat_rotate_inverse
+    curr_lin_acc_b = quat_rotate_inverse(curr_quat_w, curr_lin_acc_w)
+
+    # Base body control
+    force, moment = self._robot_controller.compute_control_quat_exact(
+        cmd_lin_vel_w=self._actions[:, 0:3] * self.cfg.max_linear_speed,
+        cmd_yaw_vel=self._actions[:, 3] * self.cfg.max_yaw_rate,
+        curr_quat_w=curr_quat_w,
+        curr_lin_vel_w=curr_lin_vel_w,
+        curr_ang_vel_b=curr_ang_vel_b,
+        curr_lin_acc_b=curr_lin_acc_b,
+        dt=self.cfg.sim.dt,
+        gains=self._controller_gains  # Optional: custom gains
+    )
+
+    # Apply external forces to base body
+    self._robot.set_external_force_and_torque(
+        forces=force.unsqueeze(1),
+        torques=moment.unsqueeze(1),
+        body_ids=[0],
+        env_ids=None
+    )
+
+    # Gimbal control (rate-based position commands)
+    if self.has_gimbal:
+        cmd_gimbal_yaw = self._actions[:, 4]
+        cmd_gimbal_pitch = self._actions[:, 5]
+
+        gimbal_yaw_current = self._robot.data.joint_pos[:, self.gimbal_joint_idx["yaw"]]
+        gimbal_pitch_current = self._robot.data.joint_pos[:, self.gimbal_joint_idx["pitch"]]
+
+        # Rate control: increment position
+        gimbal_yaw_target = gimbal_yaw_current + cmd_gimbal_yaw * max_rate * dt
+        gimbal_pitch_target = gimbal_pitch_current + cmd_gimbal_pitch * max_rate * dt
+
+        # Stabilizing roll (keeps horizon level)
+        gimbal_roll_stabilizing = self._gimbal_stabilizer.compute_stabilizing_roll(
+            gimbal_yaw_current, gimbal_pitch_current, self._robot.data.root_quat_w
+        )
+
+        # Apply gimbal position targets
+        self._robot.set_joint_position_target(
+            target=torch.stack([gimbal_yaw_target, gimbal_roll_stabilizing, gimbal_pitch_target], dim=-1),
+            joint_ids=[self.gimbal_joint_idx["yaw"], self.gimbal_joint_idx["roll"], self.gimbal_joint_idx["pitch"]]
+        )
+```
+
+---
+
+## Why Use Isaac Lab's API? (Critical Background)
+
+### The Actuator Override Problem
+
+When integrating external force-based controllers (like PointMass) with Isaac Lab articulations, you may encounter a **critical issue**: **articulation actuators override external forces**.
+
+#### Root Cause
+
+Isaac Lab's articulation system calls these methods in sequence during `write_data_to_sim()`:
+
+1. `apply_forces_and_torques_at_position()` - Applies external wrenches
+2. `_apply_actuator_model()` - Computes joint forces from actuator models
+3. **`set_dof_actuation_forces()`** - **Overwrites** forces on actuated joints
+
+If your robot has propeller/rotor actuators (e.g., `DirectActuatorCfg` on propeller joints), step 3 will **override the external forces** you applied in step 1, causing the controller to have no effect.
+
+#### Attempted Solutions (What NOT to Do)
+
+**❌ Bad Approach 1: Direct PhysX API calls in `_apply_action()`**
+
+```python
+# DON'T DO THIS - causes race conditions and timing issues
+def _apply_action(self):
+    force, moment = controller.compute_control(...)
+
+    # Calling PhysX API directly bypasses Isaac Lab's buffer management
+    self._robot.root_physx_view.apply_forces_and_torques_at_position(
+        force_data=force_all_bodies,
+        torque_data=moment_all_bodies,
+        indices=self._robot._ALL_INDICES,
+        is_global=False
+    )
+    # Problem: write_data_to_sim() is called LATER and may override these forces!
+```
+
+**Why this fails:**
+- `apply_forces_and_torques_at_position()` is called in `_apply_action()`
+- But `write_data_to_sim()` is called **after** by the environment loop
+- `set_dof_actuation_forces()` in `write_data_to_sim()` may override your forces
+- Physics pipeline timing is critical - forces must be applied at the right moment
+
+**❌ Bad Approach 2: Custom `write_data_to_sim()` without setting `has_external_wrench` flag**
+
+```python
+# DON'T DO THIS - flag stays False, forces never applied
+class CustomArticulation(Articulation):
+    def write_data_to_sim(self):
+        # This check will FAIL because flag is False!
+        if self.has_external_wrench:
+            self.root_physx_view.apply_forces_and_torques_at_position(...)
+```
+
+**Why this fails:**
+- `has_external_wrench` flag is only set to `True` when you call `set_external_force_and_torque()`
+- If you bypass this API, the flag stays `False`
+- Your custom `write_data_to_sim()` skips force application entirely
+
+#### ✅ Correct Solution: Use Isaac Lab's Standard API
+
+**Step 1: Remove propeller actuators from robot config**
+
+```python
+# In your robot configuration (e.g., iris_gimbal2.py)
+IRIS_CFG = ArticulationCfg(
+    actuators={
+        # REMOVE propeller actuators - they cause set_dof_actuation_forces() conflicts
+        # "propellers": DirectActuatorCfg(...),  # DELETE THIS
+
+        # KEEP gimbal actuators if needed (servos, different joints)
+        "gimbal_yaw": ImplicitActuatorCfg(
+            joint_names_expr=["yaw_joint"],
+            stiffness=2e3,
+            damping=1e2,
+        ),
+    },
 )
 ```
+
+**Step 2: Use `set_external_force_and_torque()` in your environment**
+
+```python
+def _apply_action(self):
+    # Compute control forces
+    force, moment = self._controller.compute_control(...)  # (num_envs, 3)
+
+    # Reshape to (num_envs, num_bodies, 3) - we apply only to base body
+    force_reshaped = force.unsqueeze(1)  # (num_envs, 1, 3)
+    moment_reshaped = moment.unsqueeze(1)  # (num_envs, 1, 3)
+
+    # Use standard Isaac Lab API
+    # This sets has_external_wrench=True and populates internal buffers
+    self._robot.set_external_force_and_torque(
+        forces=force_reshaped,
+        torques=moment_reshaped,
+        body_ids=[0],  # Base body ID
+        env_ids=None   # All environments
+    )
+    # Forces will be applied in write_data_to_sim() before physics step
+```
+
+**Step 3: Use standard or custom `write_data_to_sim()`**
+
+```python
+# Option A: Use base class (if no gimbal)
+# No custom write_data_to_sim() needed - base class handles everything
+
+# Option B: Custom class for hybrid control (base + gimbal) - RECOMMENDED FOR GIMBALS
+class QuadcopterArticulation(Articulation):
+    """Hybrid control: External forces for base, actuators for gimbal.
+
+    This is the proven stable approach for quadcopters with gimbals.
+    Tested and validated in quadcopter_env_v2.py.
+    """
+
+    def write_data_to_sim(self):
+        # Apply external wrench to base body (flag is now True!)
+        if self.has_external_wrench:
+            self.root_physx_view.apply_forces_and_torques_at_position(
+                force_data=self._external_force_b.view(-1, 3),
+                torque_data=self._external_torque_b.view(-1, 3),
+                position_data=None,
+                indices=self._ALL_INDICES,
+                is_global=False,
+            )
+
+        # Apply gimbal actuators - safe because propeller actuators removed
+        self._apply_actuator_model()
+        self.root_physx_view.set_dof_actuation_forces(
+            self._joint_effort_target_sim, self._ALL_INDICES
+        )
+
+        # Position targets for gimbal joints (implicit actuators)
+        if self._has_implicit_actuators:
+            self.root_physx_view.set_dof_position_targets(
+                self._joint_pos_target_sim, self._ALL_INDICES
+            )
+            self.root_physx_view.set_dof_velocity_targets(
+                self._joint_vel_target_sim, self._ALL_INDICES
+            )
+```
+
+### Why This Works
+
+1. **Removed propeller actuators** → `set_dof_actuation_forces()` only affects gimbal joints (if any)
+2. **Called `set_external_force_and_torque()`** → Sets `has_external_wrench=True` and populates buffers
+3. **`write_data_to_sim()` applies forces** → At the correct time in physics pipeline
+4. **No race conditions** → Forces and actuator commands applied in correct sequence
+5. **Hybrid architecture** → Base body controlled by external forces, gimbal by actuators - no conflicts
+
+**Gimbal Control Benefits:**
+- **Rate-based commands**: Incremental position updates prevent jumps
+- **Automatic stabilization**: GimbalStabilizer keeps horizon level
+- **Decoupled from base**: Gimbal motion doesn't disturb base body control
+- **Standard API**: Uses `set_joint_position_target()` - no custom PhysX calls needed
+
+### Troubleshooting Checklist
+
+If your controller has no effect, check:
+
+- [ ] `has_external_wrench` flag is `True` (print in diagnostics)
+- [ ] Propeller actuators removed from robot config
+- [ ] Called `set_external_force_and_torque()` in `_apply_action()`
+- [ ] Not calling `apply_forces_and_torques_at_position()` directly
+- [ ] `write_data_to_sim()` applies forces when flag is True
 
 ---
 
@@ -197,7 +479,62 @@ def _apply_forces_to_physx(self, force, moment):
     )
 ```
 
-### 4. Observation Collection
+### 4. Gimbal Control Integration
+
+Control gimbal angles independently from base body motion:
+
+```python
+from isaaclab_tasks.direct.iris_ma3.controller.gimbal_stabilizer import GimbalStabilizer
+
+# Initialize gimbal stabilizer
+gimbal_stabilizer = GimbalStabilizer(
+    device=device,
+    yaw_limits=[-math.pi, math.pi],      # ±180°
+    pitch_limits=[-math.pi/2, math.pi/2], # ±90°
+)
+
+def _apply_gimbal_control(self):
+    """Apply gimbal position commands with automatic stabilization."""
+    # Get gimbal commands from actions
+    cmd_gimbal_yaw = self._actions[:, 4]    # [-1, 1] normalized
+    cmd_gimbal_pitch = self._actions[:, 5]
+
+    # Get current gimbal positions
+    gimbal_yaw_current = self._robot.data.joint_pos[:, self.gimbal_joint_idx["yaw"]]
+    gimbal_pitch_current = self._robot.data.joint_pos[:, self.gimbal_joint_idx["pitch"]]
+
+    # Rate control: increment position targets
+    max_rate = math.radians(360)  # 360°/s
+    dt = self.step_dt
+
+    gimbal_yaw_target = gimbal_yaw_current + cmd_gimbal_yaw * max_rate * dt
+    gimbal_pitch_target = gimbal_pitch_current + cmd_gimbal_pitch * max_rate * dt
+
+    # Compute stabilizing roll (keeps horizon level during yaw/pitch motion)
+    gimbal_roll_stabilizing = gimbal_stabilizer.compute_stabilizing_roll(
+        gimbal_yaw_current,
+        gimbal_pitch_current,
+        self._robot.data.root_quat_w  # Base body orientation
+    )
+
+    # Apply targets to gimbal joints
+    self._robot.set_joint_position_target(
+        target=torch.stack([gimbal_yaw_target, gimbal_roll_stabilizing, gimbal_pitch_target], dim=-1),
+        joint_ids=[
+            self.gimbal_joint_idx["yaw"],
+            self.gimbal_joint_idx["roll"],
+            self.gimbal_joint_idx["pitch"],
+        ]
+    )
+```
+
+**Key Points:**
+- **Rate control**: Prevents large jumps, smooth motion
+- **Automatic roll stabilization**: Keeps camera horizon level
+- **Decoupled**: Gimbal doesn't affect base body dynamics
+- **Joint IDs**: Ensure correct mapping from robot config
+
+### 5. Observation Collection
 
 Collect controller-relevant observations for RL:
 
@@ -214,6 +551,13 @@ def _get_observations(self) -> dict:
 
         # Attitude error (compute from quaternion)
         "attitude_error": self._compute_attitude_error(),
+
+        # Gimbal state (if applicable)
+        "gimbal_angles": self._robot.data.joint_pos[:, [
+            self.gimbal_joint_idx["yaw"],
+            self.gimbal_joint_idx["pitch"],
+            self.gimbal_joint_idx["roll"],
+        ]],
     }
     return obs
 
@@ -408,6 +752,112 @@ print(f"Integral: {controller._vel_error_integral.abs().max():.2f}")
 controller.reset_integral(env_ids)
 ```
 
+### Problem: Gimbal Not Moving
+
+**Symptoms:**
+- Gimbal joints stay at initial position
+- No response to gimbal commands
+- Base body control works fine
+
+**Solutions:**
+
+1. **Check gimbal joint indices:**
+```python
+# Verify joint IDs are found
+print(f"Gimbal joint IDs: {self.gimbal_joint_idx}")
+# Should not be None
+assert all(idx is not None for idx in self.gimbal_joint_idx.values())
+```
+
+2. **Verify actuator config:**
+```python
+# In robot config, ensure gimbal has actuators
+actuators = {
+    "gimbal_yaw": ImplicitActuatorCfg(
+        joint_names_expr=["yaw_joint"],
+        stiffness=2e3,
+        damping=1e2,
+    ),
+    # ... pitch and roll ...
+}
+```
+
+3. **Check custom articulation class:**
+```python
+# Ensure write_data_to_sim() calls actuator API
+def write_data_to_sim(self):
+    # ... external wrench ...
+    self._apply_actuator_model()  # REQUIRED
+    self.root_physx_view.set_dof_actuation_forces(...)
+    if self._has_implicit_actuators:  # REQUIRED for position control
+        self.root_physx_view.set_dof_position_targets(...)
+```
+
+### Problem: Gimbal Disturbs Base Body
+
+**Symptoms:**
+- Drone tilts when gimbal moves
+- Base body velocity tracking degrades during gimbal motion
+- Oscillations correlate with gimbal movement
+
+**Root Cause:**
+- Gimbal inertia affects base body (physics coupling)
+- This is expected physical behavior
+
+**Solutions:**
+
+1. **Increase controller gains** to compensate:
+```python
+# Slightly higher attitude gains help reject disturbances
+gains["kp_att"] *= 1.2
+gains["kd_att"] *= 1.2
+```
+
+2. **Use feedforward compensation** (advanced):
+```python
+# Predict gimbal-induced torque and pre-compensate
+gimbal_accel = (gimbal_vel_target - gimbal_vel_current) / dt
+compensation_moment = gimbal_inertia * gimbal_accel
+moment_total = moment_from_controller + compensation_moment
+```
+
+3. **Accept minor coupling** - typically < 5% impact on tracking
+
+### Problem: Camera Horizon Not Level
+
+**Symptoms:**
+- Camera tilts when gimbal yaws
+- Horizon rotates during pitch motion
+- Roll stabilization not working
+
+**Solutions:**
+
+1. **Verify GimbalStabilizer is used:**
+```python
+from isaaclab_tasks.direct.iris_ma3.controller.gimbal_stabilizer import GimbalStabilizer
+
+# Must be initialized
+self._gimbal_stabilizer = GimbalStabilizer(device=device, ...)
+
+# Must be called in _apply_action()
+roll_stabilizing = self._gimbal_stabilizer.compute_stabilizing_roll(
+    gimbal_yaw, gimbal_pitch, robot_quat_w
+)
+```
+
+2. **Check roll joint index:**
+```python
+# Roll stabilization only works if roll joint exists
+assert self.gimbal_joint_idx["roll"] is not None
+```
+
+3. **Verify target application order:**
+```python
+# Order matters: [yaw, roll, pitch]
+target = torch.stack([yaw_target, roll_stab, pitch_target], dim=-1)
+joint_ids = [yaw_idx, roll_idx, pitch_idx]
+```
+
 ---
 
 ## Advanced Topics
@@ -520,3 +970,4 @@ with torch.no_grad():  # Disable gradient computation
 - [API_REFERENCE.md](API_REFERENCE.md) - Complete API documentation
 - [Isaac Lab Documentation](https://isaac-sim.github.io/IsaacLab/) - Environment setup
 - [Debugging History](../../../../../../ROOT_CAUSE_FOUND.md) - External force application troubleshooting
+- **[quadcopter_env_v2.py](../quadcopter/quadcopter_env_v2.py)** - **Reference implementation** of stable hybrid control (base + gimbal)

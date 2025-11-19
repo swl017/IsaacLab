@@ -30,7 +30,7 @@ from isaaclab_tasks.direct.iris_ma3 import bbox_raycaster
 class IrisMAEnvCfg(DirectMARLEnvCfg):
     # env
     episode_length_s = 20.0
-    decimation = 8
+    decimation = 16
     
     # Define agents
     possible_agents = ["drone_0", "drone_1"]
@@ -50,7 +50,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
-        dt=1 / 400,
+        dt=1 / 800,
         render_interval=decimation,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -122,9 +122,9 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     viewer: ViewerCfg = ViewerCfg(
         eye=(5.0, 5.0, 5.0),
         lookat=(0.0, 0.0, 0.0),
-        origin_type="asset_body",
-        asset_name="Robot_0",
-        body_name="body",
+        # origin_type="asset_body",
+        # asset_name="Robot_0",
+        # body_name="body",
     )
 
     # Scene configuration

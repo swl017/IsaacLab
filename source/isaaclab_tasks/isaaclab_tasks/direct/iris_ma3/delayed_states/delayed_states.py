@@ -458,7 +458,6 @@ class AgentStates:
             horizontal_aperture (Optional[torch.Tensor] | Optional[float]): Camera horizontal aperture.
             offset_position_b (Optional[torch.Tensor] | Optional[float]): Camera offset position in body frame.
             offset_rotation_b (Optional[torch.Tensor] | Optional[float]): Camera offset rotation in body frame.
-            intrinsics (Optional[torch.Tensor] | Optional[float]| None): Camera intrinsic matrix.
         """
         self.data.camera_width = width if isinstance(width, torch.Tensor) else torch.full((self.data.num_envs,), width, device=self.data.device)
         self.data.camera_height = height if isinstance(height, torch.Tensor) else torch.full((self.data.num_envs,), height, device=self.data.device)
@@ -487,6 +486,8 @@ class AgentStates:
                 self.data.camera_offset_rotation_b = offset_rotation_b.reshape(1, -1).repeat(self.data.num_envs, 1)
         else:
             self.data.camera_offset_rotation_b = torch.tensor([offset_rotation_b] * 4, device=self.data.device).unsqueeze(0).repeat(self.data.num_envs, 1)
+
+        self.update_intrinsic_matrix(self.data.camera_zoom_level)
 
     def update_intrinsic_matrix(self, zoom_level: torch.Tensor, env_idxs: Optional[torch.Tensor] = None):
         """Updates the camera intrinsic matrix based on focal length and image size."""

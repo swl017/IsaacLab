@@ -284,7 +284,7 @@ class PointMass:
     def compute_control_quat_exact(
         self,
         cmd_lin_vel_w: torch.Tensor,  # Command linear velocity in world frame
-        cmd_yaw_vel: torch.Tensor,    # Command yaw velocity (scalar)
+        cmd_yaw_vel_w: torch.Tensor,    # Command yaw velocity (scalar)
         curr_quat_w: torch.Tensor,    # Current orientation in world frame (w,x,y,z)
         curr_lin_vel_w: torch.Tensor, # Current linear velocity in world frame
         curr_ang_vel_b: torch.Tensor, # Current angular velocity in body frame
@@ -314,7 +314,7 @@ class PointMass:
 
         Args:
             cmd_lin_vel_w: Commanded linear velocity in world frame (N, 3)
-            cmd_yaw_vel: Commanded yaw angular velocity (N,) or (N, 1)
+            cmd_yaw_vel_w: Commanded yaw angular velocity in world frame (N,) or (N, 1)
             curr_quat_w: Current orientation quaternion (w, x, y, z) (N, 4)
             curr_lin_vel_w: Current linear velocity in world frame (N, 3)
             curr_ang_vel_b: Current angular velocity in body frame (N, 3)
@@ -397,37 +397,24 @@ class PointMass:
         )
 
         # Compute exact attitude error vector
-        att_error_b = 2.0 * vec_part * factor.unsqueeze(-1)  # (N, 3)
+        att_error_w = 2.0 * vec_part * factor.unsqueeze(-1)  # (N, 3)
+
+        att_error_b = quat_rotate_inverse(curr_quat_w, att_error_w)  # Transform to body frame
 
         # ROLL/PITCH PD CONTROL
         # moment = -kp * error - kd * velocity
-        moment = -gains["kp_att"].view(-1, 1) * att_error_b - gains["kd_att"].view(-1, 1) * curr_ang_vel_b
+        moment = \
+            -gains["kp_att"].view(-1, 1) * att_error_b \
+            - gains["kd_att"].view(-1, 1) * curr_ang_vel_b
 
         # YAW RATE TRACKING (overwrite z-axis moment)
         # Independent yaw rate control to avoid integration instability
-        yaw_rate_error = cmd_yaw_vel.view(-1) - curr_ang_vel_b[:, 2]
+        cmd_yaw_vel_b = quat_rotate_inverse(curr_quat_w, torch.stack([torch.zeros_like(cmd_yaw_vel_w), torch.zeros_like(cmd_yaw_vel_w), cmd_yaw_vel_w], dim=1))  # (N, 3)
+        yaw_rate_error = cmd_yaw_vel_b[:, 2] - curr_ang_vel_b[:, 2]
         moment[:, 2] = gains["kp_yaw"].view(-1) * yaw_rate_error
 
         # Saturate moments to prevent excessive control and numerical explosion
         moment = torch.clamp(moment, -self.max_moment, self.max_moment)
-
-        # DEBUG: Log controller internals for first environment
-        if torch.is_grad_enabled() is False:  # Only during inference
-            import sys
-            if hasattr(sys, '_controller_debug_counter'):
-                sys._controller_debug_counter += 1
-            else:
-                sys._controller_debug_counter = 0
-
-            if sys._controller_debug_counter % 50 == 0:
-                print(f"\n[CASCADED CONTROLLER DEBUG - Env 0]")
-                print(f"  att_error_b (r,p,y): {att_error_b[0]} rad = {att_error_b[0] * 57.3} deg")
-                # print(f"  OUTER LOOP: desired_ang_vel: {desired_ang_vel_b[0]} rad/s = {desired_ang_vel_b[0] * 57.3} deg/s")
-                print(f"  curr_ang_vel_b: {curr_ang_vel_b[0]} rad/s = {curr_ang_vel_b[0] * 57.3} deg/s")
-                # print(f"  INNER LOOP: rate_error (r,p): {rate_error[0, :2]} rad/s = {rate_error[0, :2] * 57.3} deg/s")
-                print(f"  Roll/Pitch moment: {moment[0, :2]} Nm")
-                print(f"  cmd_yaw_vel: {cmd_yaw_vel[0] * 57.3:.2f} deg/s, yaw_rate_error: {yaw_rate_error[0] * 57.3:.2f} deg/s")
-                print(f"  Yaw moment: {moment[0, 2]:.4f} Nm")
 
         # ========== TRANSLATIONAL CONTROL ==========
         # PID velocity tracking control with anti-windup and gravity compensation

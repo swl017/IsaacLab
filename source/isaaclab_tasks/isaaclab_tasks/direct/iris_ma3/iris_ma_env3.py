@@ -208,8 +208,26 @@ class IrisMAEnv(DirectMARLEnv):
             device=self.device,
         )
 
-        # Randomizer for initial states
-        self.randomizer = Randomizer(self.num_envs, self.device)
+        # Randomizer for initial states (gimbal-aware formation and target sampling)
+        self.randomizer = Randomizer(
+            self.num_envs,
+            self.device,
+            gimbal_pitch_limits=self.cfg.max_gimbal_pitch_angle  # Pass gimbal constraints
+        )
+
+        # Tune randomizer for desired target distances
+        # For targets at 15-20m, we need tight formations
+        self.randomizer.initial_states.cfg.max_agent_separation = 3.0  # Down from 12.0
+        self.randomizer.initial_states.cfg.min_agent_separation = 2.0  # Down from 3.0
+        self.randomizer.initial_states.cfg.z_variation_range = (0.0, 1.0)  # Down from (0.0, 5.0)
+
+        # Adjust target distance parameters
+        self.randomizer.targets.cfg.distance_scale_factor = 2.0  # Down from 2.5
+
+        # With these settings:
+        # - Max formation spread: ~6m
+        # - Min target distance: ~12-15m
+        # - Target range: 15-20m ✓
 
         # Curriculum parameters
         self.progress_delay = 0.0  # Will be updated during training
@@ -350,7 +368,7 @@ class IrisMAEnv(DirectMARLEnv):
             robot = self._robots[agent_id]
 
             # Robot root control
-            force, moment = self._robot_controllers[agent_id].compute_control(
+            force, moment = self._robot_controllers[agent_id].compute_control_quat_exact(
                 cmd_lin_vel_w=self.cmd_vel[:, idx, 0:3],
                 cmd_yaw_vel=self.cmd_vel[:, idx, 3],
                 curr_quat_w=robot.data.root_quat_w.clone(),
@@ -984,39 +1002,96 @@ class IrisMAEnv(DirectMARLEnv):
             self.extras["log"] = {}
         self.extras["log"].update(all_extras)
 
-        # Reset target states
-        target_pos = self.randomizer.initial_states.get_random_translation(len(env_ids))
-        target_pos += self._terrain.env_origins[env_ids] + 1.5
-        self.target.data.root_state_w[env_ids, :3] = target_pos
-        self.target.data.root_state_w[env_ids, 7:] = self.randomizer.initial_states.get_random_yaw_orientation(len(env_ids))
-        self.target.write_root_pose_to_sim(self.target.data.root_state_w[env_ids, :7], env_ids)
+        # =====================================================================
+        # Gimbal-Aware Formation and Target Sampling
+        # =====================================================================
+        # Step 1: Generate random formation (positions, orientations, velocities)
+        formation_data = self.randomizer.initial_states.get_random_formation(
+            num_agents=len(self.cfg.possible_agents),
+            num_envs=len(env_ids),
+            scale_factor=1.0,  # TODO: Hook to curriculum
+        )
+        # formation_data shape: [len(env_ids), num_agents, 13]
+        #   [:, :, 0:3] - positions
+        #   [:, :, 3:7] - orientations (quaternions)
+        #   [:, :, 7:13] - velocities
 
-        # Reset robots
-        for agent_id in self.cfg.possible_agents:
+        # Step 2: Sample feasible target positions (guaranteed gimbal feasibility)
+        target_positions = self.randomizer.targets.sample_target_position(
+            formation_data=formation_data,
+            scale_factor=1.0,  # TODO: Hook to curriculum
+        )
+        # target_positions shape: [len(env_ids), 3]
+
+        # Step 3: Apply terrain origins
+        terrain_offset = self._terrain.env_origins[env_ids]
+
+        # Offset formation positions
+        formation_positions = formation_data[:, :, 0:3] + terrain_offset.unsqueeze(1)
+
+        # Offset target positions
+        target_pos = target_positions + terrain_offset
+
+        # Step 4: Set target states
+        target_state = self.target.data.default_root_state[env_ids].clone()
+        target_state[:, 0:3] = target_pos
+        target_state[:, 3:7] = quat_from_euler_xyz(
+            torch.zeros(len(env_ids), device=self.device),
+            torch.zeros(len(env_ids), device=self.device),
+            torch.rand(len(env_ids), device=self.device) * 2 * math.pi  # Random yaw
+        )
+        self.target.write_root_pose_to_sim(target_state[:, :7], env_ids)
+        self.target.write_root_velocity_to_sim(target_state[:, 7:], env_ids)
+
+        # Step 5: Set agent states and compute gimbal angles
+        for i, agent_id in enumerate(self.cfg.possible_agents):
             robot = self._robots[agent_id]
-            gimbal_yaw, gimbal_roll, gimbal_pitch = self._gimbal_stabilizers[agent_id].compute_stabilized_angles_from_target_point(
-                target_point_world=target_pos,
-                drone_position_world=robot.data.root_state_w[env_ids, :3],
-                drone_quat_world=robot.data.root_state_w[env_ids, 3:7]
-            )
-            joint_pos = torch.stack([gimbal_yaw, gimbal_pitch, gimbal_roll], dim=-1)
-            joint_vel = robot.data.default_joint_vel[env_ids]
-            default_root_state = robot.data.default_root_state[env_ids].clone()
-            default_root_state[:, :2] = torch.zeros_like(default_root_state[:, :2])
-            default_root_state[:, :3] += self._terrain.env_origins[env_ids]
-            default_root_state[:, 2] += torch.zeros_like(default_root_state[:, 2]).uniform_(1.5, 4.5)
 
-            robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
-            robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
-            robot.write_joint_state_to_sim(
-                position=joint_pos,
-                velocity=joint_vel,
-                joint_ids=[
+            # Extract agent state from formation
+            agent_positions = formation_positions[:, i, :]  # [len(env_ids), 3]
+            agent_orientations = formation_data[:, i, 3:7]  # [len(env_ids), 4]
+            agent_velocities = formation_data[:, i, 7:13]   # [len(env_ids), 6]
+
+            # Construct root state
+            agent_root_state = robot.data.default_root_state[env_ids].clone()
+            agent_root_state[:, 0:3] = agent_positions
+            agent_root_state[:, 3:7] = agent_orientations
+            agent_root_state[:, 7:13] = agent_velocities
+
+            # Set robot root state
+            robot.write_root_pose_to_sim(agent_root_state[:, :7], env_ids)
+            robot.write_root_velocity_to_sim(agent_root_state[:, 7:13], env_ids)
+
+            # Compute gimbal angles (now guaranteed feasible)
+            gimbal_yaw, gimbal_roll, gimbal_pitch = \
+                self._gimbal_stabilizers[agent_id].compute_stabilized_angles_from_target_point(
+                    target_point_world=target_pos,
+                    drone_position_world=agent_positions,
+                    drone_quat_world=agent_orientations
+                )
+
+            # Set gimbal joint positions
+            gimbal_joint_ids = [
                     self.gimbal_joint_idx[agent_id]["yaw"],
                     self.gimbal_joint_idx[agent_id]["roll"],
                     self.gimbal_joint_idx[agent_id]["pitch"],
                 ]
+            joint_pos = torch.stack([gimbal_yaw, gimbal_pitch, gimbal_roll], dim=-1)
+            joint_vel = robot.data.default_joint_vel[env_ids][:,gimbal_joint_ids].clone()
+
+            robot.write_joint_state_to_sim(
+                position=joint_pos,
+                velocity=joint_vel,
+                joint_ids=gimbal_joint_ids,
+                env_ids=env_ids
             )
+        # eye=self._robots[self.cfg.possible_agents[0]].data.root_pos_w[env_ids[0]].tolist()+[5.0, 5.0, 5.0]
+        # lookat=self.target.data.root_pos_w[env_ids[0]].tolist()
+        # self.viewport_camera_controller.update_view_location(
+        #     eye=self._robots[self.cfg.possible_agents[0]].data.root_pos_w[env_ids[0]].tolist(),
+        #     lookat=self.target.data.root_pos_w[env_ids[0]].tolist()
+        # )
+
         super()._reset_idx(env_ids)
 
     def _set_debug_vis_impl(self, debug_vis: bool):
@@ -1030,6 +1105,10 @@ class IrisMAEnv(DirectMARLEnv):
 
         self.visualization.camera_frustum[self.cfg.possible_agents[0]].draw_interface.clear_lines()
         for i, agent_id in enumerate(self.cfg.possible_agents):
+            self._cameras[agent_id].set_intrinsic_matrices_batched(
+                self.state_manager.gt_states.agents[agent_id].data.camera_intrinsics, 
+                self.cfg.camera.spawn.focal_length * self.zoom_level[:, i]
+            )
             
             self.visualization.camera_frustum[agent_id].draw_frustum(
                 camera_position=self.state_manager.gt_states.agents[agent_id].data.camera_position_w,
@@ -1054,7 +1133,6 @@ class IrisMAEnv(DirectMARLEnv):
             # else:
             #     scale = scale.squeeze(1)
             self.visualization.tri_cov_visualizer[agent_id].visualize(
-                translations=X_w_tri,
-                # translations=X_w_tri[:, 0, :],
-                scales=scale,
+                translations=X_w_tri[:, 0, :],
+                scales=scale[:, 0, :],
             )

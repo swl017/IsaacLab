@@ -65,7 +65,7 @@ class CameraFrustum:
         # Extract camera parameters for all environments
         width = camera_cfg_tensor[:, 0]          # [n]
         height = camera_cfg_tensor[:, 1]         # [n]
-        focal_length = camera_cfg_tensor[:, 2]   # [n] in cm
+        focal_length = camera_cfg_tensor[:, 2] * zoom_level  # [n] in cm
         horizontal_aperture = camera_cfg_tensor[:, 3]  # [n] in cm
         near_plane_max = torch.ones_like(camera_cfg_tensor[:, 4]) * 0.5
         near_plane = torch.where(camera_cfg_tensor[:, 4] > near_plane_max, camera_cfg_tensor[:, 4], near_plane_max)  # [n]

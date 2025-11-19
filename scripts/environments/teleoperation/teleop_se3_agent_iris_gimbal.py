@@ -103,7 +103,7 @@ def pre_process_actions(
         ).unsqueeze(0)
         # Concatenate arm poses and hand joint angles
         return actions
-    elif "Gimbal" in args_cli.task:
+    elif "Iris" in args_cli.task or "Quadcopter" in args_cli.task:
         # For Iris and Crazyflie, we expect a tuple of (total_thrust, roll_moment, pitch_moment, yaw_moment)
         x, y, z, roll, pitch, yaw = teleop_data[0]
         # total_thrust, roll_moment, pitch_moment, yaw_moment = teleop_data[0]
