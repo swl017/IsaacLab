@@ -30,7 +30,7 @@ from isaaclab_tasks.direct.iris_ma3 import bbox_raycaster
 class IrisMAEnvCfg(DirectMARLEnvCfg):
     # env
     episode_length_s = 20.0
-    decimation = 16
+    decimation = 10
     
     # Define agents
     possible_agents = ["drone_0", "drone_1"]
@@ -50,7 +50,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
-        dt=1 / 800,
+        dt=1 / 500,
         render_interval=decimation,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -95,8 +95,8 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
         ),
         offset=TiledCameraCfg.OffsetCfg(
             pos=(0.0, 0.0, 0.0), 
-            rot=(0.5, -0.5, 0.5, -0.5), 
-            convention="ros"
+            rot=(0.7071068, 0, 0, -0.7071068), 
+            convention="world"
         ),
     )
 
@@ -147,7 +147,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
         partial_detection_allowed=False,
         min_bbox_area_pixels=400.0,
         enable_occlusion_check=False,
-        occlusion_ray_pattern="center_only",
+        occlusion_ray_pattern="9point",
         occlusion_visibility_threshold=0.5,
         occlusion_ray_tolerance=1.1,
         max_distance=100.0,
@@ -228,23 +228,34 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     # Delay and Communication System Parameters
     enable_delay_system: bool = True
     enable_noise_in_observations: bool = True
+
+    # Dynamics lag
     dynamics_time_constant: float = 0.1
-    detection_fps: float = 20.0
     motion_time_constant: float = 0.1
     gimbal_time_constant: float = 0.01
+
+    # Detection
+    detection_fps: float = 20.0
     detection_mean_latency: float = 0.1
     detection_std_latency: float = 0.01
-    comm_mean_delay: float = 0.1
-    comm_std_delay: float = 0.01
+    detection_latency_bound: list = [0.05, 0.5]  # Minimum and maximum latency
+    detection_failure_rate: float = 0.05
+
+    # Communication
+    comm_mean_latency: float = 0.1
+    comm_std_latency: float = 0.01
+    comm_latency_bound: list = [0.05, 0.5]  # Minimum and maximum latency
     comm_dropout_rate: float = 0.05
-    delay_buffer_size: int = 100
+    # delay_buffer_size: int = 100
     max_time_since_comm: float = 10.0  # Default value when no comm received (seconds)
     max_time_since_detection: float = 10.0  # Normalize time since detection with this value
+
+    # Reward decay
     detection_decay_time_constant: float = 1.0  # Time constant for exponential decay of detection confidence
 
-    # BBox detection parameters
-    bbox_fps: float = 30.0  # FPS throttle for bbox detections
-    bbox_latency_steps: int = 2  # Latency steps for bbox
-    bbox_dropout: float = 0.05  # Dropout probability for bbox
+    # # BBox detection parameters
+    # bbox_fps: float = 30.0  # FPS throttle for bbox detections
+    # bbox_latency_steps: int = 2  # Latency steps for bbox
+    # bbox_dropout: float = 0.05  # Dropout probability for bbox
 
     play_sim_at_step: int = 180000

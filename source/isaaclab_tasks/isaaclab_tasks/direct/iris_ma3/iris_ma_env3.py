@@ -113,7 +113,13 @@ class IrisMAEnv(DirectMARLEnv):
                 device=self.device,
             )
             robot_weight = (self._robot_mass[agent] * torch.tensor(self.sim.cfg.gravity, device=self.device).norm()).item()
-            self._robot_controllers[agent] = PointMass(0, robot_weight, self.num_envs, self.cfg.robot.spawn.rigid_props.disable_gravity, self.device)
+            self._robot_controllers[agent] = PointMass(
+                mass=self._robot_mass[agent], 
+                weight=robot_weight, 
+                num_envs=self.num_envs, 
+                disable_gravity=self.cfg.robot.spawn.rigid_props.disable_gravity, 
+                device=self.device
+            )
             self._gimbal_stabilizers[agent] = GimbalStabilizer(
                 yaw_limits=self.cfg.max_gimbal_yaw_angle,
                 pitch_limits=self.cfg.max_gimbal_pitch_angle,
@@ -162,7 +168,7 @@ class IrisMAEnv(DirectMARLEnv):
 
         # Get camera offset from config
         offset_pos = torch.tensor(self.cfg.camera.offset.pos, device=self.device)
-        offset_rot = torch.tensor(self.cfg.camera.offset.rot, device=self.device)
+        offset_rot = torch.tensor([0.5, -0.5, 0.5, -0.5], device=self.device) # torch.tensor(self.cfg.camera.offset.rot, device=self.device)
 
         # Set camera configs for all agents
         for agent_id in cfg.possible_agents:
@@ -183,6 +189,11 @@ class IrisMAEnv(DirectMARLEnv):
 
         # Initialize BBoxRayCaster on first use
         self._initialize_bbox_raycaster()
+
+        # Initialize targets
+        num_targets_per_env = 1
+        self.base_target_scale = self.cfg.target_cfg.spawn.scale[0]
+        self.target_scale = torch.ones(self.num_envs, num_targets_per_env, 3, device=self.device) * self.base_target_scale
 
         # Initialize SafetyManager for collision detection and TTC computation
         self.safety_manager = SafetyManager(
@@ -335,7 +346,8 @@ class IrisMAEnv(DirectMARLEnv):
         self.progress_all = self._linear_progress(0, self.cfg.curriculum_all_end_step, current_step)
         self.progress_delay = self._linear_progress(self.cfg.curriculum_delay_start_step, self.cfg.curriculum_delay_end_step, current_step)
         self.progress_tracking = self._linear_progress(self.cfg.curriculum_tracking_start_step, self.cfg.curriculum_tracking_end_step, current_step)
-        self.progress_coord = self._linear_progress(self.cfg.curriculum_coordination_start_step, self.cfg.curriculum_coordination_end_step, current_step)
+        # self.progress_coord = self._linear_progress(self.cfg.curriculum_coordination_start_step, self.cfg.curriculum_coordination_end_step, current_step)
+        self.progress_coord = 1.0 if DEBUG_DRAW else self._linear_progress(self.cfg.curriculum_coordination_start_step, self.cfg.curriculum_coordination_end_step, current_step)
         self.progress_safety = self._linear_progress(self.cfg.curriculum_safety_start_step, self.cfg.curriculum_safety_end_step, current_step)
         self.progress_move = self._linear_progress(self.cfg.curriculum_moving_target_start_step, self.cfg.curriculum_moving_target_end_step, current_step)
         self.progress_dynamics = self._linear_progress(self.cfg.curriculum_dynamics_start_step, self.cfg.curriculum_dynamics_end_step, current_step)
@@ -370,7 +382,7 @@ class IrisMAEnv(DirectMARLEnv):
             # Robot root control
             force, moment = self._robot_controllers[agent_id].compute_control_quat_exact(
                 cmd_lin_vel_w=self.cmd_vel[:, idx, 0:3],
-                cmd_yaw_vel=self.cmd_vel[:, idx, 3],
+                cmd_yaw_vel_w=self.cmd_vel[:, idx, 3],
                 curr_quat_w=robot.data.root_quat_w.clone(),
                 curr_lin_vel_w=robot.data.root_lin_vel_w.clone(),
                 curr_ang_vel_b=robot.data.root_ang_vel_b.clone(),
@@ -395,6 +407,10 @@ class IrisMAEnv(DirectMARLEnv):
             # Gimbal control
             gimbal_yaw = robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["yaw"]].clone()
             gimbal_pitch = robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["pitch"]].clone()
+
+            gimbal_yaw_target = self.cmd_gimbal_yaw[:, idx]
+            gimbal_pitch_target = self.cmd_gimbal_pitch[:, idx] # TODO: Compensate for drone attitude: horizontal stabilized frame
+
             gimbal_roll_stabilizing = self._gimbal_stabilizers[agent_id].compute_stabilizing_roll(gimbal_yaw, gimbal_pitch, robot.data.root_quat_w)
 
             robot.set_joint_position_target(
@@ -424,7 +440,7 @@ class IrisMAEnv(DirectMARLEnv):
 
         # Create a modified config with actual target paths
         bbox_cfg = copy.deepcopy(self.cfg.bbox_raycaster)
-        debug_vis = DEBUG_DRAW
+        bbox_cfg.debug_vis = DEBUG_DRAW
         target_prim_paths = self.scene.env_prim_paths # [f"/World/envs/env_{i}/target" for i in range(self.num_envs)]
         bbox_cfg.target_prim_paths = target_prim_paths
 
@@ -446,6 +462,14 @@ class IrisMAEnv(DirectMARLEnv):
         3. Delayed and noisy bbox detections
         4. Communication between agents
         """
+
+        # ========================================
+        # CRITICAL: Update simulation time first!
+        # ========================================
+        # This advances the internal clock in MultiAgentObservationPipeline
+        # so that delayed data (with FPS throttling and latency) can become available.
+        # Without this, delayed bboxes will NEVER show valid=True!
+        self.state_manager.update_time()
 
         # Update curriculum scaling
         self.state_manager.set_noise_progress_scale(self.progress_delay)
@@ -503,13 +527,18 @@ class IrisMAEnv(DirectMARLEnv):
             agent_id: (robot.data.root_pos_w, robot.data.root_quat_w)
             for agent_id, robot in self._robots.items()
         }
-
+        image_shapes = {
+            str(agent_id): (self.agent_camera_cfgs[agent_id].height, self.agent_camera_cfgs[agent_id].width)
+            for agent_id in self.cfg.possible_agents
+        }
         # Update bbox raycaster with GT data
         self.bbox_raycaster.update(
             camera_poses=gt_camera_poses,
             camera_intrinsics=gt_camera_intrinsics,
             target_poses=(target_pos, target_quat),
-            agent_poses=agent_body_poses
+            agent_poses=agent_body_poses,
+            image_shapes=image_shapes,
+            target_scale=self.target_scale
         )
 
         # ========== Update detections in state manager ==========
@@ -524,7 +553,9 @@ class IrisMAEnv(DirectMARLEnv):
                 bboxes_2d_gt=gt_bbox.squeeze(1),  # [N, T, 4] -> [N, 1, 4]
                 valid_mask_gt=bbox_valid.squeeze(1)  # [N, T] -> [N, 1]
             )
-
+        print(f"bbox_gt_states:")
+        print(f"  bboxes_2d: {self.state_manager.gt_states.agents[self.cfg.possible_agents[0]].data.bboxes_2d}")
+        print(f"  bboxes_2d_valid_mask: {self.state_manager.gt_states.agents[self.cfg.possible_agents[0]].data.bboxes_2d_valid_mask}") # NOTE: BUT HERE, it is true! This should flow eventually into delayed states...
         # ========== Broadcast and receive states ==========
         for agent_id in self.cfg.possible_agents:
             # Broadcast this agent's delayed states to others
@@ -538,7 +569,15 @@ class IrisMAEnv(DirectMARLEnv):
     def _compute_triangulation_covariance(self, X_w, robot_positions, robot_quats,
                                           gimbal_yaws, gimbal_pitches,
                                           camera_intrinsics, bbox_valid_mask) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-
+        print(f"[DEBUG] _compute_triangulation_covariance")
+        print(f"  X_w: {X_w.shape} ({X_w.tolist()})")
+        print(f"  target_pos: {self.target.data.root_pos_w.shape} ({self.target.data.root_pos_w.tolist()})")
+        print(f"  robot_positions: {robot_positions.shape}")
+        print(f"  robot_quats: {robot_quats.shape}")
+        print(f"  gimbal_yaws: {gimbal_yaws.shape}")
+        print(f"  gimbal_pitches: {gimbal_pitches.shape}")
+        print(f"  camera_intrinsics: {camera_intrinsics.shape}")
+        print(f"  bbox_valid_mask: {bbox_valid_mask.shape}")
         try:
             # progress_coord = (0.1 + self.progress_coord)/1.1 if self.cfg.enable_delay_system else 1.0
             progress_coord = self.progress_coord
@@ -559,12 +598,19 @@ class IrisMAEnv(DirectMARLEnv):
                 include_gimbal=True,
                 include_intrinsics=True
             )
+            print(f"  Sigma_X: {Sigma_X}")
+            print(f"  trace_cov: {trace_cov}")
             
             is_trace_valid = (trace_cov >= 0.0) & torch.isfinite(trace_cov)
             is_sigma_finite = torch.isfinite(Sigma_X).all(dim=(-2, -1))
             is_not_nan = ~torch.isnan(Sigma_X).any(dim=(-2, -1))
             is_all_bboxes_valid = bbox_valid_mask.all(dim=1)
             is_tri_cov_valid = is_trace_valid & is_sigma_finite & is_not_nan & is_all_bboxes_valid
+            print(f"  is_trace_valid: {is_trace_valid.tolist()}")
+            print(f"  is_sigma_finite: {is_sigma_finite.tolist()}")
+            print(f"  is_not_nan: {is_not_nan.tolist()}")
+            print(f"  is_all_bboxes_valid: {is_all_bboxes_valid.tolist()}") # NOTE: Always reports false here, too...
+            print(f"  is_tri_cov_valid: {is_tri_cov_valid.tolist()}")
             
             Sigma_X = torch.where(
                 is_tri_cov_valid.unsqueeze(-1).unsqueeze(-1),
@@ -577,7 +623,7 @@ class IrisMAEnv(DirectMARLEnv):
                 self.trace_cov_invalid
             )
         except Exception as e:
-            # print(f"Warning: Triangulation covariance (delayed) computation failed: {e}")
+            print(f"Warning: Triangulation covariance (delayed) computation failed: {e}")
             is_tri_cov_valid = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.bool)
             Sigma_X = self.Sigma_X_invalid.clone()
             trace_cov = self.trace_cov_invalid.clone()
@@ -585,19 +631,23 @@ class IrisMAEnv(DirectMARLEnv):
         return Sigma_X, trace_cov, is_tri_cov_valid
 
     def _get_rewards(self) -> Dict[str, torch.Tensor]:
+        print(f"[DEBUG] _get_rewards")
         self._compute_intermediate_values()
         rewards_dict = {}
 
         # ========== Compute triangulation PER AGENT (for rewards) ==========
         # Each agent uses: own delayed state + received delayed states from others
-        triangulation_results = {}  # {agent_id: (Sigma_X, trace_cov, is_valid)}
+        self.triangulation_results = {}  # {agent_id: (Sigma_X, trace_cov, is_valid)}
 
         for i, agent_id in enumerate(self.cfg.possible_agents):
+            print(f"Communication for agent {agent_id}:")
             # Get this agent's delayed state (no noise)
             delayed_state = self.state_manager.get_delayed_states(agent_id)
+            print(f"  delayed_state.bboxes_2d_valid_mask: {delayed_state.data.bboxes_2d_valid_mask.tolist()}") # NOTE: Always reports false here...
 
             # Get received delayed states from other agents
             received_states = self.state_manager.receive_other_agent_states(agent_id)
+            print(f"  received_states keys: {list(received_states.keys())}")
 
             # Build camera geometry from this agent's perspective
             # Start with this agent's own delayed state
@@ -627,6 +677,8 @@ class IrisMAEnv(DirectMARLEnv):
 
                     camera_intrinsics_list.append(other_state_dict['camera_intrinsics'][0])
                     bbox_valid_list.append(other_state_dict['bboxes_2d_valid_mask'][0][:, 0].bool())
+                    print(f"  Received state from {other_agent_id}:")
+                    print(f"    bboxes_2d_valid_mask: {bbox_valid_list}") # NOTE: Always reports false here as well...
                 else:
                     # Agent didn't receive this state (dropout/delay)
                     # Use dummy invalid data
@@ -636,6 +688,8 @@ class IrisMAEnv(DirectMARLEnv):
                     gimbal_pitches_list.append(torch.zeros_like(delayed_state.data.joint_positions_b[:, 1:2]))
                     camera_intrinsics_list.append(torch.zeros_like(delayed_state.data.camera_intrinsics))
                     bbox_valid_list.append(torch.zeros(self.num_envs, device=self.device, dtype=torch.bool))
+                    print(f"  Did NOT receive state from {other_agent_id}, using dummy data.")
+                    print(f"    bboxes_2d_valid_mask: {bbox_valid_list}")
 
             # Stack into [N, C, ...] format
             robot_positions = torch.stack(robot_positions_list, dim=1)  # [N, C, 3]
@@ -644,22 +698,29 @@ class IrisMAEnv(DirectMARLEnv):
             gimbal_pitches = torch.stack(gimbal_pitches_list, dim=1)  # [N, C, 1]
             camera_intrinsics = torch.stack(camera_intrinsics_list, dim=1)  # [N, C, 4]
             bbox_valid_mask = torch.stack(bbox_valid_list, dim=1)  # [N, C]
+            print(f"  Agent {agent_id}:")
+            print(f"    bbox_valid_mask: {bbox_valid_mask.tolist()}")
 
             # Triangulate target position from this agent's perspective
-            X_w_gt = self.target.data.root_pos_w  # [N, 3]
+            X_w_gt = self.target.data.root_pos_w.unsqueeze(1)  # [N, T, 3]
 
             # Compute triangulation covariance for THIS AGENT
             Sigma_X, trace_cov, is_tri_cov_valid = self._compute_triangulation_covariance(
                 X_w=X_w_gt,
                 robot_positions=robot_positions,
                 robot_quats=robot_quats,
-                gimbal_yaws=gimbal_yaws,
-                gimbal_pitches=gimbal_pitches,
+                gimbal_yaws=gimbal_yaws.squeeze(-1),
+                gimbal_pitches=gimbal_pitches.squeeze(-1),
                 camera_intrinsics=camera_intrinsics,
                 bbox_valid_mask=bbox_valid_mask
             )
-
-            triangulation_results[agent_id] = (Sigma_X, trace_cov, is_tri_cov_valid)
+            std_dev = torch.sqrt(torch.diagonal(Sigma_X, dim1=-2, dim2=-1))  # [N, 1, 3]
+            std_dev = torch.where(
+                is_tri_cov_valid.unsqueeze(-1),
+                std_dev,
+                torch.ones_like(std_dev) * 1e6  # Large value for invalid
+            )
+            self.triangulation_results[agent_id] = (X_w_gt, Sigma_X, std_dev, trace_cov, is_tri_cov_valid)
 
         # ========== Compute safety penalties for all agents ==========
         # Collect data for SafetyManager
@@ -694,7 +755,7 @@ class IrisMAEnv(DirectMARLEnv):
             delayed_state = self.state_manager.get_delayed_states(agent_id)
 
             # Unpack triangulation results for this agent
-            Sigma_X, trace_cov, is_tri_cov_valid = triangulation_results[agent_id]
+            X_w_gt, Sigma_X, std_dev, trace_cov, is_tri_cov_valid = self.triangulation_results[agent_id]
 
             # Compute action penalties
             action_sum = torch.sum(torch.square(self.action_weight * self._actions[agent_id]), dim=1)
@@ -763,10 +824,11 @@ class IrisMAEnv(DirectMARLEnv):
 
     def _get_observations(self) -> Dict[str, torch.Tensor]:
         """Get observations for all agents using delayed+noisy states."""
+        print(f"[DEBUG] _get_observations")
 
         # ========== Compute triangulation PER AGENT (for observations) ==========
         # Each agent uses: own delayed+noisy state + received states from others
-        self.triangulation_results_noisy = {}  # {agent_id: (X_w, std_deviations)}
+        self.triangulation_results_noisy = {}
 
         for i, agent_id in enumerate(self.cfg.possible_agents):
             # Get this agent's delayed+noisy state
@@ -816,6 +878,7 @@ class IrisMAEnv(DirectMARLEnv):
 
             # Stack
             robot_positions = torch.stack(robot_positions_list, dim=1)  # [N, C, 3]
+            print(f"  robot_positions: {robot_positions.shape}")
             robot_quats = torch.stack(robot_quats_list, dim=1)  # [N, C, 4]
             gimbal_yaws = torch.stack(gimbal_yaws_list, dim=1)  # [N, C, 1]
             gimbal_pitches = torch.stack(gimbal_pitches_list, dim=1)  # [N, C, 1]
@@ -828,30 +891,30 @@ class IrisMAEnv(DirectMARLEnv):
             # We need to add a target dimension to ray_dirs
             ray_dirs_expanded = ray_dirs.unsqueeze(2)  # [N, C, 1, 3]
             X_w_triangulated = midpoint_method_batched(
-                pts=robot_positions,
+                pts=robot_positions, # TODO: Wrong positions here? Compare with GT target pos
                 dirs=ray_dirs_expanded
             )  # [N, 1, 3]
 
             # Compute covariance
             Sigma_X, trace_cov, is_valid = self._compute_triangulation_covariance(
-                X_w=X_w_triangulated[:, 0, :],
+                X_w=X_w_triangulated,
                 robot_positions=robot_positions,
                 robot_quats=robot_quats,
-                gimbal_yaws=gimbal_yaws,
-                gimbal_pitches=gimbal_pitches,
+                gimbal_yaws=gimbal_yaws.squeeze(-1),
+                gimbal_pitches=gimbal_pitches.squeeze(-1),
                 camera_intrinsics=camera_intrinsics,
                 bbox_valid_mask=bbox_valid_mask
             )
 
             # Compute standard deviations
-            std_deviations = torch.sqrt(torch.diagonal(Sigma_X, dim1=-2, dim2=-1))  # [N, 1, 3]
-            std_deviations = torch.where(
+            std_dev = torch.sqrt(torch.diagonal(Sigma_X, dim1=-2, dim2=-1))  # [N, 1, 3]
+            std_dev = torch.where(
                 is_valid.unsqueeze(-1),
-                std_deviations,
-                torch.ones_like(std_deviations) * 1e6  # Large value for invalid
+                std_dev,
+                torch.ones_like(std_dev) * 1e6  # Large value for invalid
             )
 
-            self.triangulation_results_noisy[agent_id] = (X_w_triangulated, std_deviations)
+            self.triangulation_results_noisy[agent_id] = (X_w_triangulated, Sigma_X, std_dev, trace_cov, is_valid)
 
         # ========== Build observations for each agent ==========
         observations = {}
@@ -859,7 +922,13 @@ class IrisMAEnv(DirectMARLEnv):
         for i, agent_id in enumerate(self.cfg.possible_agents):
             noisy_state = self.state_manager.get_delayed_noisy_states(agent_id)
             received_states = self.state_manager.receive_other_agent_states(agent_id)
-            X_w_tri, std_tri = self.triangulation_results_noisy[agent_id]
+            X_w_tri, Sigma_X, std_dev, trace_cov, is_tri_cov_valid = self.triangulation_results_noisy[agent_id]
+            std_tri = torch.sqrt(torch.diagonal(Sigma_X, dim1=-2, dim2=-1))  # [N, 1, 3]
+            std_tri = torch.where(
+                is_tri_cov_valid.unsqueeze(-1),
+                std_tri,
+                torch.ones_like(std_tri) * 1e6  # Large value for invalid
+            )
 
             # Extract ego observations
             pos = noisy_state.data.body_position_w  # [N, 3]
@@ -1022,12 +1091,11 @@ class IrisMAEnv(DirectMARLEnv):
             scale_factor=1.0,  # TODO: Hook to curriculum
         )
         # target_positions shape: [len(env_ids), 3]
+        # NOTE: OVERRIDE FOR TESTING
+        target_positions = torch.tensor([10.0, 0.0, 1.0], device=self.device).unsqueeze(0).repeat(len(env_ids), 1)
 
         # Step 3: Apply terrain origins
         terrain_offset = self._terrain.env_origins[env_ids]
-
-        # Offset formation positions
-        formation_positions = formation_data[:, :, 0:3] + terrain_offset.unsqueeze(1)
 
         # Offset target positions
         target_pos = target_positions + terrain_offset
@@ -1048,13 +1116,22 @@ class IrisMAEnv(DirectMARLEnv):
             robot = self._robots[agent_id]
 
             # Extract agent state from formation
-            agent_positions = formation_positions[:, i, :]  # [len(env_ids), 3]
+            agent_positions = formation_data[:, i, 0:3]     # [len(env_ids), 3]
             agent_orientations = formation_data[:, i, 3:7]  # [len(env_ids), 4]
             agent_velocities = formation_data[:, i, 7:13]   # [len(env_ids), 6]
 
+            # # NOTE: OVERRIDE FOR TESTING
+            agent_positions = torch.tensor([0.0, i * 5.0, 1.0], device=self.device).unsqueeze(0).repeat(len(env_ids), 1)
+            agent_orientations = quat_from_euler_xyz(
+                torch.zeros(len(env_ids), device=self.device),
+                torch.zeros(len(env_ids), device=self.device),
+                torch.zeros(len(env_ids), device=self.device)
+            )
+            agent_velocities = torch.zeros(len(env_ids), 6, device=self.device)
+
             # Construct root state
             agent_root_state = robot.data.default_root_state[env_ids].clone()
-            agent_root_state[:, 0:3] = agent_positions
+            agent_root_state[:, 0:3] = agent_positions + terrain_offset
             agent_root_state[:, 3:7] = agent_orientations
             agent_root_state[:, 7:13] = agent_velocities
 
@@ -1066,7 +1143,7 @@ class IrisMAEnv(DirectMARLEnv):
             gimbal_yaw, gimbal_roll, gimbal_pitch = \
                 self._gimbal_stabilizers[agent_id].compute_stabilized_angles_from_target_point(
                     target_point_world=target_pos,
-                    drone_position_world=agent_positions,
+                    drone_position_world=agent_root_state[:, 0:3],
                     drone_quat_world=agent_orientations
                 )
 
@@ -1104,6 +1181,7 @@ class IrisMAEnv(DirectMARLEnv):
             return
 
         self.visualization.camera_frustum[self.cfg.possible_agents[0]].draw_interface.clear_lines()
+        # print(f"Triangulation: ")
         for i, agent_id in enumerate(self.cfg.possible_agents):
             self._cameras[agent_id].set_intrinsic_matrices_batched(
                 self.state_manager.gt_states.agents[agent_id].data.camera_intrinsics, 
@@ -1125,8 +1203,12 @@ class IrisMAEnv(DirectMARLEnv):
                 detected=self.state_manager.gt_states.agents[agent_id].data.bboxes_2d_valid_mask
             )
 
-            X_w_tri, std_tri = self.triangulation_results_noisy[agent_id]
-            scale = torch.sqrt(torch.clamp(std_tri, min=0.0)) * 2.5
+            # Either visualize using GT+delayed states or noisy+delayed states
+            # X_w_tri, Sigma_X, std_dev, trace_cov, is_tri_cov_valid = self.triangulation_results[agent_id]
+            X_w_tri, Sigma_X, std_dev, trace_cov, is_tri_cov_valid = self.triangulation_results_noisy[agent_id]
+
+
+            scale = torch.sqrt(torch.clamp(std_dev, min=0.0)) * 2.5
             # # Scale shape should be [N, 3]
             # if scale.ndim == 3 and scale.shape[1] >= 1:
             #     scale = scale[:, 0, :]
@@ -1136,3 +1218,6 @@ class IrisMAEnv(DirectMARLEnv):
                 translations=X_w_tri[:, 0, :],
                 scales=scale[:, 0, :],
             )
+            # print(f" Agent {agent_id}:")
+            # print(f"  Estimated Position: {X_w_tri[0,0,:].cpu().numpy()}")
+            # print(f"  Std Deviations: {std_tri[0,0,:].cpu().numpy()}")
