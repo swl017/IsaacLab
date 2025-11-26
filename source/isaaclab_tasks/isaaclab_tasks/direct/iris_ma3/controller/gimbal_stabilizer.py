@@ -98,7 +98,7 @@ class GimbalStabilizer:
         # After yaw rotation, we're in the yaw-rotated frame
         # Pitch is the angle from horizontal plane to target
         # atan2(-up, forward_horizontal) where forward_horizontal = sqrt(x^2 + y^2)
-        horizontal_dist = torch.sqrt(x**2 + y**2 + 1e-8)
+        horizontal_dist = torch.sqrt(x**2 + y**2)
         gimbal_pitch = torch.atan2(-z, horizontal_dist)  # Negative because down is positive pitch
 
         # Determine roll angle
