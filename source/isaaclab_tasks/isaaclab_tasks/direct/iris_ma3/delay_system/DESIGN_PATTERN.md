@@ -1,8 +1,28 @@
-# Delay System Design Pattern
+# Delay System Design Pattern (v2.1)
 
 ## Overview
 
 This document describes the design pattern for simulating realistic time-shifting phenomena in multi-agent RL environments for sim-to-real transfer. The core pattern is a **stochastic sample-and-hold mechanism with dropout** that models latency, sampling rate discrepancy, and packet loss.
+
+## v2.1 Architecture Changes
+
+**BREAKING CHANGE**: `bboxes_2d_valid_mask` has been **REMOVED** from the delay pipeline.
+
+**Rationale**:
+- The field caused confusion between frame-level validity and detection validity
+- Propagating validity masks through delays is error-prone and unnecessary
+- Users should validate bboxes AFTER all delay processing
+
+**New Pattern**:
+```python
+# Get delayed states (with all delays applied)
+delayed_states = delay_system.get_delayed_noisy_states(agent_id)
+
+# Validate bboxes AFTER delay processing
+bbox_valid = bbox_raycaster.validate_bbox(delayed_states.data.bboxes_2d)  # [N, T]
+
+# Use bbox_valid in your observation/reward logic
+```
 
 ## Core Algorithm
 
@@ -26,7 +46,47 @@ def sample_and_hold_with_dropout(current_time, data):
 - **Sample-and-hold**: New data sampled at stochastic intervals, held between samples
 - **Dropout**: Random sample failures (packet loss, frame drops)
 - **Latency**: Samples delayed by processing time
-- **Compounding**: Multiple stages chain together (detector → communication)
+- **Compounding**: Multiple stages chain together (detector -> communication)
+
+## Simplified Data Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    DelaySystem Pipeline                      │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  Ground Truth States                                         │
+│        ↓                                                     │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │  1. Noise Injection (to RAW sensors only)           │    │
+│  │     - Position, orientation, velocity               │    │
+│  │     - Joint positions, bboxes, zoom                 │    │
+│  └─────────────────────────────────────────────────────┘    │
+│        ↓                                                     │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │  2. Delay Application (per-field)                   │    │
+│  │     - Motion: First-order lag filter (100 Hz)       │    │
+│  │     - Orientation: Quaternion SLERP filter          │    │
+│  │     - Detection: Sample-and-hold (20 Hz, 300ms)     │    │
+│  │     - Communication: Sample-and-hold (30 Hz, 100ms) │    │
+│  └─────────────────────────────────────────────────────┘    │
+│        ↓                                                     │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │  3. Derived Field Computation                       │    │
+│  │     - camera_position_w (from body + offset)        │    │
+│  │     - camera_orientation_w (from body + gimbal)     │    │
+│  │     - camera_ray_directions_w (from bbox + cam)     │    │
+│  └─────────────────────────────────────────────────────┘    │
+│        ↓                                                     │
+│  Delayed+Noisy AgentStates                                   │
+│        ↓                                                     │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │  4. User Validation (OUTSIDE delay system)          │    │
+│  │     bbox_valid = bbox_raycaster.validate_bbox(bbox) │    │
+│  └─────────────────────────────────────────────────────┘    │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## Multi-Agent Perspective Model
 
@@ -43,556 +103,224 @@ Agent 0's perspective:
 ├── agent_0 (ego):    [motion_filter] → [detector] → [local_comm]      ← Fast
 ├── agent_1 (other):  [motion_filter] → [detector] → [inter_agent_comm] ← Slow
 └── agent_2 (other):  [motion_filter] → [detector] → [inter_agent_comm] ← Slow
-
-Agent 1's perspective:
-├── agent_1 (ego):    [motion_filter] → [detector] → [local_comm]      ← Fast
-├── agent_0 (other):  [motion_filter] → [detector] → [inter_agent_comm] ← Slow
-└── agent_2 (other):  [motion_filter] → [detector] → [inter_agent_comm] ← Slow
 ```
 
-**Key Insight:** Base processing (motion, detection) is the same for all agents. Only the final communication stage differs between ego and others.
+## AgentStatesData Fields
 
-## Data Structure Refinements
+### Raw Sensor Fields (delay applied)
 
-### AgentStatesData Cleanup
+| Field | Shape | Description |
+|-------|-------|-------------|
+| `body_position_w` | [N, 3] | Body position in world frame |
+| `body_orientation_w` | [N, 4] | Body orientation quaternion (w,x,y,z) |
+| `body_linear_velocity_w` | [N, 3] | Linear velocity in world frame |
+| `body_angular_velocity_w` | [N, 3] | Angular velocity in world frame |
+| `body_linear_acceleration_w` | [N, 3] | Linear acceleration in world frame |
+| `joint_positions_b` | [N, J] | Gimbal joint angles |
+| `camera_zoom_level` | [N] | Optical zoom level |
+| `bboxes_2d` | [N, T, 4] | Bounding boxes (x, y, w, h) |
 
-**Removed fields:**
-- ~~`bboxes_2d_valid_mask`~~ - Confusion with frame bounds; invalid detections handled by zeros/NaNs
-- ~~`bboxes_2d_age`~~ - Redundant; use timestamp comparison instead
+### Derived Fields (computed from delayed raw sensors)
 
-**Timestamp fields:**
-- `timestamp_sim_walltime` - Ground truth simulation time (s)
-- `timestamp_motion` - When motion states were last updated (s)
-- `timestamp_detection` - When detection data was last updated (s)
+| Field | Shape | Description |
+|-------|-------|-------------|
+| `camera_position_w` | [N, 3] | Camera position in world frame |
+| `camera_orientation_w` | [N, 4] | Camera orientation quaternion |
+| `camera_ray_directions_w` | [N, T, 3] | Ray directions from bbox centers |
+| `camera_ray_origins_w` | [N, T, 3] | Ray origins (camera position) |
 
-**Invalid data handling:**
-- No explicit "valid mask" for detections
-- Invalid/no detection represented by zeros, NaNs, or out-of-bounds values
-- Agent learns to interpret stale/invalid data as part of observation
+### Static Fields (no delay)
 
-## Field Grouping
+| Field | Shape | Description |
+|-------|-------|-------------|
+| `camera_offset_position_b` | [N, 3] | Camera offset in body frame |
+| `camera_offset_rotation_b` | [N, 4] | Camera rotation offset |
+| `camera_base_intrinsics` | [N, 3, 3] | Camera intrinsics matrix K |
 
-Fields grouped by timing characteristics:
+### Removed Fields (v2.1)
+
+| Field | Reason |
+|-------|--------|
+| ~~`bboxes_2d_valid_mask`~~ | Users validate AFTER delay using `bbox_raycaster.validate_bbox()` |
+| ~~`bboxes_2d_age`~~ | Use `timestamps` object instead |
+
+## Usage Pattern
+
+### Basic Usage
 
 ```python
-field_groups = {
-    # Motion states: First-order lag (100 Hz), same filter
-    'motion': [
-        'body_position_w',
-        'body_velocity_w', 'body_velocity_b',
-        'body_angular_velocity_w', 'body_angular_velocity_b',
-        'body_linear_acceleration_w', 'body_linear_acceleration_b',
-        'body_angular_acceleration_b',
-    ],
+from isaaclab_tasks.direct.iris_ma3.delay_system import (
+    MultiAgentDelaySystem,
+    AgentStates,
+)
 
-    # Orientation: Quaternion SLERP filtering (100 Hz)
-    'orientation': [
-        'body_orientation_w',
-        'camera_orientation_w',
-    ],
-
-    # Joint states: First-order lag (100 Hz)
-    'joints': [
-        'joint_positions_b',
-        'joint_velocities_b',
-        'joint_accelerations_b',
-    ],
-
-    # Detection states: Detector sampling (20 Hz, 300ms latency, dropout)
-    'detection': [
-        'bboxes_2d',
-        'camera_ray_directions_w',
-        'camera_ray_origins_w',
-    ],
-
-    # Camera intrinsics: Static, no delay
-    'camera_intrinsics': [
-        'camera_width', 'camera_height',
-        'camera_focal_length',
-        'camera_horizontal_aperture', 'camera_vertical_aperture',
-        'camera_offset_position_b', 'camera_offset_rotation_b',
-        'camera_intrinsics',
-        'camera_zoom_level',
-    ],
-}
-```
-
-## Architecture
-
-### System Overview
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      DelaySystem                            │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  ┌──────────────────────────────────────────────┐          │
-│  │  DataStorage                                 │          │
-│  │  - Ground truth state history buffer         │          │
-│  │  - Indexed by time for delay retrieval       │          │
-│  └──────────────────────────────────────────────┘          │
-│                         ↓                                   │
-│  ┌──────────────────────────────────────────────┐          │
-│  │  Base Processing (All Agents)                │          │
-│  │  ┌────────────┐  ┌──────────────┐           │          │
-│  │  │ Motion     │  │ Detection    │           │          │
-│  │  │ Filter     │  │ Sampler      │           │          │
-│  │  │ (100 Hz)   │  │ (20 Hz, 0.3s)│           │          │
-│  │  └────────────┘  └──────────────┘           │          │
-│  └──────────────────────────────────────────────┘          │
-│                         ↓                                   │
-│  ┌──────────────────────────────────────────────┐          │
-│  │  Communication Stage (Perspective-Dependent) │          │
-│  │                                              │          │
-│  │  ┌─────────────┐         ┌──────────────┐  │          │
-│  │  │ Ego View    │         │ Others View  │  │          │
-│  │  │ Local Comm  │         │ Inter-Agent  │  │          │
-│  │  │ (fast, ~ms) │         │ Comm (slow)  │  │          │
-│  │  │             │         │ (30Hz, 0.1s) │  │          │
-│  │  └─────────────┘         └──────────────┘  │          │
-│  └──────────────────────────────────────────────┘          │
-│                         ↓                                   │
-│  ┌──────────────────────────────────────────────┐          │
-│  │  Timestamp Tracking                          │          │
-│  │  - Per-group timestamps                      │          │
-│  │  - Staleness calculation                     │          │
-│  │  - Latency accumulation                      │          │
-│  └──────────────────────────────────────────────┘          │
-│                         ↓                                   │
-│  ┌──────────────────────────────────────────────┐          │
-│  │  Output: Delayed AgentStates                 │          │
-│  │  - Perspective-specific delays applied       │          │
-│  │  - Timestamp metadata per field group        │          │
-│  └──────────────────────────────────────────────┘          │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### Per-Field Sampler Architecture
-
-**Key Design Decision: Each field has its own sampler instance**
-
-**Rationale:**
-- Independent time constants per field (e.g., position vs. velocity filtering)
-- Independent dropout rates per field
-- Flexible per-field configuration
-- Can mix different sampler types (linear, quaternion, etc.)
-
-**Structure:**
-```python
-DelaySystem:
-    field_samplers: Dict[str, SamplerChain]
-        # Example entries:
-        "body_position_w" → SamplerChain([FirstOrderLagSampler])
-        "body_orientation_w" → SamplerChain([QuaternionFirstOrderLagSampler])
-        "bboxes_2d" → SamplerChain([DetectorSampler])
-
-    perspective_samplers: Dict[str, StochasticSampler]
-        "ego" → LocalCommSampler(fast)
-        "other" → InterAgentCommSampler(slow)
-```
-
-## Timestamp Management
-
-### Timestamp Hierarchy
-
-```
-Ground Truth (t_sim)
-    ↓
-Base Processing (t_base_sampled)
-    ↓ (with base latency)
-Base Available (t_base_available)
-    ↓
-Communication Processing (t_comm_sampled)
-    ↓ (with comm latency)
-Final Available (t_final_available)
-```
-
-### FieldTimestamp Class
-
-```python
-class FieldTimestamp:
-    """Timestamp metadata for a field or field group"""
-
-    t_captured: torch.Tensor      # [num_envs] When data was captured in sim
-    t_sampled: torch.Tensor       # [num_envs] When last sampled (period-based)
-    t_available: torch.Tensor     # [num_envs] When became available (after latency)
-    t_current: torch.Tensor       # [num_envs] Current simulation time
-
-    @property
-    def staleness(self) -> torch.Tensor:
-        """Time since data was captured (seconds)"""
-        return self.t_current - self.t_captured
-
-    @property
-    def latency(self) -> torch.Tensor:
-        """Total latency from capture to availability (seconds)"""
-        return self.t_available - self.t_captured
-
-    @property
-    def age(self) -> torch.Tensor:
-        """Time since data became available (seconds)"""
-        return self.t_current - self.t_available
-```
-
-### Per-Group Timestamp Tracking
-
-```python
-class AgentStatesTimestamps:
-    """Timestamp tracking for all AgentStates field groups"""
-
-    timestamps: Dict[str, FieldTimestamp]
-    # Example:
-    # timestamps['motion'] = FieldTimestamp(...)
-    # timestamps['detection'] = FieldTimestamp(...)
-    # timestamps['orientation'] = FieldTimestamp(...)
-```
-
-## Sampler Chaining
-
-### Chain Concept
-
-```
-Raw Data → Stage1 → Stage2 → ... → StageN → Output
-           (t1)     (t2)             (tN)
-```
-
-**Each stage adds:**
-- Sampling period (FPS throttling)
-- Latency (processing delay)
-- Dropout (packet loss)
-
-**Timestamps accumulate through stages:**
-- Total latency = sum of all stage latencies
-- Final staleness = t_current - t_captured (initial)
-
-### Example Chains
-
-**Detection Pipeline (Ego View):**
-```
-Bboxes @ 100Hz → DetectorSampler(20Hz, 0.3s, 10%) → LocalCommSampler(fast) → Output
-   t_capture        t_detect (300ms later)            t_ego (5ms later)
-
-Total latency: ~305ms
-```
-
-**Detection Pipeline (Other Agent View):**
-```
-Bboxes @ 100Hz → DetectorSampler(20Hz, 0.3s, 10%) → InterAgentCommSampler(30Hz, 0.1s, 5%) → Output
-   t_capture        t_detect (300ms later)            t_comm (100ms later)
-
-Total latency: ~400ms
-```
-
-**Motion Pipeline:**
-```
-Position @ 100Hz → FirstOrderLag(tau=0.1) → Output
-   t_capture          t_filtered (smooth)
-
-No explicit latency, continuous filtering
-```
-
-### SamplerChain Implementation
-
-```python
-class SamplerChain:
-    """Chain of samplers for a field"""
-
-    field_name: str
-    samplers: List[StochasticSampler]
-
-    # Timestamp tracking
-    t_captured: torch.Tensor
-    stage_timestamps: List[torch.Tensor]
-
-    def update(self, data: torch.Tensor, t_current: torch.Tensor) -> Tuple:
-        """
-        Pass data through sampler chain.
-
-        Returns:
-            (output_data, field_timestamp)
-        """
-        current_data = data
-        self.t_captured = t_current.clone()
-        self.stage_timestamps = [t_current.clone()]
-
-        # Pass through each stage
-        for sampler in self.samplers:
-            current_data, stage_info = sampler.update(current_data, t_current)
-            stage_time = t_current + sampler.accumulated_latency
-            self.stage_timestamps.append(stage_time)
-
-        # Build timestamp metadata
-        field_ts = FieldTimestamp(
-            t_captured=self.t_captured,
-            t_sampled=self.stage_timestamps[-2],
-            t_available=self.stage_timestamps[-1],
-            t_current=t_current,
-        )
-
-        return current_data, field_ts
-```
-
-## Multi-Agent State Management
-
-### DelaySystem Interface
-
-```python
-class DelaySystem:
-    """Main delay system for multi-agent environment"""
-
-    def update_agent_gt_states(self, agent_id: AgentID, states: AgentStates):
-        """
-        Record ground truth states for an agent.
-        Called every step for each agent.
-        """
-        pass
-
-    def get_ego_states(self, agent_id: AgentID) -> AgentStates:
-        """
-        Get ego states for an agent (fast local processing).
-
-        Returns:
-            AgentStates with ego perspective delays applied
-        """
-        pass
-
-    def get_other_agent_states(self, ego_agent: AgentID, other_agent: AgentID) -> AgentStates:
-        """
-        Get other agent's states from ego agent's perspective.
-        Includes inter-agent communication delays.
-
-        Returns:
-            AgentStates with full delays (base + inter-agent comm)
-        """
-        pass
-
-    def get_all_agent_states_for_ego(self, ego_agent: AgentID) -> Dict[AgentID, AgentStates]:
-        """
-        Get all agent states from ego agent's perspective.
-
-        Returns:
-            Dict mapping agent_id → delayed states
-            - ego_agent: Fast ego processing
-            - other agents: Slow inter-agent communication
-        """
-        pass
-```
-
-### Usage Example
-
-```python
-# Initialize delay system for 3 agents
-delay_system = DelaySystem(
-    agent_ids=["agent_0", "agent_1", "agent_2"],
+# Initialize
+delay_system = MultiAgentDelaySystem(
+    possible_agents=["agent_0", "agent_1", "agent_2"],
     num_envs=512,
-    device="cuda:0",
+    num_joints_per_agent={"agent_0": 2, "agent_1": 2, "agent_2": 2},
+    num_targets_per_agent={"agent_0": 5, "agent_1": 5, "agent_2": 5},
+    dt=0.01,
+    device=torch.device("cuda:0"),
+    enable_noise=True,
+    position_noise_std=0.05,
+    orientation_noise_std=0.02,
 )
 
-# Each step: Update ground truth
+# Each simulation step:
+delay_system.update_time()
+
+# 1. Update ground truth states (from physics)
 for agent_id in agent_ids:
-    gt_states = get_ground_truth_states(agent_id)
-    delay_system.update_agent_gt_states(agent_id, gt_states)
+    delay_system.update_gt_states(
+        agent_id=agent_id,
+        body_position_w=robot.body_position,
+        body_orientation_w=robot.body_orientation,
+        body_linear_velocity_w=robot.body_linear_velocity,
+        body_angular_velocity_w=robot.body_angular_velocity,
+        body_linear_acceleration_w=robot.body_linear_acceleration,
+        body_combined_angular_velocity_w=combined_angular_velocity,
+        joint_positions_b=gimbal.joint_positions,
+        zoom_level=camera.zoom_level,
+    )
 
-# Get observations for agent_0
-agent_0_obs = delay_system.get_all_agent_states_for_ego("agent_0")
-# Returns:
-# {
-#   "agent_0": <ego states with fast processing>,
-#   "agent_1": <states with slow inter-agent comm>,
-#   "agent_2": <states with slow inter-agent comm>,
-# }
+    # 2. Update detection data
+    delay_system.update_detections(
+        agent_id=agent_id,
+        bboxes_2d_gt=detector.bboxes,  # [N, T, 4]
+    )
 
-# Get observations for agent_1
-agent_1_obs = delay_system.get_all_agent_states_for_ego("agent_1")
-# Returns:
-# {
-#   "agent_1": <ego states with fast processing>,    ← Different ego agent
-#   "agent_0": <states with slow inter-agent comm>,
-#   "agent_2": <states with slow inter-agent comm>,
-# }
+# 3. Get delayed+noisy states for observations
+for agent_id in agent_ids:
+    obs_states = delay_system.get_delayed_noisy_states(agent_id)
+
+    # Access delayed data
+    position = obs_states.data.body_position_w      # [N, 3]
+    bboxes = obs_states.data.bboxes_2d              # [N, T, 4]
+    ray_dirs = obs_states.data.camera_ray_directions_w  # [N, T, 3]
+
+    # Validate bboxes AFTER delay processing
+    bbox_valid = bbox_raycaster.validate_bbox(bboxes)  # [N, T]
+
+# 4. Get clean delayed states for rewards
+for agent_id in agent_ids:
+    reward_states = delay_system.get_delayed_states(agent_id)
+    # Use for reward computation (no noise, just delays)
 ```
 
-## Configuration Example
-
-### Scenario Setup
-
-- Simulation: 100 Hz
-- Object detector: 20 Hz ± 5 Hz, 300ms ± 50ms latency, 10% dropout
-- Navigation filter: 100 Hz, 100ms time constant (first-order lag)
-- Local communication: ~5ms (minimal)
-- Inter-agent communication: 30 Hz ± 10 Hz, 100ms ± 20ms latency, 5% dropout
-
-### Config Definition
+### Multi-Agent State Sharing (Viewing Pattern)
 
 ```python
-from delay_system import (
-    DelaySystemCfg,
-    SamplerConfig,
-    DistributionConfig,
-)
+# Get ALL agent states from agent_0's perspective (RECOMMENDED)
+all_states = delay_system._delay_system.get_all_agent_states_for_ego("agent_0")
 
-@configclass
-class MyDelaySystemCfg(DelaySystemCfg):
-    # Simulation
-    dt_sim: float = 0.01  # 100 Hz
+# Ego states (fast local processing)
+ego_states = all_states["agent_0"]
 
-    # Motion filter (first-order lag)
-    motion_time_constant: float = 0.1  # 100ms
-    orientation_time_constant: float = 0.1
-    joint_time_constant: float = 0.05  # Faster for joints
+# Other agent states (slow inter-agent communication)
+other_states = all_states["agent_1"]
 
-    # Detection sampler
-    detection_fps_mean: float = 20.0
-    detection_fps_std: float = 5.0
-    detection_latency_mean: float = 0.3  # 300ms
-    detection_latency_std: float = 0.05  # 50ms
-    detection_dropout_rate: float = 0.10  # 10%
-
-    # Ego communication (local, fast)
-    ego_comm_latency: float = 0.005  # 5ms, nearly instant
-
-    # Inter-agent communication
-    inter_agent_comm_rate_min: float = 20.0  # Hz
-    inter_agent_comm_rate_max: float = 40.0  # Hz (30 ± 10)
-    inter_agent_comm_latency_mean: float = 0.1  # 100ms
-    inter_agent_comm_latency_std: float = 0.02  # 20ms
-    inter_agent_comm_dropout_rate: float = 0.05  # 5%
+# Direct access to AgentStates fields
+other_pos = other_states.data.body_position_w      # [N, 3]
+other_ori = other_states.data.body_orientation_w   # [N, 4]
+other_bboxes = other_states.data.bboxes_2d         # [N, T, 4]
 ```
 
-### Sampler Instantiation
+**Note:** `receive_other_agent_states()` is a legacy wrapper that returns `Dict[field -> (data, mask, age)]` tuples. Prefer the viewing pattern above for cleaner code.
+
+### Curriculum Learning
 
 ```python
-# Motion samplers (per-field)
-motion_samplers = {
-    'body_position_w': FirstOrderLagSampler(
-        num_envs=num_envs,
-        state_dim=3,
-        time_constant=cfg.motion_time_constant,
-        dt=cfg.dt_sim,
-        device=device,
-    ),
-    'body_velocity_w': FirstOrderLagSampler(
-        num_envs=num_envs,
-        state_dim=3,
-        time_constant=cfg.motion_time_constant,
-        dt=cfg.dt_sim,
-        device=device,
-    ),
-    # ... other motion fields
-}
+# Gradually increase noise over training
+progress = (current_step - noise_start) / (noise_end - noise_start)
+delay_system.set_noise_progress_scale(progress)  # 0.0 to 1.0
 
-# Orientation samplers
-orientation_samplers = {
-    'body_orientation_w': QuaternionFirstOrderLagSampler(
-        num_envs=num_envs,
-        time_constant=cfg.orientation_time_constant,
-        dt=cfg.dt_sim,
-        device=device,
-    ),
-}
-
-# Detection sampler (shared config for all detection fields)
-detection_sampler = StochasticSampler(
-    config=SamplerConfig(
-        period_dist=DistributionConfig(
-            distribution_type="normal",
-            mean=1.0 / cfg.detection_fps_mean,
-            std=cfg.detection_fps_std / (cfg.detection_fps_mean ** 2),
-        ),
-        latency_dist=DistributionConfig(
-            distribution_type="normal",
-            mean=cfg.detection_latency_mean,
-            std=cfg.detection_latency_std,
-        ),
-        dropout_dist=DistributionConfig(
-            distribution_type="constant",
-            value=cfg.detection_dropout_rate,
-        ),
-    ),
-    num_envs=num_envs,
-    device=device,
-    dt=cfg.dt_sim,
+# Adjust delay parameters during training
+delay_system._delay_system.set_time_constants(
+    motion=0.05,  # Faster motion filtering
+    orientation=0.05,
+    joints=0.02,
 )
 
-# Communication samplers
-ego_comm_sampler = StochasticSampler(
-    config=SamplerConfig(
-        period_dist=DistributionConfig(
-            distribution_type="constant",
-            value=cfg.dt_sim,  # No FPS throttling for local
-        ),
-        latency_dist=DistributionConfig(
-            distribution_type="constant",
-            value=cfg.ego_comm_latency,
-        ),
-        dropout_dist=None,  # No dropout for local comm
-    ),
-    num_envs=num_envs,
-    device=device,
-    dt=cfg.dt_sim,
-)
-
-inter_agent_comm_sampler = StochasticSampler(
-    config=SamplerConfig(
-        period_dist=DistributionConfig(
-            distribution_type="uniform",
-            min_value=1.0 / cfg.inter_agent_comm_rate_max,
-            max_value=1.0 / cfg.inter_agent_comm_rate_min,
-        ),
-        latency_dist=DistributionConfig(
-            distribution_type="normal",
-            mean=cfg.inter_agent_comm_latency_mean,
-            std=cfg.inter_agent_comm_latency_std,
-        ),
-        dropout_dist=DistributionConfig(
-            distribution_type="constant",
-            value=cfg.inter_agent_comm_dropout_rate,
-        ),
-    ),
-    num_envs=num_envs,
-    device=device,
-    dt=cfg.dt_sim,
+delay_system._delay_system.set_detection_latency_params(
+    fps_mean=30.0,  # Higher FPS
+    latency_mean=0.2,  # Lower latency
+    dropout_prob=0.05,  # Less dropout
 )
 ```
 
-## Timestamp Usage in Observations
+## Field Groups and Samplers
 
-### Adding Staleness to Observations
+### Sampler Types
+
+| Group | Sampler Type | Parameters |
+|-------|-------------|------------|
+| motion | FirstOrderLagSampler | time_constant: 0.1s |
+| orientation | QuaternionFirstOrderLagSampler | time_constant: 0.1s |
+| joints | FirstOrderLagSampler | time_constant: 0.05s |
+| zoom | FirstOrderLagSampler | time_constant: 0.05s |
+| detection_bbox | StochasticSampler | 20 Hz, 300ms latency, 10% dropout |
+| camera_intrinsics | PassthroughSampler | No delay (static) |
+
+### Noise Types
+
+| Field | Noise Type | Description |
+|-------|-----------|-------------|
+| position | Gaussian | World-frame position noise |
+| orientation | Quaternion perturbation | Small rotation noise via axis-angle |
+| linear_velocity | Gaussian | Velocity measurement noise |
+| angular_velocity | Gaussian | Gyroscope noise |
+| joint_positions | Gaussian | Encoder noise |
+| bboxes_2d | Realistic bbox noise | Scale-dependent, aspect-preserving |
+| zoom | Gaussian | Zoom motor encoder noise |
+
+## Best Practices
+
+### 1. Bbox Validation
+
+**ALWAYS** validate bboxes after delay processing:
 
 ```python
-# Get delayed states for ego agent
-ego_states = delay_system.get_ego_states(agent_id)
-other_states = delay_system.get_other_agent_states(agent_id, other_agent_id)
+delayed_states = delay_system.get_delayed_noisy_states(agent_id)
+bboxes = delayed_states.data.bboxes_2d
 
-# Extract timestamps
-motion_ts = ego_states.timestamps['motion']
-detection_ts = ego_states.timestamps['detection']
+# Validate using your bbox_raycaster
+bbox_valid = bbox_raycaster.validate_bbox(bboxes)  # [N, T]
 
-# Calculate staleness
-motion_staleness = motion_ts.staleness  # [num_envs]
-detection_staleness = detection_ts.staleness  # [num_envs]
-
-# Include in observation
-obs = torch.cat([
-    ego_states.data.body_position_w,
-    ego_states.data.bboxes_2d.flatten(start_dim=1),
-    motion_staleness.unsqueeze(-1),      # Add staleness info
-    detection_staleness.unsqueeze(-1),
-], dim=-1)
+# Filter invalid bboxes
+valid_bboxes = bboxes[bbox_valid]
+# Or mask for computations
+ray_dirs = delayed_states.data.camera_ray_directions_w
+ray_dirs_masked = ray_dirs * bbox_valid.unsqueeze(-1)
 ```
 
-### Staleness-Based Reward Shaping
+### 2. Reward vs Observation Separation
 
 ```python
-# Penalize stale detections
-detection_staleness = detection_ts.staleness
-staleness_penalty = -0.1 * torch.clamp(detection_staleness, max=2.0)
+# For REWARDS: Use clean delayed states (no noise)
+reward_states = delay_system.get_delayed_states(agent_id)
 
-# Exponential decay confidence
-detection_confidence = torch.exp(-detection_staleness / tau_decay)
-confidence_reward = 0.5 * detection_confidence
+# For OBSERVATIONS: Use noisy delayed states
+obs_states = delay_system.get_delayed_noisy_states(agent_id)
+```
 
-total_reward = base_reward + staleness_penalty + confidence_reward
+### 3. Timestamp Usage
+
+```python
+# Access timestamps for staleness tracking
+if obs_states.timestamps is not None:
+    motion_ts = obs_states.timestamps.timestamps['motion']
+    detection_ts = obs_states.timestamps.timestamps['detection']
+
+    motion_staleness = motion_ts.staleness  # [N]
+    detection_staleness = detection_ts.staleness  # [N]
+
+    # Include staleness in observations
+    obs = torch.cat([
+        obs_states.data.body_position_w,
+        motion_staleness.unsqueeze(-1),
+        detection_staleness.unsqueeze(-1),
+    ], dim=-1)
 ```
 
 ## File Structure
@@ -600,70 +328,56 @@ total_reward = base_reward + staleness_penalty + confidence_reward
 ```
 delay_system/
 ├── __init__.py
-├── DESIGN_PATTERN.md              # This document
+├── DESIGN_PATTERN.md          # This document
+├── API_REFERENCE.md           # API reference documentation
+├── README.md                  # Quick start guide
+├── usage_example.py           # Runnable example
 │
-├── stochastic_sampler.py          # Core sampler + distribution configs
-│   ├── DistributionConfig
-│   ├── SamplerConfig
-│   └── StochasticSampler
+├── agent_states.py            # AgentStates, AgentStatesData
+├── delay_system.py            # Core DelaySystem
+├── delay_system_cfg.py        # Configuration dataclasses
+├── multi_agent_wrapper.py     # MultiAgentDelaySystem wrapper
 │
-├── specialized_samplers.py        # Domain-specific samplers
-│   ├── FirstOrderLagSampler
-│   ├── QuaternionFirstOrderLagSampler
-│   ├── PassthroughSampler (no delay)
-│   └── ...
+├── stochastic_sampler.py      # StochasticSampler
+├── specialized_samplers.py    # FirstOrderLag, Quaternion, Passthrough
+├── sampler_chain.py           # SamplerChain composition
+├── field_configs.py           # Field grouping and sampler factories
 │
-├── sampler_chain.py               # Chain composition
-│   ├── SamplerChain
-│   └── ComposableSampler
-│
-├── timestamp_manager.py           # Timestamp tracking
-│   ├── FieldTimestamp
-│   └── AgentStatesTimestamps
-│
-├── field_configs.py               # Field metadata & grouping
-│   ├── field_groups
-│   └── create_field_samplers()
-│
-├── delay_system.py                # Main orchestration
-│   └── DelaySystem
-│
-├── delay_system_cfg.py            # Configuration dataclasses
-│   └── DelaySystemCfg
-│
-└── agent_states.py                # AgentStates with timestamps
-    ├── AgentStatesData
-    ├── AgentStates
-    └── AgentStatesTimestamps
+└── tests/
+    ├── run_tests.py           # Test runner
+    └── test_*.py              # Unit tests
 ```
 
 ## Key Design Principles
 
-1. **Composability**: Samplers chain together for complex delay scenarios
-2. **Per-field configuration**: Each field independently configurable
-3. **Perspective-aware**: Ego vs. other agents have different delay profiles
-4. **Timestamp-rich**: Comprehensive timing metadata for staleness tracking
-5. **GPU-accelerated**: All operations batched across environments
-6. **Type-aware**: Special handling for quaternions, complex data types
-7. **No invalid masking**: Keep it simple; invalid = no detection or zeros
-8. **Separation of concerns**: Base processing vs. communication delays
+1. **Simplicity**: No valid_mask propagation through delays
+2. **Separation**: Clean states for rewards, noisy states for observations
+3. **Composability**: Samplers chain together for complex delay scenarios
+4. **Per-field configuration**: Each field independently configurable
+5. **Perspective-aware**: Ego vs. other agents have different delay profiles
+6. **GPU-accelerated**: All operations batched across environments
+7. **Type-aware**: Special handling for quaternions
+8. **User validation**: Bbox validity computed AFTER delay, not propagated through
 
-## Benefits for Sim-to-Real Transfer
+## Migration from v2.0
 
-1. **Realistic timing**: Models actual sensor/network behavior
-2. **Stale data training**: Agent learns to handle outdated information
-3. **Dropout robustness**: Agent adapts to missing data
-4. **Latency awareness**: Agent compensates for delays
-5. **Multi-agent coordination**: Realistic inter-agent communication constraints
-6. **Observability**: Staleness info helps agent assess data quality
+If upgrading from v2.0, remove `bboxes_2d_valid_mask` from your code:
 
-## Next Steps
+```python
+# OLD (v2.0):
+delay_system.update_detections(
+    agent_id=agent_id,
+    bboxes_2d_gt=bboxes,
+    valid_mask_gt=valid_mask,  # REMOVE THIS
+)
 
-1. Implement `stochastic_sampler.py` (core algorithm)
-2. Implement `specialized_samplers.py` (first-order lag, quaternion)
-3. Implement `sampler_chain.py` (composition)
-4. Implement `timestamp_manager.py` (timing metadata)
-5. Implement `field_configs.py` (field grouping)
-6. Implement `delay_system.py` (orchestration)
-7. Update `agent_states.py` (add timestamps)
-8. Create configuration examples and tests
+# NEW (v2.1):
+delay_system.update_detections(
+    agent_id=agent_id,
+    bboxes_2d_gt=bboxes,
+)
+
+# Validate AFTER:
+delayed_states = delay_system.get_delayed_noisy_states(agent_id)
+bbox_valid = bbox_raycaster.validate_bbox(delayed_states.data.bboxes_2d)
+```

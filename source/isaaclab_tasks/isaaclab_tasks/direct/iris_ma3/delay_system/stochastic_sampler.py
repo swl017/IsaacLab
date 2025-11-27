@@ -291,6 +291,83 @@ class StochasticSampler:
                 if s['env_idx'] not in env_ids_set
             ]
 
+    def update_config(
+        self,
+        period_mean: Optional[float] = None,
+        period_std: Optional[float] = None,
+        period_min: Optional[float] = None,
+        period_max: Optional[float] = None,
+        latency_mean: Optional[float] = None,
+        latency_std: Optional[float] = None,
+        dropout_prob: Optional[float] = None,
+    ):
+        """
+        Dynamically update sampler configuration parameters without recreation.
+
+        This method enables curriculum learning by allowing external modules to
+        adjust delay parameters during training.
+
+        Args:
+            period_mean: New mean for period distribution (normal only)
+            period_std: New std for period distribution (normal only)
+            period_min: New min for period distribution (uniform only)
+            period_max: New max for period distribution (uniform only)
+            latency_mean: New mean for latency distribution (normal only)
+            latency_std: New std for latency distribution (normal only)
+            dropout_prob: New dropout probability (constant value)
+
+        Note:
+            - Only updates parameters compatible with current distribution types
+            - Validates parameter ranges before applying
+            - Ignores parameters not compatible with current config
+        """
+        # Update period distribution
+        if self.config.period_dist.distribution_type == "normal":
+            if period_mean is not None:
+                self.config.period_dist.mean = period_mean
+            if period_std is not None:
+                assert period_std >= 0, f"period_std must be >= 0, got {period_std}"
+                self.config.period_dist.std = period_std
+        elif self.config.period_dist.distribution_type == "uniform":
+            if period_min is not None:
+                self.config.period_dist.min_value = period_min
+            if period_max is not None:
+                self.config.period_dist.max_value = period_max
+            # Validate range if both are set
+            if self.config.period_dist.min_value is not None and \
+               self.config.period_dist.max_value is not None:
+                assert self.config.period_dist.min_value <= self.config.period_dist.max_value, \
+                    f"period_min ({self.config.period_dist.min_value}) must be <= " \
+                    f"period_max ({self.config.period_dist.max_value})"
+
+        # Update latency distribution
+        if self.config.latency_dist is not None:
+            if self.config.latency_dist.distribution_type == "normal":
+                if latency_mean is not None:
+                    self.config.latency_dist.mean = latency_mean
+                if latency_std is not None:
+                    assert latency_std >= 0, f"latency_std must be >= 0, got {latency_std}"
+                    self.config.latency_dist.std = latency_std
+            elif self.config.latency_dist.distribution_type == "constant":
+                if latency_mean is not None:
+                    self.config.latency_dist.value = latency_mean
+
+        # Update dropout distribution
+        if self.config.dropout_dist is not None:
+            if dropout_prob is not None:
+                assert 0.0 <= dropout_prob <= 1.0, \
+                    f"dropout_prob must be in [0, 1], got {dropout_prob}"
+                if self.config.dropout_dist.distribution_type == "constant":
+                    self.config.dropout_dist.value = dropout_prob
+                elif self.config.dropout_dist.distribution_type == "normal":
+                    self.config.dropout_dist.mean = dropout_prob
+                elif self.config.dropout_dist.distribution_type == "uniform":
+                    # For uniform dropout, adjust midpoint while keeping range
+                    range_half = (self.config.dropout_dist.max_value -
+                                  self.config.dropout_dist.min_value) / 2.0
+                    self.config.dropout_dist.min_value = max(0.0, dropout_prob - range_half)
+                    self.config.dropout_dist.max_value = min(1.0, dropout_prob + range_half)
+
 
 # ==================== Convenience Factory Functions ====================
 

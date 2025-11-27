@@ -34,6 +34,7 @@ from .field_configs import (
     get_group_fields,
     get_all_groups,
 )
+from .multi_agent_wrapper import MultiAgentDelaySystem
 
 __all__ = [
     # Main system
@@ -69,4 +70,6 @@ __all__ = [
     "get_field_group",
     "get_group_fields",
     "get_all_groups",
+    # Multi-agent wrapper
+    "MultiAgentDelaySystem",
 ]

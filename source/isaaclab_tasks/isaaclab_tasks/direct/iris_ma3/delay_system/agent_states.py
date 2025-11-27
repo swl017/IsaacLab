@@ -30,15 +30,9 @@ class AgentStatesData:
     joint_positions_b: torch.Tensor # [N, J]
     joint_velocities_b: torch.Tensor # [N, J]
     joint_accelerations_b: torch.Tensor # [N, J]
-    camera_width: torch.Tensor # [N]
-    camera_height: torch.Tensor # [N]
-    camera_image_rbg: torch.Tensor # Not implemented yet.
-    camera_default_focal_length: torch.Tensor # [N] - base focal length (unzoomed)
-    camera_horizontal_aperture: torch.Tensor # [N]
-    camera_vertical_aperture: torch.Tensor # [N]
     camera_offset_position_b: torch.Tensor # [N, 3]
     camera_offset_rotation_b: torch.Tensor # [N, 4] (w, x, y, z)
-    camera_intrinsics: torch.Tensor # [N, 3, 3]
+    camera_base_intrinsics: torch.Tensor # [N, 3, 3] - base camera intrinsics matrix K (unzoomed)
     camera_position_w: torch.Tensor # [N, 3]
     camera_orientation_w: torch.Tensor # [N, 4] (w, x, y, z)
     camera_ray_directions_w: torch.Tensor # [N, T, 3]
@@ -82,21 +76,21 @@ class AgentStates:
         self.data.joint_positions_b = torch.zeros(N, J, device=device)
         self.data.joint_velocities_b = torch.zeros(N, J, device=device)
         self.data.joint_accelerations_b = torch.zeros(N, J, device=device)
-        self.data.camera_width = torch.zeros(N, device=device)
-        self.data.camera_height = torch.zeros(N, device=device)
-        self.data.camera_image_rbg = torch.zeros(N, 3, device=device)  # Placeholder
-        self.data.camera_default_focal_length = torch.zeros(N, device=device)
-        self.data.camera_horizontal_aperture = torch.zeros(N, device=device)
-        self.data.camera_vertical_aperture = torch.zeros(N, device=device)
         self.data.camera_offset_position_b = torch.zeros(N, 3, device=device)
         self.data.camera_offset_rotation_b = torch.zeros(N, 4, device=device)
-        self.data.camera_intrinsics = torch.zeros(N, 3, 3, device=device)
+        # Initialize camera intrinsics with proper structure [[fx, 0, cx], [0, fy, cy], [0, 0, 1]]
+        self.data.camera_base_intrinsics = torch.zeros(N, 3, 3, device=device)
+        self.data.camera_base_intrinsics[:, 2, 2] = 1.0  # Bottom-right element must be 1.0
         self.data.camera_position_w = torch.zeros(N, 3, device=device)
         self.data.camera_orientation_w = math_utils.default_orientation(N, device=str(device))
         self.data.camera_ray_directions_w = torch.zeros(N, T, 3, device=device)
         self.data.camera_ray_origins_w = torch.zeros(N, T, 3, device=device)
         self.data.camera_zoom_level = torch.zeros(N, device=device)
         self.data.bboxes_2d = torch.zeros(N, T, 4, device=device)
+        # NOTE: bboxes_2d_valid_mask has been REMOVED from the delay pipeline.
+        # Users should validate bboxes AFTER delay processing using:
+        #     bbox_valid = bbox_raycaster.validate_bbox(bbox)  # [N, T]
+        # This avoids confusion between frame-level validity and detection validity.
 
 class MultiAgentStates:
     agent_states: Dict[AgentID, AgentStates]

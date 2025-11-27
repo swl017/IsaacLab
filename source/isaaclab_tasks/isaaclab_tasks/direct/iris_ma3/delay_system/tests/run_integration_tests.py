@@ -308,6 +308,27 @@ def create_dummy_states(
     # Joint states (gimbal pitch/yaw)
     states.data.joint_positions_b = torch.randn(num_envs, num_joints, device=device) * 0.5
 
+    # Camera intrinsics (K matrix) - realistic 640x480 camera
+    # K = [[fx, 0, cx], [0, fy, cy], [0, 0, 1]]
+    fx, fy = 500.0, 500.0  # Focal length in pixels
+    cx, cy = 320.0, 240.0  # Principal point (image center)
+    K = torch.zeros(num_envs, 3, 3, device=device)
+    K[:, 0, 0] = fx
+    K[:, 1, 1] = fy
+    K[:, 0, 2] = cx
+    K[:, 1, 2] = cy
+    K[:, 2, 2] = 1.0
+    states.data.camera_base_intrinsics = K
+
+    # Camera offset in body frame (gimbal mounted slightly below and forward)
+    states.data.camera_offset_position_b = torch.zeros(num_envs, 3, device=device)
+    states.data.camera_offset_position_b[:, 0] = 0.1   # 10cm forward
+    states.data.camera_offset_position_b[:, 2] = -0.05  # 5cm below
+
+    # Camera rotation offset (identity - camera aligned with body frame initially)
+    states.data.camera_offset_rotation_b = torch.zeros(num_envs, 4, device=device)
+    states.data.camera_offset_rotation_b[:, 0] = 1.0  # w=1, identity quaternion
+
     # Camera zoom
     states.data.camera_zoom_level = torch.ones(num_envs, device=device) * 2.0  # 2x zoom
 

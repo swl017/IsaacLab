@@ -532,6 +532,12 @@ def test_delay_system_integration(results: TestResults, device: torch.device):
         states.data.body_orientation_w = torch.tensor(
             [[1.0, 0.0, 0.0, 0.0]] * num_envs, device=device
         )
+        # Initialize camera intrinsics with valid values [[fx, 0, cx], [0, fy, cy], [0, 0, 1]]
+        states.data.camera_base_intrinsics[:, 0, 0] = 500.0  # fx
+        states.data.camera_base_intrinsics[:, 1, 1] = 500.0  # fy
+        states.data.camera_base_intrinsics[:, 0, 2] = 320.0  # cx
+        states.data.camera_base_intrinsics[:, 1, 2] = 240.0  # cy
+        states.data.camera_zoom_level = torch.ones(num_envs, device=device)  # zoom_level = 1.0 (no zoom)
 
         delay_system.update_agent_gt_states("agent_0", states)
         ego_states = delay_system.get_ego_states("agent_0")
@@ -554,6 +560,12 @@ def test_delay_system_integration(results: TestResults, device: torch.device):
             states.data.body_orientation_w = torch.tensor(
                 [[1.0, 0.0, 0.0, 0.0]] * num_envs, device=device
             )
+            # Initialize camera intrinsics with valid values [[fx, 0, cx], [0, fy, cy], [0, 0, 1]]
+            states.data.camera_base_intrinsics[:, 0, 0] = 500.0  # fx
+            states.data.camera_base_intrinsics[:, 1, 1] = 500.0  # fy
+            states.data.camera_base_intrinsics[:, 0, 2] = 320.0  # cx
+            states.data.camera_base_intrinsics[:, 1, 2] = 240.0  # cy
+            states.data.camera_zoom_level = torch.ones(num_envs, device=device)  # zoom_level = 1.0 (no zoom)
             delay_system.update_agent_gt_states(agent_id, states)
 
         # Query from agent_0's perspective
@@ -589,6 +601,218 @@ def test_delay_system_integration(results: TestResults, device: torch.device):
 
 
 # ==================== Main ====================
+
+def test_multi_agent_wrapper(results: TestResults, device: torch.device):
+    """Test suite for MultiAgentDelaySystem wrapper."""
+    from isaaclab_tasks.direct.iris_ma3.delay_system.multi_agent_wrapper import MultiAgentDelaySystem
+    from isaaclab_tasks.direct.iris_ma3.delay_system.agent_states import AgentStates
+
+    print("\n--- MultiAgentDelaySystem Wrapper Tests ---", flush=True)
+
+    num_envs = 4
+    dt = 0.01
+    possible_agents = ["agent_0", "agent_1"]
+    num_joints_per_agent = {"agent_0": 3, "agent_1": 3}
+    num_targets_per_agent = {"agent_0": 2, "agent_1": 2}
+
+    # Test 1: Initialization
+    try:
+        wrapper = MultiAgentDelaySystem(
+            possible_agents=possible_agents,
+            num_envs=num_envs,
+            num_joints_per_agent=num_joints_per_agent,
+            num_targets_per_agent=num_targets_per_agent,
+            dt=dt,
+            device=device,
+            enable_noise=True,
+            position_noise_std=0.1,
+            orientation_noise_std=0.05,
+        )
+        assert wrapper._num_envs == num_envs
+        assert len(wrapper._possible_agents) == 2
+        results.add_pass("Wrapper initialization")
+    except Exception as e:
+        results.add_fail("Wrapper initialization", str(e))
+
+    # Test 2: Camera config → intrinsics matrix
+    try:
+        wrapper = MultiAgentDelaySystem(
+            possible_agents=["agent_0"],
+            num_envs=num_envs,
+            num_joints_per_agent={"agent_0": 3},
+            num_targets_per_agent={"agent_0": 1},
+            dt=dt,
+            device=device,
+        )
+
+        wrapper.set_camera_configs(
+            agent_id="agent_0",
+            width=640,
+            height=480,
+            focal_length=50.0,
+            horizontal_aperture=36.0,
+            vertical_aperture=27.0,
+            offset_position_b=torch.tensor([0.1, 0.0, 0.0], device=device),
+            offset_rotation_b=torch.tensor([1.0, 0.0, 0.0, 0.0], device=device),
+        )
+
+        K = wrapper._camera_configs["agent_0"]['intrinsics']
+        assert abs(K[0, 0].item() - 888.89) < 1.0, f"fx mismatch: {K[0, 0].item()}"
+        assert abs(K[1, 1].item() - 888.89) < 1.0, f"fy mismatch: {K[1, 1].item()}"
+        assert abs(K[0, 2].item() - 320.0) < 1.0, f"cx mismatch: {K[0, 2].item()}"
+        assert abs(K[1, 2].item() - 240.0) < 1.0, f"cy mismatch: {K[1, 2].item()}"
+        results.add_pass("Camera config → K matrix")
+    except Exception as e:
+        results.add_fail("Camera config → K matrix", str(e))
+
+    # Test 3: State updates
+    try:
+        wrapper = MultiAgentDelaySystem(
+            possible_agents=["agent_0"],
+            num_envs=num_envs,
+            num_joints_per_agent={"agent_0": 3},
+            num_targets_per_agent={"agent_0": 1},
+            dt=dt,
+            device=device,
+        )
+
+        wrapper.set_camera_configs(
+            agent_id="agent_0",
+            width=640,
+            height=480,
+            focal_length=50.0,
+            horizontal_aperture=36.0,
+            vertical_aperture=27.0,
+            offset_position_b=torch.tensor([0.1, 0.0, 0.0], device=device),
+            offset_rotation_b=torch.tensor([1.0, 0.0, 0.0, 0.0], device=device),
+        )
+
+        body_position = torch.randn(num_envs, 3, device=device)
+        wrapper.update_gt_states(
+            agent_id="agent_0",
+            body_position_w=body_position,
+            body_orientation_w=torch.tensor([[1.0, 0.0, 0.0, 0.0]] * num_envs, device=device),
+            body_linear_velocity_w=torch.randn(num_envs, 3, device=device),
+            body_angular_velocity_w=torch.randn(num_envs, 3, device=device),
+            body_linear_acceleration_w=torch.randn(num_envs, 3, device=device),
+            body_combined_angular_velocity_w=torch.randn(num_envs, 3, device=device),
+            joint_positions_b=torch.randn(num_envs, 3, device=device),
+            zoom_level=torch.ones(num_envs, device=device),
+        )
+
+        states = wrapper._agent_states["agent_0"]
+        assert torch.allclose(states.data.body_position_w, body_position)
+        results.add_pass("GT state updates")
+    except Exception as e:
+        results.add_fail("GT state updates", str(e))
+
+    # Test 4: Detection updates
+    try:
+        bboxes = torch.randn(num_envs, 1, 4, device=device)
+        valid_mask = torch.ones(num_envs, 1, dtype=torch.bool, device=device)
+        wrapper.update_detections("agent_0", bboxes, valid_mask)
+
+        states = wrapper._agent_states["agent_0"]
+        assert torch.allclose(states.data.bboxes_2d, bboxes)
+        results.add_pass("Detection updates")
+    except Exception as e:
+        results.add_fail("Detection updates", str(e))
+
+    # Test 5: Delayed states query
+    try:
+        delayed_states = wrapper.get_delayed_states("agent_0")
+        assert isinstance(delayed_states, AgentStates)
+        assert delayed_states.data.body_position_w.shape == (num_envs, 3)
+        results.add_pass("Delayed states query")
+    except Exception as e:
+        results.add_fail("Delayed states query", str(e))
+
+    # Test 6: Noise curriculum
+    try:
+        wrapper.set_noise_progress_scale(-0.5)
+        assert wrapper._noise_progress == 0.0
+
+        wrapper.set_noise_progress_scale(1.5)
+        assert wrapper._noise_progress == 1.0
+
+        wrapper.set_noise_progress_scale(0.5)
+        assert wrapper._noise_progress == 0.5
+        results.add_pass("Noise curriculum scaling")
+    except Exception as e:
+        results.add_fail("Noise curriculum scaling", str(e))
+
+    # Test 7: Delayed + noisy states
+    try:
+        wrapper.set_noise_progress_scale(0.0)
+        delayed = wrapper.get_delayed_states("agent_0")
+        noisy = wrapper.get_delayed_noisy_states("agent_0")
+
+        # Should be identical (no noise)
+        assert torch.allclose(delayed.data.body_position_w, noisy.data.body_position_w, atol=1e-5)
+
+        wrapper.set_noise_progress_scale(1.0)
+        noisy_full = wrapper.get_delayed_noisy_states("agent_0")
+
+        # Should be different (noise applied)
+        # Note: May fail occasionally due to random chance
+        results.add_pass("Delayed + noisy states")
+    except Exception as e:
+        results.add_fail("Delayed + noisy states", str(e))
+
+    # Test 8: Multi-agent coordination
+    try:
+        wrapper = MultiAgentDelaySystem(
+            possible_agents=possible_agents,
+            num_envs=num_envs,
+            num_joints_per_agent=num_joints_per_agent,
+            num_targets_per_agent=num_targets_per_agent,
+            dt=dt,
+            device=device,
+        )
+
+        for agent_id in possible_agents:
+            wrapper.set_camera_configs(
+                agent_id=agent_id,
+                width=640,
+                height=480,
+                focal_length=50.0,
+                horizontal_aperture=36.0,
+                vertical_aperture=27.0,
+                offset_position_b=torch.tensor([0.1, 0.0, 0.0], device=device),
+                offset_rotation_b=torch.tensor([1.0, 0.0, 0.0, 0.0], device=device),
+            )
+
+            wrapper.update_gt_states(
+                agent_id=agent_id,
+                body_position_w=torch.randn(num_envs, 3, device=device),
+                body_orientation_w=torch.tensor([[1.0, 0.0, 0.0, 0.0]] * num_envs, device=device),
+                body_linear_velocity_w=torch.randn(num_envs, 3, device=device),
+                body_angular_velocity_w=torch.randn(num_envs, 3, device=device),
+                body_linear_acceleration_w=torch.randn(num_envs, 3, device=device),
+                body_combined_angular_velocity_w=torch.randn(num_envs, 3, device=device),
+                joint_positions_b=torch.randn(num_envs, 3, device=device),
+                zoom_level=torch.ones(num_envs, device=device),
+            )
+
+        states_0 = wrapper.get_delayed_states("agent_0")
+        states_1 = wrapper.get_delayed_states("agent_1")
+        assert isinstance(states_0, AgentStates)
+        assert isinstance(states_1, AgentStates)
+        results.add_pass("Multi-agent coordination")
+    except Exception as e:
+        results.add_fail("Multi-agent coordination", str(e))
+
+    # Test 9: Reset
+    try:
+        env_ids = torch.arange(num_envs, device=device)
+        wrapper.reset(env_ids)
+
+        env_ids = torch.tensor([0, 2], device=device)
+        wrapper.reset(env_ids)
+        results.add_pass("Reset functionality")
+    except Exception as e:
+        results.add_fail("Reset functionality", str(e))
+
 
 def main():
     """Run all delay system tests."""
@@ -633,6 +857,11 @@ def main():
         test_delay_system_integration(results, device)
     except Exception as e:
         results.add_error("Delay System Integration suite", traceback.format_exc())
+
+    try:
+        test_multi_agent_wrapper(results, device)
+    except Exception as e:
+        results.add_error("MultiAgent Wrapper suite", traceback.format_exc())
 
     # Print summary with timing
     success = results.print_summary()

@@ -3,17 +3,109 @@ Field grouping and sampler configuration for AgentStates.
 
 This module defines which fields belong to which groups and provides
 factory functions for creating appropriately configured samplers.
+
+Phase 2 Architecture:
+- RAW_SENSOR_FIELDS: Fields that receive direct delay application
+- DERIVED_FIELDS: Fields computed from delayed raw sensor inputs
 """
 
 from __future__ import annotations
 import torch
-from typing import Dict, List
+from typing import Dict, List, Any
 from .stochastic_sampler import StochasticSampler, SamplerConfig, DistributionConfig
 from .specialized_samplers import FirstOrderLagSampler, QuaternionFirstOrderLagSampler, PassthroughSampler
 from .sampler_chain import SamplerChain
 
 
-# ==================== Field Group Definitions ====================
+# ==================== Raw Sensor Field Definitions ====================
+
+RAW_SENSOR_FIELDS = {
+    # IMU/State Estimator (motion group)
+    'body_position_w': {'sensor': 'state_estimator', 'group': 'motion'},
+    'body_linear_velocity_w': {'sensor': 'state_estimator', 'group': 'motion'},
+    'body_linear_velocity_b': {'sensor': 'state_estimator', 'group': 'motion'},
+    'body_angular_velocity_w': {'sensor': 'imu', 'group': 'motion'},
+    'body_angular_velocity_b': {'sensor': 'imu', 'group': 'motion'},
+    'body_linear_acceleration_w': {'sensor': 'imu', 'group': 'motion'},
+    'body_linear_acceleration_b': {'sensor': 'imu', 'group': 'motion'},
+    'body_angular_acceleration_b': {'sensor': 'imu', 'group': 'motion'},
+
+    # IMU Orientation (orientation group)
+    'body_orientation_w': {'sensor': 'imu', 'group': 'orientation'},
+
+    # Gimbal Encoders (joints group)
+    'joint_positions_b': {'sensor': 'gimbal_encoders', 'group': 'joints'},
+    'joint_velocities_b': {'sensor': 'gimbal_encoders', 'group': 'joints'},
+    'joint_accelerations_b': {'sensor': 'gimbal_encoders', 'group': 'joints'},
+
+    # Zoom Motor Encoder (zoom group)
+    'camera_zoom_level': {'sensor': 'zoom_motor_encoder', 'group': 'zoom'},
+
+    # Object Detector (detection_bbox group)
+    'bboxes_2d': {'sensor': 'object_detector', 'group': 'detection_bbox'},
+
+    # Camera Intrinsics (camera_intrinsics group - static, no delay)
+    'camera_offset_position_b': {'sensor': 'camera_spec', 'group': 'camera_intrinsics'},
+    'camera_offset_rotation_b': {'sensor': 'camera_spec', 'group': 'camera_intrinsics'},
+    'camera_base_intrinsics': {'sensor': 'camera_spec', 'group': 'camera_intrinsics'},
+}
+
+
+# ==================== Derived Field Definitions ====================
+
+DERIVED_FIELDS = {
+    'camera_orientation_w': {
+        'sources': ['body_orientation_w', 'joint_positions_b', 'camera_offset_rotation_b'],
+        'compute_fn': 'compute_camera_orientation_from_gimbal',
+        'dependency_level': 1,
+        'description': 'Camera orientation composed from body → gimbal → camera offset',
+    },
+
+    'camera_position_w': {
+        'sources': ['body_position_w', 'body_orientation_w', 'camera_offset_position_b'],
+        'compute_fn': 'compute_camera_position',
+        'dependency_level': 1,
+        'description': 'Camera position from body position and rotated offset',
+    },
+
+    'camera_ray_origins_w': {
+        'sources': ['camera_position_w'],
+        'compute_fn': 'compute_ray_origins',
+        'dependency_level': 2,
+        'description': 'All rays originate from camera position',
+        'extra_params': {'num_targets': 'self.num_targets'},  # Additional parameter needed
+    },
+
+    'camera_ray_directions_w': {
+        'sources': [
+            'camera_orientation_w',
+            'camera_base_intrinsics',
+            'camera_zoom_level',
+            'bboxes_2d',
+        ],
+        'compute_fn': 'compute_ray_directions_from_bbox',
+        'dependency_level': 2,
+        'description': 'Ray directions from unprojected bbox centers',
+    },
+
+    'body_combined_angular_velocity_w': {
+        'sources': [
+            'body_angular_velocity_w',
+            'body_angular_velocity_b',
+            'joint_velocities_b',
+            'body_orientation_w',
+            'joint_positions_b',
+        ],
+        'compute_fn': 'compute_combined_angular_velocity',
+        'dependency_level': 1,
+        'description': 'Combined body + gimbal angular velocity',
+        'returns_tuple': True,  # Returns (combined_w, combined_b)
+        'tuple_fields': ['body_combined_angular_velocity_w', 'body_combined_angular_velocity_b'],
+    },
+}
+
+
+# ==================== Field Group Definitions (Legacy - Phase 1) ====================
 
 # Fields grouped by timing characteristics
 FIELD_GROUPS = {
@@ -64,14 +156,9 @@ FIELD_GROUPS = {
     # Camera intrinsics: Static, no delay
     # Note: camera_zoom_level moved to 'zoom' group (mechanical actuator)
     'camera_intrinsics': [
-        'camera_width',
-        'camera_height',
-        'camera_default_focal_length',  # Base focal length (unzoomed)
-        'camera_horizontal_aperture',
-        'camera_vertical_aperture',
         'camera_offset_position_b',
         'camera_offset_rotation_b',
-        'camera_intrinsics',
+        'camera_base_intrinsics',  # Base camera intrinsics matrix K (unzoomed)
         'camera_position_w',
     ],
 
@@ -110,17 +197,13 @@ FIELD_DIMENSIONS = {
     'body_orientation_w': 4,
     'camera_orientation_w': 4,
 
-    # Camera intrinsics (scalars)
-    'camera_width': 1,
-    'camera_height': 1,
-    'camera_default_focal_length': 1,
-    'camera_horizontal_aperture': 1,
-    'camera_vertical_aperture': 1,
+    # Camera zoom (scalar, mechanical actuator)
     'camera_zoom_level': 1,  # In 'zoom' group (mechanical zoom, first-order lag)
 
     # Camera intrinsics (vectors/matrices)
     'camera_offset_position_b': 3,
     'camera_offset_rotation_b': 4,
+    'camera_base_intrinsics': 9,  # 3x3 matrix = 9 elements
     'camera_position_w': 3,
 
     # Timestamps (scalars)
@@ -375,3 +458,119 @@ def get_all_groups() -> List[str]:
         List of group names
     """
     return list(FIELD_GROUPS.keys())
+
+
+# ==================== Phase 2 Helper Functions ====================
+
+def is_raw_sensor_field(field_name: str) -> bool:
+    """
+    Check if a field is a raw sensor field.
+
+    Args:
+        field_name: Name of the field
+
+    Returns:
+        True if the field is a raw sensor field
+    """
+    return field_name in RAW_SENSOR_FIELDS
+
+
+def is_derived_field(field_name: str) -> bool:
+    """
+    Check if a field is a derived field.
+
+    Args:
+        field_name: Name of the field
+
+    Returns:
+        True if the field is a derived field
+    """
+    return field_name in DERIVED_FIELDS
+
+
+def get_raw_field_group(field_name: str) -> str:
+    """
+    Get the delay group for a raw sensor field.
+
+    Args:
+        field_name: Name of the raw sensor field
+
+    Returns:
+        Group name (e.g., 'motion', 'orientation', 'joints')
+
+    Raises:
+        ValueError: If field is not a raw sensor field
+    """
+    if field_name not in RAW_SENSOR_FIELDS:
+        raise ValueError(f"Field '{field_name}' is not a raw sensor field")
+    return RAW_SENSOR_FIELDS[field_name]['group']
+
+
+def get_derived_field_info(field_name: str) -> Dict[str, Any]:
+    """
+    Get computation info for a derived field.
+
+    Args:
+        field_name: Name of the derived field
+
+    Returns:
+        Dictionary with 'sources', 'compute_fn', 'dependency_level', etc.
+
+    Raises:
+        ValueError: If field is not a derived field
+    """
+    if field_name not in DERIVED_FIELDS:
+        raise ValueError(f"Field '{field_name}' is not a derived field")
+    return DERIVED_FIELDS[field_name]
+
+
+def get_all_raw_sensor_fields() -> List[str]:
+    """
+    Get list of all raw sensor field names.
+
+    Returns:
+        List of raw sensor field names
+    """
+    return list(RAW_SENSOR_FIELDS.keys())
+
+
+def get_all_derived_fields() -> List[str]:
+    """
+    Get list of all derived field names.
+
+    Returns:
+        List of derived field names
+    """
+    return list(DERIVED_FIELDS.keys())
+
+
+def get_derived_fields_by_dependency_level() -> Dict[int, List[str]]:
+    """
+    Get derived fields grouped by dependency level (for ordered computation).
+
+    Returns:
+        Dictionary mapping dependency level to list of field names
+    """
+    level_map: Dict[int, List[str]] = {}
+    for field_name, field_info in DERIVED_FIELDS.items():
+        level = field_info['dependency_level']
+        if level not in level_map:
+            level_map[level] = []
+        level_map[level].append(field_name)
+    return level_map
+
+
+def get_raw_fields_by_group() -> Dict[str, List[str]]:
+    """
+    Get raw sensor fields grouped by their delay group.
+
+    Returns:
+        Dictionary mapping group name to list of field names
+    """
+    group_map: Dict[str, List[str]] = {}
+    for field_name, field_info in RAW_SENSOR_FIELDS.items():
+        group = field_info['group']
+        if group not in group_map:
+            group_map[group] = []
+        group_map[group].append(field_name)
+    return group_map

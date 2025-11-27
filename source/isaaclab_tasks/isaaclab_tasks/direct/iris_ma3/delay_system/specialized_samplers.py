@@ -90,6 +90,27 @@ class FirstOrderLagSampler:
         self.tau[env_ids] = time_constant
         self.alpha[env_ids] = self.dt / (self.dt + time_constant)
 
+    def update_config(self, time_constant: Optional[float] = None):
+        """
+        Dynamically update sampler configuration parameters without recreation.
+
+        This method enables curriculum learning by allowing external modules to
+        adjust time constants during training.
+
+        Args:
+            time_constant: New time constant value (tau) for all environments.
+                          If None, no update is performed.
+
+        Note:
+            - Updates time constant uniformly across all environments
+            - Recalculates filter coefficients (alpha) automatically
+            - For per-environment updates, use update_time_constants() instead
+        """
+        if time_constant is not None:
+            assert time_constant > 0, f"time_constant must be > 0, got {time_constant}"
+            self.tau[:] = time_constant
+            self.alpha = self.dt / (self.dt + self.tau)
+
     def update(
         self,
         data: torch.Tensor,
