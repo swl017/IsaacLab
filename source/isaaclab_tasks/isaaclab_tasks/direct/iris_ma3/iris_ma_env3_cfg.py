@@ -208,7 +208,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     pos_std = 0.1
     ori_std = 0.01
     gimbal_std = 0.01
-    intrinsic_std = 10.0
+    intrinsics_std = 10.0
 
     # Curriculum
     curriculum_all_end_step: int = 200000

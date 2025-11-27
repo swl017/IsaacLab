@@ -121,13 +121,21 @@ class FirstOrderLagSampler:
         Update filter with new measurements.
 
         Args:
-            data: Measured state (num_envs, state_dim)
+            data: Measured state (num_envs,) or (num_envs, state_dim)
             t_current: Current time (unused, for interface compatibility)
             force_update: Boolean mask for forced updates (unused, for interface compatibility)
 
         Returns:
             Tuple of (filtered_state, info_dict)
+            Output shape matches input shape (1D in → 1D out, 2D in → 2D out)
         """
+        # Track if input was 1D to restore shape on output
+        input_was_1d = data.dim() == 1
+
+        # Ensure 2D for internal computation to avoid broadcast issues
+        if input_was_1d:
+            data = data.unsqueeze(-1)
+
         self.filtered_state = self.filtered_state + self.alpha * (data - self.filtered_state)
 
         info = {
@@ -136,7 +144,12 @@ class FirstOrderLagSampler:
             'accumulated_latency': self.accumulated_latency.clone(),
         }
 
-        return self.filtered_state.clone(), info
+        # Restore original shape
+        output = self.filtered_state.clone()
+        if input_was_1d:
+            output = output.squeeze(-1)
+
+        return output, info
 
     def reset(self, env_ids: Optional[torch.Tensor] = None, initial_data: Optional[torch.Tensor] = None):
         """

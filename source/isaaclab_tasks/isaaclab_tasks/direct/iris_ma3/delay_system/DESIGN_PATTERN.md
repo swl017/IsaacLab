@@ -212,7 +212,7 @@ delay_system = MultiAgentDelaySystem(
 )
 
 # Each simulation step:
-delay_system.update_time()
+delay_system.update_time(dt)
 
 # 1. Update ground truth states (from physics)
 for agent_id in agent_ids:

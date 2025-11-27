@@ -117,7 +117,7 @@ def main():
     print(f"  Warmup (other): ~{warmup_steps_other} steps ({warmup_steps_other * dt:.2f}s)")
 
     for step in range(num_steps):
-        delay_system.update_time()
+        delay_system.update_time(dt)
 
         progress = step / num_steps
         delay_system.set_noise_progress_scale(progress)

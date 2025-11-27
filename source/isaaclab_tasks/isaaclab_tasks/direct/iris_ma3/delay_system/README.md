@@ -51,7 +51,7 @@ delay_system = MultiAgentDelaySystem(
 
 # 2. Simulation loop
 for step in range(num_steps):
-    delay_system.update_time()
+    delay_system.update_time(dt)
 
     # Update ground truth states for each agent
     for agent_id in agent_ids:

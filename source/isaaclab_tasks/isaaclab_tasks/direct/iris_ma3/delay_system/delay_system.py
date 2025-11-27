@@ -495,7 +495,7 @@ class DelaySystem:
         """
         return self.delayed_states[ego_agent]
 
-    def step(self, dt: Optional[float] = None):
+    def step(self, dt: Optional[float] | Optional[torch.Tensor] = None):
         """
         Advance time in the delay system.
 

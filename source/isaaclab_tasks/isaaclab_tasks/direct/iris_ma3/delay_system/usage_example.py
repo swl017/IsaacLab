@@ -1,18 +1,20 @@
 """
-Usage example for the delay system (v2.1).
+Usage example for the delay system (v2.2).
 
 This example demonstrates how to:
-1. Configure the delay system
+1. Configure the delay system with dual pipeline architecture
 2. Initialize for multi-agent environment
-3. Update ground truth states
-4. Query delayed states from different perspectives
-5. Validate bboxes AFTER delay processing
-6. Use curriculum learning hooks
+3. Update ground truth states (fed to both clean and noisy pipelines)
+4. Query states using view scheme API
+5. Separate clean states (rewards) from noisy states (observations)
+6. Validate bboxes AFTER delay processing
+7. Use curriculum learning hooks
 
-v2.1 BREAKING CHANGE:
-- bboxes_2d_valid_mask has been REMOVED from the delay pipeline
-- Users should validate bboxes AFTER delay processing using:
-    bbox_valid = bbox_raycaster.validate_bbox(delayed_bboxes)
+v2.2 KEY CHANGES:
+- Dual pipeline: clean (rewards) + noisy (observations)
+- Noise injected BEFORE delays (physically correct)
+- New view scheme API: get_all_states_for_rewards(), get_all_states_for_observations()
+- REMOVED: get_delayed_states, get_delayed_noisy_states, receive_other_agent_states
 """
 import sys
 # Force unbuffered output for Isaac Sim compatibility
@@ -41,7 +43,7 @@ from isaaclab_tasks.direct.iris_ma3.delay_system import (
 
 def main():
     print("=" * 80)
-    print("Delay System v2.1 Usage Example")
+    print("Delay System v2.2 Usage Example")
     print("=" * 80)
 
     # ========== Configuration ==========
@@ -116,8 +118,19 @@ def main():
     # ========== Simulation Loop ==========
 
     num_steps = 100
+    dt = 0.01  # 100 Hz simulation
+
+    # Expected delay parameters (defaults from delay_system_cfg.py)
+    detection_latency_mean = 0.3  # 300ms detection latency
+    detection_fps = 20.0  # 20 Hz detector
+    motion_time_constant = 0.1  # 100ms first-order lag
+    warmup_steps = int(detection_latency_mean / dt) + int(1.0 / detection_fps / dt)  # ~35 steps
 
     print(f"\nRunning {num_steps} simulation steps...")
+    print(f"  Expected delays (configured):")
+    print(f"    Motion: τ={motion_time_constant*1000:.0f}ms (first-order lag time constant)")
+    print(f"    Detection: {detection_latency_mean*1000:.0f}ms latency + {1000/detection_fps:.0f}ms FPS period")
+    print(f"  Warmup: ~{warmup_steps} steps ({warmup_steps * dt:.2f}s) for bboxes to propagate")
 
     for step in range(num_steps):
         # Advance simulation time
@@ -151,63 +164,64 @@ def main():
                 bboxes_2d_gt=gt_states.data.bboxes_2d,  # [N, T, 4]
             )
 
-        # ========== Query Delayed States ==========
+        # ========== View Scheme API (v2.2) ==========
 
-        # Get delayed states from agent_0's perspective
-        agent_0_view = delay_system._delay_system.get_all_agent_states_for_ego("agent_0")
+        # For REWARDS: Get clean delayed states (no noise)
+        reward_states = delay_system.get_all_states_for_rewards("agent_0")
+        ego_clean = reward_states["agent_0"]
+        other_clean = reward_states["agent_1"]
 
-        # Ego states (fast local processing)
-        ego_states = agent_0_view["agent_0"]
+        # For OBSERVATIONS: Get noisy delayed states
+        obs_states = delay_system.get_all_states_for_observations("agent_0")
+        ego_noisy = obs_states["agent_0"]
+        other_noisy = obs_states["agent_1"]
 
-        # Other agent states (slow inter-agent communication)
-        other_states = agent_0_view["agent_1"]
+        # Access delayed data directly
+        ego_position = ego_noisy.data.body_position_w  # [num_envs, 3]
+        ego_bboxes = ego_noisy.data.bboxes_2d  # [num_envs, num_targets, 4]
 
-        # Access delayed data
-        ego_position = ego_states.data.body_position_w  # [num_envs, 3]
-        ego_bboxes = ego_states.data.bboxes_2d  # [num_envs, num_targets, 4]
+        other_position = other_noisy.data.body_position_w
+        other_bboxes = other_noisy.data.bboxes_2d
 
-        other_position = other_states.data.body_position_w
-        other_bboxes = other_states.data.bboxes_2d
-
-        # ========== Bbox Validation (v2.1 pattern) ==========
+        # ========== Bbox Validation (v2.1+ pattern) ==========
         # Users should validate bboxes AFTER delay processing
         # In real code, use: bbox_valid = bbox_raycaster.validate_bbox(bboxes)
         # Here we simulate with simple bounds check
         bbox_valid = validate_bboxes_simple(ego_bboxes, width=640, height=480)
+        obs_bbox_valid = bbox_valid  # Same thing for noisy observations
 
-        # ========== Separate Clean vs Noisy States ==========
+        # ========== Clean vs Noisy Comparison ==========
+        # Clean states (for rewards - no noise)
+        ego_pos_clean = ego_clean.data.body_position_w
+        other_pos_clean = other_clean.data.body_position_w
 
-        # For REWARDS: Use clean delayed states (no noise)
-        reward_states = delay_system.get_delayed_states("agent_0")
+        # Noisy states (for observations - with noise)
+        ego_pos_noisy = ego_noisy.data.body_position_w
+        other_pos_noisy = other_noisy.data.body_position_w
 
-        # For OBSERVATIONS: Use noisy delayed states
-        obs_states = delay_system.get_delayed_noisy_states("agent_0")
-
-        # Validate bboxes for observations
-        obs_bboxes = obs_states.data.bboxes_2d
-        obs_bbox_valid = validate_bboxes_simple(obs_bboxes, width=640, height=480)
+        # Compute noise magnitude (useful for debugging)
+        ego_noise_mag = (ego_pos_noisy - ego_pos_clean).abs().mean()
+        other_noise_mag = (other_pos_noisy - other_pos_clean).abs().mean()
 
         # Use timestamp information (if available)
-        if obs_states.timestamps is not None:
-            motion_staleness = obs_states.timestamps.timestamps['motion'].staleness
-            detection_staleness = obs_states.timestamps.timestamps['detection'].staleness
+        if ego_noisy.timestamps is not None:
+            motion_staleness = ego_noisy.timestamps.timestamps['motion'].staleness
+            detection_staleness = ego_noisy.timestamps.timestamps['detection'].staleness
         else:
             motion_staleness = torch.zeros(num_envs, device=device)
             detection_staleness = torch.zeros(num_envs, device=device)
 
-        # ========== Multi-Agent State Sharing ==========
-        # NOTE: We already have other agent states from `agent_0_view` above!
-        # This is the recommended "viewing" pattern - no need for separate API.
-        #
-        # other_states = agent_0_view["agent_1"]  # Already available!
-        # other_pos = other_states.data.body_position_w
-        # other_ori = other_states.data.body_orientation_w
-        # other_bboxes = other_states.data.bboxes_2d
-
         # Print progress every 20 steps
         if step % 20 == 0:
             valid_ratio = bbox_valid.float().mean().item()
-            print(f"  Step {step:3d}: noise={progress:.2f}, bbox_valid={valid_ratio:.2%}")
+
+            # Expected bbox_valid: 0% during warmup, 100% after
+            expected_valid = 0.0 if step < warmup_steps else 1.0
+
+            # Show simulation time and expected vs actual bbox_valid
+            sim_time_ms = step * dt * 1000
+            print(f"  Step {step:3d} (t={sim_time_ms:.0f}ms): noise={progress:.2f}, "
+                  f"bbox_valid={valid_ratio:.0%} (expected={expected_valid:.0%})")
 
     print(f"\n[OK] Simulation completed: {num_steps} steps")
 
@@ -225,28 +239,39 @@ def main():
     print("=" * 80)
 
     # Adjust delay parameters during training (easier -> harder)
+    # v2.2: Need to apply to BOTH pipelines (clean and noisy)
     print("\nAdjusting delay parameters for curriculum learning:")
 
+    def set_delay_params(motion_tc, orientation_tc, joint_tc, fps_mean, latency_mean, dropout_rate):
+        """Helper to apply settings to both pipelines."""
+        for ds in [delay_system._delay_system_clean, delay_system._delay_system_noisy]:
+            ds.set_time_constants(
+                motion_tc=motion_tc,
+                orientation_tc=orientation_tc,
+                joint_tc=joint_tc,
+            )
+            ds.set_detection_latency_params(
+                fps_mean=fps_mean,
+                latency_mean=latency_mean,
+                dropout_rate=dropout_rate,
+            )
+
     # Easy settings (fast, low latency)
-    delay_system._delay_system.set_time_constants(
+    set_delay_params(
         motion_tc=0.02,       # 20ms time constant
         orientation_tc=0.02,
         joint_tc=0.01,
-    )
-    delay_system._delay_system.set_detection_latency_params(
-        fps_mean=30.0,      # 30 Hz detector
-        latency_mean=0.1,   # 100ms latency
-        dropout_rate=0.02,  # 2% dropout
+        fps_mean=30.0,        # 30 Hz detector
+        latency_mean=0.1,     # 100ms latency
+        dropout_rate=0.02,    # 2% dropout
     )
     print("  [Easy] motion_tc=0.02, detection_fps=30, latency=0.1s, dropout=2%")
 
     # Medium settings
-    delay_system._delay_system.set_time_constants(
+    set_delay_params(
         motion_tc=0.05,
         orientation_tc=0.05,
         joint_tc=0.02,
-    )
-    delay_system._delay_system.set_detection_latency_params(
         fps_mean=20.0,
         latency_mean=0.2,
         dropout_rate=0.05,
@@ -254,12 +279,10 @@ def main():
     print("  [Medium] motion_tc=0.05, detection_fps=20, latency=0.2s, dropout=5%")
 
     # Hard settings (realistic)
-    delay_system._delay_system.set_time_constants(
+    set_delay_params(
         motion_tc=0.1,
         orientation_tc=0.1,
         joint_tc=0.05,
-    )
-    delay_system._delay_system.set_detection_latency_params(
         fps_mean=15.0,
         latency_mean=0.3,
         dropout_rate=0.10,

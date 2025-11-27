@@ -25,6 +25,9 @@ from .specialized_samplers import (
     QuaternionFirstOrderLagSampler,
     PassthroughSampler,
 )
+
+# Backward compatibility alias for FirstOrderLag (used in iris_ma_env3.py for _robot_dynamics)
+FirstOrderLag = FirstOrderLagSampler
 from .sampler_chain import SamplerChain, ComposableSampler
 from .field_configs import (
     FIELD_GROUPS,
@@ -51,6 +54,7 @@ __all__ = [
     # Samplers
     "StochasticSampler",
     "FirstOrderLagSampler",
+    "FirstOrderLag",  # Backward compatibility alias
     "QuaternionFirstOrderLagSampler",
     "PassthroughSampler",
     # Sampler configuration

@@ -16,7 +16,7 @@ API:
 """
 
 from __future__ import annotations
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import torch
 import copy
 
@@ -183,13 +183,15 @@ class MultiAgentDelaySystem:
         states.data.camera_offset_rotation_b[:] = offset_rotation_b
         states.data.camera_base_intrinsics[:] = K
 
-    def update_time(self) -> None:
+    def update_time(self, dt: Optional[float | torch.Tensor] = None) -> None:
         """
         Advance simulation time by dt for BOTH pipelines.
 
         CRITICAL: Must be called at start of each environment step,
         before any state updates or queries.
         """
+        if dt is not None:
+            self._dt = dt
         self._delay_system_clean.step(self._dt)
         self._delay_system_noisy.step(self._dt)
 
@@ -205,6 +207,29 @@ class MultiAgentDelaySystem:
                 - 1.0: Full noise (configured std values)
         """
         self._noise_progress = max(0.0, min(1.0, progress))
+
+    @property
+    def current_time(self) -> torch.Tensor:
+        """
+        Current simulation time (for computing staleness/age).
+
+        Returns the internal simulation time from the clean delay pipeline.
+        Used to compute bboxes_2d_age as: current_time - detection_timestamp
+        """
+        return self._delay_system_clean.t_sim
+
+    @property
+    def gt_states(self) -> "MultiAgentGTStates":
+        """
+        Access ground-truth states for all agents (for debugging/visualization).
+
+        Returns a wrapper providing: gt_states.agents[agent_id].data.<field>
+
+        Note: This accesses the raw GT states BEFORE any delay processing.
+        For actual delayed states, use get_all_states_for_rewards() or
+        get_all_states_for_observations().
+        """
+        return MultiAgentGTStates(self._agent_states)
 
     def update_gt_states(
         self,
@@ -271,6 +296,11 @@ class MultiAgentDelaySystem:
         # Update in GT buffer
         states = self._agent_states[agent_id]
         states.data.bboxes_2d = bboxes_2d_gt
+
+        # Update detection timestamp to current simulation time
+        # This enables computing bboxes_2d_age as: current_time - timestamp_detection
+        # Note: self.current_time is already a [N] tensor (per-environment time)
+        states.data.timestamp_detection = self.current_time.clone()
 
         # Note: DelaySystem updates are handled in update_agent_gt_states
         # The bboxes are stored in AgentStates and processed through the pipeline
@@ -347,10 +377,15 @@ class MultiAgentDelaySystem:
         """
         Reset delay system for specified environments.
 
-        Resets BOTH pipelines.
+        Resets BOTH pipelines and all timestamps.
         """
         self._delay_system_clean.reset(env_ids)
         self._delay_system_noisy.reset(env_ids)
+
+        # Reset timestamps in AgentStates to match reset t_sim
+        # This prevents negative age calculations after partial resets
+        for agent_id in self._possible_agents:
+            self._agent_states[agent_id].data.timestamp_detection[env_ids] = 0.0
 
         # Reset noise RNG
         for agent_id in self._possible_agents:
@@ -588,3 +623,15 @@ class MultiAgentDelaySystem:
         h_noisy = torch.clamp(h_noisy, min=1.0)
 
         return torch.stack([x + x_noise, y + y_noise, w_noisy, h_noisy], dim=-1)
+
+
+class MultiAgentGTStates:
+    """
+    Helper class for accessing ground-truth states with dict-like interface.
+
+    Provides backward-compatible access pattern:
+        gt_states.agents[agent_id].data.<field>
+    """
+
+    def __init__(self, agent_states: Dict[str, AgentStates]):
+        self.agents = agent_states

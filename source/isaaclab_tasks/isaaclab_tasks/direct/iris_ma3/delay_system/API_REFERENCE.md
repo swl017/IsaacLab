@@ -101,7 +101,7 @@ MultiAgentDelaySystem(
 Advance simulation time by `dt`. **Must be called at start of each step.**
 
 ```python
-def update_time(self) -> None
+def update_time(self, dt: float = None) -> None
 ```
 
 ---
@@ -675,7 +675,7 @@ delay_system = MultiAgentDelaySystem(
 )
 
 # Each step:
-delay_system.update_time()
+delay_system.update_time(dt)
 
 # Curriculum progress (0.0 = no noise, 1.0 = full noise)
 delay_system.set_noise_progress_scale(0.5)
