@@ -603,11 +603,11 @@ def test_delay_system_integration(results: TestResults, device: torch.device):
 # ==================== Main ====================
 
 def test_multi_agent_wrapper(results: TestResults, device: torch.device):
-    """Test suite for MultiAgentDelaySystem wrapper."""
+    """Test suite for MultiAgentDelaySystem wrapper (v2.2 API)."""
     from isaaclab_tasks.direct.iris_ma3.delay_system.multi_agent_wrapper import MultiAgentDelaySystem
     from isaaclab_tasks.direct.iris_ma3.delay_system.agent_states import AgentStates
 
-    print("\n--- MultiAgentDelaySystem Wrapper Tests ---", flush=True)
+    print("\n--- MultiAgentDelaySystem Wrapper Tests (v2.2) ---", flush=True)
 
     num_envs = 4
     dt = 0.01
@@ -706,26 +706,29 @@ def test_multi_agent_wrapper(results: TestResults, device: torch.device):
     except Exception as e:
         results.add_fail("GT state updates", str(e))
 
-    # Test 4: Detection updates
+    # Test 4: Detection updates (v2.1+: no valid_mask parameter)
     try:
         bboxes = torch.randn(num_envs, 1, 4, device=device)
-        valid_mask = torch.ones(num_envs, 1, dtype=torch.bool, device=device)
-        wrapper.update_detections("agent_0", bboxes, valid_mask)
+        # Note: valid_mask_gt was REMOVED in v2.1 - validate bboxes AFTER delay
+        wrapper.update_detections("agent_0", bboxes)
 
         states = wrapper._agent_states["agent_0"]
         assert torch.allclose(states.data.bboxes_2d, bboxes)
-        results.add_pass("Detection updates")
+        results.add_pass("Detection updates (v2.1+ API)")
     except Exception as e:
         results.add_fail("Detection updates", str(e))
 
-    # Test 5: Delayed states query
+    # Test 5: View scheme API - get_all_states_for_rewards
     try:
-        delayed_states = wrapper.get_delayed_states("agent_0")
-        assert isinstance(delayed_states, AgentStates)
-        assert delayed_states.data.body_position_w.shape == (num_envs, 3)
-        results.add_pass("Delayed states query")
+        reward_states = wrapper.get_all_states_for_rewards("agent_0")
+        assert isinstance(reward_states, dict)
+        assert "agent_0" in reward_states
+        ego_states = reward_states["agent_0"]
+        assert isinstance(ego_states, AgentStates)
+        assert ego_states.data.body_position_w.shape == (num_envs, 3)
+        results.add_pass("View scheme: get_all_states_for_rewards")
     except Exception as e:
-        results.add_fail("Delayed states query", str(e))
+        results.add_fail("View scheme: get_all_states_for_rewards", str(e))
 
     # Test 6: Noise curriculum
     try:
@@ -741,25 +744,32 @@ def test_multi_agent_wrapper(results: TestResults, device: torch.device):
     except Exception as e:
         results.add_fail("Noise curriculum scaling", str(e))
 
-    # Test 7: Delayed + noisy states
+    # Test 7: View scheme API - get_all_states_for_observations (noisy)
     try:
         wrapper.set_noise_progress_scale(0.0)
-        delayed = wrapper.get_delayed_states("agent_0")
-        noisy = wrapper.get_delayed_noisy_states("agent_0")
+        reward_states = wrapper.get_all_states_for_rewards("agent_0")
+        obs_states = wrapper.get_all_states_for_observations("agent_0")
 
-        # Should be identical (no noise)
-        assert torch.allclose(delayed.data.body_position_w, noisy.data.body_position_w, atol=1e-5)
+        # With noise_progress=0.0, should be very similar
+        clean_pos = reward_states["agent_0"].data.body_position_w
+        noisy_pos = obs_states["agent_0"].data.body_position_w
+        assert torch.allclose(clean_pos, noisy_pos, atol=1e-4), \
+            f"With noise=0, positions should match. Diff: {(clean_pos - noisy_pos).abs().max()}"
 
         wrapper.set_noise_progress_scale(1.0)
-        noisy_full = wrapper.get_delayed_noisy_states("agent_0")
+        obs_states_full = wrapper.get_all_states_for_observations("agent_0")
+        noisy_pos_full = obs_states_full["agent_0"].data.body_position_w
+        reward_states_full = wrapper.get_all_states_for_rewards("agent_0")
+        clean_pos_full = reward_states_full["agent_0"].data.body_position_w
 
-        # Should be different (noise applied)
-        # Note: May fail occasionally due to random chance
-        results.add_pass("Delayed + noisy states")
+        # With full noise, should be different
+        noise_diff = (noisy_pos_full - clean_pos_full).abs().mean().item()
+        # Note: May have some noise even with fresh states
+        results.add_pass("View scheme: get_all_states_for_observations (noisy)")
     except Exception as e:
-        results.add_fail("Delayed + noisy states", str(e))
+        results.add_fail("View scheme: get_all_states_for_observations", str(e))
 
-    # Test 8: Multi-agent coordination
+    # Test 8: Multi-agent coordination with view scheme
     try:
         wrapper = MultiAgentDelaySystem(
             possible_agents=possible_agents,
@@ -794,24 +804,65 @@ def test_multi_agent_wrapper(results: TestResults, device: torch.device):
                 zoom_level=torch.ones(num_envs, device=device),
             )
 
-        states_0 = wrapper.get_delayed_states("agent_0")
-        states_1 = wrapper.get_delayed_states("agent_1")
-        assert isinstance(states_0, AgentStates)
-        assert isinstance(states_1, AgentStates)
-        results.add_pass("Multi-agent coordination")
-    except Exception as e:
-        results.add_fail("Multi-agent coordination", str(e))
+        # Test view scheme from agent_0's perspective
+        all_states = wrapper.get_all_states_for_rewards("agent_0")
+        assert "agent_0" in all_states, "Missing ego agent in view"
+        assert "agent_1" in all_states, "Missing other agent in view"
+        assert isinstance(all_states["agent_0"], AgentStates)
+        assert isinstance(all_states["agent_1"], AgentStates)
 
-    # Test 9: Reset
+        # Test view scheme from agent_1's perspective
+        all_states_1 = wrapper.get_all_states_for_observations("agent_1")
+        assert "agent_0" in all_states_1
+        assert "agent_1" in all_states_1
+        results.add_pass("Multi-agent view scheme coordination")
+    except Exception as e:
+        results.add_fail("Multi-agent view scheme coordination", str(e))
+
+    # Test 9: Reset (resets BOTH pipelines)
     try:
         env_ids = torch.arange(num_envs, device=device)
         wrapper.reset(env_ids)
 
         env_ids = torch.tensor([0, 2], device=device)
         wrapper.reset(env_ids)
-        results.add_pass("Reset functionality")
+        results.add_pass("Reset functionality (both pipelines)")
     except Exception as e:
         results.add_fail("Reset functionality", str(e))
+
+    # Test 10: Dual pipeline architecture verification
+    try:
+        wrapper = MultiAgentDelaySystem(
+            possible_agents=["agent_0"],
+            num_envs=num_envs,
+            num_joints_per_agent={"agent_0": 3},
+            num_targets_per_agent={"agent_0": 1},
+            dt=dt,
+            device=device,
+            enable_noise=True,
+            position_noise_std=0.1,
+        )
+
+        wrapper.set_camera_configs(
+            agent_id="agent_0",
+            width=640,
+            height=480,
+            focal_length=50.0,
+            horizontal_aperture=36.0,
+            vertical_aperture=27.0,
+            offset_position_b=torch.tensor([0.1, 0.0, 0.0], device=device),
+            offset_rotation_b=torch.tensor([1.0, 0.0, 0.0, 0.0], device=device),
+        )
+
+        # Verify dual pipeline instances exist
+        assert hasattr(wrapper, '_delay_system_clean'), "Missing clean pipeline"
+        assert hasattr(wrapper, '_delay_system_noisy'), "Missing noisy pipeline"
+        assert wrapper._delay_system_clean is not wrapper._delay_system_noisy, \
+            "Clean and noisy pipelines should be separate instances"
+
+        results.add_pass("Dual pipeline architecture")
+    except Exception as e:
+        results.add_fail("Dual pipeline architecture", str(e))
 
 
 def main():

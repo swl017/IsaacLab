@@ -1,6 +1,8 @@
-# Delay System for Multi-Agent RL
+# Delay System for Multi-Agent RL (v2.2)
 
 A GPU-accelerated delay system for realistic sim-to-real transfer in multi-agent reinforcement learning environments.
+
+**Current Version: v2.2** - Dual pipeline architecture with noise-before-delay processing.
 
 ## Overview
 
@@ -12,13 +14,15 @@ This delay system simulates realistic time-shifting phenomena that occur in real
 
 ### Key Features
 
+✅ **Dual pipeline architecture** - Clean (rewards) + Noisy (observations) separation
+✅ **Noise-before-delay** - Physically correct noise injection before delays
 ✅ **Stochastic sample-and-hold with dropout** - Core algorithm for all delays
 ✅ **Per-field configuration** - Independent delays for each state field
 ✅ **Multi-agent perspectives** - Ego (fast) vs other agents (slow) communication
 ✅ **Timestamp tracking** - Comprehensive timing metadata for staleness calculation
 ✅ **Sampler chaining** - Compose delays (detector → communication)
 ✅ **GPU-accelerated** - Batched operations across environments
-✅ **Modular design** - Easy to extend with custom samplers
+✅ **Curriculum learning** - Adjustable noise and delay parameters during training
 
 ## Quick Start
 
@@ -26,45 +30,53 @@ This delay system simulates realistic time-shifting phenomena that occur in real
 
 The delay system is part of the `iris_ma3` task. No additional installation needed.
 
-### Basic Usage
+### Basic Usage (v2.2 API)
 
 ```python
 import torch
-from delay_system import DelaySystem, DelaySystemCfg
+from isaaclab_tasks.direct.iris_ma3.delay_system import MultiAgentDelaySystem
 
-# 1. Configure
-cfg = DelaySystemCfg()
-cfg.detection_fps_mean = 20.0  # 20 Hz detector
-cfg.detection_latency_mean = 0.3  # 300ms latency
-cfg.inter_agent_comm_latency_mean = 0.1  # 100ms inter-agent comm
-
-# 2. Initialize
-delay_system = DelaySystem(
-    cfg=cfg,
-    agent_ids=["agent_0", "agent_1", "agent_2"],
+# 1. Initialize with dual pipeline (clean + noisy)
+delay_system = MultiAgentDelaySystem(
+    possible_agents=["agent_0", "agent_1", "agent_2"],
     num_envs=512,
-    num_joints=2,
-    num_targets=5,
+    num_joints_per_agent={aid: 2 for aid in ["agent_0", "agent_1", "agent_2"]},
+    num_targets_per_agent={aid: 5 for aid in ["agent_0", "agent_1", "agent_2"]},
+    dt=0.01,
     device=torch.device("cuda:0"),
+    enable_noise=True,
+    position_noise_std=0.05,
+    bbox_noise_std=5.0,
 )
 
-# 3. Simulation loop
+# 2. Simulation loop
 for step in range(num_steps):
+    delay_system.update_time()
+
     # Update ground truth states for each agent
     for agent_id in agent_ids:
-        gt_states = get_ground_truth_states(agent_id)
-        delay_system.update_agent_gt_states(agent_id, gt_states)
+        delay_system.update_gt_states(agent_id, ...)
+        delay_system.update_detections(agent_id, bboxes_2d_gt=bboxes)
 
-    # Query delayed states from agent_0's perspective
-    agent_0_view = delay_system.get_all_agent_states_for_ego("agent_0")
+    # For REWARDS: Get clean delayed states (no noise)
+    reward_states = delay_system.get_all_states_for_rewards("agent_0")
+    ego_clean = reward_states["agent_0"]       # fast ego processing
+    other_clean = reward_states["agent_1"]     # slow inter-agent comm
 
-    # agent_0_view["agent_0"] → fast ego processing
-    # agent_0_view["agent_1"] → slow inter-agent comm
-    # agent_0_view["agent_2"] → slow inter-agent comm
+    # For OBSERVATIONS: Get noisy delayed states
+    obs_states = delay_system.get_all_states_for_observations("agent_0")
+    ego_noisy = obs_states["agent_0"]
+    other_noisy = obs_states["agent_1"]
 
-    # Advance time
-    delay_system.step()
+    # Validate bboxes AFTER delay processing
+    bbox_valid = bbox_raycaster.validate_bbox(ego_noisy.data.bboxes_2d)
 ```
+
+**⚠️ REMOVED FROM CODE**: The following v2.1 methods no longer exist:
+- ~~`get_delayed_states()`~~ → use `get_all_states_for_rewards()`
+- ~~`get_delayed_noisy_states()`~~ → use `get_all_states_for_observations()`
+- ~~`receive_other_agent_states()`~~ → use view scheme API
+- ~~`valid_mask_gt` parameter~~ → validate bboxes after delay
 
 See [usage_example.py](usage_example.py) for a complete example.
 

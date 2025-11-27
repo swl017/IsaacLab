@@ -219,7 +219,12 @@ class DelaySystem:
         # Update delayed states for all perspectives
         self._update_delayed_states_for_agent(agent_id)
 
-    def process_noisy_gt_states(self, agent_id: AgentID, noisy_gt_states: AgentStates) -> AgentStates:
+    def process_noisy_gt_states(
+        self,
+        agent_id: AgentID,
+        noisy_gt_states: AgentStates,
+        is_ego: bool = True,
+    ) -> AgentStates:
         """
         Process noisy ground-truth states through delay pipeline WITHOUT storing.
 
@@ -229,28 +234,34 @@ class DelaySystem:
         This method applies the same processing as update_agent_gt_states but:
         1. Does NOT store the GT states
         2. Does NOT update delayed_states for all perspectives
-        3. ONLY returns ego-perspective delayed states for immediate use
+        3. Returns delayed states with specified perspective (ego or inter-agent)
 
         Args:
             agent_id: Agent identifier
             noisy_gt_states: Ground truth AgentStates with noise already injected to raw sensors
+            is_ego: If True, apply ego perspective (fast local comm).
+                   If False, apply inter-agent perspective (slow network comm).
 
         Returns:
-            AgentStates with delays applied and derived fields recomputed (ego perspective only)
+            AgentStates with delays applied and derived fields recomputed
 
         Example usage (in wrapper):
+            # For ego noisy states:
             gt_states = self._agent_states[agent_id]
             noisy_gt = copy.deepcopy(gt_states)
             self._inject_gaussian_noise_to_raw_sensors(noisy_gt, agent_id)
-            delayed_noisy = delay_system.process_noisy_gt_states(agent_id, noisy_gt)
+            delayed_noisy = delay_system.process_noisy_gt_states(agent_id, noisy_gt, is_ego=True)
+
+            # For other agent noisy states (with inter-agent comm delay):
+            delayed_noisy_other = delay_system.process_noisy_gt_states(agent_id, noisy_gt, is_ego=False)
         """
         # Apply base processing (delays + derived field computation)
         base_processed = self._apply_base_processing(noisy_gt_states)
 
-        # Apply communication for ego perspective (fast local)
+        # Apply communication based on perspective
         delayed_noisy = self._apply_communication(
             base_processed,
-            is_ego=True,
+            is_ego=is_ego,
         )
 
         return delayed_noisy

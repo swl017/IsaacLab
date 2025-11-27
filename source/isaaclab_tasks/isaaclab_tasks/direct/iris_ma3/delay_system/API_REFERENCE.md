@@ -1,4 +1,4 @@
-# Delay System API Reference (v2.1)
+# Delay System API Reference (v2.2)
 
 ## Quick Links
 
@@ -10,9 +10,50 @@
 
 ---
 
+## Architecture Overview
+
+The v2.2 delay system uses a **dual pipeline architecture**:
+
+```
+                                    ┌─────────────────────┐
+                                    │    Raw GT States    │
+                                    │  (from simulation)  │
+                                    └──────────┬──────────┘
+                                               │
+                       ┌───────────────────────┴───────────────────────┐
+                       │                                               │
+                       ▼                                               ▼
+            ┌──────────────────┐                            ┌──────────────────┐
+            │  Clean Pipeline  │                            │  Noisy Pipeline  │
+            │  (no noise)      │                            │  (noise → delay) │
+            └────────┬─────────┘                            └────────┬─────────┘
+                     │                                               │
+                     │                                    ┌──────────┴──────────┐
+                     │                                    │   Inject Noise      │
+                     │                                    │   (before delay)    │
+                     │                                    └──────────┬──────────┘
+                     │                                               │
+                     ▼                                               ▼
+            ┌──────────────────┐                            ┌──────────────────┐
+            │  DelaySystem #1  │                            │  DelaySystem #2  │
+            │  (clean)         │                            │  (noisy)         │
+            └────────┬─────────┘                            └────────┬─────────┘
+                     │                                               │
+                     ▼                                               ▼
+            ┌──────────────────┐                            ┌──────────────────┐
+            │  REWARDS         │                            │  OBSERVATIONS    │
+            │  get_all_states  │                            │  get_all_states  │
+            │  _for_rewards()  │                            │  _for_observations()|
+            └──────────────────┘                            └──────────────────┘
+```
+
+**Key Principle:** Noise is injected to raw sensor data BEFORE delays are applied.
+
+---
+
 ## MultiAgentDelaySystem
 
-Multi-agent delay system wrapper with API compatibility for easy integration.
+Multi-agent delay system wrapper with dual pipeline architecture.
 
 ### Constructor
 
@@ -123,7 +164,7 @@ delay_system.set_noise_progress_scale(progress)
 
 #### update_gt_states()
 
-Update ground-truth states for an agent.
+Update ground-truth states for an agent. States are fed to BOTH pipelines.
 
 ```python
 def update_gt_states(
@@ -154,6 +195,10 @@ def update_gt_states(
 | `joint_positions_b` | `[N, J]` | Gimbal joint angles |
 | `zoom_level` | `[N]` | Optical zoom level |
 
+**Note:** Internally, this method:
+1. Feeds clean GT to the clean pipeline
+2. Injects noise to GT copy, then feeds to noisy pipeline
+
 ---
 
 #### update_detections()
@@ -179,81 +224,79 @@ def update_detections(
 
 ---
 
-#### get_delayed_states()
+#### get_all_states_for_rewards() (RECOMMENDED)
 
-Get delayed states **WITHOUT** noise (for rewards).
-
-```python
-def get_delayed_states(self, agent_id: str) -> AgentStates
-```
-
-**Returns:** `AgentStates` with delays applied but no noise.
-
-**Use for:** Reward computation, triangulation covariance.
-
----
-
-#### get_delayed_noisy_states()
-
-Get delayed states **WITH** noise (for observations).
+Get ALL agent states for REWARD computation (clean, no noise).
 
 ```python
-def get_delayed_noisy_states(self, agent_id: str) -> AgentStates
+def get_all_states_for_rewards(self, ego_agent_id: str) -> Dict[str, AgentStates]
 ```
 
-**Returns:** `AgentStates` with delays and noise applied.
+**Parameters:**
 
-**Use for:** Policy observations.
-
----
-
-#### get_all_agent_states_for_ego() (RECOMMENDED)
-
-Get all agent states from one agent's perspective.
-
-```python
-# Access via internal DelaySystem
-all_states = delay_system._delay_system.get_all_agent_states_for_ego(ego_agent_id)
-```
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `ego_agent_id` | `str` | The ego agent's perspective |
 
 **Returns:** `Dict[agent_id -> AgentStates]`
 
 - Ego agent: Fast local processing delays
 - Other agents: Slow inter-agent communication delays
 
+**Use for:** Reward computation, triangulation covariance, ground truth comparisons.
+
 **Example:**
 ```python
-# Get all states from agent_0's perspective
-all_states = delay_system._delay_system.get_all_agent_states_for_ego("agent_0")
+# Get clean states from agent_0's perspective
+reward_states = delay_system.get_all_states_for_rewards("agent_0")
 
-# Ego states (fast)
-ego_states = all_states["agent_0"]
+# Ego states (fast local processing)
+ego_states = reward_states["agent_0"]
+ego_pos = ego_states.data.body_position_w  # [N, 3]
 
-# Other agent states (slow)
-other_states = all_states["agent_1"]
-
-# Direct AgentStates access (clean!)
-other_pos = other_states.data.body_position_w      # [N, 3]
-other_ori = other_states.data.body_orientation_w   # [N, 4]
-other_bboxes = other_states.data.bboxes_2d         # [N, T, 4]
+# Other agent states (slow inter-agent communication)
+other_states = reward_states["agent_1"]
+other_pos = other_states.data.body_position_w  # [N, 3]
 ```
 
 ---
 
-#### receive_other_agent_states() (LEGACY)
+#### get_all_states_for_observations() (RECOMMENDED)
 
-> **Deprecated:** Prefer `get_all_agent_states_for_ego()` for cleaner code.
-
-Legacy wrapper that returns states in tuple format for backwards compatibility.
+Get ALL agent states for OBSERVATION computation (noisy).
 
 ```python
-def receive_other_agent_states(
-    self,
-    receiver_id: str,
-) -> Dict[str, Dict[str, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]]
+def get_all_states_for_observations(self, ego_agent_id: str) -> Dict[str, AgentStates]
 ```
 
-**Returns:** `Dict[sender_id -> Dict[field_name -> (data, valid_mask, data_age)]]`
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `ego_agent_id` | `str` | The ego agent's perspective |
+
+**Returns:** `Dict[agent_id -> AgentStates]`
+
+- Ego agent: Fast local processing delays + noise
+- Other agents: Slow inter-agent communication delays + noise
+
+**Use for:** Policy observations.
+
+**Example:**
+```python
+# Get noisy states from agent_0's perspective
+obs_states = delay_system.get_all_states_for_observations("agent_0")
+
+# Ego states (noisy)
+ego_obs = obs_states["agent_0"]
+ego_pos = ego_obs.data.body_position_w  # [N, 3] with noise
+ego_bboxes = ego_obs.data.bboxes_2d     # [N, T, 4] with noise
+
+# Other agent states (noisy)
+other_obs = obs_states["agent_1"]
+other_pos = other_obs.data.body_position_w
+other_bboxes = other_obs.data.bboxes_2d
+```
 
 ---
 
@@ -271,11 +314,13 @@ def reset(self, env_ids: torch.Tensor) -> None
 |-----------|------|-------------|
 | `env_ids` | `Tensor[E]` | Environment indices to reset |
 
+**Note:** Resets BOTH clean and noisy pipelines.
+
 ---
 
 ## DelaySystem
 
-Core delay system (accessed via `delay_system._delay_system`).
+Core delay system (accessed via `delay_system._delay_system_clean` or `delay_system._delay_system_noisy`).
 
 ### Curriculum Learning Methods
 
@@ -286,9 +331,9 @@ Update first-order lag filter time constants.
 ```python
 def set_time_constants(
     self,
-    motion: Optional[float] = None,
-    orientation: Optional[float] = None,
-    joints: Optional[float] = None,
+    motion_tc: Optional[float] = None,
+    orientation_tc: Optional[float] = None,
+    joint_tc: Optional[float] = None,
 ) -> None
 ```
 
@@ -296,9 +341,9 @@ def set_time_constants(
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `motion` | `float` | Time constant for motion fields (seconds) |
-| `orientation` | `float` | Time constant for orientation (seconds) |
-| `joints` | `float` | Time constant for joint fields (seconds) |
+| `motion_tc` | `float` | Time constant for motion fields (seconds) |
+| `orientation_tc` | `float` | Time constant for orientation (seconds) |
+| `joint_tc` | `float` | Time constant for joint fields (seconds) |
 
 ---
 
@@ -311,7 +356,7 @@ def set_detection_latency_params(
     self,
     fps_mean: Optional[float] = None,
     latency_mean: Optional[float] = None,
-    dropout_prob: Optional[float] = None,
+    dropout_rate: Optional[float] = None,
 ) -> None
 ```
 
@@ -321,7 +366,7 @@ def set_detection_latency_params(
 |-----------|------|-------------|
 | `fps_mean` | `float` | Mean detection rate (Hz) |
 | `latency_mean` | `float` | Mean processing latency (seconds) |
-| `dropout_prob` | `float` | Frame dropout probability (0-1) |
+| `dropout_rate` | `float` | Frame dropout probability (0-1) |
 
 ---
 
@@ -606,7 +651,7 @@ class DistributionConfig:
 
 ---
 
-## Example: Complete Integration
+## Example: Complete Integration (v2.2)
 
 ```python
 import torch
@@ -615,7 +660,7 @@ from isaaclab_tasks.direct.iris_ma3.delay_system import (
     AgentStates,
 )
 
-# Initialize
+# Initialize with noise enabled
 delay_system = MultiAgentDelaySystem(
     possible_agents=["agent_0", "agent_1", "agent_2"],
     num_envs=512,
@@ -626,15 +671,16 @@ delay_system = MultiAgentDelaySystem(
     enable_noise=True,
     position_noise_std=0.05,
     orientation_noise_std=0.02,
+    bbox_noise_std=5.0,
 )
 
 # Each step:
 delay_system.update_time()
 
-# Curriculum progress
+# Curriculum progress (0.0 = no noise, 1.0 = full noise)
 delay_system.set_noise_progress_scale(0.5)
 
-# Update states
+# Update states for all agents
 for agent_id in ["agent_0", "agent_1", "agent_2"]:
     delay_system.update_gt_states(
         agent_id=agent_id,
@@ -652,26 +698,48 @@ for agent_id in ["agent_0", "agent_1", "agent_2"]:
         bboxes_2d_gt=bboxes,
     )
 
-# Get observations (noisy)
-obs_states = delay_system.get_delayed_noisy_states("agent_0")
-obs_bboxes = obs_states.data.bboxes_2d
+# ============================================================
+# View Scheme API (v2.2)
+# ============================================================
 
-# Validate bboxes AFTER delay
-bbox_valid = bbox_raycaster.validate_bbox(obs_bboxes)  # [N, T]
+# For REWARDS: Use clean states (no noise)
+reward_states = delay_system.get_all_states_for_rewards("agent_0")
+ego_clean = reward_states["agent_0"]
+other_clean = reward_states["agent_1"]
 
-# Get reward states (clean)
-reward_states = delay_system.get_delayed_states("agent_0")
+# For OBSERVATIONS: Use noisy states
+obs_states = delay_system.get_all_states_for_observations("agent_0")
+ego_noisy = obs_states["agent_0"]
+other_noisy = obs_states["agent_1"]
 
-# Get other agent states
-received = delay_system.receive_other_agent_states("agent_0")
-other_pos = received["agent_1"]["position"][0]  # [N, 3]
+# Access data directly
+ego_pos_clean = ego_clean.data.body_position_w      # [N, 3] clean
+ego_pos_noisy = ego_noisy.data.body_position_w      # [N, 3] noisy
 
-# Curriculum: adjust difficulty
-delay_system._delay_system.set_time_constants(motion=0.05)
-delay_system._delay_system.set_detection_latency_params(
+other_bboxes_clean = other_clean.data.bboxes_2d     # [N, T, 4] clean
+other_bboxes_noisy = other_noisy.data.bboxes_2d     # [N, T, 4] noisy
+
+# Validate bboxes AFTER delay (v2.1+)
+bbox_valid = bbox_raycaster.validate_bbox(ego_noisy.data.bboxes_2d)
+
+# ============================================================
+# Curriculum Learning
+# ============================================================
+
+# Access internal delay systems for curriculum adjustments
+# Note: Adjustments apply to BOTH clean and noisy pipelines
+delay_system._delay_system_clean.set_time_constants(motion_tc=0.05)
+delay_system._delay_system_noisy.set_time_constants(motion_tc=0.05)
+
+delay_system._delay_system_clean.set_detection_latency_params(
     fps_mean=25.0,
     latency_mean=0.2,
-    dropout_prob=0.05,
+    dropout_rate=0.05,
+)
+delay_system._delay_system_noisy.set_detection_latency_params(
+    fps_mean=25.0,
+    latency_mean=0.2,
+    dropout_rate=0.05,
 )
 
 # Reset on episode end
@@ -680,9 +748,69 @@ delay_system.reset(env_ids_to_reset)
 
 ---
 
+## Migration from v2.1 to v2.2
+
+### API Changes
+
+**⚠️ REMOVED FROM CODE** - The following methods no longer exist in the codebase:
+
+| v2.1 Method (REMOVED) | v2.2 Replacement |
+|----------------------|------------------|
+| ~~`get_delayed_states(agent_id)`~~ | `get_all_states_for_rewards(agent_id)[agent_id]` |
+| ~~`get_delayed_noisy_states(agent_id)`~~ | `get_all_states_for_observations(agent_id)[agent_id]` |
+| ~~`receive_other_agent_states(ego_id)`~~ | `get_all_states_for_rewards(ego_id)` or `get_all_states_for_observations(ego_id)` |
+
+### Migration Example
+
+**Before (v2.1):**
+```python
+# Ego states
+ego_clean = delay_system.get_delayed_states("agent_0")
+ego_noisy = delay_system.get_delayed_noisy_states("agent_0")
+
+# Other agent states
+received = delay_system.receive_other_agent_states("agent_0")
+other_pos = received["agent_1"]["position"][0]  # [N, 3]
+```
+
+**After (v2.2):**
+```python
+# All states in one call
+reward_states = delay_system.get_all_states_for_rewards("agent_0")
+obs_states = delay_system.get_all_states_for_observations("agent_0")
+
+# Ego states
+ego_clean = reward_states["agent_0"]
+ego_noisy = obs_states["agent_0"]
+
+# Other agent states
+other_clean = reward_states["agent_1"]
+other_noisy = obs_states["agent_1"]
+other_pos = other_noisy.data.body_position_w  # [N, 3]
+```
+
+### Internal Changes
+
+- Two separate `DelaySystem` instances (`_delay_system_clean`, `_delay_system_noisy`)
+- Noise injected BEFORE delays (physically correct)
+- Removed legacy wrapper methods
+
+---
+
 ## Version History
 
-### v2.1 (Current)
+### v2.2 (Current)
+
+- **ADDED** Dual pipeline architecture (clean + noisy)
+- **ADDED** `get_all_states_for_rewards()` - View scheme for rewards
+- **ADDED** `get_all_states_for_observations()` - View scheme for observations
+- **⚠️ REMOVED FROM CODE** `get_delayed_states()` - use `get_all_states_for_rewards()`
+- **⚠️ REMOVED FROM CODE** `get_delayed_noisy_states()` - use `get_all_states_for_observations()`
+- **⚠️ REMOVED FROM CODE** `receive_other_agent_states()` - use view scheme API
+- **⚠️ REMOVED FROM CODE** `valid_mask_gt` parameter in `update_detections()`
+- **CHANGED** Noise injection happens BEFORE delay processing
+
+### v2.1
 
 - **REMOVED** `bboxes_2d_valid_mask` from delay pipeline
 - **SIMPLIFIED** `_agent_states_to_dict` - all fields always valid

@@ -1,10 +1,52 @@
-# Delay System Design Pattern (v2.1)
+# Delay System Design Pattern (v2.2)
 
 ## Overview
 
 This document describes the design pattern for simulating realistic time-shifting phenomena in multi-agent RL environments for sim-to-real transfer. The core pattern is a **stochastic sample-and-hold mechanism with dropout** that models latency, sampling rate discrepancy, and packet loss.
 
-## v2.1 Architecture Changes
+## v2.2 Architecture: Dual Pipeline with Noise-Before-Delay
+
+### Key Principle: Noise MUST Be Applied BEFORE Delay
+
+The delay system implements a **dual pipeline architecture** where:
+1. **Noise is injected to raw sensor data FIRST**
+2. **Then delays are applied to the noisy data**
+
+This ordering is physically correct because:
+- Noise represents sensor measurement errors at the point of sensing
+- Delays represent processing/communication latency AFTER sensing
+- Derived fields (camera pose, rays) computed from noisy delayed sensors preserve geometric consistency
+
+### Dual Pipeline Architecture
+
+The wrapper maintains **TWO separate DelaySystem instances**:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    MultiAgentDelaySystem                                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Ground Truth States                                                     │
+│        │                                                                 │
+│        ├──────────────────────────────┬──────────────────────────────┐  │
+│        ▼                              ▼                               │  │
+│  ┌─────────────────────┐     ┌───────────────────────────────────┐   │  │
+│  │  Clean Pipeline     │     │  Noisy Pipeline                   │   │  │
+│  │  (for REWARDS)      │     │  (for OBSERVATIONS)               │   │  │
+│  ├─────────────────────┤     ├───────────────────────────────────┤   │  │
+│  │                     │     │  1. Inject noise to RAW sensors   │   │  │
+│  │  GT → Delay System  │     │  2. GT+Noise → Delay System       │   │  │
+│  │                     │     │                                   │   │  │
+│  └─────────────────────┘     └───────────────────────────────────┘   │  │
+│        │                              │                               │  │
+│        ▼                              ▼                               │  │
+│  Clean Delayed States          Noisy Delayed States                   │  │
+│  (use in _get_rewards)         (use in _get_observations)             │  │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### v2.1 Breaking Changes
 
 **BREAKING CHANGE**: `bboxes_2d_valid_mask` has been **REMOVED** from the delay pipeline.
 
@@ -15,13 +57,15 @@ This document describes the design pattern for simulating realistic time-shiftin
 
 **New Pattern**:
 ```python
-# Get delayed states (with all delays applied)
-delayed_states = delay_system.get_delayed_noisy_states(agent_id)
+# Get all states from agent's perspective using 'view' scheme
+all_states = delay_system.get_all_states_for_observations("agent_0")
+
+# Access noisy delayed states
+ego_states = all_states["agent_0"]
+other_states = all_states["agent_1"]
 
 # Validate bboxes AFTER delay processing
-bbox_valid = bbox_raycaster.validate_bbox(delayed_states.data.bboxes_2d)  # [N, T]
-
-# Use bbox_valid in your observation/reward logic
+bbox_valid = bbox_raycaster.validate_bbox(ego_states.data.bboxes_2d)  # [N, T]
 ```
 
 ## Core Algorithm
@@ -146,7 +190,7 @@ Agent 0's perspective:
 
 ## Usage Pattern
 
-### Basic Usage
+### Basic Usage (v2.2 API)
 
 ```python
 from isaaclab_tasks.direct.iris_ma3.delay_system import (
@@ -190,43 +234,61 @@ for agent_id in agent_ids:
         bboxes_2d_gt=detector.bboxes,  # [N, T, 4]
     )
 
-# 3. Get delayed+noisy states for observations
+# 3. Get delayed states for REWARDS (clean, no noise)
 for agent_id in agent_ids:
-    obs_states = delay_system.get_delayed_noisy_states(agent_id)
+    all_reward_states = delay_system.get_all_states_for_rewards(agent_id)
 
-    # Access delayed data
-    position = obs_states.data.body_position_w      # [N, 3]
-    bboxes = obs_states.data.bboxes_2d              # [N, T, 4]
-    ray_dirs = obs_states.data.camera_ray_directions_w  # [N, T, 3]
+    # Ego states
+    ego_states = all_reward_states[agent_id]
+
+    # Other agent states (with inter-agent comm delay)
+    for other_id, other_states in all_reward_states.items():
+        if other_id != agent_id:
+            other_pos = other_states.data.body_position_w  # [N, 3]
+
+# 4. Get delayed states for OBSERVATIONS (noisy)
+for agent_id in agent_ids:
+    all_obs_states = delay_system.get_all_states_for_observations(agent_id)
+
+    # Ego states (noisy)
+    ego_states = all_obs_states[agent_id]
+    position = ego_states.data.body_position_w      # [N, 3]
+    bboxes = ego_states.data.bboxes_2d              # [N, T, 4]
+    ray_dirs = ego_states.data.camera_ray_directions_w  # [N, T, 3]
 
     # Validate bboxes AFTER delay processing
     bbox_valid = bbox_raycaster.validate_bbox(bboxes)  # [N, T]
 
-# 4. Get clean delayed states for rewards
-for agent_id in agent_ids:
-    reward_states = delay_system.get_delayed_states(agent_id)
-    # Use for reward computation (no noise, just delays)
+    # Other agent states (noisy, with inter-agent comm delay)
+    for other_id, other_states in all_obs_states.items():
+        if other_id != agent_id:
+            other_pos = other_states.data.body_position_w  # [N, 3]
 ```
 
-### Multi-Agent State Sharing (Viewing Pattern)
+### View Scheme (Recommended)
+
+The **view scheme** provides a unified way to access all agent states from one agent's perspective:
 
 ```python
-# Get ALL agent states from agent_0's perspective (RECOMMENDED)
-all_states = delay_system._delay_system.get_all_agent_states_for_ego("agent_0")
+# For REWARDS: Get ALL agent states (clean, no noise)
+all_reward_states = delay_system.get_all_states_for_rewards("agent_0")
 
-# Ego states (fast local processing)
-ego_states = all_states["agent_0"]
+# For OBSERVATIONS: Get ALL agent states (noisy)
+all_obs_states = delay_system.get_all_states_for_observations("agent_0")
 
-# Other agent states (slow inter-agent communication)
-other_states = all_states["agent_1"]
+# Both return: Dict[agent_id -> AgentStates]
+# - Ego agent: Fast local processing delays
+# - Other agents: Slow inter-agent communication delays
+
+# Access states directly
+ego_states = all_obs_states["agent_0"]
+other_states = all_obs_states["agent_1"]
 
 # Direct access to AgentStates fields
 other_pos = other_states.data.body_position_w      # [N, 3]
 other_ori = other_states.data.body_orientation_w   # [N, 4]
 other_bboxes = other_states.data.bboxes_2d         # [N, T, 4]
 ```
-
-**Note:** `receive_other_agent_states()` is a legacy wrapper that returns `Dict[field -> (data, mask, age)]` tuples. Prefer the viewing pattern above for cleaner code.
 
 ### Curriculum Learning
 
@@ -281,8 +343,9 @@ delay_system._delay_system.set_detection_latency_params(
 **ALWAYS** validate bboxes after delay processing:
 
 ```python
-delayed_states = delay_system.get_delayed_noisy_states(agent_id)
-bboxes = delayed_states.data.bboxes_2d
+all_obs_states = delay_system.get_all_states_for_observations(agent_id)
+ego_states = all_obs_states[agent_id]
+bboxes = ego_states.data.bboxes_2d
 
 # Validate using your bbox_raycaster
 bbox_valid = bbox_raycaster.validate_bbox(bboxes)  # [N, T]
@@ -290,7 +353,7 @@ bbox_valid = bbox_raycaster.validate_bbox(bboxes)  # [N, T]
 # Filter invalid bboxes
 valid_bboxes = bboxes[bbox_valid]
 # Or mask for computations
-ray_dirs = delayed_states.data.camera_ray_directions_w
+ray_dirs = ego_states.data.camera_ray_directions_w
 ray_dirs_masked = ray_dirs * bbox_valid.unsqueeze(-1)
 ```
 
@@ -298,10 +361,13 @@ ray_dirs_masked = ray_dirs * bbox_valid.unsqueeze(-1)
 
 ```python
 # For REWARDS: Use clean delayed states (no noise)
-reward_states = delay_system.get_delayed_states(agent_id)
+all_reward_states = delay_system.get_all_states_for_rewards(agent_id)
 
 # For OBSERVATIONS: Use noisy delayed states
-obs_states = delay_system.get_delayed_noisy_states(agent_id)
+all_obs_states = delay_system.get_all_states_for_observations(agent_id)
+
+# Both methods return Dict[agent_id -> AgentStates] with proper
+# ego vs inter-agent communication delays applied.
 ```
 
 ### 3. Timestamp Usage
@@ -359,9 +425,39 @@ delay_system/
 7. **Type-aware**: Special handling for quaternions
 8. **User validation**: Bbox validity computed AFTER delay, not propagated through
 
-## Migration from v2.0
+## Migration from v2.0/v2.1
 
-If upgrading from v2.0, remove `bboxes_2d_valid_mask` from your code:
+### API Changes in v2.2
+
+**⚠️ REMOVED FROM CODE** - The following methods no longer exist in the codebase:
+- ~~`get_delayed_states()`~~ → use `get_all_states_for_rewards()`
+- ~~`get_delayed_noisy_states()`~~ → use `get_all_states_for_observations()`
+- ~~`receive_other_agent_states()`~~ → use `get_all_states_for_rewards()`
+- ~~`receive_other_agent_states_noisy()`~~ → use `get_all_states_for_observations()`
+
+```python
+# OLD (v2.1):
+ego_reward = delay_system.get_delayed_states(agent_id)
+ego_obs = delay_system.get_delayed_noisy_states(agent_id)
+other_reward = delay_system.receive_other_agent_states(agent_id)
+other_obs = delay_system.receive_other_agent_states_noisy(agent_id)
+
+# NEW (v2.2) - View scheme:
+all_reward_states = delay_system.get_all_states_for_rewards(agent_id)
+all_obs_states = delay_system.get_all_states_for_observations(agent_id)
+
+# Access ego and other agents from the returned dict
+ego_reward = all_reward_states[agent_id]
+ego_obs = all_obs_states[agent_id]
+for other_id in agent_ids:
+    if other_id != agent_id:
+        other_reward = all_reward_states[other_id]
+        other_obs = all_obs_states[other_id]
+```
+
+### From v2.0
+
+**⚠️ REMOVED FROM CODE** - `valid_mask_gt` parameter and `bboxes_2d_valid_mask` field no longer exist:
 
 ```python
 # OLD (v2.0):
@@ -371,13 +467,13 @@ delay_system.update_detections(
     valid_mask_gt=valid_mask,  # REMOVE THIS
 )
 
-# NEW (v2.1):
+# NEW (v2.2):
 delay_system.update_detections(
     agent_id=agent_id,
     bboxes_2d_gt=bboxes,
 )
 
 # Validate AFTER:
-delayed_states = delay_system.get_delayed_noisy_states(agent_id)
-bbox_valid = bbox_raycaster.validate_bbox(delayed_states.data.bboxes_2d)
+all_obs_states = delay_system.get_all_states_for_observations(agent_id)
+bbox_valid = bbox_raycaster.validate_bbox(all_obs_states[agent_id].data.bboxes_2d)
 ```
