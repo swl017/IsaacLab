@@ -10,12 +10,12 @@ class DetectionIndicator:
         self.draw_interface = omni_debug_draw.acquire_debug_draw_interface()
 
     def get_line_colors(self, detected: torch.Tensor) -> torch.Tensor:
-        line_colors_yellow = torch.tensor([[1.0, 1.0, 0.0, 1.0]], device=self.device).repeat(self.num_envs, 1)
-        line_colors_green = torch.tensor([[0.0, 1.0, 0.0, 1.0]], device=self.device).repeat(self.num_envs, 1)
-        line_colors_red = torch.tensor([[1.0, 0.0, 0.0, 1.0]], device=self.device).repeat(self.num_envs, 1)
+        line_colors_yellow = torch.tensor([[1.0, 1.0, 0.0, 1.0]], device=self.device).repeat(detected.shape[0], 1)
+        line_colors_green = torch.tensor([[0.0, 1.0, 0.0, 1.0]], device=self.device).repeat(detected.shape[0], 1)
+        line_colors_red = torch.tensor([[1.0, 0.0, 0.0, 1.0]], device=self.device).repeat(detected.shape[0], 1)
 
         line_colors = torch.where(
-            detected,
+            detected.unsqueeze(-1),
             line_colors_green,
             line_colors_yellow
         )
@@ -24,7 +24,7 @@ class DetectionIndicator:
 
     def draw_indicator(self, start_points: torch.Tensor, end_points: torch.Tensor, detected: torch.Tensor):
         line_colors = self.get_line_colors(detected)
-        line_thickness = [1.0] * self.num_envs
+        line_thickness = [1.0] * detected.shape[0]
 
         self.draw_interface.draw_lines(
             start_points.tolist(),

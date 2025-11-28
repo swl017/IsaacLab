@@ -388,14 +388,25 @@ class MultiAgentDelaySystem:
         # Communication handled automatically by DelaySystem
         pass
 
-    def reset(self, env_ids: torch.Tensor) -> None:
+    def reset(
+        self,
+        env_ids: torch.Tensor,
+        initial_gt_states: Optional[Dict[AgentID, "AgentStates"]] = None
+    ) -> None:
         """
         Reset delay system for specified environments.
 
         Resets BOTH pipelines and all timestamps.
+
+        Args:
+            env_ids: Indices of environments to reset.
+            initial_gt_states: Optional dict of agent_id -> AgentStates containing initial
+                              GT values to properly initialize FirstOrderLag samplers.
+                              This prevents the initial transient where filtered values
+                              slowly converge from zeros to actual values.
         """
-        self._delay_system_clean.reset(env_ids)
-        self._delay_system_noisy.reset(env_ids)
+        self._delay_system_clean.reset(env_ids, initial_gt_states=initial_gt_states)
+        self._delay_system_noisy.reset(env_ids, initial_gt_states=initial_gt_states)
 
         # Reset timestamps in AgentStates to match reset t_sim
         # This prevents negative age calculations after partial resets
@@ -556,16 +567,15 @@ class MultiAgentDelaySystem:
             ) * self._noise_stds['gimbal'] * scale
 
         # Bounding boxes
-        # DISABLED FOR DEBUGGING: NaN values in triangulation covariance
-        # if self._noise_stds['bbox'] > 0:
-        #     states.data.bboxes_2d = self._inject_realistic_bbox_noise(
-        #         bboxes=states.data.bboxes_2d,
-        #         position_noise_std=self._noise_stds['bbox'] * scale,
-        #         scale_noise_std=self._noise_stds['bbox'] * scale * 0.1,
-        #         scale_dependency_factor=0.5,
-        #         aspect_ratio_noise_range=0.1,
-        #         rng=rng,
-        #     )
+        if self._noise_stds['bbox'] > 0:
+            states.data.bboxes_2d = self._inject_realistic_bbox_noise(
+                bboxes=states.data.bboxes_2d,
+                position_noise_std=self._noise_stds['bbox'] * scale,
+                scale_noise_std=self._noise_stds['bbox'] * scale * 0.1,
+                scale_dependency_factor=0.5,
+                aspect_ratio_noise_range=0.1,
+                rng=rng,
+            )
 
         # Zoom level
         if self._noise_stds['zoom'] > 0:

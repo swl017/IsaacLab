@@ -270,7 +270,7 @@ class StochasticSampler:
 
         Args:
             env_ids: Indices of environments to reset. None means reset all.
-            initial_data: Initial data for reset environments. None means keep current.
+            initial_data: Initial data for reset environments. If None, clears held_data to zeros.
         """
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device)
@@ -280,8 +280,15 @@ class StochasticSampler:
         self.next_sample_threshold[env_ids] = self._sample_period()[env_ids]
         self.accumulated_latency[env_ids] = 0.0
 
+        # CRITICAL: Always update held_data on reset to prevent stale data
+        # Stale data from previous episodes would enable triangulation immediately after reset
         if initial_data is not None:
-            self.held_data[env_ids] = initial_data[env_ids]
+            # Expects pre-indexed data (shape: [len(env_ids), ...])
+            # This matches FirstOrderLagSampler convention
+            self.held_data[env_ids] = initial_data
+        elif self.held_data is not None:
+            # Clear to zeros when no initial_data provided
+            self.held_data[env_ids] = 0.0
 
         # Clear pending samples for reset environments
         if self.has_latency:

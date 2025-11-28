@@ -577,12 +577,20 @@ class DelaySystem:
 
         self.t_sim += dt
 
-    def reset(self, env_ids: Optional[torch.Tensor] = None):
+    def reset(
+        self,
+        env_ids: Optional[torch.Tensor] = None,
+        initial_gt_states: Optional[Dict[AgentID, "AgentStates"]] = None
+    ):
         """
         Reset delay system for specified environments.
 
         Args:
             env_ids: Indices of environments to reset. None means reset all.
+            initial_gt_states: Optional dict of agent_id -> AgentStates containing initial
+                              GT values to properly initialize FirstOrderLag samplers.
+                              If provided, samplers will start from these values instead of zeros,
+                              avoiding the initial transient where filtered values slowly converge.
         """
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device)
@@ -592,18 +600,43 @@ class DelaySystem:
 
         # Reset all per-agent samplers
         for agent_id in self.agent_ids:
-            # Motion samplers
-            for sampler in self.motion_samplers[agent_id].values():
-                sampler.reset(env_ids)
-            # Orientation samplers
-            for sampler in self.orientation_samplers[agent_id].values():
-                sampler.reset(env_ids)
-            # Joint samplers
-            for sampler in self.joint_samplers[agent_id].values():
-                sampler.reset(env_ids)
-            # Zoom sampler
-            self.zoom_samplers[agent_id].reset(env_ids)
-            # Detection samplers
+            # Get initial GT states for this agent if available
+            agent_gt = initial_gt_states.get(agent_id) if initial_gt_states else None
+
+            # Motion samplers - initialize with actual values to avoid transient
+            for field_name, sampler in self.motion_samplers[agent_id].items():
+                if agent_gt is not None and hasattr(agent_gt.data, field_name):
+                    initial_data = getattr(agent_gt.data, field_name)
+                    sampler.reset(env_ids, initial_data=initial_data[env_ids])
+                else:
+                    sampler.reset(env_ids)
+
+            # Orientation samplers - initialize with actual quaternions
+            for field_name, sampler in self.orientation_samplers[agent_id].items():
+                if agent_gt is not None and hasattr(agent_gt.data, field_name):
+                    initial_data = getattr(agent_gt.data, field_name)
+                    sampler.reset(env_ids, initial_data=initial_data[env_ids])
+                else:
+                    sampler.reset(env_ids)
+
+            # Joint samplers - initialize with actual joint states
+            for field_name, sampler in self.joint_samplers[agent_id].items():
+                if agent_gt is not None and hasattr(agent_gt.data, field_name):
+                    initial_data = getattr(agent_gt.data, field_name)
+                    sampler.reset(env_ids, initial_data=initial_data[env_ids])
+                else:
+                    sampler.reset(env_ids)
+
+            # Zoom sampler - initialize with actual zoom level
+            if agent_gt is not None and hasattr(agent_gt.data, 'camera_zoom_level'):
+                initial_data = agent_gt.data.camera_zoom_level
+                self.zoom_samplers[agent_id].reset(env_ids, initial_data=initial_data[env_ids])
+            else:
+                self.zoom_samplers[agent_id].reset(env_ids)
+
+            # Detection samplers - DO NOT initialize with data
+            # Issue 2.2 fix ensures held_data is cleared to zeros on reset,
+            # preventing stale bboxes from enabling immediate triangulation
             self.detection_bbox_samplers[agent_id].reset(env_ids)
             self.detection_rays_samplers[agent_id].reset(env_ids)
 
@@ -611,6 +644,7 @@ class DelaySystem:
         self.passthrough_sampler.reset(env_ids)
 
         # Reset per-agent communication samplers
+        # Communication samplers are StochasticSamplers - clear held_data (Issue 2.2)
         for agent_id in self.agent_ids:
             for sampler in self.ego_comm_samplers[agent_id].values():
                 sampler.reset(env_ids)

@@ -876,13 +876,14 @@ class IrisMAEnv(DirectMARLEnv):
             # midpoint_method_batched expects pts [N, C, 3] and dirs [N, C, T, 3]
             # We need to add a target dimension to ray_dirs
             ray_dirs_expanded = ray_dirs.unsqueeze(2)  # [N, C, 1, 3]
-            X_w_triangulated = midpoint_method_batched(
-                pts=ray_origins, # TODO(after integration): Wrong robot_positions here? Compare with GT target pos and debug the issue
-                dirs=ray_dirs_expanded
-            )  # [N, 1, 3]
+            X_w_triangulated, is_triangulation_valid = midpoint_method_batched(
+                pts=ray_origins,
+                dirs=ray_dirs_expanded,
+                valid_mask=bbox_valid_mask  # [N, C] - exclude invalid detections from triangulation
+            )  # X_w_triangulated: [N, 1, 3], is_triangulation_valid: [N, 1]
 
             # Compute covariance
-            Sigma_X, trace_cov, is_valid = self._compute_triangulation_covariance(
+            Sigma_X, trace_cov, is_cov_valid = self._compute_triangulation_covariance(
                 X_w=X_w_triangulated,
                 robot_positions=ray_origins,
                 robot_quats=robot_quats,
@@ -891,6 +892,9 @@ class IrisMAEnv(DirectMARLEnv):
                 camera_intrinsics=camera_intrinsics,
                 bbox_valid_mask=bbox_valid_mask
             )
+
+            # Combine validity flags: triangulation valid AND covariance valid
+            is_valid = is_triangulation_valid & is_cov_valid  # [N, 1]
 
             # Compute standard deviations
             std_dev = torch.sqrt(torch.diagonal(Sigma_X, dim1=-2, dim2=-1))  # [N, 1, 3]
@@ -1018,13 +1022,79 @@ class IrisMAEnv(DirectMARLEnv):
 
         return terminated_dict, time_out_dict
 
+    def _build_initial_gt_states_for_reset(self, env_ids: torch.Tensor) -> Dict[str, Any]:
+        """
+        Build initial GT states dict for delay system reset.
+
+        This creates a minimal structure that matches what delay_system.reset() expects:
+        - Dict[agent_id, object with .data attribute]
+        - The .data object has fields like body_position_w, body_orientation_w, etc.
+
+        This is used to properly initialize FirstOrderLag samplers with actual GT values
+        instead of zeros, avoiding the initial transient convergence period.
+
+        Args:
+            env_ids: Indices of environments being reset
+
+        Returns:
+            Dict[agent_id, InitialStateWrapper] containing initial GT values
+        """
+        from types import SimpleNamespace
+
+        initial_gt_states = {}
+
+        for agent_id in self.cfg.possible_agents:
+            robot = self._robots[agent_id]
+
+            # Create a namespace to hold initial data
+            data = SimpleNamespace()
+
+            # Motion states (from robot root state)
+            data.body_position_w = robot.data.root_pos_w.clone()
+            data.body_linear_velocity_w = robot.data.root_lin_vel_w.clone()
+            data.body_linear_velocity_b = robot.data.root_lin_vel_b.clone()
+            data.body_angular_velocity_w = robot.data.root_ang_vel_w.clone()
+            data.body_angular_velocity_b = robot.data.root_ang_vel_b.clone()
+            # Combined angular velocity (body + gimbal) - init to body angular velocity
+            data.body_combined_angular_velocity_w = robot.data.root_ang_vel_w.clone()
+            data.body_combined_angular_velocity_b = robot.data.root_ang_vel_b.clone()
+            # Accelerations - init to zeros (will be computed from dynamics)
+            data.body_linear_acceleration_w = torch.zeros_like(robot.data.root_pos_w)
+            data.body_linear_acceleration_b = torch.zeros_like(robot.data.root_pos_w)
+            data.body_angular_acceleration_b = torch.zeros_like(robot.data.root_pos_w)
+
+            # Orientation states (from robot quaternion)
+            data.body_orientation_w = robot.data.root_quat_w.clone()
+            # Camera orientation - use body orientation as initial (will be updated by derived fields)
+            data.camera_orientation_w = robot.data.root_quat_w.clone()
+
+            # Joint states - only include gimbal joints (yaw, roll, pitch)
+            # The delay system was configured with num_joints=3 for the gimbal
+            gimbal_joint_ids = [
+                self.gimbal_joint_idx[agent_id]["yaw"],
+                self.gimbal_joint_idx[agent_id]["roll"],
+                self.gimbal_joint_idx[agent_id]["pitch"],
+            ]
+            data.joint_positions_b = robot.data.joint_pos[:, gimbal_joint_ids].clone()
+            data.joint_velocities_b = robot.data.joint_vel[:, gimbal_joint_ids].clone()
+            data.joint_accelerations_b = torch.zeros(self.num_envs, 3, device=self.device)
+
+            # Zoom level - shape [N, 1] to match sampler expectation
+            data.camera_zoom_level = torch.ones(self.num_envs, 1, device=self.device)
+
+            # Wrap in a SimpleNamespace with .data attribute
+            wrapper = SimpleNamespace(data=data)
+            initial_gt_states[agent_id] = wrapper
+
+        return initial_gt_states
+
     def _reset_idx(self, env_ids: torch.Tensor | None):
         """Reset environments at specified indices."""
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._robots[self.cfg.possible_agents[0]]._ALL_INDICES
 
-        # Reset state manager
-        self.delay_system.reset(env_ids=env_ids)
+        # NOTE: delay_system.reset() is called AFTER robot states are written (see below)
+        # This allows us to initialize FirstOrderLag samplers with actual GT values
 
         # Reset dynamics filters
         for agent_id in self.cfg.possible_agents:
@@ -1141,6 +1211,15 @@ class IrisMAEnv(DirectMARLEnv):
                 joint_ids=gimbal_joint_ids,
                 env_ids=env_ids
             )
+
+        # =====================================================================
+        # Reset Delay System with Initial GT States
+        # =====================================================================
+        # Build initial GT states from robot data for proper FirstOrderLag initialization
+        # This prevents the initial transient where filtered values slowly converge from zeros
+        initial_gt_states = self._build_initial_gt_states_for_reset(env_ids)
+        self.delay_system.reset(env_ids=env_ids, initial_gt_states=initial_gt_states)
+
         # eye=self._robots[self.cfg.possible_agents[0]].data.root_pos_w[env_ids[0]].tolist()+[5.0, 5.0, 5.0]
         # lookat=self.target.data.root_pos_w[env_ids[0]].tolist()
         # self.viewport_camera_controller.update_view_location(
@@ -1160,6 +1239,7 @@ class IrisMAEnv(DirectMARLEnv):
             return
 
         self.visualization.camera_frustum[self.cfg.possible_agents[0]].draw_interface.clear_lines()
+        self.visualization.detection_indicator[self.cfg.possible_agents[0]].draw_interface.clear_lines()
         # print(f"Triangulation: ")
         for i, agent_id in enumerate(self.cfg.possible_agents):
             camera_intrinsics_updated = self.delay_system.gt_states.agents[agent_id].data.camera_base_intrinsics.clone()
@@ -1179,42 +1259,53 @@ class IrisMAEnv(DirectMARLEnv):
                 device=self.device
             )
 
-            # Validate GT bboxes using raycaster (v2.2 pattern)
-            gt_bbox = self.delay_system.gt_states.agents[agent_id].data.bboxes_2d[:, 0, :]  # [N, 4]
-            gt_bbox_valid = self.bbox_raycaster.validate_bbox(gt_bbox)  # [N, 1]
+            # Visualize GT bboxes using raycaster
+            # gt_bbox = self.delay_system.gt_states.agents[agent_id].data.bboxes_2d[:, 0, :]  # [N, 4]
+            # gt_bbox_valid = self.bbox_raycaster.validate_bbox(gt_bbox)  # [N, 1]
+            # self.visualization.detection_indicator[agent_id].draw_indicator(
+            #     start_points=self.delay_system.gt_states.agents[agent_id].data.camera_position_w,
+            #     end_points=self.target.data.root_pos_w,
+            #     detected=gt_bbox_valid.squeeze(-1)  # [N]
+            # )
+
+            # Visualize delayed bboxes using raycaster
+            delayed_states = self.delay_system.get_all_states_for_observations(agent_id)
+            delayed_bbox = delayed_states[agent_id].data.bboxes_2d[:, 0, :]  # [N, 4]
+            delayed_bbox_valid = self.bbox_raycaster.validate_bbox(delayed_bbox)  # [N, 1]
             self.visualization.detection_indicator[agent_id].draw_indicator(
-                start_points=self.delay_system.gt_states.agents[agent_id].data.camera_position_w,
+                start_points=delayed_states[agent_id].data.camera_position_w,
                 end_points=self.target.data.root_pos_w,
-                detected=gt_bbox_valid.squeeze(-1)  # [N]
+                detected=delayed_bbox_valid.squeeze(-1)  # [N]
             )
-
-
 
             # Either visualize using GT+delayed states or noisy+delayed states
             # X_w_tri, Sigma_X, std_dev, trace_cov, is_tri_cov_valid = self.triangulation_results[agent_id]
             X_w_tri, Sigma_X, std_dev, trace_cov, is_tri_cov_valid = self.triangulation_results_noisy[agent_id]
+            valid_envs = torch.nonzero(
+                is_tri_cov_valid.squeeze(-1), as_tuple=False
+            ).squeeze(-1).tolist()  # python list of env ids with valid tri cov
 
+            if len(valid_envs) > 0:
+                scale = torch.sqrt(torch.clamp(std_dev, min=0.0)) * 2.5
+                self.visualization.tri_cov_visualizer[agent_id].visualize(
+                    translations=X_w_tri[valid_envs, 0, :], # [N, 3]
+                    scales=scale[valid_envs, 0, :], # [N, 3]
+                )
+                # print(f" Agent {agent_id}:")
+                # print(f"  Estimated Position: {X_w_tri[0,0,:].cpu().numpy()}")
+                # print(f"  Std Deviations: {std_tri[0,0,:].cpu().numpy()}")
 
-            scale = torch.sqrt(torch.clamp(std_dev, min=0.0)) * 2.5
-            # # Scale shape should be [N, 3]
-            # if scale.ndim == 3 and scale.shape[1] >= 1:
-            #     scale = scale[:, 0, :]
-            # else:
-            #     scale = scale.squeeze(1)
-            self.visualization.tri_cov_visualizer[agent_id].visualize(
-                translations=X_w_tri[:, 0, :],
-                scales=scale[:, 0, :],
-            )
-            # print(f" Agent {agent_id}:")
-            # print(f"  Estimated Position: {X_w_tri[0,0,:].cpu().numpy()}")
-            # print(f"  Std Deviations: {std_tri[0,0,:].cpu().numpy()}")
-
-            # Visualize camera ray through bbox center noisy+delay
-            states = self.delay_system.get_all_states_for_observations(agent_id)
-            bbox = states[agent_id].data.bboxes_2d[:, 0, :]  # [N, 4]
-            bbox_valid = self.bbox_raycaster.validate_bbox(bbox)  # [N]
-            self.visualization.detection_indicator[agent_id].draw_indicator(
-                start_points=states[agent_id].data.camera_position_w,
-                end_points=X_w_tri[:, 0, :],
-                detected=bbox_valid  # [N]
-            )
+                # Visualize camera ray through bbox center noisy+delay
+                states = self.delay_system.get_all_states_for_observations(agent_id)
+                bbox = states[agent_id].data.bboxes_2d[:, 0, :]  # [N, 4]
+                bbox_valid = self.bbox_raycaster.validate_bbox(bbox)  # [N]
+                self.visualization.detection_indicator[agent_id].draw_indicator(
+                    start_points=states[agent_id].data.camera_position_w[valid_envs],
+                    end_points=X_w_tri[valid_envs, 0, :],
+                    detected=bbox_valid[valid_envs]  # [N]
+                )
+            else:
+                self.visualization.tri_cov_visualizer[agent_id].visualize(
+                    translations=torch.zeros((0, 3), device=self.device), # [N, 3]
+                    scales=torch.zeros((0, 3), device=self.device), # [N, 3]
+                )
