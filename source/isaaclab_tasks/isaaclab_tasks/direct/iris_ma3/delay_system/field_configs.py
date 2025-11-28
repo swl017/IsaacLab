@@ -155,11 +155,12 @@ FIELD_GROUPS = {
 
     # Camera intrinsics: Static, no delay
     # Note: camera_zoom_level moved to 'zoom' group (mechanical actuator)
+    # Note: camera_position_w REMOVED - it's a DERIVED field that must be
+    #       recomputed after communication delays, not treated as static
     'camera_intrinsics': [
         'camera_offset_position_b',
         'camera_offset_rotation_b',
         'camera_base_intrinsics',  # Base camera intrinsics matrix K (unzoomed)
-        'camera_position_w',
     ],
 
     # Timestamps (special handling, not sampled)

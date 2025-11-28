@@ -95,115 +95,143 @@ class DelaySystem:
         self._create_communication_samplers()
 
     def _create_base_samplers(self):
-        """Create base samplers for motion, detection, etc. (shared by all agents)."""
-        # Motion samplers (one per motion field)
-        self.motion_samplers = {}
-        for field in FIELD_GROUPS['motion']:
-            self.motion_samplers[field] = create_motion_sampler(
-                field_name=field,
+        """Create base samplers PER AGENT.
+
+        CRITICAL: Each agent must have its own sampler instances because samplers
+        like FirstOrderLagSampler maintain internal state (filtered_state) that would
+        get corrupted if different agents' data passes through the same sampler.
+
+        Structure: self.motion_samplers[agent_id][field] = sampler
+        """
+        # Motion samplers: {agent_id: {field: sampler}}
+        self.motion_samplers: Dict[AgentID, Dict[str, SamplerChain]] = {}
+        for agent_id in self.agent_ids:
+            self.motion_samplers[agent_id] = {}
+            for field in FIELD_GROUPS['motion']:
+                self.motion_samplers[agent_id][field] = create_motion_sampler(
+                    field_name=field,
+                    num_envs=self.num_envs,
+                    time_constant=self.cfg.motion_time_constant,
+                    dt=self.cfg.dt_sim,
+                    device=self.device,
+                )
+
+        # Orientation samplers: {agent_id: {field: sampler}}
+        self.orientation_samplers: Dict[AgentID, Dict[str, SamplerChain]] = {}
+        for agent_id in self.agent_ids:
+            self.orientation_samplers[agent_id] = {}
+            for field in FIELD_GROUPS['orientation']:
+                self.orientation_samplers[agent_id][field] = create_orientation_sampler(
+                    num_envs=self.num_envs,
+                    time_constant=self.cfg.orientation_time_constant,
+                    dt=self.cfg.dt_sim,
+                    device=self.device,
+                )
+
+        # Joint samplers: {agent_id: {field: sampler}}
+        self.joint_samplers: Dict[AgentID, Dict[str, SamplerChain]] = {}
+        for agent_id in self.agent_ids:
+            self.joint_samplers[agent_id] = {}
+            for field in FIELD_GROUPS['joints']:
+                self.joint_samplers[agent_id][field] = create_joint_sampler(
+                    num_joints=self.num_joints,
+                    num_envs=self.num_envs,
+                    time_constant=self.cfg.joint_time_constant,
+                    dt=self.cfg.dt_sim,
+                    device=self.device,
+                )
+
+        # Zoom sampler: {agent_id: sampler}
+        self.zoom_samplers: Dict[AgentID, SamplerChain] = {}
+        for agent_id in self.agent_ids:
+            self.zoom_samplers[agent_id] = create_motion_sampler(
+                field_name='camera_zoom_level',
                 num_envs=self.num_envs,
-                time_constant=self.cfg.motion_time_constant,
+                time_constant=self.cfg.joint_time_constant,  # Similar to joints (mechanical actuator)
                 dt=self.cfg.dt_sim,
                 device=self.device,
             )
 
-        # Orientation samplers
-        self.orientation_samplers = {}
-        for field in FIELD_GROUPS['orientation']:
-            self.orientation_samplers[field] = create_orientation_sampler(
+        # Detection bbox samplers: {agent_id: sampler}
+        self.detection_bbox_samplers: Dict[AgentID, StochasticSampler] = {}
+        for agent_id in self.agent_ids:
+            self.detection_bbox_samplers[agent_id] = create_detection_sampler(
+                fps_mean=self.cfg.detection_fps_mean,
+                fps_std=self.cfg.detection_fps_std,
+                latency_mean=self.cfg.detection_latency_mean,
+                latency_std=self.cfg.detection_latency_std,
+                dropout_rate=self.cfg.detection_dropout_rate,
                 num_envs=self.num_envs,
-                time_constant=self.cfg.orientation_time_constant,
                 dt=self.cfg.dt_sim,
                 device=self.device,
             )
 
-        # Joint samplers
-        self.joint_samplers = {}
-        for field in FIELD_GROUPS['joints']:
-            self.joint_samplers[field] = create_joint_sampler(
-                num_joints=self.num_joints,
+        # Detection rays samplers: {agent_id: sampler}
+        self.detection_rays_samplers: Dict[AgentID, StochasticSampler] = {}
+        for agent_id in self.agent_ids:
+            self.detection_rays_samplers[agent_id] = create_detection_sampler(
+                fps_mean=self.cfg.detection_fps_mean,
+                fps_std=self.cfg.detection_fps_std,
+                latency_mean=self.cfg.detection_latency_mean,
+                latency_std=self.cfg.detection_latency_std,
+                dropout_rate=self.cfg.detection_dropout_rate,
                 num_envs=self.num_envs,
-                time_constant=self.cfg.joint_time_constant,
                 dt=self.cfg.dt_sim,
                 device=self.device,
             )
 
-        # Zoom sampler (first-order lag for mechanical lens movement)
-        self.zoom_sampler = create_motion_sampler(
-            field_name='camera_zoom_level',
-            num_envs=self.num_envs,
-            time_constant=self.cfg.joint_time_constant,  # Similar to joints (mechanical actuator)
-            dt=self.cfg.dt_sim,
-            device=self.device,
-        )
-
-        # Detection samplers (separate for dimension compatibility)
-        # detection_bbox: [N, T, 4] - bounding boxes
-        self.detection_bbox_sampler = create_detection_sampler(
-            fps_mean=self.cfg.detection_fps_mean,
-            fps_std=self.cfg.detection_fps_std,
-            latency_mean=self.cfg.detection_latency_mean,
-            latency_std=self.cfg.detection_latency_std,
-            dropout_rate=self.cfg.detection_dropout_rate,
-            num_envs=self.num_envs,
-            dt=self.cfg.dt_sim,
-            device=self.device,
-        )
-
-        # detection_rays: [N, T, 3] - ray directions and origins
-        self.detection_rays_sampler = create_detection_sampler(
-            fps_mean=self.cfg.detection_fps_mean,
-            fps_std=self.cfg.detection_fps_std,
-            latency_mean=self.cfg.detection_latency_mean,
-            latency_std=self.cfg.detection_latency_std,
-            dropout_rate=self.cfg.detection_dropout_rate,
-            num_envs=self.num_envs,
-            dt=self.cfg.dt_sim,
-            device=self.device,
-        )
-
-        # Passthrough samplers for static fields
+        # Passthrough sampler (stateless, can be shared)
         self.passthrough_sampler = create_passthrough_sampler(
             num_envs=self.num_envs,
             device=self.device,
         )
 
     def _create_communication_samplers(self):
-        """Create communication samplers for ego vs. other perspectives.
+        """Create communication samplers PER AGENT for ego vs. other perspectives.
 
-        Creates per-field-group samplers because different field groups have different tensor shapes.
-        The StochasticSampler maintains held_data internally, so each shape needs its own sampler.
+        CRITICAL: Each agent must have its own sampler instances because StochasticSampler
+        maintains internal state (held_data) that would get corrupted if different agents'
+        data passes through the same sampler.
+
+        Structure: self.ego_comm_samplers[agent_id][field] = sampler
         """
-        # Field groups that need communication samplers
+        # Collect all field names that need communication samplers
         comm_field_groups = ['motion', 'orientation', 'joints', 'zoom', 'detection_bbox', 'detection_rays']
-
-        # Ego communication samplers (fast, local) - one per field group
-        self.ego_comm_samplers: Dict[str, StochasticSampler] = {}
+        all_comm_fields = []
         for group in comm_field_groups:
-            self.ego_comm_samplers[group] = create_communication_sampler(
-                rate_min=1.0 / self.cfg.dt_sim,  # Run at sim rate
-                rate_max=1.0 / self.cfg.dt_sim,
-                latency_mean=self.cfg.ego_comm_latency,
-                latency_std=0.0,  # Constant
-                dropout_rate=0.0,  # No dropout for ego
-                num_envs=self.num_envs,
-                dt=self.cfg.dt_sim,
-                device=self.device,
-            )
+            all_comm_fields.extend(FIELD_GROUPS.get(group, []))
 
-        # Inter-agent communication samplers (slow, network) - one per field group
-        self.inter_agent_comm_samplers: Dict[str, StochasticSampler] = {}
-        for group in comm_field_groups:
-            self.inter_agent_comm_samplers[group] = create_communication_sampler(
-                rate_min=self.cfg.inter_agent_comm_rate_min,
-                rate_max=self.cfg.inter_agent_comm_rate_max,
-                latency_mean=self.cfg.inter_agent_comm_latency_mean,
-                latency_std=self.cfg.inter_agent_comm_latency_std,
-                dropout_rate=self.cfg.inter_agent_comm_dropout_rate,
-                num_envs=self.num_envs,
-                dt=self.cfg.dt_sim,
-                device=self.device,
-            )
+        # Ego communication samplers (fast, local) - per AGENT, per FIELD
+        self.ego_comm_samplers: Dict[AgentID, Dict[str, StochasticSampler]] = {}
+        for agent_id in self.agent_ids:
+            self.ego_comm_samplers[agent_id] = {}
+            for field_name in all_comm_fields:
+                self.ego_comm_samplers[agent_id][field_name] = create_communication_sampler(
+                    rate_min=1.0 / self.cfg.dt_sim,  # Run at sim rate
+                    rate_max=1.0 / self.cfg.dt_sim,
+                    latency_mean=self.cfg.ego_comm_latency,
+                    latency_std=0.0,  # Constant
+                    dropout_rate=0.0,  # No dropout for ego
+                    num_envs=self.num_envs,
+                    dt=self.cfg.dt_sim,
+                    device=self.device,
+                )
+
+        # Inter-agent communication samplers (slow, network) - per AGENT, per FIELD
+        self.inter_agent_comm_samplers: Dict[AgentID, Dict[str, StochasticSampler]] = {}
+        for agent_id in self.agent_ids:
+            self.inter_agent_comm_samplers[agent_id] = {}
+            for field_name in all_comm_fields:
+                self.inter_agent_comm_samplers[agent_id][field_name] = create_communication_sampler(
+                    rate_min=self.cfg.inter_agent_comm_rate_min,
+                    rate_max=self.cfg.inter_agent_comm_rate_max,
+                    latency_mean=self.cfg.inter_agent_comm_latency_mean,
+                    latency_std=self.cfg.inter_agent_comm_latency_std,
+                    dropout_rate=self.cfg.inter_agent_comm_dropout_rate,
+                    num_envs=self.num_envs,
+                    dt=self.cfg.dt_sim,
+                    device=self.device,
+                )
 
     def update_agent_gt_states(self, agent_id: AgentID, states: AgentStates):
         """
@@ -215,6 +243,10 @@ class DelaySystem:
         """
         # Store ground truth
         self.gt_states[agent_id] = states
+
+        # Compute derived fields for GT states (camera_position_w, camera_orientation_w, etc.)
+        # This ensures GT states have all fields populated for debugging/visualization
+        self._compute_derived_fields_inplace(states)
 
         # Update delayed states for all perspectives
         self._update_delayed_states_for_agent(agent_id)
@@ -255,11 +287,12 @@ class DelaySystem:
             # For other agent noisy states (with inter-agent comm delay):
             delayed_noisy_other = delay_system.process_noisy_gt_states(agent_id, noisy_gt, is_ego=False)
         """
-        # Apply base processing (delays + derived field computation)
-        base_processed = self._apply_base_processing(noisy_gt_states)
+        # Apply base processing (delays + derived field computation) using per-agent samplers
+        base_processed = self._apply_base_processing(agent_id, noisy_gt_states)
 
-        # Apply communication based on perspective
+        # Apply communication based on perspective using per-agent comm samplers
         delayed_noisy = self._apply_communication(
+            agent_id,
             base_processed,
             is_ego=is_ego,
         )
@@ -275,20 +308,22 @@ class DelaySystem:
         """
         gt_states = self.gt_states[agent_id]
 
-        # Apply base processing (motion filter, detection)
-        base_processed_states = self._apply_base_processing(gt_states)
+        # Apply base processing (motion filter, detection) using per-agent samplers
+        base_processed_states = self._apply_base_processing(agent_id, gt_states)
 
         # Update for each ego agent's perspective
         for ego_agent in self.agent_ids:
             if ego_agent == agent_id:
                 # Ego perspective: fast local communication
                 final_states = self._apply_communication(
+                    agent_id,
                     base_processed_states,
                     is_ego=True,
                 )
             else:
                 # Other agent perspective: slow inter-agent communication
                 final_states = self._apply_communication(
+                    agent_id,
                     base_processed_states,
                     is_ego=False,
                 )
@@ -296,16 +331,17 @@ class DelaySystem:
             # Store delayed states
             self.delayed_states[ego_agent][agent_id] = final_states
 
-    def _apply_base_processing(self, states: AgentStates) -> AgentStates:
+    def _apply_base_processing(self, agent_id: AgentID, states: AgentStates) -> AgentStates:
         """
         Apply base processing with Phase 2 derived field pipeline.
 
         Phase 2 Architecture:
-        1. Apply delays to RAW sensor fields only
+        1. Apply delays to RAW sensor fields only (using per-agent samplers)
         2. Recompute DERIVED fields from delayed raw sensor inputs
         3. Process in dependency order (level 1, then level 2, etc.)
 
         Args:
+            agent_id: Agent identifier (used to select per-agent samplers)
             states: Ground truth AgentStates
 
         Returns:
@@ -317,24 +353,24 @@ class DelaySystem:
 
         # ========== Step 1: Apply delays to RAW sensor fields ==========
 
-        # Get sampler for each raw field based on its group
+        # Get sampler for each raw field based on its group (using per-agent samplers)
         for field_name, field_info in RAW_SENSOR_FIELDS.items():
             group = field_info['group']
             raw_data = getattr(states.data, field_name)
 
-            # Select appropriate sampler based on group
+            # Select appropriate per-agent sampler based on group
             if group == 'motion':
-                sampler = self.motion_samplers.get(field_name)
+                sampler = self.motion_samplers[agent_id].get(field_name)
             elif group == 'orientation':
-                sampler = self.orientation_samplers.get(field_name)
+                sampler = self.orientation_samplers[agent_id].get(field_name)
             elif group == 'joints':
-                sampler = self.joint_samplers.get(field_name)
+                sampler = self.joint_samplers[agent_id].get(field_name)
             elif group == 'zoom':
-                sampler = self.zoom_sampler
+                sampler = self.zoom_samplers[agent_id]
             elif group == 'detection_bbox':
-                sampler = self.detection_bbox_sampler
+                sampler = self.detection_bbox_samplers[agent_id]
             elif group == 'camera_intrinsics':
-                sampler = self.passthrough_sampler
+                sampler = self.passthrough_sampler  # Stateless, can be shared
             else:
                 # Unknown group, skip
                 setattr(processed_states.data, field_name, raw_data.clone())
@@ -393,56 +429,85 @@ class DelaySystem:
 
         return processed_states
 
-    def _apply_communication(self, states: AgentStates, is_ego: bool) -> AgentStates:
+    def _compute_derived_fields_inplace(self, states: AgentStates) -> None:
         """
-        Apply communication delays.
+        Compute derived fields for an AgentStates object IN-PLACE.
+
+        This is used for GT states where we want derived fields computed
+        but without any delay processing.
 
         Args:
+            states: AgentStates object to update with derived field values
+        """
+        # Process in dependency order (level 1, then level 2, etc.)
+        derived_by_level = get_derived_fields_by_dependency_level()
+        for level in sorted(derived_by_level.keys()):
+            for field_name in derived_by_level[level]:
+                field_info = get_derived_field_info(field_name)
+
+                # Gather source data from current states
+                source_data = {}
+                for source_field in field_info['sources']:
+                    source_data[source_field] = getattr(states.data, source_field)
+
+                # Handle extra parameters (e.g., num_targets)
+                if 'extra_params' in field_info:
+                    for param_name, param_value in field_info['extra_params'].items():
+                        # Evaluate self references
+                        if isinstance(param_value, str) and param_value.startswith('self.'):
+                            attr_name = param_value.split('.')[1]
+                            source_data[param_name] = getattr(self, attr_name)
+                        else:
+                            source_data[param_name] = param_value
+
+                # Get computation function
+                compute_fn = getattr(derived_field_computers, field_info['compute_fn'])
+
+                # Compute derived field
+                result = compute_fn(**source_data)
+
+                # Handle functions that return tuples (e.g., combined angular velocity)
+                if field_info.get('returns_tuple', False):
+                    tuple_fields = field_info['tuple_fields']
+                    for i, output_field in enumerate(tuple_fields):
+                        setattr(states.data, output_field, result[i])
+                else:
+                    setattr(states.data, field_name, result)
+
+    def _apply_communication(
+        self, agent_id: AgentID, states: AgentStates, is_ego: bool
+    ) -> AgentStates:
+        """
+        Apply communication delays and recompute derived fields.
+
+        Args:
+            agent_id: Agent identifier (used to select per-agent comm samplers)
             states: Base-processed AgentStates
             is_ego: True for ego perspective, False for other agents
 
         Returns:
-            AgentStates with communication delays applied
+            AgentStates with communication delays applied and derived fields recomputed
         """
         comm_states = AgentStates(
             self.num_envs, self.num_joints, self.num_targets, self.device
         )
 
-        # Select appropriate communication sampler set (per-group samplers)
-        comm_samplers = self.ego_comm_samplers if is_ego else self.inter_agent_comm_samplers
+        # Select appropriate per-agent communication sampler set
+        comm_samplers = (
+            self.ego_comm_samplers[agent_id] if is_ego
+            else self.inter_agent_comm_samplers[agent_id]
+        )
 
-        # Apply communication to each field group using its dedicated sampler
-        # Each group needs its own sampler because shapes differ (e.g., [N,3] vs [N,T,4])
+        # Apply communication to each field using its dedicated per-agent, per-field sampler
+        # CRITICAL: Each agent MUST have its own samplers to avoid state corruption
+        # when different agents' data passes through sequentially.
 
-        for field_name in FIELD_GROUPS['motion']:
-            data = getattr(states.data, field_name)
-            comm_data, info = comm_samplers['motion'].update(data, self.t_sim)
-            setattr(comm_states.data, field_name, comm_data)
-
-        for field_name in FIELD_GROUPS['orientation']:
-            data = getattr(states.data, field_name)
-            comm_data, info = comm_samplers['orientation'].update(data, self.t_sim)
-            setattr(comm_states.data, field_name, comm_data)
-
-        for field_name in FIELD_GROUPS['joints']:
-            data = getattr(states.data, field_name)
-            comm_data, info = comm_samplers['joints'].update(data, self.t_sim)
-            setattr(comm_states.data, field_name, comm_data)
-
-        for field_name in FIELD_GROUPS['zoom']:
-            data = getattr(states.data, field_name)
-            comm_data, info = comm_samplers['zoom'].update(data, self.t_sim)
-            setattr(comm_states.data, field_name, comm_data)
-
-        for field_name in FIELD_GROUPS['detection_bbox']:
-            data = getattr(states.data, field_name)
-            comm_data, info = comm_samplers['detection_bbox'].update(data, self.t_sim)
-            setattr(comm_states.data, field_name, comm_data)
-
-        for field_name in FIELD_GROUPS['detection_rays']:
-            data = getattr(states.data, field_name)
-            comm_data, info = comm_samplers['detection_rays'].update(data, self.t_sim)
-            setattr(comm_states.data, field_name, comm_data)
+        comm_field_groups = ['motion', 'orientation', 'joints', 'zoom', 'detection_bbox', 'detection_rays']
+        for group in comm_field_groups:
+            for field_name in FIELD_GROUPS[group]:
+                data = getattr(states.data, field_name)
+                comm_data, info = comm_samplers[field_name].update(data, self.t_sim)
+                setattr(comm_states.data, field_name, comm_data)
 
         # Static fields don't need communication delay
         for field_name in FIELD_GROUPS['camera_intrinsics']:
@@ -453,6 +518,11 @@ class DelaySystem:
         comm_states.data.timestamp_sim_walltime = states.data.timestamp_sim_walltime.clone()
         comm_states.data.timestamp_motion = states.data.timestamp_motion.clone()
         comm_states.data.timestamp_detection = states.data.timestamp_detection.clone()
+
+        # CRITICAL: Recompute derived fields from communication-delayed inputs
+        # This ensures fields like camera_position_w are computed from the
+        # communication-delayed body_position_w and body_orientation_w, not stale values.
+        self._compute_derived_fields_inplace(comm_states)
 
         return comm_states
 
@@ -520,24 +590,32 @@ class DelaySystem:
         # Reset simulation time
         self.t_sim[env_ids] = 0.0
 
-        # Reset all samplers
-        for sampler in self.motion_samplers.values():
-            sampler.reset(env_ids)
-        for sampler in self.orientation_samplers.values():
-            sampler.reset(env_ids)
-        for sampler in self.joint_samplers.values():
-            sampler.reset(env_ids)
-        self.zoom_sampler.reset(env_ids)
+        # Reset all per-agent samplers
+        for agent_id in self.agent_ids:
+            # Motion samplers
+            for sampler in self.motion_samplers[agent_id].values():
+                sampler.reset(env_ids)
+            # Orientation samplers
+            for sampler in self.orientation_samplers[agent_id].values():
+                sampler.reset(env_ids)
+            # Joint samplers
+            for sampler in self.joint_samplers[agent_id].values():
+                sampler.reset(env_ids)
+            # Zoom sampler
+            self.zoom_samplers[agent_id].reset(env_ids)
+            # Detection samplers
+            self.detection_bbox_samplers[agent_id].reset(env_ids)
+            self.detection_rays_samplers[agent_id].reset(env_ids)
 
-        self.detection_bbox_sampler.reset(env_ids)
-        self.detection_rays_sampler.reset(env_ids)
+        # Passthrough sampler (shared, stateless)
         self.passthrough_sampler.reset(env_ids)
 
-        # Reset per-group communication samplers
-        for sampler in self.ego_comm_samplers.values():
-            sampler.reset(env_ids)
-        for sampler in self.inter_agent_comm_samplers.values():
-            sampler.reset(env_ids)
+        # Reset per-agent communication samplers
+        for agent_id in self.agent_ids:
+            for sampler in self.ego_comm_samplers[agent_id].values():
+                sampler.reset(env_ids)
+            for sampler in self.inter_agent_comm_samplers[agent_id].values():
+                sampler.reset(env_ids)
 
         # Reset timestamp manager
         self.timestamp_manager.reset(env_ids=env_ids)
@@ -564,13 +642,15 @@ class DelaySystem:
             - Updates apply to all motion and orientation samplers
         """
         if time_constant is not None:
-            # Update motion samplers
-            for sampler in self.motion_samplers.values():
-                sampler.update_config(time_constant=time_constant)
+            # Update per-agent motion samplers
+            for agent_id in self.agent_ids:
+                for sampler in self.motion_samplers[agent_id].values():
+                    sampler.update_config(time_constant=time_constant)
 
-            # Update orientation samplers
-            for sampler in self.orientation_samplers.values():
-                sampler.update_config(time_constant=time_constant)
+            # Update per-agent orientation samplers
+            for agent_id in self.agent_ids:
+                for sampler in self.orientation_samplers[agent_id].values():
+                    sampler.update_config(time_constant=time_constant)
 
             # Update config for consistency
             self.cfg.motion_time_constant = time_constant
@@ -611,15 +691,16 @@ class DelaySystem:
             # Convert FPS std to period std: std_period ≈ std_fps / (fps_mean^2)
             period_std = fps_std / (fps_mean ** 2)
 
-        # Update detection samplers
-        for sampler in [self.detection_bbox_sampler, self.detection_rays_sampler]:
-            sampler.update_config(
-                period_mean=period_mean,
-                period_std=period_std,
-                latency_mean=latency_mean,
-                latency_std=latency_std,
-                dropout_prob=dropout_rate,
-            )
+        # Update per-agent detection samplers
+        for agent_id in self.agent_ids:
+            for sampler in [self.detection_bbox_samplers[agent_id], self.detection_rays_samplers[agent_id]]:
+                sampler.update_config(
+                    period_mean=period_mean,
+                    period_std=period_std,
+                    latency_mean=latency_mean,
+                    latency_std=latency_std,
+                    dropout_prob=dropout_rate,
+                )
 
         # Update config for consistency
         if fps_mean is not None:
@@ -667,14 +748,16 @@ class DelaySystem:
             period_min = 1.0 / inter_agent_rate_max  # Note: max rate → min period
             period_max = 1.0 / inter_agent_rate_min  # Note: min rate → max period
 
-        # Update inter-agent communication sampler
-        self.inter_agent_comm_sampler.update_config(
-            period_min=period_min,
-            period_max=period_max,
-            latency_mean=inter_agent_latency_mean,
-            latency_std=inter_agent_latency_std,
-            dropout_prob=inter_agent_dropout_rate,
-        )
+        # Update per-agent inter-agent communication samplers
+        for agent_id in self.agent_ids:
+            for sampler in self.inter_agent_comm_samplers[agent_id].values():
+                sampler.update_config(
+                    period_min=period_min,
+                    period_max=period_max,
+                    latency_mean=inter_agent_latency_mean,
+                    latency_std=inter_agent_latency_std,
+                    dropout_prob=inter_agent_dropout_rate,
+                )
 
         # Update config for consistency
         if inter_agent_latency_mean is not None:
@@ -714,20 +797,24 @@ class DelaySystem:
             - All samplers use continuous filtering (not sample-and-hold)
         """
         if motion_tc is not None:
-            for sampler in self.motion_samplers.values():
-                sampler.update_config(time_constant=motion_tc)
+            for agent_id in self.agent_ids:
+                for sampler in self.motion_samplers[agent_id].values():
+                    sampler.update_config(time_constant=motion_tc)
             self.cfg.motion_time_constant = motion_tc
 
         if orientation_tc is not None:
-            for sampler in self.orientation_samplers.values():
-                sampler.update_config(time_constant=orientation_tc)
+            for agent_id in self.agent_ids:
+                for sampler in self.orientation_samplers[agent_id].values():
+                    sampler.update_config(time_constant=orientation_tc)
             self.cfg.orientation_time_constant = orientation_tc
 
         if joint_tc is not None:
-            for sampler in self.joint_samplers.values():
-                sampler.update_config(time_constant=joint_tc)
+            for agent_id in self.agent_ids:
+                for sampler in self.joint_samplers[agent_id].values():
+                    sampler.update_config(time_constant=joint_tc)
             self.cfg.joint_time_constant = joint_tc
 
         if zoom_tc is not None:
-            self.zoom_sampler.update_config(time_constant=zoom_tc)
+            for agent_id in self.agent_ids:
+                self.zoom_samplers[agent_id].update_config(time_constant=zoom_tc)
             # No separate config for zoom_tc, it uses joint_tc

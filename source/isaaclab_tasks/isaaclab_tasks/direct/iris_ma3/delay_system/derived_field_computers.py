@@ -8,7 +8,7 @@ being delayed independently.
 
 from __future__ import annotations
 import torch
-from isaaclab.utils.math import quat_mul, quat_rotate_inverse
+from isaaclab.utils.math import quat_mul, quat_rotate_inverse, matrix_from_quat
 
 
 def compute_camera_orientation_from_gimbal(
@@ -177,61 +177,162 @@ def compute_ray_directions_from_bbox(
         "camera_base_intrinsics contains NaN values"
     assert not torch.any(camera_base_intrinsics[:, 2, 2] == 0), \
         "camera_base_intrinsics[2,2] must be non-zero (should be 1.0)"
+    
+    # Convert 2D bbox center to normalized image coordinates
+    fx = camera_base_intrinsics[..., 0, 0].unsqueeze(-1) * camera_zoom_level.unsqueeze(-1)  # (N, 1)
+    fy = camera_base_intrinsics[..., 1, 1].unsqueeze(-1) * camera_zoom_level.unsqueeze(-1)  # (N, 1)
+    cx = camera_base_intrinsics[..., 0, 2].unsqueeze(-1)
+    cy = camera_base_intrinsics[..., 1, 2].unsqueeze(-1)
 
-    # Compute bbox centers in pixel coordinates
-    bbox_centers_px = bboxes_2d[..., :2] + bboxes_2d[..., 2:] / 2  # [N, T, 2]
+    def validate_bbox(bbox: torch.Tensor, width, height) -> torch.Tensor:
+        """Validate arbitrary bounding boxes based on size and center criteria.
+        Args:
+            bboxes: Tensor of shape (N, 4) in normalized (x_center, y_center, width, height) format.
+        Returns:
+            Tensor of shape (N,) with boolean validity mask.
+        """
+        # Normalize one bbox
+        # Extract dimensions
+        img_h = height
+        img_w = width
+        
+        # Prevent division by zero
+        img_w_safe = torch.clamp(img_w, min=1e-6)
+        img_h_safe = torch.clamp(img_h, min=1e-6)
+        
+        # Split bbox components
+        cx, cy, w, h = bbox.split(1, dim=-1)
 
-    # Apply zoom to base intrinsics
-    # Zoom affects focal lengths but not principal point
-    K = camera_base_intrinsics.clone()
-    K[:, 0, 0] = K[:, 0, 0] * camera_zoom_level  # fx *= zoom
-    K[:, 1, 1] = K[:, 1, 1] * camera_zoom_level  # fy *= zoom
-    # K[:, 0, 2] = cx (unchanged)
-    # K[:, 1, 2] = cy (unchanged)
-    # K[:, 2, 2] = 1.0 (unchanged)
+        # Normalize
+        cx_norm = cx / img_w_safe
+        cy_norm = cy / img_h_safe
+        w_norm = w / img_w_safe
+        h_norm = h / img_h_safe
+        
+        # Clamp to [0, 1] to handle numerical errors
+        cx_norm = torch.clamp(cx_norm, 0.0, 1.0)
+        cy_norm = torch.clamp(cy_norm, 0.0, 1.0)
+        w_norm = torch.clamp(w_norm, 0.0, 1.0)
+        h_norm = torch.clamp(h_norm, 0.0, 1.0)
+        bbox_normalized = torch.cat([cx_norm, cy_norm, w_norm, h_norm], dim=-1) # (N, 4)
 
-    # Unproject pixel coordinates to normalized camera coordinates
-    # Inverse of: [u, v, 1]^T = K * [X/Z, Y/Z, 1]^T
-    # So: [X/Z, Y/Z, 1]^T = K^{-1} * [u, v, 1]^T
+        def validate_bbox_sizes(
+            bboxes_norm: torch.Tensor,
+            min_size: tuple[float, float],
+            max_size: tuple[float, float]
+        ) -> torch.Tensor:
+            """Check if normalized bbox sizes are within valid range.
+            
+            Args:
+                bboxes_norm: Normalized bboxes (cx, cy, w, h). Shape (N, C, T, 4).
+                min_size: Minimum (width, height) as fraction of image.
+                max_size: Maximum (width, height) as fraction of image.
+                
+            Returns:
+                Boolean mask for valid bbox sizes. Shape (N, C, T).
+            """
+            # Extract width and height
+            w = bboxes_norm[..., 2]
+            h = bboxes_norm[..., 3]
+            
+            # Check size constraints
+            valid_w = (w >= min_size[0]) & (w <= max_size[0])
+            valid_h = (h >= min_size[1]) & (h <= max_size[1])
+            return valid_w & valid_h
+        size_ok = validate_bbox_sizes(
+            bbox_normalized,
+            (0, 0),
+            (1, 1)
+        )
+        center_x = bbox_normalized[..., 0]
+        center_y = bbox_normalized[..., 1]
+        center_ok = (
+            (center_x >= 0.0) & (center_x <= 1.0) &
+            (center_y >= 0.0) & (center_y <= 1.0)
+        )
 
-    # Homogeneous pixel coordinates [N, T, 3]
-    pixels_hom = torch.ones(N, T, 3, device=device)
-    pixels_hom[:, :, :2] = bbox_centers_px
+        valid_mask = size_ok & center_ok
 
-    # Compute K^{-1} for each environment
-    K_inv = torch.inverse(K)  # [N, 3, 3]
+        return valid_mask
 
-    # Unproject: [N, T, 3] = [N, 3, 3] @ [N, T, 3]
-    # Need to do batch matrix multiplication
-    # Reshape for bmm: [N*T, 1, 3] @ [N, 3, 3]^T = [N*T, 1, 3]
+    is_bbox_valid = validate_bbox(bboxes_2d, 2*cx, 2*cy)  # [N, T]
+    x_n = (bboxes_2d[..., 0] - cx) / fx # (N, T)
+    y_n = (bboxes_2d[..., 1] - cy) / fy
 
-    # Expand K_inv for each target: [N, 1, 3, 3] -> [N, T, 3, 3]
-    K_inv_expanded = K_inv.unsqueeze(1).expand(N, T, 3, 3)
+    # Form direction vectors in camera frame
+    dirs_camera = torch.stack([x_n, y_n, torch.ones_like(x_n)], dim=-1)  # [N, T, 3]
 
-    # Batch matrix-vector multiply
-    rays_camera = torch.einsum('ntij,ntj->nti', K_inv_expanded, pixels_hom)  # [N, T, 3]
+    # Normalize direction vectors
+    dirs_camera_norm = dirs_camera / torch.norm(dirs_camera, dim=-1, keepdim=True) # [N, T, 3]
 
-    # Normalize ray directions in camera frame
-    rays_camera_normalized = rays_camera / (rays_camera.norm(dim=-1, keepdim=True) + 1e-8)
+    # Rotate to world frame - treat dirs_camera_norm as batch of column vectors
+    camera_rot_mat = matrix_from_quat(camera_orientation_w)  # [N, 3, 3]
+    camera_rot_mat_exp = camera_rot_mat.unsqueeze(1).expand(N, dirs_camera_norm.shape[1], 3, 3)  # [N, T, 3, 3]
+    ray_directions_w = torch.matmul(camera_rot_mat_exp, dirs_camera_norm.unsqueeze(-1)).squeeze(-1)  # [N, T, 3]
 
-    # Rotate from camera frame to world frame
-    # Need to apply quaternion rotation to each ray
-    # quat_rotate_inverse rotates vectors by quaternion
+    ray_directions_w = torch.where(
+        is_bbox_valid.unsqueeze(-1),
+        ray_directions_w,
+        torch.zeros_like(ray_directions_w)
+    )
 
-    # Expand camera_orientation_w for each target: [N, 4] -> [N, T, 4]
-    camera_quat_expanded = camera_orientation_w.unsqueeze(1).expand(N, T, 4)
+    return ray_directions_w
 
-    # Flatten for batch rotation
-    rays_camera_flat = rays_camera_normalized.reshape(N * T, 3)
-    camera_quat_flat = camera_quat_expanded.reshape(N * T, 4)
+    # # Compute bbox centers in pixel coordinates
+    # # bbox_centers_px = bboxes_2d[..., :2] + bboxes_2d[..., 2:] / 2  # [N, T, 2]
+    # bbox_centers_px = bboxes_2d[..., :2] # [N, T, 2]
 
-    rays_world_flat = quat_rotate_inverse(camera_quat_flat, rays_camera_flat)
-    rays_world = rays_world_flat.reshape(N, T, 3)
+    # # Apply zoom to base intrinsics
+    # # Zoom affects focal lengths but not principal point
+    # K = camera_base_intrinsics.clone()
+    # K[:, 0, 0] = K[:, 0, 0] * camera_zoom_level  # fx *= zoom
+    # K[:, 1, 1] = K[:, 1, 1] * camera_zoom_level  # fy *= zoom
+    # # K[:, 0, 2] = cx (unchanged)
+    # # K[:, 1, 2] = cy (unchanged)
+    # # K[:, 2, 2] = 1.0 (unchanged)
 
-    # Normalize (should already be normalized, but ensure it)
-    rays_world_normalized = rays_world / (rays_world.norm(dim=-1, keepdim=True) + 1e-8)
+    # # Unproject pixel coordinates to normalized camera coordinates
+    # # Inverse of: [u, v, 1]^T = K * [X/Z, Y/Z, 1]^T
+    # # So: [X/Z, Y/Z, 1]^T = K^{-1} * [u, v, 1]^T
 
-    return rays_world_normalized
+    # # Homogeneous pixel coordinates [N, T, 3]
+    # pixels_hom = torch.ones(N, T, 3, device=device)
+    # pixels_hom[:, :, :2] = bbox_centers_px
+
+    # # Compute K^{-1} for each environment
+    # K_inv = torch.inverse(K)  # [N, 3, 3]
+
+    # # Unproject: [N, T, 3] = [N, 3, 3] @ [N, T, 3]
+    # # Need to do batch matrix multiplication
+    # # Reshape for bmm: [N*T, 1, 3] @ [N, 3, 3]^T = [N*T, 1, 3]
+
+    # # Expand K_inv for each target: [N, 1, 3, 3] -> [N, T, 3, 3]
+    # K_inv_expanded = K_inv.unsqueeze(1).expand(N, T, 3, 3)
+
+    # # Batch matrix-vector multiply
+    # rays_camera = torch.einsum('ntij,ntj->nti', K_inv_expanded, pixels_hom)  # [N, T, 3]
+
+    # # Normalize ray directions in camera frame
+    # rays_camera_normalized = rays_camera / (rays_camera.norm(dim=-1, keepdim=True) + 1e-8)
+
+    # # Rotate from camera frame to world frame
+    # # Need to apply quaternion rotation to each ray
+    # # quat_rotate_inverse rotates vectors by quaternion
+
+    # # Expand camera_orientation_w for each target: [N, 4] -> [N, T, 4]
+    # camera_quat_expanded = camera_orientation_w.unsqueeze(1).expand(N, T, 4)
+
+    # # Flatten for batch rotation
+    # rays_camera_flat = rays_camera_normalized.reshape(N * T, 3)
+    # camera_quat_flat = camera_quat_expanded.reshape(N * T, 4)
+
+    # rays_world_flat = quat_rotate_inverse(camera_quat_flat, rays_camera_flat)
+    # rays_world = rays_world_flat.reshape(N, T, 3)
+
+    # # Normalize (should already be normalized, but ensure it)
+    # rays_world_normalized = rays_world / (rays_world.norm(dim=-1, keepdim=True) + 1e-8)
+
+    # return rays_world_normalized
 
 
 def compute_combined_angular_velocity(

@@ -120,7 +120,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
 
     # Viewer configuration
     viewer: ViewerCfg = ViewerCfg(
-        eye=(15.0, 15.0, 15.0),
+        eye=(5.0, 5.0, 5.0),
         lookat=(0.0, 0.0, 0.0),
         # origin_type="asset_body",
         # asset_name="Robot_0",

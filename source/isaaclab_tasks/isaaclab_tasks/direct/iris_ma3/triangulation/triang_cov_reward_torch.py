@@ -472,17 +472,19 @@ def midpoint_method_batched(pts: torch.Tensor, dirs: torch.Tensor) -> torch.Tens
 
     # Check rank and solve
     # If rank < 3, use mean of points as fallback
+    # Note: pts.mean(dim=1) gives [N, 3], need to expand to [N, T, 3]
+    mean_pts = pts.mean(dim=1).unsqueeze(1).expand(-1, T, -1)  # [N, T, 3]
+
     try:
         X_mid = torch.linalg.solve(A, b.unsqueeze(-1)).squeeze(-1)  # [N, T, 3]
     except:
         # Fallback to mean if singular
-        X_mid = pts.mean(dim=1)  # [N, T, 3]
+        X_mid = mean_pts.clone()  # [N, T, 3]
 
     # Check for singular matrices per batch and use mean as fallback
     rank = torch.linalg.matrix_rank(A)  # [N, T]
     is_singular = rank < 3
     if is_singular.any():
-        mean_pts = pts.mean(dim=1)  # [N, T, 3]
         X_mid = torch.where(is_singular.unsqueeze(-1), mean_pts, X_mid)
 
     return X_mid

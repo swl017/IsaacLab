@@ -20,7 +20,7 @@ from typing import Dict, List, Any, Optional
 import torch
 import copy
 
-from isaaclab.utils.math import quat_from_angle_axis, quat_mul
+from isaaclab.utils.math import quat_from_angle_axis, quat_mul, quat_rotate_inverse
 
 from .delay_system import DelaySystem
 from .delay_system_cfg import DelaySystemCfg
@@ -257,7 +257,7 @@ class MultiAgentDelaySystem:
         if zoom_level.dim() == 2 and zoom_level.shape[1] == 1:
             zoom_level = zoom_level.squeeze(1)
 
-        # Update state fields in GT buffer
+        # Update state fields in GT buffer (world frame)
         states.data.body_position_w = body_position_w
         states.data.body_orientation_w = body_orientation_w
         states.data.body_linear_velocity_w = body_linear_velocity_w
@@ -266,6 +266,21 @@ class MultiAgentDelaySystem:
         states.data.body_combined_angular_velocity_w = body_combined_angular_velocity_w
         states.data.joint_positions_b = joint_positions_b
         states.data.camera_zoom_level = zoom_level
+
+        # Compute body frame velocities from world frame (rotate by inverse of body orientation)
+        # In a real system, IMU provides these directly in body frame
+        states.data.body_linear_velocity_b = quat_rotate_inverse(
+            body_orientation_w, body_linear_velocity_w
+        )
+        states.data.body_angular_velocity_b = quat_rotate_inverse(
+            body_orientation_w, body_angular_velocity_w
+        )
+        states.data.body_linear_acceleration_b = quat_rotate_inverse(
+            body_orientation_w, body_linear_acceleration_w
+        )
+        states.data.body_combined_angular_velocity_b = quat_rotate_inverse(
+            body_orientation_w, body_combined_angular_velocity_w
+        )
 
         # ====================================================================
         # Feed to BOTH pipelines
@@ -541,15 +556,16 @@ class MultiAgentDelaySystem:
             ) * self._noise_stds['gimbal'] * scale
 
         # Bounding boxes
-        if self._noise_stds['bbox'] > 0:
-            states.data.bboxes_2d = self._inject_realistic_bbox_noise(
-                bboxes=states.data.bboxes_2d,
-                position_noise_std=self._noise_stds['bbox'] * scale,
-                scale_noise_std=self._noise_stds['bbox'] * scale * 0.1,
-                scale_dependency_factor=0.5,
-                aspect_ratio_noise_range=0.1,
-                rng=rng,
-            )
+        # DISABLED FOR DEBUGGING: NaN values in triangulation covariance
+        # if self._noise_stds['bbox'] > 0:
+        #     states.data.bboxes_2d = self._inject_realistic_bbox_noise(
+        #         bboxes=states.data.bboxes_2d,
+        #         position_noise_std=self._noise_stds['bbox'] * scale,
+        #         scale_noise_std=self._noise_stds['bbox'] * scale * 0.1,
+        #         scale_dependency_factor=0.5,
+        #         aspect_ratio_noise_range=0.1,
+        #         rng=rng,
+        #     )
 
         # Zoom level
         if self._noise_stds['zoom'] > 0:
