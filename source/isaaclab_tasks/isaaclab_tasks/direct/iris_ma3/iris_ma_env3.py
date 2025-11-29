@@ -5,7 +5,7 @@ import torch
 import math
 import numpy as np
 import copy
-from typing import Dict
+from typing import Dict, Optional, Any
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg
@@ -995,14 +995,68 @@ class IrisMAEnv(DirectMARLEnv):
                 std_tri[:, 0, :],  # 3*T (triangulation std deviations)
             ], dim=-1) ## 26 + 15*(C-1) + 6*T
 
-            # Check for NaN values
-            if torch.isnan(obs).any():
-                std_dev_reward = self.triangulation_results[ego_agent_id][2]
-                std_dev_obs = self.triangulation_results_noisy[ego_agent_id][2]
-                print(f"std_dev_reward for {ego_agent_id}: {std_dev_reward.tolist()}")
-                print(f"std_dev_obs for {ego_agent_id}: {std_dev_obs.tolist()}")
-                nan_envs = torch.nonzero(torch.isnan(obs).any(dim=1)).flatten()
-                raise ValueError(f"NaN detected in {ego_agent_id} observation at environments: {nan_envs.tolist()}")
+            # Check for NaN/Inf values with detailed diagnostics
+            if torch.isnan(obs).any() or torch.isinf(obs).any():
+                print(f"\n{'='*80}")
+                print(f"NaN/Inf detected in {ego_agent_id} observation!")
+                print(f"{'='*80}")
+
+                # Check each component individually
+                obs_components = {
+                    "pos": pos,
+                    "yaw": yaw,
+                    "lin_vel": lin_vel,
+                    "yaw_rate": yaw_rate,
+                    "lin_acc": lin_acc,
+                    "gimbal_pitch": gimbal_pitch,
+                    "gimbal_yaw": gimbal_yaw,
+                    "combined_ang_vel": combined_ang_vel,
+                    "bbox": bbox,
+                    "bbox_valid": bbox_valid,
+                    "time_since_detection": time_since_detection,
+                    "zoom": zoom,
+                    "ray_dir": ray_dir,
+                    "X_w_tri": X_w_tri[:, 0, :],
+                    "std_tri": std_tri[:, 0, :],
+                }
+
+                # Add other agent components
+                for i, other_agent_id in enumerate([a for a in self.cfg.possible_agents if a != ego_agent_id]):
+                    obs_components[f"other_positions[{other_agent_id}]"] = other_positions[i]
+                    obs_components[f"other_lin_vels[{other_agent_id}]"] = other_lin_vels[i]
+                    obs_components[f"other_combined_ang_vels[{other_agent_id}]"] = other_combined_ang_vels[i]
+                    obs_components[f"other_bbox_valids[{other_agent_id}]"] = other_bbox_valids[i]
+                    obs_components[f"other_ray_dirs[{other_agent_id}]"] = other_ray_dirs[i]
+                    obs_components[f"other_data_age[{other_agent_id}]"] = other_data_age[i]
+                    obs_components[f"other_detection_age[{other_agent_id}]"] = other_detection_age[i]
+
+                # Check each component
+                problematic_vars = []
+                for name, tensor in obs_components.items():
+                    has_nan = torch.isnan(tensor).any()
+                    has_inf = torch.isinf(tensor).any()
+                    if has_nan or has_inf:
+                        issue = "NaN" if has_nan else "Inf"
+                        nan_mask = torch.isnan(tensor) | torch.isinf(tensor)
+                        bad_envs = torch.nonzero(nan_mask.any(dim=-1) if tensor.dim() > 1 else nan_mask).flatten()
+                        problematic_vars.append(name)
+                        print(f"\n  ✗ {name}: {issue} detected")
+                        print(f"    Shape: {tensor.shape}")
+                        print(f"    Bad envs: {bad_envs.tolist()}")
+                        # Print values for bad envs (limit to first 3)
+                        for env_idx in bad_envs[:3].tolist():
+                            print(f"    Env {env_idx}: {tensor[env_idx].tolist()}")
+
+                # Also print triangulation debug info
+                print(f"\n  Triangulation debug:")
+                print(f"    std_dev_reward: {self.triangulation_results[ego_agent_id][2].tolist()}")
+                print(f"    std_dev_obs: {self.triangulation_results_noisy[ego_agent_id][2].tolist()}")
+
+                nan_envs = torch.nonzero((torch.isnan(obs) | torch.isinf(obs)).any(dim=1)).flatten()
+                raise ValueError(
+                    f"NaN/Inf in {ego_agent_id} obs at envs {nan_envs.tolist()}. "
+                    f"Problematic variables: {problematic_vars}"
+                )
 
             observations[ego_agent_id] = obs
 
@@ -1022,7 +1076,11 @@ class IrisMAEnv(DirectMARLEnv):
 
         return terminated_dict, time_out_dict
 
-    def _build_initial_gt_states_for_reset(self, env_ids: torch.Tensor) -> Dict[str, Any]:
+    def _build_initial_gt_states_for_reset(
+        self,
+        env_ids: torch.Tensor,
+        reset_states: Optional[Dict[str, Dict[str, torch.Tensor]]] = None
+    ) -> Dict[str, Any]:
         """
         Build initial GT states dict for delay system reset.
 
@@ -1035,6 +1093,9 @@ class IrisMAEnv(DirectMARLEnv):
 
         Args:
             env_ids: Indices of environments being reset
+            reset_states: Optional dict of agent_id -> {position, orientation, ...} containing
+                         the computed reset values. If provided, these are used instead of
+                         reading from robot.data (which may be stale after write_root_pose_to_sim).
 
         Returns:
             Dict[agent_id, InitialStateWrapper] containing initial GT values
@@ -1049,38 +1110,129 @@ class IrisMAEnv(DirectMARLEnv):
             # Create a namespace to hold initial data
             data = SimpleNamespace()
 
-            # Motion states (from robot root state)
-            data.body_position_w = robot.data.root_pos_w.clone()
-            data.body_linear_velocity_w = robot.data.root_lin_vel_w.clone()
-            data.body_linear_velocity_b = robot.data.root_lin_vel_b.clone()
-            data.body_angular_velocity_w = robot.data.root_ang_vel_w.clone()
-            data.body_angular_velocity_b = robot.data.root_ang_vel_b.clone()
-            # Combined angular velocity (body + gimbal) - init to body angular velocity
-            data.body_combined_angular_velocity_w = robot.data.root_ang_vel_w.clone()
-            data.body_combined_angular_velocity_b = robot.data.root_ang_vel_b.clone()
-            # Accelerations - init to zeros (will be computed from dynamics)
-            data.body_linear_acceleration_w = torch.zeros_like(robot.data.root_pos_w)
-            data.body_linear_acceleration_b = torch.zeros_like(robot.data.root_pos_w)
-            data.body_angular_acceleration_b = torch.zeros_like(robot.data.root_pos_w)
+            # Use reset_states if provided (Fix 3.2: avoids stale robot.data after write)
+            if reset_states and agent_id in reset_states:
+                rs = reset_states[agent_id]
 
-            # Orientation states (from robot quaternion)
-            data.body_orientation_w = robot.data.root_quat_w.clone()
-            # Camera orientation - use body orientation as initial (will be updated by derived fields)
-            data.camera_orientation_w = robot.data.root_quat_w.clone()
+                # Extract values from reset_states
+                position = rs['position']  # [len(env_ids), 3]
+                orientation = rs['orientation']  # [len(env_ids), 4] wxyz
+                linear_velocity_w = rs['linear_velocity']  # [len(env_ids), 3] world frame
+                angular_velocity_w = rs['angular_velocity']  # [len(env_ids), 3] world frame
+                joint_velocities = rs['joint_velocities']  # [len(env_ids), 3]
 
-            # Joint states - only include gimbal joints (yaw, roll, pitch)
-            # The delay system was configured with num_joints=3 for the gimbal
-            gimbal_joint_ids = [
-                self.gimbal_joint_idx[agent_id]["yaw"],
-                self.gimbal_joint_idx[agent_id]["roll"],
-                self.gimbal_joint_idx[agent_id]["pitch"],
-            ]
-            data.joint_positions_b = robot.data.joint_pos[:, gimbal_joint_ids].clone()
-            data.joint_velocities_b = robot.data.joint_vel[:, gimbal_joint_ids].clone()
-            data.joint_accelerations_b = torch.zeros(self.num_envs, 3, device=self.device)
+                # Compute body-frame velocities using quat_rotate_inverse
+                # Same formula as articulation_data.py lines 604-619
+                from isaaclab.utils.math import quat_rotate_inverse
+                linear_velocity_b = quat_rotate_inverse(orientation, linear_velocity_w)
+                angular_velocity_b = quat_rotate_inverse(orientation, angular_velocity_w)
+
+                # Motion states - use computed reset values
+                # Initialize full tensors with identity/zero values, then fill in reset envs
+                data.body_position_w = torch.zeros(self.num_envs, 3, device=self.device)
+                data.body_position_w[env_ids] = position
+
+                data.body_linear_velocity_w = torch.zeros(self.num_envs, 3, device=self.device)
+                data.body_linear_velocity_w[env_ids] = linear_velocity_w
+
+                data.body_linear_velocity_b = torch.zeros(self.num_envs, 3, device=self.device)
+                data.body_linear_velocity_b[env_ids] = linear_velocity_b
+
+                data.body_angular_velocity_w = torch.zeros(self.num_envs, 3, device=self.device)
+                data.body_angular_velocity_w[env_ids] = angular_velocity_w
+
+                data.body_angular_velocity_b = torch.zeros(self.num_envs, 3, device=self.device)
+                data.body_angular_velocity_b[env_ids] = angular_velocity_b
+
+                # Combined angular velocity (body + gimbal contribution)
+                # At reset, gimbal joint velocities are typically zero (from default_joint_vel)
+                # If non-zero, compute gimbal contribution using the simplified kinematic model
+                # Gimbal axes: yaw around body Z, pitch around body Y
+                pitch_rate = joint_velocities[:, 0]  # pitch joint velocity
+                yaw_rate = joint_velocities[:, 1] if joint_velocities.shape[1] > 1 else torch.zeros_like(pitch_rate)
+
+                # Gimbal angular velocity in body frame [0, pitch_rate, yaw_rate] 
+                # TODO: pitch_rate and yaw_rate are actually in joint pos frame. We need to turn it into robot body frame using gimbal angles as well.
+                gimbal_ang_vel_b = torch.stack([
+                    torch.zeros_like(pitch_rate),  # X
+                    pitch_rate,                     # Y (pitch axis)
+                    yaw_rate,                       # Z (yaw axis)
+                ], dim=-1)
+
+                # Combined in body frame
+                combined_angular_velocity_b = angular_velocity_b + gimbal_ang_vel_b
+
+                # Transform combined velocity to world frame using quat_rotate
+                from isaaclab.utils.math import quat_rotate
+                combined_angular_velocity_w = quat_rotate(orientation, combined_angular_velocity_b)
+
+                data.body_combined_angular_velocity_w = torch.zeros(self.num_envs, 3, device=self.device)
+                data.body_combined_angular_velocity_w[env_ids] = combined_angular_velocity_w
+                data.body_combined_angular_velocity_b = torch.zeros(self.num_envs, 3, device=self.device)
+                data.body_combined_angular_velocity_b[env_ids] = combined_angular_velocity_b
+
+                # Accelerations - init to zeros
+                data.body_linear_acceleration_w = torch.zeros(self.num_envs, 3, device=self.device)
+                data.body_linear_acceleration_b = torch.zeros(self.num_envs, 3, device=self.device)
+                data.body_angular_acceleration_b = torch.zeros(self.num_envs, 3, device=self.device)
+
+                # Orientation states - use computed reset values
+                # Initialize with identity quaternion [1,0,0,0] (wxyz convention)
+                data.body_orientation_w = torch.zeros(self.num_envs, 4, device=self.device)
+                data.body_orientation_w[:, 0] = 1.0  # w=1 for identity (wxyz)
+                data.body_orientation_w[env_ids] = rs['orientation']
+
+                # Camera orientation - use body orientation
+                data.camera_orientation_w = data.body_orientation_w.clone()
+
+                # Joint states - use computed reset values
+                data.joint_positions_b = torch.zeros(self.num_envs, 3, device=self.device)
+                data.joint_positions_b[env_ids] = rs['joint_positions']
+
+                data.joint_velocities_b = torch.zeros(self.num_envs, 3, device=self.device)
+                data.joint_velocities_b[env_ids] = rs['joint_velocities']
+
+                data.joint_accelerations_b = torch.zeros(self.num_envs, 3, device=self.device)
+
+            else:
+                # Fallback: read from robot.data
+                # WARNING: This branch should not be reached during normal reset operation.
+                # If reached, robot.data may be stale (not yet updated after write_root_pose_to_sim).
+                # This fallback is kept for debugging purposes only.
+                import warnings
+                warnings.warn(
+                    f"_build_initial_gt_states_for_reset: Fallback branch reached for {agent_id}. "
+                    "This may indicate reset_states was not properly passed. "
+                    "Values from robot.data may be stale."
+                )
+                data.body_position_w = robot.data.root_pos_w.clone()
+                data.body_linear_velocity_w = robot.data.root_lin_vel_w.clone()
+                data.body_linear_velocity_b = robot.data.root_lin_vel_b.clone()
+                data.body_angular_velocity_w = robot.data.root_ang_vel_w.clone()
+                data.body_angular_velocity_b = robot.data.root_ang_vel_b.clone()
+                data.body_combined_angular_velocity_w = robot.data.root_ang_vel_w.clone()
+                data.body_combined_angular_velocity_b = robot.data.root_ang_vel_b.clone()
+                data.body_linear_acceleration_w = torch.zeros_like(robot.data.root_pos_w)
+                data.body_linear_acceleration_b = torch.zeros_like(robot.data.root_pos_w)
+                data.body_angular_acceleration_b = torch.zeros_like(robot.data.root_pos_w)
+
+                data.body_orientation_w = robot.data.root_quat_w.clone()
+                data.camera_orientation_w = robot.data.root_quat_w.clone()
+
+                gimbal_joint_ids = [
+                    self.gimbal_joint_idx[agent_id]["yaw"],
+                    self.gimbal_joint_idx[agent_id]["roll"],
+                    self.gimbal_joint_idx[agent_id]["pitch"],
+                ]
+                data.joint_positions_b = robot.data.joint_pos[:, gimbal_joint_ids].clone()
+                data.joint_velocities_b = robot.data.joint_vel[:, gimbal_joint_ids].clone()
+                data.joint_accelerations_b = torch.zeros(self.num_envs, 3, device=self.device)
 
             # Zoom level - shape [N, 1] to match sampler expectation
             data.camera_zoom_level = torch.ones(self.num_envs, 1, device=self.device)
+            if reset_states and agent_id in reset_states and 'zoom_level' in reset_states[agent_id]:
+                # Use zoom level from reset_states (already reset to 1.0, but passed explicitly for consistency)
+                data.camera_zoom_level[env_ids, 0] = reset_states[agent_id]['zoom_level']
 
             # Wrap in a SimpleNamespace with .data attribute
             wrapper = SimpleNamespace(data=data)
@@ -1107,7 +1259,7 @@ class IrisMAEnv(DirectMARLEnv):
         for agent_id in self.cfg.possible_agents:
             self._last_actions[agent_id][env_ids].zero_()
         self.last_cmd_vel[env_ids].zero_()
-        self.zoom_level[env_ids].fill_(1.0)
+        self.zoom_level[env_ids].fill_(1.0) # TODO: Hook to curriculum
 
         # Logging
         all_extras = {}
@@ -1161,6 +1313,10 @@ class IrisMAEnv(DirectMARLEnv):
         self.target.write_root_velocity_to_sim(target_state[:, 7:], env_ids)
 
         # Step 5: Set agent states and compute gimbal angles
+        # Collect reset states for delay system initialization (Fix 3.2)
+        # We store computed values here because robot.data won't be updated until physics step
+        reset_states = {}
+
         for i, agent_id in enumerate(self.cfg.possible_agents):
             robot = self._robots[agent_id]
 
@@ -1211,13 +1367,29 @@ class IrisMAEnv(DirectMARLEnv):
                 joint_ids=gimbal_joint_ids,
                 env_ids=env_ids
             )
+            robot.set_joint_position_target(
+                target=torch.stack([gimbal_yaw, gimbal_roll, gimbal_pitch], dim=-1),
+                joint_ids=gimbal_joint_ids
+            )
+
+            # Store reset states for delay system initialization
+            # These are the actual values being written - robot.data won't be updated until physics step
+            reset_states[agent_id] = {
+                'position': agent_root_state[:, 0:3].clone(),  # [len(env_ids), 3]
+                'orientation': agent_root_state[:, 3:7].clone(),  # [len(env_ids), 4] (wxyz)
+                'linear_velocity': agent_root_state[:, 7:10].clone(),  # [len(env_ids), 3]
+                'angular_velocity': agent_root_state[:, 10:13].clone(),  # [len(env_ids), 3]
+                'joint_positions': joint_pos.clone(),  # [len(env_ids), 3] (yaw, pitch, roll)
+                'joint_velocities': joint_vel.clone(),  # [len(env_ids), 3]
+                'zoom_level': self.zoom_level[env_ids, i].clone(),  # [len(env_ids)] - already reset to 1.0
+            }
 
         # =====================================================================
         # Reset Delay System with Initial GT States
         # =====================================================================
-        # Build initial GT states from robot data for proper FirstOrderLag initialization
+        # Build initial GT states using computed reset values (not stale robot.data)
         # This prevents the initial transient where filtered values slowly converge from zeros
-        initial_gt_states = self._build_initial_gt_states_for_reset(env_ids)
+        initial_gt_states = self._build_initial_gt_states_for_reset(env_ids, reset_states=reset_states)
         self.delay_system.reset(env_ids=env_ids, initial_gt_states=initial_gt_states)
 
         # eye=self._robots[self.cfg.possible_agents[0]].data.root_pos_w[env_ids[0]].tolist()+[5.0, 5.0, 5.0]
@@ -1306,6 +1478,6 @@ class IrisMAEnv(DirectMARLEnv):
                 )
             else:
                 self.visualization.tri_cov_visualizer[agent_id].visualize(
-                    translations=torch.zeros((0, 3), device=self.device), # [N, 3]
-                    scales=torch.zeros((0, 3), device=self.device), # [N, 3]
+                    translations=torch.zeros(1, 3, device=self.device), # [N, 3]
+                    scales=torch.zeros(1, 3, device=self.device), # [N, 3]
                 )

@@ -29,7 +29,7 @@ from isaaclab_tasks.direct.iris_ma3 import bbox_raycaster
 @configclass
 class IrisMAEnvCfg(DirectMARLEnvCfg):
     # env
-    episode_length_s = 20.0
+    episode_length_s = 2.0 # NOTE: 20 -> 2 for quick testing
     decimation = 10
     
     # Define agents
