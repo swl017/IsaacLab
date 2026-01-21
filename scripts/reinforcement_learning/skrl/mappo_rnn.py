@@ -321,7 +321,7 @@ class MAPPO_RNN(MultiAgent):
                         rnn_input = {"rnn": self._rnn_states[uid]["value"]}
                     
                     values, _, value_outputs = self.values[uid].act(
-                        {"states": self._shared_state_preprocessor[uid](shared_states_payload), **rnn_input}, 
+                        {"states": self._shared_state_preprocessor[uid](shared_states_payload[uid]), **rnn_input},
                         role="value"
                     )
                     values = self._value_preprocessor[uid](values, inverse=True)
@@ -353,7 +353,7 @@ class MAPPO_RNN(MultiAgent):
                     truncated=truncated[uid],
                     log_prob=self._current_log_prob[uid],
                     values=values,
-                    shared_states=shared_states_payload,
+                    shared_states=shared_states_payload[uid],
                     **rnn_states_storage,
                 )
                 
