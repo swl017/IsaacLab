@@ -10,9 +10,9 @@ The MAPPO-RNN system provides:
 - ✅ **Episode masking** - Step-by-step GRU processing to prevent gradient contamination
 - ✅ **Preprocessors** - RunningStandardScaler for state normalization
 - ✅ **Bounded log std** - Prevents policy collapse
-- ✅ **YAML configuration** - Easy hyperparameter tuning per task
+- ✅ **Hydra configuration** - Easy hyperparameter tuning via YAML and CLI overrides
 - ✅ **Single & multi-agent** - Works for both paradigms
-- ✅ **CLI overrides** - Change hyperparameters without editing files
+- ✅ **Ray Tune compatible** - Hydra overrides work seamlessly with hyperparameter optimization
 
 ## Quick Start
 
@@ -20,27 +20,26 @@ The MAPPO-RNN system provides:
 
 ```bash
 # Train Quadcopter with MAPPO-RNN
-python scripts/reinforcement_learning/skrl/train_mappo_rnn.py \
+python scripts/reinforcement_learning/skrl/train_mappo_rnn_hydra.py \
     --task Isaac-Quadcopter-Direct-v0 \
     --num_envs 1024 \
     --headless
 
-# With custom hyperparameters
-python scripts/reinforcement_learning/skrl/train_mappo_rnn.py \
+# With Hydra overrides for custom hyperparameters
+python scripts/reinforcement_learning/skrl/train_mappo_rnn_hydra.py \
     --task Isaac-Quadcopter-Direct-v0 \
     --num_envs 1024 \
-    --sequence_length 50 \
-    --burn_in_steps 10 \
-    --learning_rate 1e-3 \
-    --rollouts 800 \
-    --headless
+    agent.agent.sequence_length=50 \
+    agent.agent.burn_in_steps=10 \
+    agent.agent.learning_rate=1e-3 \
+    agent.agent.rollouts=800
 ```
 
 ### Multi-Agent Training
 
 ```bash
 # Train multi-agent Iris environment
-python scripts/reinforcement_learning/skrl/train_mappo_rnn.py \
+python scripts/reinforcement_learning/skrl/train_mappo_rnn_hydra.py \
     --task Isaac-Iris-MA2-Direct-Comm-v0 \
     --num_envs 400 \
     --headless
@@ -51,8 +50,9 @@ python scripts/reinforcement_learning/skrl/train_mappo_rnn.py \
 ```
 IsaacLab/
 ├── scripts/reinforcement_learning/skrl/
-│   ├── train_mappo_rnn.py          # Main training script
-│   └── mappo_rnn.py                 # MAPPO_RNN agent implementation
+│   ├── train_mappo_rnn_hydra.py     # Main training script (Hydra-based)
+│   ├── mappo_rnn.py                 # MAPPO_RNN agent implementation
+│   └── MAPPO_RNN_GUIDE.md           # This documentation
 │
 └── source/isaaclab_tasks/isaaclab_tasks/direct/
     └── quadcopter/
@@ -146,16 +146,46 @@ gym.register(
 
 ### 3. CLI Arguments
 
-Override config values from the command line:
+The script accepts two types of arguments:
 
+**Standard Arguments** (with `--` prefix):
 ```bash
---sequence_length 50      # RNN sequence length
---burn_in_steps 10        # Burn-in steps
---learning_rate 1e-3      # Learning rate
---rollouts 800            # Rollouts before update
---max_iterations 5000     # Total training iterations
---experiment_name my_exp  # Custom experiment name
---seed 42                 # Random seed
+--task Isaac-Quadcopter-Direct-v0  # Task name (required)
+--num_envs 1024                    # Number of environments
+--seed 42                          # Random seed
+--headless                         # Run without GUI (default: True)
+```
+
+**Hydra Overrides** (without `--` prefix, use `=` for assignment):
+```bash
+# Agent parameters
+agent.agent.sequence_length=50           # RNN sequence length
+agent.agent.burn_in_steps=10             # Burn-in steps
+agent.agent.learning_rate=1e-3           # Learning rate
+agent.agent.rollouts=800                 # Rollouts before update
+
+# Model parameters
+models.policy.hidden_size=256      # Policy network hidden size
+models.policy.gru_num_layers=2     # Number of GRU layers
+models.value.gru_hidden_size=256   # Value network GRU hidden size
+
+# Trainer parameters
+trainer.timesteps=400000           # Total training timesteps
+
+# Experiment settings
+agent.agent.experiment.directory=my_logs # Log directory name
+agent.agent.experiment.experiment_name=my_exp  # Experiment name
+```
+
+**Example with mixed arguments:**
+```bash
+python scripts/reinforcement_learning/skrl/train_mappo_rnn_hydra.py \
+    --task Isaac-Quadcopter-Direct-v0 \
+    --num_envs 1024 \
+    --seed 42 \
+    agent.agent.learning_rate=5e-4 \
+    agent.agent.sequence_length=64 \
+    models.policy.gru_hidden_size=512
 ```
 
 ## Key Features
@@ -301,14 +331,16 @@ rollouts: 800
 
 | Feature | MAPPO_RNN (This) | SKRL PPO_RNN | train_ppo_rnn.py |
 |---------|------------------|--------------|------------------|
-| **burn_in_steps** | ✅ 10 steps | ❌ Not supported | ❌ Not implemented |
+| **burn_in_steps** | ✅ Configurable | ❌ Not supported | ❌ Not implemented |
 | **Episode masking** | ✅ Step-by-step | ⚠️ Model dependent | ❌ Not implemented |
 | **Preprocessors** | ✅ Auto-configured | ⚠️ Manual setup | ❌ Not configured |
 | **Log std bounds** | ✅ Bounded | ⚠️ Model dependent | ❌ Unbounded |
-| **YAML config** | ✅ Per-task | ❌ Code-based | ❌ Hardcoded |
+| **Hydra config** | ✅ Per-task YAML | ❌ Code-based | ❌ Hardcoded |
 | **Single-agent** | ✅ Supported | ✅ Native | ✅ Native |
 | **Multi-agent** | ✅ Supported | ❌ Not supported | ❌ Not supported |
-| **CLI overrides** | ✅ All hyperparams | ⚠️ Limited | ⚠️ Limited |
+| **Hydra overrides** | ✅ All hyperparams | ❌ Not supported | ❌ Not supported |
+| **Ray Tune** | ✅ Compatible | ⚠️ Manual setup | ⚠️ Manual setup |
+| **TensorBoard logging** | ✅ Episode metrics | ✅ Basic | ✅ Basic |
 
 ## Advanced Usage
 
@@ -351,18 +383,52 @@ gym.register(
 )
 ```
 
+### Ray Tune Integration
+
+The Hydra configuration system makes it easy to integrate with Ray Tune for hyperparameter optimization:
+
+```python
+# Example Ray Tune config
+from ray import tune
+
+search_space = {
+    "agent.agent.learning_rate": tune.loguniform(1e-4, 1e-2),
+    "agent.agent.sequence_length": tune.choice([32, 64, 128]),
+    "agent.agent.burn_in_steps": tune.choice([5, 10, 20]),
+    "models.policy.gru_hidden_size": tune.choice([128, 256, 512]),
+}
+
+# Ray Tune passes these as hydra_args to the training script
+```
+
+The script automatically handles Hydra overrides passed via `hydra_args`, making it fully compatible with Ray Tune's hyperparameter search.
+
 ### Logging and Checkpoints
 
 Results are saved to:
 
 ```
-logs/skrl/<experiment_dir>/<timestamp>_<experiment_name>/
+logs/skrl/<experiment_dir>/<timestamp>_mappo_rnn_torch_<experiment_name>/
 ├── params/
-│   ├── config.yaml          # Full configuration used
-│   └── config.pkl           # Pickled config
+│   ├── env.yaml             # Environment configuration
+│   ├── agent.yaml           # Agent configuration
+│   ├── env.pkl              # Pickled environment config
+│   └── agent.pkl            # Pickled agent config
 ├── checkpoints/             # Model checkpoints during training
-├── agent_agent_0_final.pt   # Final trained model
-└── training_config.pt       # Training metadata
+├── events.out.tfevents.*    # TensorBoard logs
+└── agent_agent_0_final.pt   # Final trained model
+```
+
+**TensorBoard Logging:**
+
+Episode metrics from the environment are automatically logged:
+- `Info / Episode_Reward/*` - Per-reward-component averages
+- `Info / Episode_Termination/*` - Termination statistics
+- `Info / Metrics/*` - Custom environment metrics
+
+View logs with:
+```bash
+tensorboard --logdir logs/skrl/<experiment_dir>
 ```
 
 ## Troubleshooting
@@ -416,18 +482,26 @@ gym.register(
 You now have a complete, production-ready MAPPO-RNN training system that:
 
 1. ✅ **Works out of the box** - Just run the command with your task name
-2. ✅ **Highly configurable** - YAML configs + CLI overrides
+2. ✅ **Hydra configuration** - YAML configs + Hydra CLI overrides
 3. ✅ **Single & multi-agent** - Automatic detection and handling
 4. ✅ **All advanced features** - burn-in, episode masking, bounded exploration
-5. ✅ **Extensible** - Easy to add new tasks or customize configs
+5. ✅ **Ray Tune compatible** - Seamless hyperparameter optimization
+6. ✅ **TensorBoard logging** - Episode metrics automatically logged
 
 The system is ready for your command:
 
 ```bash
-python scripts/reinforcement_learning/skrl/train_mappo_rnn.py \
+# Basic training
+python scripts/reinforcement_learning/skrl/train_mappo_rnn_hydra.py \
+    --task Isaac-Quadcopter-Direct-v0 \
+    --num_envs 1024
+
+# With Hydra overrides
+python scripts/reinforcement_learning/skrl/train_mappo_rnn_hydra.py \
     --task Isaac-Quadcopter-Direct-v0 \
     --num_envs 1024 \
-    --headless
+    agent.agent.learning_rate=5e-4 \
+    agent.agent.sequence_length=64
 ```
 
-Enjoy training! 🚀
+Enjoy training!

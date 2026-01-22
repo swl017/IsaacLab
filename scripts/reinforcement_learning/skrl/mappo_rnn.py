@@ -344,11 +344,12 @@ class MAPPO_RNN(MultiAgent):
                         rnn_states_storage[f"rnn_value_{i}"] = s.transpose(0, 1)
                 
                 # storage transition in memory
+                # NOTE: next_states removed - tensor was never created in memory
+                # PPO doesn't need next_states since it uses GAE with stored values
                 self.memories[uid].add_samples(
                     states=states[uid],
                     actions=actions[uid],
                     rewards=rewards[uid],
-                    next_states=next_states[uid],
                     terminated=terminated[uid],
                     truncated=truncated[uid],
                     log_prob=self._current_log_prob[uid],
@@ -456,23 +457,182 @@ class MAPPO_RNN(MultiAgent):
             memory.set_tensor_by_name("values", self._value_preprocessor[uid](values, train=True))
             memory.set_tensor_by_name("returns", self._value_preprocessor[uid](returns, train=True))
             memory.set_tensor_by_name("advantages", advantages)
-            
-            # sample mini-batches from memory
-            sampled_batches = memory.sample_all(
-                names=self._tensors_names, 
-                mini_batches=self._mini_batches[uid],
-                sequence_length=self._rnn_sequence_lengths[uid]
-            )
-            
-            # Sample RNN states if available
-            sampled_rnn_batches = None
+
+            # ============================================================
+            # CUSTOM RECURRENT MINIBATCH GENERATOR
+            # skrl's sample_all returns flattened data - we need sequences
+            # ============================================================
+            seq_len = self._rnn_sequence_lengths[uid]
+            num_envs = memory.num_envs
+            memory_size = memory.memory_size  # This is T (timesteps per rollout)
+
+            # Get raw tensors from memory - shape: (T, N, ...)
+            raw_states = memory.get_tensor_by_name("states")  # (T, N, obs_dim)
+            raw_shared_states = memory.get_tensor_by_name("shared_states")
+            raw_actions = memory.get_tensor_by_name("actions")
+            raw_terminated = memory.get_tensor_by_name("terminated")
+            raw_truncated = memory.get_tensor_by_name("truncated")
+            raw_log_prob = memory.get_tensor_by_name("log_prob")
+            raw_values = memory.get_tensor_by_name("values")
+            raw_returns = memory.get_tensor_by_name("returns")
+            raw_advantages = memory.get_tensor_by_name("advantages")
+
+            # Get RNN initial states if available
+            raw_rnn_states = []
             if uid in self._rnn_tensors_names and self._rnn_tensors_names[uid]:
-                sampled_rnn_batches = memory.sample_all(
-                    names=self._rnn_tensors_names[uid],
-                    mini_batches=self._mini_batches[uid],
-                    sequence_length=self._rnn_sequence_lengths[uid],
-                )
-            
+                for rnn_name in self._rnn_tensors_names[uid]:
+                    raw_rnn_states.append(memory.get_tensor_by_name(rnn_name))  # (T, N, layers, hidden)
+
+            # Transpose to (N, T, ...) for easier sequence slicing
+            states_NT = raw_states.transpose(0, 1).contiguous()  # (N, T, obs_dim)
+            shared_states_NT = raw_shared_states.transpose(0, 1).contiguous()
+            actions_NT = raw_actions.transpose(0, 1).contiguous()
+            terminated_NT = raw_terminated.transpose(0, 1).contiguous()
+            truncated_NT = raw_truncated.transpose(0, 1).contiguous()
+            log_prob_NT = raw_log_prob.transpose(0, 1).contiguous()
+            values_NT = raw_values.transpose(0, 1).contiguous()
+            returns_NT = raw_returns.transpose(0, 1).contiguous()
+            advantages_NT = raw_advantages.transpose(0, 1).contiguous()
+
+            rnn_states_NT = [r.transpose(0, 1).contiguous() for r in raw_rnn_states]  # List of (N, T, layers, hidden)
+
+            # Create non-overlapping sequences
+            # T must be divisible by seq_len, or we truncate
+            num_sequences_per_env = memory_size // seq_len
+            effective_T = num_sequences_per_env * seq_len
+
+            if effective_T < memory_size:
+                # Truncate to fit exact sequences
+                states_NT = states_NT[:, :effective_T]
+                shared_states_NT = shared_states_NT[:, :effective_T]
+                actions_NT = actions_NT[:, :effective_T]
+                terminated_NT = terminated_NT[:, :effective_T]
+                truncated_NT = truncated_NT[:, :effective_T]
+                log_prob_NT = log_prob_NT[:, :effective_T]
+                values_NT = values_NT[:, :effective_T]
+                returns_NT = returns_NT[:, :effective_T]
+                advantages_NT = advantages_NT[:, :effective_T]
+                rnn_states_NT = [r[:, :effective_T] for r in rnn_states_NT]
+
+            # Reshape to (N * num_seq, seq_len, ...)
+            total_sequences = num_envs * num_sequences_per_env
+
+            def reshape_to_sequences(tensor_NT, seq_len):
+                # (N, T, ...) -> (N, num_seq, seq_len, ...) -> (N*num_seq, seq_len, ...)
+                shape = tensor_NT.shape
+                N, T = shape[0], shape[1]
+                rest = shape[2:] if len(shape) > 2 else ()
+                num_seq = T // seq_len
+                reshaped = tensor_NT.view(N, num_seq, seq_len, *rest)
+                return reshaped.view(N * num_seq, seq_len, *rest)
+
+            seq_states = reshape_to_sequences(states_NT, seq_len)  # (total_seq, seq_len, obs_dim)
+            seq_shared_states = reshape_to_sequences(shared_states_NT, seq_len)
+            seq_actions = reshape_to_sequences(actions_NT, seq_len)
+            seq_terminated = reshape_to_sequences(terminated_NT, seq_len)
+            seq_truncated = reshape_to_sequences(truncated_NT, seq_len)
+            seq_log_prob = reshape_to_sequences(log_prob_NT, seq_len)
+            seq_values = reshape_to_sequences(values_NT, seq_len)
+            seq_returns = reshape_to_sequences(returns_NT, seq_len)
+            seq_advantages = reshape_to_sequences(advantages_NT, seq_len)
+
+            # For RNN initial states, we need the state at the START of each sequence
+            # rnn_states_NT is (N, T, layers, hidden)
+            # We need states at t=0, seq_len, 2*seq_len, ... for each env
+            seq_rnn_initial = []
+            for rnn_NT in rnn_states_NT:
+                # (N, T, layers, hidden) -> select every seq_len timesteps
+                N, T, layers, hidden = rnn_NT.shape
+                num_seq = T // seq_len
+                # Indices: 0, seq_len, 2*seq_len, ...
+                indices = torch.arange(0, effective_T, seq_len, device=rnn_NT.device)
+                initial_states = rnn_NT[:, indices, :, :]  # (N, num_seq, layers, hidden)
+                initial_states = initial_states.view(N * num_seq, layers, hidden)  # (total_seq, layers, hidden)
+                seq_rnn_initial.append(initial_states)
+
+            # Create mini-batches by shuffling sequence indices
+            mini_batch_size = total_sequences // self._mini_batches[uid]
+            indices = torch.randperm(total_sequences, device=self.device)
+
+            # Build sampled_batches list (similar format to original but with sequences)
+            sampled_batches = []
+            sampled_rnn_batches = []
+            for mb in range(self._mini_batches[uid]):
+                start = mb * mini_batch_size
+                end = start + mini_batch_size
+                mb_indices = indices[start:end]
+
+                sampled_batches.append((
+                    seq_states[mb_indices],           # (B, S, obs_dim)
+                    seq_shared_states[mb_indices],
+                    seq_actions[mb_indices],
+                    seq_terminated[mb_indices],
+                    seq_truncated[mb_indices],
+                    seq_log_prob[mb_indices],
+                    seq_values[mb_indices],
+                    seq_returns[mb_indices],
+                    seq_advantages[mb_indices],
+                ))
+
+                if seq_rnn_initial:
+                    sampled_rnn_batches.append([rnn[mb_indices] for rnn in seq_rnn_initial])
+
+            # ============================================================
+            # SANITY CHECKS - Verify RNN training is working correctly
+            # ============================================================
+            if sampled_batches and self._rollout <= self._rollouts:  # Only on first update
+                first_batch = sampled_batches[0]
+                sampled_states_check = first_batch[0]  # states
+                sampled_terminated_check = first_batch[3]  # terminated
+                sampled_truncated_check = first_batch[4]  # truncated
+
+                logger.info(f"\n{'='*60}")
+                logger.info(f"MAPPO_RNN SANITY CHECK (Agent: {uid})")
+                logger.info(f"{'='*60}")
+                logger.info(f"Memory: T={memory_size}, N={num_envs}")
+                logger.info(f"Sequence length: {seq_len}")
+                logger.info(f"Sequences per env: {num_sequences_per_env}")
+                logger.info(f"Total sequences: {total_sequences}")
+                logger.info(f"Mini-batch size: {mini_batch_size}")
+                logger.info(f"Number of mini-batches: {len(sampled_batches)}")
+
+                # Check 1: sampled_states shape
+                logger.info(f"\n[CHECK 1] sampled_states.shape: {sampled_states_check.shape}")
+                if sampled_states_check.dim() == 2:
+                    logger.warning("  WARNING: sampled_states is 2D (batch, obs_dim)")
+                    logger.warning("      This means you are NOT doing BPTT!")
+                    logger.warning("      Expected 3D: (batch, sequence, obs_dim)")
+                elif sampled_states_check.dim() == 3:
+                    logger.info(f"  Good: sampled_states is 3D (batch={sampled_states_check.shape[0]}, "
+                               f"seq={sampled_states_check.shape[1]}, obs={sampled_states_check.shape[2]})")
+
+                # Check 2: RNN hidden states shape
+                if sampled_rnn_batches:
+                    rnn_batch_0 = sampled_rnn_batches[0]
+                    logger.info(f"\n[CHECK 2] sampled_rnn_batches[0] (initial hidden states):")
+                    for idx, rnn_tensor in enumerate(rnn_batch_0):
+                        logger.info(f"  rnn_tensor[{idx}].shape: {rnn_tensor.shape}")
+                        # New format: (batch, layers, hidden) - 3D is correct
+                        if rnn_tensor.dim() == 3:
+                            logger.info(f"    Good: (batch={rnn_tensor.shape[0]}, layers={rnn_tensor.shape[1]}, hidden={rnn_tensor.shape[2]})")
+                else:
+                    logger.warning("\n[CHECK 2] No RNN batches sampled!")
+
+                # Check 3: terminated/truncated shape
+                logger.info(f"\n[CHECK 3] terminated/truncated shapes:")
+                logger.info(f"  sampled_terminated.shape: {sampled_terminated_check.shape}")
+                logger.info(f"  sampled_truncated.shape: {sampled_truncated_check.shape}")
+                combined_dones = sampled_terminated_check | sampled_truncated_check
+                logger.info(f"  combined dones shape: {combined_dones.shape}")
+                if combined_dones.dim() == 3 and combined_dones.shape[-1] == 1:
+                    logger.info("  Note: dones has trailing dim 1, will be squeezed")
+
+                # Summary
+                is_seq = sampled_states_check.dim() == 3
+                logger.info(f"\n{'='*60}")
+                logger.info(f"VERDICT: {'SEQUENCE TRAINING ACTIVE - BPTT enabled!' if is_seq else 'NOT doing BPTT'}")
+                logger.info(f"{'='*60}\n")
+
             cumulative_policy_loss = 0
             cumulative_entropy_loss = 0
             cumulative_value_loss = 0
@@ -498,10 +658,15 @@ class MAPPO_RNN(MultiAgent):
                     rnn_policy = {}
                     rnn_value = {}
                     if sampled_rnn_batches:
+                        # Fix terminated shape: squeeze trailing dim if (B, S, 1) -> (B, S)
+                        combined_terminated = sampled_terminated | sampled_truncated
+                        if combined_terminated.dim() == 3 and combined_terminated.shape[-1] == 1:
+                            combined_terminated = combined_terminated.squeeze(-1)
+
                         if policy is value:
                             rnn_policy = {
                                 "rnn": [s.transpose(0, 1) for s in sampled_rnn_batches[i]],
-                                "terminated": sampled_terminated | sampled_truncated,
+                                "terminated": combined_terminated,
                             }
                             rnn_value = rnn_policy
                         else:
@@ -511,7 +676,7 @@ class MAPPO_RNN(MultiAgent):
                                     for s, n in zip(sampled_rnn_batches[i], self._rnn_tensors_names[uid])
                                     if "policy" in n
                                 ],
-                                "terminated": sampled_terminated | sampled_truncated,
+                                "terminated": combined_terminated,
                             }
                             rnn_value = {
                                 "rnn": [
@@ -519,48 +684,71 @@ class MAPPO_RNN(MultiAgent):
                                     for s, n in zip(sampled_rnn_batches[i], self._rnn_tensors_names[uid])
                                     if "value" in n
                                 ],
-                                "terminated": sampled_terminated | sampled_truncated,
+                                "terminated": combined_terminated,
                             }
                     
                     with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
-                        
-                        sampled_states = self._state_preprocessor[uid](sampled_states, train=not epoch)
-                        sampled_shared_states = self._shared_state_preprocessor[uid](
-                            sampled_shared_states, train=not epoch
-                        )
-                        
+
+                        # Check if we have sequence data (3D tensors)
+                        is_sequence = sampled_states.dim() == 3
+                        batch_size, seq_length = (sampled_states.shape[0], sampled_states.shape[1]) if is_sequence else (sampled_states.shape[0], 1)
+
+                        # For sequence training:
+                        # - States stay 3D (B, S, obs) -> model processes sequences with GRU, outputs (B*S, hidden)
+                        # - Actions must be flattened to (B*S, action_dim) to match model output
+                        # - Model's compute_base handles the sequence->flattened transformation internally
+
+                        if is_sequence:
+                            # Flatten actions to match model's flattened output
+                            flat_actions = sampled_actions.flatten(0, 1)  # (B*S, action_dim)
+                        else:
+                            flat_actions = sampled_actions
+
+                        # Preprocess states (handles 3D correctly - normalizes per feature)
+                        proc_states = self._state_preprocessor[uid](sampled_states, train=not epoch)
+                        proc_shared_states = self._shared_state_preprocessor[uid](sampled_shared_states, train=not epoch)
+
+                        # Policy forward pass - model internally processes 3D states through GRU
+                        # and outputs flattened (B*S, action_dim) mean + log_prob
                         _, next_log_prob, _ = policy.act(
-                            {"states": sampled_states, "taken_actions": sampled_actions, **rnn_policy}, role="policy"
+                            {"states": proc_states, "taken_actions": flat_actions, **rnn_policy}, role="policy"
                         )
-                        
-                        # compute value predictions
-                        predicted_values, _, _ = value.act({"states": sampled_shared_states, **rnn_value}, role="value")
-                        
+
+                        # Value forward pass
+                        predicted_values, _, _ = value.act({"states": proc_shared_states, **rnn_value}, role="value")
+
                         # Apply burn-in masking
-                        # If burn-in is enabled and we have sequence data, exclude burn-in steps from losses
-                        if self._burn_in_steps > 0 and next_log_prob.dim() > 1:  # Sequence data
+                        if is_sequence and self._burn_in_steps > 0:
                             burn_in = self._burn_in_steps
-                            seq_len = next_log_prob.shape[1] if next_log_prob.dim() == 2 else next_log_prob.shape[0]
-                            
-                            if seq_len > burn_in:
-                                # Slice out burn-in steps - only use post-burn-in steps for loss
-                                next_log_prob = next_log_prob[:, burn_in:] if next_log_prob.dim() == 2 else next_log_prob[burn_in:]
-                                predicted_values = predicted_values[:, burn_in:] if predicted_values.dim() == 2 else predicted_values[burn_in:]
-                                
-                                # Also slice the targets
-                                sampled_log_prob = sampled_log_prob[:, burn_in:] if sampled_log_prob.dim() == 2 else sampled_log_prob[burn_in:]
-                                sampled_values = sampled_values[:, burn_in:] if sampled_values.dim() == 2 else sampled_values[burn_in:]
-                                sampled_returns = sampled_returns[:, burn_in:] if sampled_returns.dim() == 2 else sampled_returns[burn_in:]
-                                sampled_advantages = sampled_advantages[:, burn_in:] if sampled_advantages.dim() == 2 else sampled_advantages[burn_in:]
-                        
-                        # Flatten if still multi-dimensional
-                        if next_log_prob.dim() > 1:
+
+                            # Reshape model outputs back to (B, S, ...) for burn-in slicing
+                            next_log_prob = next_log_prob.view(batch_size, seq_length, -1)
+                            predicted_values = predicted_values.view(batch_size, seq_length, -1)
+
+                            if seq_length > burn_in:
+                                # Slice out burn-in steps from model outputs
+                                next_log_prob = next_log_prob[:, burn_in:]
+                                predicted_values = predicted_values[:, burn_in:]
+                                # Slice out burn-in steps from targets
+                                sampled_log_prob = sampled_log_prob[:, burn_in:]
+                                sampled_values = sampled_values[:, burn_in:]
+                                sampled_returns = sampled_returns[:, burn_in:]
+                                sampled_advantages = sampled_advantages[:, burn_in:]
+
+                            # Flatten everything for loss computation
                             next_log_prob = next_log_prob.flatten()
-                            sampled_log_prob = sampled_log_prob.flatten()
-                            sampled_advantages = sampled_advantages.flatten()
                             predicted_values = predicted_values.flatten()
+                            sampled_log_prob = sampled_log_prob.flatten()
                             sampled_values = sampled_values.flatten()
                             sampled_returns = sampled_returns.flatten()
+                            sampled_advantages = sampled_advantages.flatten()
+                        elif is_sequence:
+                            # No burn-in, but still need to flatten sequence targets
+                            sampled_log_prob = sampled_log_prob.flatten()
+                            sampled_values = sampled_values.flatten()
+                            sampled_returns = sampled_returns.flatten()
+                            sampled_advantages = sampled_advantages.flatten()
+                            # Model outputs are already flattened (B*S, ...)
                         
                         # compute approximate KL divergence
                         with torch.no_grad():
@@ -683,7 +871,7 @@ class MAPPORNNBaseModel(Model):
 
     def compute_base(self, inputs):
         """Shared forward pass logic with proper episode masking.
-        
+
         This method processes sequences step-by-step, zeroing the hidden state
         whenever an episode terminates within the sequence. This prevents
         gradient contamination across episode boundaries.
@@ -691,6 +879,10 @@ class MAPPORNNBaseModel(Model):
         x = self.net(inputs["states"])
         h = inputs.get("rnn", [None])[0]  # (layers, batch, hidden)
         dones = inputs.get("terminated", None)  # (batch, seq) or None
+
+        # Fix dones shape: ensure it's (B, S) not (B, S, 1)
+        if dones is not None and dones.dim() == 3 and dones.shape[-1] == 1:
+            dones = dones.squeeze(-1)
 
         # Check if we are processing a single time-step (e.g., during interaction)
         is_single_step = x.dim() == 2

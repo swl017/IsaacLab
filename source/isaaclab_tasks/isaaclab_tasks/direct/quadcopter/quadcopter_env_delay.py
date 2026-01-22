@@ -100,7 +100,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     ang_vel_reward_scale = -0.01
     distance_to_goal_reward_scale = 15.0
 
-    delay_steps: int = 0
+    delay_steps: int = 2
     
     """Configuration for action and observation delays. Disabled by default.
 

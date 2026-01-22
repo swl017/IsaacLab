@@ -7,34 +7,34 @@ seed: 42
 models:
   policy:
     class_name: mappo_rnn  # Will use MAPPORNNPolicy from scripts/reinforcement_learning/skrl/mappo_rnn.py
-    hidden_size: 256
+    hidden_size: 64
     gru_num_layers: 2
-    gru_hidden_size: 256
+    gru_hidden_size: 64
     initial_log_std: -0.5  # σ ≈ 0.6
     min_log_std: -5.0      # σ_min ≈ 0.007, prevents collapse
     max_log_std: 0.7       # σ_max ≈ 2.0, caps exploration
 
   value:
     class_name: mappo_rnn  # Will use MAPPORNNValue
-    hidden_size: 256
+    hidden_size: 64
     gru_num_layers: 2
-    gru_hidden_size: 256
+    gru_hidden_size: 64
 
 # Agent configuration
 agent:
   # RNN-specific parameters
-  sequence_length: 50        # RNN sequence length for training
-  burn_in_steps: 10          # Burn-in steps for hidden state warm-up (must be < sequence_length)
+  sequence_length: 4        # RNN sequence length for training
+  burn_in_steps: 1          # Burn-in steps for hidden state warm-up (must be < sequence_length)
 
   # PPO parameters
-  rollouts: 350              # Number of rollouts before updating
+  rollouts: 28              # Number of rollouts before updating
   learning_epochs: 6         # Number of learning epochs during each update
   mini_batches: 2            # Number of mini batches (lower = better sequence sampling)
 
   discount_factor: 0.99      # Discount factor (gamma)
   lambda: 0.95               # TD(lambda) coefficient for GAE
 
-  learning_rate: 1.0e-3      # Learning rate (lower = better RNN stability)
+  learning_rate: 0.001     # Learning rate (lower = better RNN stability)
   random_timesteps: 0        # Random exploration steps
   learning_starts: 0         # Learning starts after this many steps
 
@@ -76,7 +76,7 @@ agent:
   # Experiment tracking
   experiment:
     directory: quadcopter_mappo_rnn
-    experiment_name: ""      # Will be set by training script
+    experiment_name: "seq5_roll35_delay2"      # Will be set by training script
     write_interval: auto
     checkpoint_interval: auto
     store_separately: false
