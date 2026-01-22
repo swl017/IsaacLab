@@ -1,0 +1,75 @@
+[3gH    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H [INFO] Using python from: /home/usrg/miniconda3/envs/env_isaaclab/bin/python
+Loading user config located at: '/home/usrg/isaacsim/kit/data/Kit/Isaac-Sim/4.5/user.config.json'
+[Info] [carb] Logging to file: /home/usrg/isaacsim/kit/logs/Kit/Isaac-Sim/4.5/kit_20260122_130504.log
+2026-01-22 04:05:04 [0ms] [Warning] [omni.kit.app.plugin] No crash reporter present, dumps uploading isn't available.
+2026-01-22 04:05:04 [3ms] [Warning] [omni.ext.plugin] [ext: driver_artifacts] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts' or '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts/config'
+2026-01-22 04:05:04 [3ms] [Warning] [omni.ext.plugin] [ext: rendering_modes] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes' or '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes/config'
+2026-01-22 04:05:04 [420ms] [Warning] [omni.usd_config.extension] Enable omni.materialx.libs extension to use MaterialX
+2026-01-22 04:05:04 [535ms] [Warning] [omni.platforminfo.plugin] failed to open the default display.  Can't verify X Server version.
+2026-01-22 04:05:04 [801ms] [Warning] [omni.isaac.dynamic_control] omni.isaac.dynamic_control is deprecated as of Isaac Sim 4.5. No action is needed from end-users.
+
+|---------------------------------------------------------------------------------------------|
+| Driver Version: 535.230.02    | Graphics API: Vulkan
+|=============================================================================================|
+| GPU | Name                             | Active | LDA | GPU Memory | Vendor-ID | LUID       |
+|     |                                  |        |     |            | Device-ID | UUID       |
+|     |                                  |        |     |            | Bus-ID    |            |
+|---------------------------------------------------------------------------------------------|
+| 0   | NVIDIA GeForce RTX 3090          | Yes: 0 |     | 24822   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2204      | 7116df58.. |
+|     |                                  |        |     |            | 9         |            |
+|=============================================================================================|
+| OS: 20.04.6 LTS (Focal Fossa) ubuntu, Version: 20.04.6, Kernel: 5.15.0-139-generic
+| Processor: AMD Ryzen 9 5950X 16-Core Processor
+| Cores: 16 | Logical Cores: 32
+|---------------------------------------------------------------------------------------------|
+| Total Memory (MB): 64194 | Free Memory: 47069
+| Total Page/Swap (MB): 13730 | Free Page/Swap: 13730
+|---------------------------------------------------------------------------------------------|
+[WARN][AppLauncher]: There are no arguments attached to the ArgumentParser object. If you have your own arguments, please load your own arguments before calling the `AppLauncher.add_app_launcher_args` method. This allows the method to check the validity of the arguments and perform checks for argument names.
+[INFO][AppLauncher]: Using device: cuda:0
+[INFO][AppLauncher]: Loading experience file: /home/usrg/IsaacPX4/IsaacLab/apps/isaaclab.python.headless.kit
+================================================================================
+DELAY SYSTEM TEST SUITE
+================================================================================
+Device:        cuda
+Torch version: 2.5.1+cu118
+CUDA version:  11.8
+GPU name:      NVIDIA GeForce RTX 3090
+Started:       2026-01-22 13:05:08
+
+================================================================================
+Testing DelayCfg
+================================================================================
+  ✓ Default initialization
+  ✓ Custom initialization
+  ✓ Validation - negative min_delay
+  ✓ Validation - max_delay < min_delay
+
+================================================================================
+Testing DelaySystemCfg
+================================================================================
+  ✓ Default initialization
+  ✓ Action delay only configuration
+  ✓ Both delays configured
+
+================================================================================
+Testing DelaySystem
+================================================================================
+Configuration: 16 environments, action_dim=4, obs_dim=12
+Device: cuda
+  ✓ Initialization with delays disabled
+  ✓ Initialization with action delay enabled
+  ✓ Initialization with both delays enabled
+  ✓ Compute delayed action (no delay buffer)
+  ✓ Compute delayed observation (no delay buffer)
+  ✓ Compute delayed action with fixed delay
+  ✓ Reset functionality
+  ✓ Delay randomization
+  ✓ Get delay info
+  ✓ Manual delay setting
+
+================================================================================
+Integration Tests
+================================================================================
+  Running 100-step simulation....25.50.75

@@ -27,7 +27,7 @@ agent:
   burn_in_steps: 10          # Burn-in steps for hidden state warm-up (must be < sequence_length)
 
   # PPO parameters
-  rollouts: 150              # Number of rollouts before updating
+  rollouts: 350              # Number of rollouts before updating
   learning_epochs: 6         # Number of learning epochs during each update
   mini_batches: 2            # Number of mini batches (lower = better sequence sampling)
 
