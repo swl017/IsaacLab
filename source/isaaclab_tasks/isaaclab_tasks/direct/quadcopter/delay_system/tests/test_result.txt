@@ -1,12 +1,12 @@
-[3gH    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H [INFO] Using python from: /home/usrg/miniconda3/envs/env_isaaclab/bin/python
+[3gH    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H   [INFO] Using python from: /home/usrg/miniconda3/envs/env_isaaclab/bin/python
 Loading user config located at: '/home/usrg/isaacsim/kit/data/Kit/Isaac-Sim/4.5/user.config.json'
-[Info] [carb] Logging to file: /home/usrg/isaacsim/kit/logs/Kit/Isaac-Sim/4.5/kit_20260122_130504.log
-2026-01-22 04:05:04 [0ms] [Warning] [omni.kit.app.plugin] No crash reporter present, dumps uploading isn't available.
-2026-01-22 04:05:04 [3ms] [Warning] [omni.ext.plugin] [ext: driver_artifacts] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts' or '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts/config'
-2026-01-22 04:05:04 [3ms] [Warning] [omni.ext.plugin] [ext: rendering_modes] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes' or '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes/config'
-2026-01-22 04:05:04 [420ms] [Warning] [omni.usd_config.extension] Enable omni.materialx.libs extension to use MaterialX
-2026-01-22 04:05:04 [535ms] [Warning] [omni.platforminfo.plugin] failed to open the default display.  Can't verify X Server version.
-2026-01-22 04:05:04 [801ms] [Warning] [omni.isaac.dynamic_control] omni.isaac.dynamic_control is deprecated as of Isaac Sim 4.5. No action is needed from end-users.
+[Info] [carb] Logging to file: /home/usrg/isaacsim/kit/logs/Kit/Isaac-Sim/4.5/kit_20260122_230529.log
+2026-01-22 14:05:29 [0ms] [Warning] [omni.kit.app.plugin] No crash reporter present, dumps uploading isn't available.
+2026-01-22 14:05:29 [3ms] [Warning] [omni.ext.plugin] [ext: driver_artifacts] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts' or '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts/config'
+2026-01-22 14:05:29 [3ms] [Warning] [omni.ext.plugin] [ext: rendering_modes] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes' or '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes/config'
+2026-01-22 14:05:29 [426ms] [Warning] [omni.usd_config.extension] Enable omni.materialx.libs extension to use MaterialX
+2026-01-22 14:05:29 [546ms] [Warning] [omni.platforminfo.plugin] failed to open the default display.  Can't verify X Server version.
+2026-01-22 14:05:29 [813ms] [Warning] [omni.isaac.dynamic_control] omni.isaac.dynamic_control is deprecated as of Isaac Sim 4.5. No action is needed from end-users.
 
 |---------------------------------------------------------------------------------------------|
 | Driver Version: 535.230.02    | Graphics API: Vulkan
@@ -23,20 +23,20 @@ Loading user config located at: '/home/usrg/isaacsim/kit/data/Kit/Isaac-Sim/4.5/
 | Processor: AMD Ryzen 9 5950X 16-Core Processor
 | Cores: 16 | Logical Cores: 32
 |---------------------------------------------------------------------------------------------|
-| Total Memory (MB): 64194 | Free Memory: 47069
+| Total Memory (MB): 64194 | Free Memory: 23829
 | Total Page/Swap (MB): 13730 | Free Page/Swap: 13730
 |---------------------------------------------------------------------------------------------|
 [WARN][AppLauncher]: There are no arguments attached to the ArgumentParser object. If you have your own arguments, please load your own arguments before calling the `AppLauncher.add_app_launcher_args` method. This allows the method to check the validity of the arguments and perform checks for argument names.
 [INFO][AppLauncher]: Using device: cuda:0
 [INFO][AppLauncher]: Loading experience file: /home/usrg/IsaacPX4/IsaacLab/apps/isaaclab.python.headless.kit
 ================================================================================
-DELAY SYSTEM TEST SUITE
+DELAY SYSTEM TEST SUITE (V1 + V2)
 ================================================================================
 Device:        cuda
 Torch version: 2.5.1+cu118
 CUDA version:  11.8
 GPU name:      NVIDIA GeForce RTX 3090
-Started:       2026-01-22 13:05:08
+Started:       2026-01-22 23:05:33
 
 ================================================================================
 Testing DelayCfg
@@ -72,4 +72,61 @@ Device: cuda
 ================================================================================
 Integration Tests
 ================================================================================
-  Running 100-step simulation....25.50.75
+  Running 100-step simulation....25.50.75 done
+  ✓ Simulated training loop (100 steps)
+  ✓ Verify delay timing (3-step fixed delay)
+  ✓ Large batch size (4096 envs)
+
+================================================================================
+Testing DataBus (V2)
+================================================================================
+  ✓ DataBus initialization
+  ✓ Store data without noise
+  ✓ Store data with noise
+  ✓ Step time advancement
+  ✓ Reset specific environments
+
+================================================================================
+Testing DelayPipeline (V2)
+================================================================================
+  ✓ First-order lag filtering
+  ✓ Time constant invariance
+  ✓ Staleness (sample-and-hold)
+  ✓ Dropout mechanism
+  ✓ Pipeline reset functionality
+
+================================================================================
+Testing DerivedFieldComputer (V2)
+================================================================================
+  ✓ Basic derived field computation
+  ✓ Dependency ordering
+  ✓ Missing sources handled gracefully
+  ✓ Velocity magnitude computation
+
+================================================================================
+Testing DelaySystemV2 (V2)
+================================================================================
+  ✓ Legacy mode (backward compatibility)
+  ✓ Enhanced mode initialization
+  ✓ Store and retrieve clean data
+  ✓ Noise injection
+  ✓ Clean path has no dropout
+  ✓ Step and reset
+  ✓ Curriculum learning hooks
+  ✓ Derived field computation
+
+================================================================================
+V2 Integration Tests
+================================================================================
+  Running 100-step simulation....25.50.75 done
+  ✓ Full pipeline simulation (100 steps)
+  ✓ Large batch size V2 (4096 envs)
+
+================================================================================
+TEST SUMMARY
+================================================================================
+Total Tests: 44
+Passed:      44 (100.0%)
+Failed:      0 (0.0%)
+Errors:      0 (0.0%)
+================================================================================
