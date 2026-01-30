@@ -24,12 +24,12 @@ IRIS_CFG = ArticulationCfg(
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
             max_depenetration_velocity=10.0,
-            enable_gyroscopic_forces=True,
+            enable_gyroscopic_forces=False,  # Disabled - gyroscopic coupling may interfere with control
         ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             enabled_self_collisions=False,
             solver_position_iteration_count=4,
-            solver_velocity_iteration_count=0,
+            solver_velocity_iteration_count=4,  # Increased from 0 to allow torques to affect velocities
             sleep_threshold=0.005,
             stabilization_threshold=0.001,
         ),
@@ -41,21 +41,18 @@ IRIS_CFG = ArticulationCfg(
             ".*": 0.0,
         },
         joint_vel={
-            # "cgo3_vertical_arm_joint": 0.0,
-            # "cgo3_horizontal_arm_joint": 0.0,
-            # "cgo3_camera_joint": 0.0,
-            "joint0": 200.0,
-            "joint1": -200.0,
-            "joint2": 200.0,
-            "joint3": -200.0,
+            # Set propeller joints to zero - we control via external forces, not joint motors
+            # The 200 rad/s initial velocities were causing gyroscopic coupling issues
+            "joint0": 0.0,
+            "joint1": 0.0,
+            "joint2": 0.0,
+            "joint3": 0.0,
         },
     ),
     actuators={
-        "dummy": ImplicitActuatorCfg(
-            joint_names_expr=[".*"],
-            stiffness=0.0,
-            damping=0.0,
-        ),
+        # REMOVED: Dummy actuators were overriding external force/torque commands
+        # The actuators call set_dof_velocity_targets() which overwrites our control
+        # For external wrench-based control, we don't need actuators on the joints
     },
 )
 """Configuration for the Iris quadcopter."""
