@@ -20,66 +20,10 @@
 
 4. (Raised at 2026-01-30 23:00) Check initial state (especially gimbal pointing to the target and formation) and randomization is correct and respects curriculum and physical limits, like gimbal tilt limits, at reset. Gimbal joint_id inconsistancy must be resolved prior to this issue.
 
-5. (Raised at 2026-02-01 00:50) Gimbal joint_id inconsistant between set_joint_position and reading actual joint angles. We need to review the structure inside Iris USDA model.
-    ```
-    # Implementation
-    """ NOTE: Abuse of variables/terms: 
-        1.  cmd_vel[:, idx, 4] and cmd_vel[:, idx, 5] are used as target angles (not rates) instead.
-        2.  targets are applied to in roll, pitch, yaw order, regardless of joint_ids yaw, pitch, roll order.
-    """
-    robot.set_joint_position_target(
-        target=torch.stack([
-            torch.zeros_like(gimbal_roll_stabilizing), 
-            torch.clamp(self.cmd_vel[:, idx, 4], min=self.cfg.gimbal.pitch_limits[0], max=self.cfg.gimbal.pitch_limits[1]),
-            torch.clamp(self.cmd_vel[:, idx, 5], min=self.cfg.gimbal.yaw_limits[0], max=self.cfg.gimbal.yaw_limits[1])], dim=-1),
-        joint_ids=[
-            self.gimbal_joint_idx[agent_id]["yaw"],
-            self.gimbal_joint_idx[agent_id]["roll"],
-            self.gimbal_joint_idx[agent_id]["pitch"],
-        ]
-    )
-    """ Debug logs """
-    gimbal_targets = torch.stack([
-            gimbal_roll_stabilizing, 
-            torch.clamp(self.cmd_vel[:, idx, 4], min=self.cfg.gimbal.pitch_limits[0], max=self.cfg.gimbal.pitch_limits[1]), 
-            torch.clamp(self.cmd_vel[:, idx, 5], min=self.cfg.gimbal.yaw_limits[0], max=self.cfg.gimbal.yaw_limits[1])], dim=-1)
-    carb.log_warn(f"gimbal targets (roll, pitch, yaw): {gimbal_targets.cpu().numpy().round(2)}")
-    
-    gimbal_actual = torch.stack([
-            robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["roll"]], 
-            robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["pitch"]], 
-            robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["yaw"]]], dim=-1)
-    carb.log_warn(f"gimbal actual (roll, pitch, yaw): {gimbal_actual.cpu().numpy().round(2)}")
-    ```
-    ```
-    # Terminal output
-    # Gimbal actually turns in pitch direction in the simulation with pitch targets applied
-    2026-01-31 15:46:39 [30,537ms] [Warning] [isaaclab_tasks.direct.iris_ma4.iris_ma_env4] gimbal targets (roll, pitch, yaw): [[ 0.   -0.79  0.  ]
-    [ 0.   -0.79  0.  ]
-    [ 0.   -0.79  0.  ]
-    [ 0.   -0.79  0.  ]]
-    2026-01-31 15:46:39 [30,538ms] [Warning] [isaaclab_tasks.direct.iris_ma4.iris_ma_env4] gimbal actual (roll, pitch, yaw): [[-0.79 -0.    0.  ]
-    [-0.79 -0.    0.  ]
-    [-0.79 -0.    0.  ]
-    [-0.79 -0.    0.  ]]
-
-    # Transient (roll command shows up when actual yaw value is above certain value)
-    # Gimbal actually turns in yaw direction in the simulation with yaw targets applied
-    2026-01-31 16:41:39 [150,708ms] [Warning] [isaaclab_tasks.direct.iris_ma4.iris_ma_env4] gimbal targets (roll, pitch, yaw): [[ 0.79 -0.    3.49]
-    [-0.79 -0.    3.49]
-    [ 0.79 -0.    3.49]
-    [ 0.79 -0.    3.49]]
-    2026-01-31 16:41:39 [150,708ms] [Warning] [isaaclab_tasks.direct.iris_ma4.iris_ma_env4] gimbal actual (roll, pitch, yaw): [[ 0.    3.49  0.  ]
-    [ 0.    3.49  0.  ]
-    [ 0.    3.49  0.  ]
-    [-0.    3.49 -0.  ]]
-
-    2026-01-31 16:43:10 [241,762ms] [Warning] [isaaclab_tasks.direct.iris_ma4.iris_ma_env4] gimbal targets (roll, pitch, yaw): [[ 0.   -0.    3.49]
-    [ 0.   -0.    3.49]
-    [ 0.   -0.    3.49]
-    [ 0.   -0.    3.49]]
-    2026-01-31 16:43:10 [241,763ms] [Warning] [isaaclab_tasks.direct.iris_ma4.iris_ma_env4] gimbal actual (roll, pitch, yaw): [[-0.    1.41 -0.  ]
-    [-0.    1.41 -0.  ]
-    [-0.    1.41 -0.  ]
-    [ 0.    1.41  0.  ]]
-    ```
+5. (Raised at 2026-02-01 00:50, resolved 2026-02-01 02:30) Gimbal joint_id inconsistant between set_joint_position and reading actual joint angles. We need to review the structure inside Iris USDA model.
+    - Now Convention Established
+        joint_positions_b tensor uses [pitch, yaw, roll] convention:
+        Index 0: pitch
+        Index 1: yaw
+        Index 2: roll
+        This convention is camera-centric and matches what compute_camera_orientation_from_gimbal() expects.

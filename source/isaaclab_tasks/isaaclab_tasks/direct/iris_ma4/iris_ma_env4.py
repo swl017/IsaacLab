@@ -459,17 +459,17 @@ class IrisMAEnvV4(DirectMARLEnv):
             )
 
             """ Debug logs """
-            gimbal_targets = torch.stack([
-                    self.cmd_gimbal_pitch[:, idx],
-                    self.cmd_gimbal_yaw[:, idx],
-                    gimbal_roll_stabilizing], dim=-1)
-            carb.log_warn(f"gimbal targets (pitch, yaw, roll): {gimbal_targets.cpu().numpy().round(2)}")
+            # gimbal_targets = torch.stack([
+            #         self.cmd_gimbal_pitch[:, idx],
+            #         self.cmd_gimbal_yaw[:, idx],
+            #         gimbal_roll_stabilizing], dim=-1)
+            # carb.log_warn(f"gimbal targets (pitch, yaw, roll): {gimbal_targets.cpu().numpy().round(2)}")
 
-            gimbal_actual = torch.stack([
-                    robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["pitch"]],
-                    robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["yaw"]],
-                    robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["roll"]]], dim=-1)
-            carb.log_warn(f"gimbal actual (pitch, yaw, roll): {gimbal_actual.cpu().numpy().round(2)}")
+            # gimbal_actual = torch.stack([
+            #         robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["pitch"]],
+            #         robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["yaw"]],
+            #         robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["roll"]]], dim=-1)
+            # carb.log_warn(f"gimbal actual (pitch, yaw, roll): {gimbal_actual.cpu().numpy().round(2)}")
 
             self.zoom_level[:, idx] += self.cmd_vel[:, idx, 6] * self.cfg.max_zoom_rate * self.cfg.sim.dt
             self.zoom_level[:, idx] = torch.clamp(self.zoom_level[:, idx], min=1.0, max=self.cfg.max_zoom_level)
