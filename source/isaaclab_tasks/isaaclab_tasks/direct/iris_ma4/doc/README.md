@@ -251,6 +251,38 @@ The gimbal is mounted on the drone body and provides camera stabilization throug
 R_body_to_gimbal = R_yaw(α) @ R_roll @ R_pitch(β)
 ```
 
+#### Gimbal Joint Ordering Convention: `[pitch, yaw, roll]`
+
+Throughout iris_ma4, gimbal joint positions/velocities are stored in tensors with this ordering:
+
+| Index | Joint | Description |
+|-------|-------|-------------|
+| 0 | pitch | Camera tilt angle (primary for target tracking) |
+| 1 | yaw | Camera pan angle (primary for target tracking) |
+| 2 | roll | Horizon stabilization (computed automatically) |
+
+This convention is used in:
+- `AgentStatesData.joint_positions_b`: `[N, 3]` tensor with `[pitch, yaw, roll]`
+- `AgentStatesData.joint_velocities_b`: `[N, 3]` tensor with `[pitch_rate, yaw_rate, roll_rate]`
+- All `set_joint_position_target()` calls in `iris_ma_env4.py`
+- All gimbal joint extraction code
+
+**Rationale**: Pitch and yaw are the primary control axes for camera pointing, while roll is typically used only for horizon stabilization. Placing pitch/yaw first aligns with camera-centric thinking and matches the expectations of `compute_camera_orientation_from_gimbal()` in `derived_field_computers.py`.
+
+**Example Usage:**
+```python
+# Extracting gimbal angles from joint_positions_b
+gimbal_pitch = state.data.joint_positions_b[:, 0:1]  # [N, 1]
+gimbal_yaw = state.data.joint_positions_b[:, 1:2]    # [N, 1]
+gimbal_roll = state.data.joint_positions_b[:, 2:3]   # [N, 1]
+
+# Setting joint targets (target tensor and joint_ids must match order)
+robot.set_joint_position_target(
+    target=torch.stack([pitch_target, yaw_target, roll_target], dim=-1),
+    joint_ids=[pitch_joint_id, yaw_joint_id, roll_joint_id]
+)
+```
+
 ### Camera Frame (C)
 
 **Convention: Optical (RDF - Right-Down-Forward)**

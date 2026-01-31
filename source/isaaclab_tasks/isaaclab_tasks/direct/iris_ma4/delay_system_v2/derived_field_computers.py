@@ -18,7 +18,7 @@ from isaaclab.utils.math import quat_mul, quat_rotate_inverse, matrix_from_quat
 
 def compute_camera_orientation_from_gimbal(
     body_orientation_w: torch.Tensor,       # [N, 4] quaternion (w, x, y, z)
-    joint_positions_b: torch.Tensor,        # [N, J] where J >= 2 (pitch, yaw)
+    joint_positions_b: torch.Tensor,        # [N, J] where J >= 2 ([pitch, yaw, roll] convention)
     camera_offset_rotation_b: torch.Tensor, # [N, 4] quaternion
 ) -> torch.Tensor:
     """
@@ -29,15 +29,16 @@ def compute_camera_orientation_from_gimbal(
 
     Args:
         body_orientation_w: Body orientation in world frame [N, 4] (w, x, y, z)
-        joint_positions_b: Gimbal joint angles [N, J] (at least pitch, yaw)
+        joint_positions_b: Gimbal joint angles [N, J] using [pitch, yaw, roll] convention
+                          (pitch at [0], yaw at [1], roll at [2] if present)
         camera_offset_rotation_b: Camera mounting offset rotation [N, 4]
 
     Returns:
         camera_orientation_w: Camera orientation in world frame [N, 4]
     """
-    # Extract gimbal angles (pitch=joint[0], yaw=joint[1])
-    pitch = joint_positions_b[:, 0]  # [N]
-    yaw = joint_positions_b[:, 1] if joint_positions_b.shape[1] > 1 else torch.zeros_like(pitch)
+    # Extract gimbal angles using [pitch, yaw, roll] convention
+    pitch = joint_positions_b[:, 0]  # [N] - pitch is at index 0
+    yaw = joint_positions_b[:, 1] if joint_positions_b.shape[1] > 1 else torch.zeros_like(pitch)  # yaw is at index 1
 
     # Convert Euler angles to quaternion
     # Gimbal rotation: pitch around Y, yaw around Z
@@ -310,11 +311,11 @@ def compute_combined_angular_velocity(
         combined_angular_velocity_w: Combined velocity in world frame [N, 3]
         combined_angular_velocity_b: Combined velocity in body frame [N, 3]
     """
-    # Extract gimbal velocities (pitch_rate, yaw_rate)
+    # Extract gimbal velocities using [pitch, yaw, roll] convention
     pitch_rate = joint_velocities_b[:, 0] if joint_velocities_b.shape[1] > 0 else torch.zeros(
         body_angular_velocity_b.shape[0], device=body_angular_velocity_b.device
-    )
-    yaw_rate = joint_velocities_b[:, 1] if joint_velocities_b.shape[1] > 1 else torch.zeros_like(pitch_rate)
+    )  # pitch_rate is at index 0
+    yaw_rate = joint_velocities_b[:, 1] if joint_velocities_b.shape[1] > 1 else torch.zeros_like(pitch_rate)  # yaw_rate is at index 1
 
     # Gimbal angular velocity in body frame
     # Assuming gimbal axes: yaw around body Z, pitch around body Y
