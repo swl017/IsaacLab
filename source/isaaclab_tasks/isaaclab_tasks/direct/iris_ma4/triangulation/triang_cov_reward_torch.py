@@ -278,8 +278,18 @@ def jacs_for_view_batch(
         Sigma_theta = torch.zeros(N, C, 0, 0, device=device)
     
     # Weight matrix (inverse pixel covariance)
-    W_i = torch.linalg.inv(Sigma_pix)  # [N, C, 2, 2]
-    
+    # Add minimum eigenvalue floor to prevent singularity when curriculum scales Sigma_pix near zero
+    MIN_SIGMA_PIX_DIAG = 1e-6
+    Sigma_pix_safe = Sigma_pix.clone()
+    Sigma_pix_safe[:, :, 0, 0] = torch.clamp(Sigma_pix_safe[:, :, 0, 0], min=MIN_SIGMA_PIX_DIAG)
+    Sigma_pix_safe[:, :, 1, 1] = torch.clamp(Sigma_pix_safe[:, :, 1, 1], min=MIN_SIGMA_PIX_DIAG)
+
+    try:
+        W_i = torch.linalg.inv(Sigma_pix_safe)  # [N, C, 2, 2]
+    except RuntimeError:
+        # Fallback to pseudo-inverse if still singular (edge case)
+        W_i = torch.linalg.pinv(Sigma_pix_safe)
+
     return JX, J_theta, Sigma_theta, W_i
 
 

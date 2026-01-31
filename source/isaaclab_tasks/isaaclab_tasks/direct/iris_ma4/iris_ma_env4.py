@@ -397,18 +397,21 @@ class IrisMAEnvV4(DirectMARLEnv):
             self._actions[agent_id] = action.clone()
 
             # Scale actions
+            # [0 vx, 1 vy, 2 vz, 3 yaw_rate, 4 gimbal_yaw_rate, 5 gimbal_pitch_rate, 6 zoom_rate]
             self.cmd_vel[:, idx, 0:3] = action[:, 0:3] * self.cfg.max_lin_vel
             self.cmd_vel[:, idx, 3] = action[:, 3] * self.cfg.max_yaw_rate
             self.cmd_vel[:, idx, 4:6] = action[:, 4:6] * self.cfg.gimbal.max_rate
             self.cmd_vel[:, idx, 6] = action[:, 6] * self.cfg.max_zoom_rate
+            """ Debug logs """
+            # carb.log_warn(f"cmd_vel:\n{self.cmd_vel[:, idx, :].cpu().numpy()}")
 
             # Get current gimbal angles
             robot = self._robots[agent_id]
             gimbal_yaw = robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["yaw"]].clone()
             gimbal_pitch = robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["pitch"]].clone()
 
-            self.cmd_gimbal_yaw[:, idx] = gimbal_yaw + self.cmd_vel[:, idx, 4] * self.step_dt
-            self.cmd_gimbal_pitch[:, idx] = gimbal_pitch + self.cmd_vel[:, idx, 5] * self.step_dt
+            self.cmd_gimbal_yaw[:, idx] = torch.clamp(self.cmd_gimbal_yaw[:, idx] + self.cmd_vel[:, idx, 4] * self.step_dt, min=self.cfg.gimbal.yaw_limits[0], max=self.cfg.gimbal.yaw_limits[1])
+            self.cmd_gimbal_pitch[:, idx] = torch.clamp(self.cmd_gimbal_pitch[:, idx] + torch.ones_like(self.cmd_vel[:, idx, 5]) * self.step_dt, min=self.cfg.gimbal.pitch_limits[0], max=self.cfg.gimbal.pitch_limits[1])
 
     def _apply_action(self):
         """Apply actions to the environment. Runs at simulation rate, not at decimated rate."""
@@ -438,14 +441,54 @@ class IrisMAEnvV4(DirectMARLEnv):
 
             gimbal_roll_stabilizing = self._gimbal_stabilizers[agent_id].compute_stabilizing_roll(gimbal_yaw, gimbal_pitch, robot.data.root_quat_w)
 
+            """ NOTE: Abuse of variables/terms: 
+                1.  cmd_vel[:, idx, 4] and cmd_vel[:, idx, 5] are used as target angles (not rates) instead.
+                2.  targets are applied to in roll, pitch, yaw order, regardless of joint_ids yaw, pitch, roll order.
+            """
             robot.set_joint_position_target(
-                target=torch.stack([self.cmd_gimbal_yaw[:, idx], gimbal_roll_stabilizing, self.cmd_gimbal_pitch[:, idx]], dim=-1),
+                target=torch.stack([
+                    torch.zeros_like(gimbal_roll_stabilizing), 
+                    torch.clamp(self.cmd_vel[:, idx, 4], min=self.cfg.gimbal.pitch_limits[0], max=self.cfg.gimbal.pitch_limits[1]), 
+                    torch.clamp(self.cmd_vel[:, idx, 5], min=self.cfg.gimbal.yaw_limits[0], max=self.cfg.gimbal.yaw_limits[1])], dim=-1),
                 joint_ids=[
                     self.gimbal_joint_idx[agent_id]["yaw"],
                     self.gimbal_joint_idx[agent_id]["roll"],
                     self.gimbal_joint_idx[agent_id]["pitch"],
                 ]
             )
+
+            """ What it should have been.(but doesn't work)"""
+            # robot.set_joint_position_target(
+            #     target=torch.stack([self.cmd_gimbal_yaw[:, idx], gimbal_roll_stabilizing, self.cmd_gimbal_pitch[:, idx]], dim=-1),
+            #     joint_ids=[
+            #         self.gimbal_joint_idx[agent_id]["yaw"],
+            #         self.gimbal_joint_idx[agent_id]["roll"],
+            #         self.gimbal_joint_idx[agent_id]["pitch"],
+            #     ]
+            # )
+
+            """ This could have been a good alternative.(but doesn't work)"""
+            # robot.set_joint_velocity_target(
+            #     target=torch.stack([torch.zeros_like(gimbal_roll_stabilizing), self.cmd_vel[:, idx, 4], self.cmd_vel[:, idx, 5]], dim=-1),
+            #     joint_ids=[
+            #         self.gimbal_joint_idx[agent_id]["yaw"],
+            #         self.gimbal_joint_idx[agent_id]["roll"],
+            #         self.gimbal_joint_idx[agent_id]["pitch"],
+            #     ]
+            # )
+
+            """ Debug logs """
+            # gimbal_targets = torch.stack([
+            #         gimbal_roll_stabilizing, 
+            #         torch.clamp(self.cmd_vel[:, idx, 4], min=self.cfg.gimbal.pitch_limits[0], max=self.cfg.gimbal.pitch_limits[1]), 
+            #         torch.clamp(self.cmd_vel[:, idx, 5], min=self.cfg.gimbal.yaw_limits[0], max=self.cfg.gimbal.yaw_limits[1])], dim=-1)
+            # carb.log_warn(f"gimbal targets (roll, pitch, yaw): {gimbal_targets.cpu().numpy().round(2)}")
+            
+            # gimbal_actual = torch.stack([
+            #         robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["roll"]], 
+            #         robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["pitch"]], 
+            #         robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["yaw"]]], dim=-1)
+            # carb.log_warn(f"gimbal actual (roll, pitch, yaw): {gimbal_actual.cpu().numpy().round(2)}")
 
             self.zoom_level[:, idx] += self.cmd_vel[:, idx, 6] * self.cfg.max_zoom_rate * self.cfg.sim.dt
             self.zoom_level[:, idx] = torch.clamp(self.zoom_level[:, idx], min=1.0, max=self.cfg.max_zoom_level)
@@ -1078,20 +1121,25 @@ class IrisMAEnvV4(DirectMARLEnv):
         self.extras["log"].update(all_extras)
 
         # Generate formation and target positions
+        # Use tracking curriculum progress to scale randomization difficulty
+        formation_scale = self.progress_tracking  # 0.0 -> 1.0 as training progresses
+
         formation_data = self.randomizer.initial_states.get_random_formation(
             num_agents=len(self.cfg.possible_agents),
             num_envs=len(env_ids),
-            scale_factor=1.0,
+            scale_factor=formation_scale,
         )
 
         target_positions = self.randomizer.targets.sample_target_position(
             formation_data=formation_data,
-            scale_factor=1.0,
+            scale_factor=formation_scale,
         )
-        target_positions0 = torch.tensor([10.0, 0.0, 1.0], device=self.device).unsqueeze(0).repeat(len(env_ids), 1)
+        target_positions0 = torch.tensor([10.0, 0.0, 0.5], device=self.device).unsqueeze(0).repeat(len(env_ids), 1)
 
         terrain_offset = self._terrain.env_origins[env_ids]
-        target_pos = target_positions * self.progress_tracking + target_positions0 * (1.0 - self.progress_tracking) + terrain_offset
+        target_pos = target_positions + terrain_offset
+        """ Debug mode """
+        # target_pos = target_positions0 + terrain_offset
 
         target_state = self.target.data.default_root_state[env_ids].clone()
         target_state[:, 0:3] = target_pos
@@ -1112,13 +1160,15 @@ class IrisMAEnvV4(DirectMARLEnv):
             agent_orientations = formation_data[:, i, 3:7]
             agent_velocities = formation_data[:, i, 7:13]
 
-            agent_positions = torch.tensor([0.0, i * 5.0, 1.0], device=self.device).unsqueeze(0).repeat(len(env_ids), 1)
-            agent_orientations = quat_from_euler_xyz(
-                torch.zeros(len(env_ids), device=self.device),
-                torch.zeros(len(env_ids), device=self.device),
-                torch.zeros(len(env_ids), device=self.device)
-            )
-            agent_velocities = torch.zeros(len(env_ids), 6, device=self.device)
+            # HARDCODED OVERRIDE - Uncomment below to use fixed positions for quick testing
+            """ Debug mode """
+            # agent_positions = torch.tensor([0.0, i * 5.0, 1.0], device=self.device).unsqueeze(0).repeat(len(env_ids), 1)
+            # agent_orientations = quat_from_euler_xyz(
+            #     torch.zeros(len(env_ids), device=self.device),
+            #     torch.zeros(len(env_ids), device=self.device),
+            #     torch.zeros(len(env_ids), device=self.device)
+            # )
+            # agent_velocities = torch.zeros(len(env_ids), 6, device=self.device)
 
             agent_root_state = robot.data.default_root_state[env_ids].clone()
             agent_root_state[:, 0:3] = agent_positions + terrain_offset
@@ -1135,12 +1185,23 @@ class IrisMAEnvV4(DirectMARLEnv):
                     drone_quat_world=agent_orientations
                 )
 
+            # Verify gimbal angles are within configured limits
+            if __debug__:
+                assert (gimbal_pitch >= self.cfg.gimbal.pitch_limits[0]).all(), \
+                    f"Initial gimbal pitch {gimbal_pitch.min():.3f} below min {self.cfg.gimbal.pitch_limits[0]:.3f}"
+                assert (gimbal_pitch <= self.cfg.gimbal.pitch_limits[1]).all(), \
+                    f"Initial gimbal pitch {gimbal_pitch.max():.3f} above max {self.cfg.gimbal.pitch_limits[1]:.3f}"
+                assert (gimbal_yaw >= self.cfg.gimbal.yaw_limits[0]).all(), \
+                    f"Initial gimbal yaw {gimbal_yaw.min():.3f} below min {self.cfg.gimbal.yaw_limits[0]:.3f}"
+                assert (gimbal_yaw <= self.cfg.gimbal.yaw_limits[1]).all(), \
+                    f"Initial gimbal yaw {gimbal_yaw.max():.3f} above max {self.cfg.gimbal.yaw_limits[1]:.3f}"
+
             gimbal_joint_ids = [
                 self.gimbal_joint_idx[agent_id]["yaw"],
                 self.gimbal_joint_idx[agent_id]["roll"],
                 self.gimbal_joint_idx[agent_id]["pitch"],
             ]
-            joint_pos = torch.stack([gimbal_yaw, gimbal_pitch, gimbal_roll], dim=-1)
+            joint_pos = torch.stack([gimbal_yaw, gimbal_roll, gimbal_pitch], dim=-1)
             joint_vel = robot.data.default_joint_vel[env_ids][:, gimbal_joint_ids].clone()
 
             robot.write_joint_state_to_sim(
@@ -1149,11 +1210,18 @@ class IrisMAEnvV4(DirectMARLEnv):
                 joint_ids=gimbal_joint_ids,
                 env_ids=env_ids
             )
-            robot.set_joint_position_target(
-                target=torch.stack([gimbal_yaw, gimbal_roll, gimbal_pitch], dim=-1),
-                joint_ids=gimbal_joint_ids,
-                env_ids=env_ids
-            )
+            # robot.set_joint_position_target(
+            #     # target=torch.stack([gimbal_yaw, gimbal_roll, gimbal_pitch], dim=-1),
+            #     target=torch.stack([torch.ones_like(gimbal_yaw)*1, torch.ones_like(gimbal_roll)*0.2, torch.ones_like(gimbal_pitch)*0.5], dim=-1),
+            #     joint_ids=gimbal_joint_ids,
+            #     env_ids=env_ids
+            # )
+            # robot.write_joint_state_to_sim(
+            #     position=torch.stack([torch.ones_like(gimbal_yaw)*1, torch.ones_like(gimbal_roll)*0.2, torch.ones_like(gimbal_pitch)*0.5], dim=-1),
+            #     velocity=joint_vel,
+            #     joint_ids=gimbal_joint_ids,
+            #     env_ids=env_ids
+            # )
 
             reset_states[agent_id] = {
                 'position': agent_root_state[:, 0:3].clone(),
@@ -1229,15 +1297,6 @@ class IrisMAEnvV4(DirectMARLEnv):
                     agent_id=agent_id,
                     translations=X_w_tri[valid_envs, 0, :],
                     scales=scale[valid_envs, 0, :],
-                )
-
-                states = self.delay_system.get_all_states_for_observations(agent_id)
-                bbox = states[agent_id].data.bboxes_2d[:, 0, :]
-                bbox_valid = self.bbox_raycaster.validate_bbox(bbox)
-                self.visualization.detection_indicator[agent_id].draw_indicator(
-                    start_points=states[agent_id].data.camera_position_w[valid_envs],
-                    end_points=X_w_tri[valid_envs, 0, :],
-                    detected=bbox_valid[valid_envs]
                 )
             else:
                 # Use safe visualization method that checks if prim is ready

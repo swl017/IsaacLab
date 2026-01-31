@@ -169,6 +169,233 @@ iris_ma4/
 └── doc/                         # Documentation
 ```
 
+## Frame Conventions
+
+This section documents the coordinate frame conventions used throughout iris_ma4.
+
+### Global Conventions
+
+| Convention | Format | Description |
+|------------|--------|-------------|
+| Quaternion | `(w, x, y, z)` | Scalar-first format (Isaac Sim convention) |
+| Euler Angles | `(roll, pitch, yaw)` | XYZ order, radians |
+| Rotation Order | ZYX | Yaw → Pitch → Roll (extrinsic) |
+
+### World Frame (W)
+
+**Convention: ENU (East-North-Up)**
+
+```
+    Z (Up)
+    │
+    │
+    │
+    └───────── Y (North/Left)
+   /
+  /
+ X (East/Forward)
+```
+
+- **X-axis**: East (or Forward in simulation)
+- **Y-axis**: North (or Left in simulation)
+- **Z-axis**: Up
+- **Gravity**: `[0, 0, -9.81]` m/s²
+
+### Body Frame (B) - Drone
+
+**Convention: FLU (Forward-Left-Up)**
+
+```
+    Z_b (Up)
+    │
+    │    ┌────────┐
+    │   /  Drone  /
+    │  /   Body  /
+    └────────── Y_b (Left)
+   /
+  /
+ X_b (Forward)
+```
+
+- **X-axis**: Forward (nose direction)
+- **Y-axis**: Left (port wing)
+- **Z-axis**: Up (dorsal)
+- Attached to the drone's center of mass
+- Rotates with the drone body
+
+**State Variables in Body Frame:**
+- `body_linear_velocity_b`: Linear velocity in body frame
+- `body_angular_velocity_b`: Angular velocity in body frame (roll_rate, pitch_rate, yaw_rate)
+- `body_linear_acceleration_b`: Linear acceleration in body frame
+
+### Gimbal Frame (G)
+
+**Convention: FLU with ZYX rotation sequence**
+
+The gimbal is mounted on the drone body and provides camera stabilization through three joints:
+
+1. **Yaw Joint** (α): Rotation around body Z-axis
+   - Positive: Counter-clockwise when viewed from above
+   - Limits: Typically ±π rad
+
+2. **Roll Joint**: Rotation around rotated X-axis (after yaw)
+   - Used for horizon stabilization
+   - Automatically computed to keep horizon level
+
+3. **Pitch Joint** (β): Rotation around rotated Y-axis (after yaw and roll)
+   - Positive: Camera tilts down
+   - Limits: Typically [-π/2, 0] rad (looking down)
+
+**Rotation Composition:**
+```
+R_body_to_gimbal = R_yaw(α) @ R_roll @ R_pitch(β)
+```
+
+### Camera Frame (C)
+
+**Convention: Optical (RDF - Right-Down-Forward)**
+
+The camera frame follows computer vision conventions:
+
+```
+       Z_c (Forward/Optical axis)
+      /
+     /
+    /
+   └───────── X_c (Right)
+   │
+   │
+   │
+   Y_c (Down)
+```
+
+- **X-axis**: Right (image u-direction)
+- **Y-axis**: Down (image v-direction)
+- **Z-axis**: Forward (optical axis, depth direction)
+
+**Transformation from Gimbal (ENU) to Camera (RDF):**
+```python
+R_gimbal_to_camera = [
+    [0,  -1,  0],   # X_cam = -Y_gimbal (Right = -Left)
+    [0,   0, -1],   # Y_cam = -Z_gimbal (Down = -Up)
+    [1,   0,  0]    # Z_cam =  X_gimbal (Forward = Forward)
+]
+```
+
+**Camera Position Offset:**
+- Specified in body frame via `camera_offset_position_b`
+- Default offset quaternion: `[0.5, -0.5, 0.5, -0.5]` (represents the RDF rotation)
+
+### Image/Pixel Coordinates
+
+**Origin: Top-Left**
+
+```
+(0,0) ────────────────────── u (width)
+  │
+  │      Image Plane
+  │
+  │
+  v (height)
+```
+
+- **u**: Horizontal pixel coordinate (0 to width-1)
+- **v**: Vertical pixel coordinate (0 to height-1)
+
+**Bounding Box Format: Normalized xywh**
+```
+bbox = [cx, cy, w, h]
+```
+- `cx`: Center x (normalized 0-1, where 0.5 = image center)
+- `cy`: Center y (normalized 0-1, where 0.5 = image center)
+- `w`: Width (normalized 0-1)
+- `h`: Height (normalized 0-1)
+
+**Camera Intrinsic Matrix (K):**
+```
+K = [fx,  0, cx]
+    [ 0, fy, cy]
+    [ 0,  0,  1]
+```
+Where:
+- `fx, fy`: Focal lengths in pixels
+- `cx, cy`: Principal point (typically image center)
+
+### State Naming Conventions
+
+| Suffix | Meaning | Example |
+|--------|---------|---------|
+| `_w` | World frame | `body_position_w` |
+| `_b` | Body frame | `body_angular_velocity_b` |
+| `_c` | Camera frame | `points_camera` |
+| `_g` | Gimbal frame | `R_bg` (body to gimbal) |
+
+### Triangulation Geometry
+
+The triangulation module uses the following convention:
+
+```
+           Target (X_w)
+              ★
+             /│\
+            / │ \
+           /  │  \
+          /   │   \
+    ray_1/    │    \ray_2
+        /     │     \
+       /      │      \
+    Camera 1  │    Camera 2
+      ○───────┴───────○
+```
+
+**Ray Direction:**
+- Computed from bbox center using camera intrinsics
+- Normalized to unit length
+- Expressed in world frame
+
+**Midpoint Method:**
+- Finds the 3D point minimizing distance to all rays
+- Returns validity flag for behind-camera cases
+
+### Force/Torque Application
+
+**Point Mass Controller:**
+- Forces applied in body frame
+- Torques applied around body-frame axes (roll, pitch, yaw)
+- Gravity compensation in body frame when enabled
+
+**External Force Application:**
+```python
+robot.set_external_force_and_torque(
+    forces=force_body,      # [N, 1, 3] - in body frame
+    torques=moment_body,    # [N, 1, 3] - in body frame
+    body_ids=body_id
+)
+```
+
+### Common Frame Transformations
+
+| From | To | Function |
+|------|-----|----------|
+| World → Body | `quat_rotate_inverse(quat_w, vec_w)` |
+| Body → World | `quat_rotate(quat_w, vec_b)` |
+| Gimbal → Camera | Multiply by `R_gimbal_to_camera` |
+| Camera → Image | `pixel = K @ (point_c / point_c.z)` |
+
+### Important Notes
+
+1. **USD Model Convention**: The IRIS drone USD model has a 180° roll offset. The controller accounts for this by targeting `roll=π` instead of `roll=0` for level flight.
+
+2. **Gimbal Lock Prevention**: The gimbal stabilizer works directly in the gimbal base frame to avoid Euler angle singularities.
+
+3. **Zoom Handling**: Camera intrinsics are scaled by zoom level:
+   ```python
+   K_zoomed[:, 0, 0] = K_base[:, 0, 0] * zoom_level  # fx
+   K_zoomed[:, 1, 1] = K_base[:, 1, 1] * zoom_level  # fy
+   ```
+
+4. **Quaternion Operations**: Always use Isaac Lab's math utilities (`quat_mul`, `quat_inv`, `quat_rotate`) for consistency.
+
 ## Related Documentation
 
 - [Delay System V2](../delay_system_v2/doc/README.md) - Detailed delay pipeline documentation

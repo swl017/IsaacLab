@@ -53,26 +53,50 @@ IRIS_GIMBAL2_CFG = ArticulationCfg(
     ),
     actuators={
         # KEEP gimbal actuators - these are real servo motors for gimbal control
-        "pitch": ImplicitActuatorCfg(
-            joint_names_expr=["pitch_joint"],
-            effort_limit_sim=100.0,
-            velocity_limit_sim=3.14 * 3,  # ~9.42 rad/s max velocity
-            stiffness=2e2,
-            damping=1e0,
-        ),
         "roll": ImplicitActuatorCfg(
-            joint_names_expr=["roll_joint"],
-            effort_limit_sim=100.0,
+            joint_names_expr=["yaw_joint"],
+            effort_limit_sim=200.0,
             velocity_limit_sim=3.14 * 3,
-            stiffness=2e2,
-            damping=1e0,
+            stiffness=2e3,
+            damping=1e1,
+        ),
+        "pitch": ImplicitActuatorCfg(
+            joint_names_expr=["roll_joint"],
+            effort_limit_sim=200.0,
+            velocity_limit_sim=3.14 * 3,
+            stiffness=2e3,
+            damping=1e1,
         ),
         "yaw": ImplicitActuatorCfg(
-            joint_names_expr=["yaw_joint"],
-            effort_limit_sim=100.0,
-            velocity_limit_sim=3.14 * 3,
-            stiffness=2e2,
-            damping=1e0,
+            joint_names_expr=["pitch_joint"],
+            effort_limit_sim=200.0,
+            velocity_limit_sim=3.14 * 3,  # ~9.42 rad/s max velocity
+            stiffness=2e3,
+            damping=1e1,
+        ),
+        "prop0": ImplicitActuatorCfg(
+            joint_names_expr=["joint0"],
+            effort_limit_sim=0.0,
+            stiffness=0.0,
+            damping=0.0,
+        ),
+        "prop1": ImplicitActuatorCfg(
+            joint_names_expr=["joint1"],
+            effort_limit_sim=0.0,
+            stiffness=0.0,
+            damping=0.0,
+        ),
+        "prop2": ImplicitActuatorCfg(
+            joint_names_expr=["joint2"],
+            effort_limit_sim=0.0,
+            stiffness=0.0,
+            damping=0.0,
+        ),
+        "prop3": ImplicitActuatorCfg(
+            joint_names_expr=["joint3"],
+            effort_limit_sim=0.0,
+            stiffness=0.0,
+            damping=0.0,
         ),
         # REMOVED propeller actuators - base body controlled via external forces
         # The propeller actuators would override our direct PhysX force application

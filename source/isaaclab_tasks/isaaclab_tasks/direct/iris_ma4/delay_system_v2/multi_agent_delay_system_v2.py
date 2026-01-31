@@ -92,6 +92,10 @@ class MultiAgentDelaySystemV2:
     RAW_ZOOM_FIELDS = [
         "camera_zoom_level",
     ]
+    # Timestamp fields (delayed identically to their associated data)
+    RAW_TIMESTAMP_FIELDS = [
+        "timestamp_detection",  # Timestamp when detection data was captured
+    ]
     # Static fields (no delay, passthrough)
     STATIC_FIELDS = [
         "camera_offset_position_b",
@@ -245,6 +249,10 @@ class MultiAgentDelaySystemV2:
                 for field in self.RAW_ZOOM_FIELDS:
                     dims[f"{agent_id}.{field}.{perspective}"] = 1
 
+                # Timestamp fields (scalar values)
+                for field in self.RAW_TIMESTAMP_FIELDS:
+                    dims[f"{agent_id}.{field}.{perspective}"] = 1
+
         return dims
 
     def _build_field_configs(self) -> tuple[Dict[str, FieldDelayCfg], Dict[str, FieldDelayCfg]]:
@@ -309,6 +317,28 @@ class MultiAgentDelaySystemV2:
             )
             for field in self.RAW_ZOOM_FIELDS:
                 ego_configs[f"{agent_id}.{field}.ego"] = zoom_cfg_ego
+
+            # Timestamp fields: same delay as detection, but NO first-order lag
+            # Timestamps should not be smoothed, but should be delayed identically
+            timestamp_cfg_ego = FieldDelayCfg(
+                first_order_lag_enabled=False,  # No smoothing for timestamps
+                staleness_enabled=True,
+                sample_rate=DistributionCfg(
+                    type="normal",
+                    mean=cfg.detection_fps_mean,
+                    std=cfg.detection_fps_std,
+                ),
+                latency_enabled=True,
+                latency=DistributionCfg(
+                    type="normal",
+                    mean=cfg.detection_latency_mean,
+                    std=cfg.detection_latency_std,
+                ),
+                dropout_enabled=True,
+                dropout_prob=cfg.detection_dropout_rate,
+            )
+            for field in self.RAW_TIMESTAMP_FIELDS:
+                ego_configs[f"{agent_id}.{field}.ego"] = timestamp_cfg_ego
 
             # === Other perspective (slow inter-agent communication) ===
             # Motion fields: first-order lag + staleness + latency + dropout
@@ -418,6 +448,28 @@ class MultiAgentDelaySystemV2:
             )
             for field in self.RAW_ZOOM_FIELDS:
                 other_configs[f"{agent_id}.{field}.other"] = zoom_cfg_other
+
+            # Timestamp fields: same delay as detection, but NO first-order lag
+            # Timestamps should not be smoothed, but should be delayed identically
+            timestamp_cfg_other = FieldDelayCfg(
+                first_order_lag_enabled=False,  # No smoothing for timestamps
+                staleness_enabled=True,
+                sample_rate=DistributionCfg(
+                    type="normal",
+                    mean=cfg.detection_fps_mean,
+                    std=cfg.detection_fps_std,
+                ),
+                latency_enabled=True,
+                latency=DistributionCfg(
+                    type="normal",
+                    mean=cfg.detection_latency_mean + cfg.inter_agent_comm_latency_mean,
+                    std=(cfg.detection_latency_std**2 + cfg.inter_agent_comm_latency_std**2)**0.5,
+                ),
+                dropout_enabled=True,
+                dropout_prob=min(1.0, cfg.detection_dropout_rate + cfg.inter_agent_comm_dropout_rate),
+            )
+            for field in self.RAW_TIMESTAMP_FIELDS:
+                other_configs[f"{agent_id}.{field}.other"] = timestamp_cfg_other
 
         return ego_configs, other_configs
 
@@ -701,6 +753,13 @@ class MultiAgentDelaySystemV2:
             else:
                 delay_noisy.store(full_name, bboxes_flat)
 
+            # Store timestamp_detection alongside bboxes (same delay pipeline)
+            # This ensures the timestamp is delayed identically to the detection data
+            timestamp_field_name = f"{agent_id}.timestamp_detection.{perspective}"
+            timestamp_data = self._current_time.unsqueeze(-1)  # [N] -> [N, 1]
+            delay_clean.store(timestamp_field_name, timestamp_data)
+            delay_noisy.store(timestamp_field_name, timestamp_data)  # No noise for timestamps
+
     def get_all_states_for_rewards(self, ego_agent_id: AgentID) -> Dict[AgentID, AgentStates]:
         """Get clean delayed states for reward computation.
 
@@ -865,8 +924,12 @@ class MultiAgentDelaySystemV2:
                 )
 
             # Timestamps
+            # timestamp_motion: Use current time (motion data is continuously streamed)
             agent_states.data.timestamp_motion[:] = self._current_time
-            agent_states.data.timestamp_detection[:] = self._current_time
+            # timestamp_detection: Retrieve from delay pipeline (delayed with detection data)
+            # This ensures the timestamp reflects when the detection data was captured
+            delayed_timestamp = get_field("timestamp_detection")
+            agent_states.data.timestamp_detection[:] = delayed_timestamp.squeeze(-1)
 
             result[agent_id] = agent_states
 
@@ -973,8 +1036,9 @@ class MultiAgentDelaySystemV2:
                 gt_state.data.camera_zoom_level,
             )
 
-            # Push bbox data
+            # Push bbox data and timestamp_detection
             bboxes_flat = gt_state.data.bboxes_2d.flatten(start_dim=1)
+            timestamp_data = self._current_time.unsqueeze(-1)  # [N] -> [N, 1]
             for perspective in ["ego", "other"]:
                 if perspective == "ego":
                     delay_clean = self._delay_clean_ego
@@ -983,9 +1047,15 @@ class MultiAgentDelaySystemV2:
                     delay_clean = self._delay_clean_other
                     delay_noisy = self._delay_noisy_other
 
+                # Store bboxes
                 full_name = f"{agent_id}.bboxes_2d.{perspective}"
                 delay_clean.store(full_name, bboxes_flat)
                 delay_noisy.store(full_name, bboxes_flat)
+
+                # Store timestamp_detection (initialized to 0, same as current_time at init)
+                timestamp_field_name = f"{agent_id}.timestamp_detection.{perspective}"
+                delay_clean.store(timestamp_field_name, timestamp_data)
+                delay_noisy.store(timestamp_field_name, timestamp_data)
 
         # Step delay systems to process the initial data
         # This ensures data is available for immediate retrieval

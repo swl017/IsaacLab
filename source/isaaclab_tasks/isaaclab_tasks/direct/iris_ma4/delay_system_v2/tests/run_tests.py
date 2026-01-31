@@ -726,6 +726,189 @@ def run_derived_fields_tests(results: TestResults, device: torch.device, verbose
         results.add_fail("Camera intrinsics available", traceback.format_exc())
 
 
+def run_timestamp_tests(results: TestResults, device: torch.device, verbose: bool = False):
+    """Test that timestamp_detection correctly reflects delayed timestamps.
+
+    This test verifies the fix for the bug where detection_age was always ~0
+    because timestamp_detection was being set to current_time instead of
+    the original capture time of the delayed data.
+    """
+    print("\n" + "=" * 80)
+    print("Testing Timestamp Delay Propagation")
+    print("=" * 80)
+
+    num_envs = 16
+    possible_agents = ["drone_0", "drone_1"]
+
+    # Create delay system with detectable delays
+    try:
+        cfg = MultiAgentDelaySystemV2Cfg(
+            dt=0.01,
+            # Detection pipeline delays
+            detection_fps_mean=30.0,  # ~33ms staleness
+            detection_latency_mean=0.05,  # 50ms latency
+            detection_latency_std=0.01,
+            detection_dropout_rate=0.0,  # No dropout for predictable testing
+            # Inter-agent communication delays
+            inter_agent_comm_latency_mean=0.03,  # 30ms latency
+            inter_agent_comm_latency_std=0.005,
+            inter_agent_comm_dropout_rate=0.0,
+            enable_noise=False,  # Disable noise for cleaner testing
+        )
+        delay_system = MultiAgentDelaySystemV2(
+            cfg=cfg,
+            possible_agents=possible_agents,
+            num_envs=num_envs,
+            num_joints_per_agent={agent: 3 for agent in possible_agents},
+            num_targets_per_agent={agent: 1 for agent in possible_agents},
+            device=device,
+        )
+
+        # Set camera configs
+        offset_pos = torch.tensor([0.0, 0.0, 0.1], device=device)
+        offset_rot = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
+        for agent_id in possible_agents:
+            delay_system.set_camera_configs(
+                agent_id,
+                width=640, height=480,
+                focal_length=24.0,
+                horizontal_aperture=20.955,
+                vertical_aperture=15.0,
+                offset_position_b=offset_pos,
+                offset_rotation_b=offset_rot
+            )
+    except Exception as e:
+        results.add_error("Timestamp test setup", traceback.format_exc())
+        return
+
+    # Test 1: Verify timestamp_detection is not always current_time
+    try:
+        # Initialize states at t=0
+        for agent_id in possible_agents:
+            delay_system.update_gt_states(
+                agent_id=agent_id,
+                body_position_w=torch.zeros(num_envs, 3, device=device),
+                body_orientation_w=torch.tensor([[1., 0., 0., 0.]], device=device).expand(num_envs, 4),
+                body_linear_velocity_w=torch.zeros(num_envs, 3, device=device),
+                body_angular_velocity_w=torch.zeros(num_envs, 3, device=device),
+                body_linear_acceleration_w=torch.zeros(num_envs, 3, device=device),
+                body_combined_angular_velocity_w=torch.zeros(num_envs, 3, device=device),
+                joint_positions_b=torch.zeros(num_envs, 3, device=device),
+                zoom_level=torch.ones(num_envs, device=device)
+            )
+            delay_system.update_detections(
+                agent_id=agent_id,
+                bboxes_2d_gt=torch.tensor([[[320., 240., 50., 50.]]], device=device).expand(num_envs, 1, 4)
+            )
+
+        # Advance time by multiple steps to build up delay
+        num_steps = 20
+        for _ in range(num_steps):
+            delay_system.update_time(dt=0.01)
+            # Update detections at each step
+            for agent_id in possible_agents:
+                delay_system.update_detections(
+                    agent_id=agent_id,
+                    bboxes_2d_gt=torch.tensor([[[320., 240., 50., 50.]]], device=device).expand(num_envs, 1, 4)
+                )
+
+        # Get current time
+        current_time = delay_system.current_time
+
+        # Get states for observations (should have delayed timestamps)
+        states = delay_system.get_all_states_for_observations("drone_0")
+
+        # Check ego agent's timestamp_detection
+        ego_timestamp = states["drone_0"].data.timestamp_detection
+
+        # Check other agent's timestamp_detection
+        other_timestamp = states["drone_1"].data.timestamp_detection
+
+        # The timestamps should be LESS than current_time (delayed)
+        # At least some environments should show delay
+        detection_age_ego = current_time - ego_timestamp
+        detection_age_other = current_time - other_timestamp
+
+        if verbose:
+            print(f"    Current time: {current_time.mean().item():.4f}s")
+            print(f"    Ego timestamp_detection: {ego_timestamp.mean().item():.4f}s")
+            print(f"    Other timestamp_detection: {other_timestamp.mean().item():.4f}s")
+            print(f"    Ego detection_age: {detection_age_ego.mean().item():.4f}s")
+            print(f"    Other detection_age: {detection_age_other.mean().item():.4f}s")
+
+        # Detection age should be positive (timestamp < current_time)
+        # Allow some tolerance since early steps might not have full delay
+        mean_age_ego = detection_age_ego.mean().item()
+        mean_age_other = detection_age_other.mean().item()
+
+        assert mean_age_ego >= 0, f"Ego detection_age should be >= 0, got {mean_age_ego:.4f}"
+        assert mean_age_other >= 0, f"Other detection_age should be >= 0, got {mean_age_other:.4f}"
+
+        # Other agent should have higher delay (ego + inter-agent comm)
+        # Note: This may not always be true due to stochastic sampling
+        # but in general other should have more delay
+
+        results.add_pass(f"timestamp_detection shows delay (ego: {mean_age_ego:.3f}s, other: {mean_age_other:.3f}s)")
+    except AssertionError as e:
+        results.add_fail("timestamp_detection shows delay", str(e))
+    except Exception as e:
+        results.add_fail("timestamp_detection shows delay", traceback.format_exc())
+
+    # Test 2: Verify detection_age is NOT always zero
+    try:
+        # The key bug was that detection_age = current_time - timestamp_detection = 0
+        # After the fix, detection_age should be > 0 for delayed data
+
+        states = delay_system.get_all_states_for_observations("drone_0")
+        current_time = delay_system.current_time
+
+        # Check other agent (should have more delay)
+        other_timestamp = states["drone_1"].data.timestamp_detection
+        detection_age = current_time - other_timestamp
+
+        # After 20 steps with delays, at least some age should be detectable
+        # Expected delay: ~staleness (1/30 Hz) + latency (50ms + 30ms) ≈ 0.08-0.11s
+        # But this depends on pipeline buffering, so just check it's not all zeros
+
+        all_zero = torch.all(detection_age < 1e-6).item()
+        if all_zero:
+            results.add_fail(
+                "detection_age is not always zero",
+                f"All detection_age values are near zero: {detection_age}"
+            )
+        else:
+            results.add_pass("detection_age is not always zero")
+    except Exception as e:
+        results.add_fail("detection_age is not always zero", traceback.format_exc())
+
+    # Test 3: Verify clean vs noisy paths have consistent timestamps
+    try:
+        states_clean = delay_system.get_all_states_for_rewards("drone_0")
+        states_noisy = delay_system.get_all_states_for_observations("drone_0")
+
+        # Both should use delayed timestamps (but may differ due to dropout in noisy)
+        clean_ts = states_clean["drone_1"].data.timestamp_detection
+        noisy_ts = states_noisy["drone_1"].data.timestamp_detection
+
+        # Timestamps should be close (same delay, possibly different due to dropout)
+        # Since dropout is disabled in this test, they should be equal
+        ts_diff = (clean_ts - noisy_ts).abs().mean().item()
+
+        if verbose:
+            print(f"    Clean timestamp: {clean_ts.mean().item():.4f}s")
+            print(f"    Noisy timestamp: {noisy_ts.mean().item():.4f}s")
+            print(f"    Difference: {ts_diff:.6f}s")
+
+        # With dropout=0, timestamps should be very close
+        assert ts_diff < 0.001, f"Clean and noisy timestamps differ significantly: {ts_diff}"
+
+        results.add_pass("Clean/noisy timestamp consistency")
+    except AssertionError as e:
+        results.add_fail("Clean/noisy timestamp consistency", str(e))
+    except Exception as e:
+        results.add_fail("Clean/noisy timestamp consistency", traceback.format_exc())
+
+
 def main():
     """Main test runner."""
     print("=" * 80)
@@ -750,6 +933,7 @@ def main():
         run_perspective_tests(results, device, verbose)
         run_reset_tests(results, device, verbose)
         run_derived_fields_tests(results, device, verbose)
+        run_timestamp_tests(results, device, verbose)
     except Exception as e:
         results.add_error("Test suite", traceback.format_exc())
 
