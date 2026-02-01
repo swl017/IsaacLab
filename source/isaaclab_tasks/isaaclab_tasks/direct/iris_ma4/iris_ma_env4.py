@@ -1242,12 +1242,14 @@ class IrisMAEnvV4(DirectMARLEnv):
                 joint_ids=gimbal_joint_ids,
                 env_ids=env_ids
             )
-            # robot.set_joint_position_target(
-            #     # target=torch.stack([gimbal_yaw, gimbal_roll, gimbal_pitch], dim=-1),
-            #     target=torch.stack([torch.ones_like(gimbal_yaw)*1, torch.ones_like(gimbal_roll)*0.2, torch.ones_like(gimbal_pitch)*0.5], dim=-1),
-            #     joint_ids=gimbal_joint_ids,
-            #     env_ids=env_ids
-            # )
+            robot.set_joint_position_target(
+                target=torch.stack([gimbal_pitch, gimbal_yaw, gimbal_roll], dim=-1),
+                # target=torch.stack([torch.ones_like(gimbal_yaw)*1, torch.ones_like(gimbal_roll)*0.2, torch.ones_like(gimbal_pitch)*0.5], dim=-1),
+                joint_ids=gimbal_joint_ids,
+                env_ids=env_ids
+            )
+            self.cmd_gimbal_yaw[:, i] = gimbal_yaw.clone()
+            self.cmd_gimbal_pitch[:, i] = gimbal_pitch.clone()
             # robot.write_joint_state_to_sim(
             #     position=torch.stack([torch.ones_like(gimbal_yaw)*1, torch.ones_like(gimbal_roll)*0.2, torch.ones_like(gimbal_pitch)*0.5], dim=-1),
             #     velocity=joint_vel,
