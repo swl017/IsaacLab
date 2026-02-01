@@ -24,6 +24,7 @@ from isaaclab_tasks.direct.iris_ma3 import bbox_raycaster
 
 from .controller import PointMassCfg, GimbalStabilizerCfg
 from .curriculum import CurriculumCfg
+from .target_movement import TargetMovementCfg
 
 
 @configclass
@@ -167,6 +168,9 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
 
     curriculum: CurriculumCfg = CurriculumCfg()
     """Training curriculum configuration."""
+
+    target_movement: TargetMovementCfg = TargetMovementCfg()
+    """Target movement configuration for randomized target motion."""
 
     bbox_raycaster: bbox_raycaster.BBoxRayCasterCfg = bbox_raycaster.BBoxRayCasterCfg(
         target_prim_paths=[],
@@ -312,5 +316,5 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     # Debug
     # ==========================================================================
 
-    play_sim_at_step: int = 180000
+    play_sim_at_step: int = 70000
     """Training step at which to enable rendering for debugging."""

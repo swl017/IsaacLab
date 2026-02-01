@@ -29,3 +29,21 @@
         This convention is camera-centric and matches what compute_camera_orientation_from_gimbal() expects.
 
 6. (Raised at 2026-02-01 03:00, resolved 2026-02-01 23:00) Robot and gimbal not facing the target correctly at reset.
+
+7. (Raised at 2026-02-01 23:10, resolved 2026-02-02 00:24) Add randomized target movement.
+```
+# Definition
+self.target = RigidObject(self.cfg.target_cfg)
+
+# Update target acceleration with capped velocity
+# while being above certain altitude (10m) and within a geofenced area (from 50m x 50m to 1,000m x 1,000m curriculum)
+
+# The target can fly in straight or in circular path.
+# Target's target velocity and flight path can be updated at random period
+
+```
+
+8. (Raised at 2026-02-02 00:25, resolved at 2026-02-02 00:40) Can we better implement `direction_change_prob` at
+@source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma4/target_movement/target_movement.py#L283 in terms of distribution, learnability and curriculum. What interpretation can we give around this whole 'target movement' issue?
+
+9. Running `iris_ma4_mappo_rnn_tuning6_20260202_004546` experiment...

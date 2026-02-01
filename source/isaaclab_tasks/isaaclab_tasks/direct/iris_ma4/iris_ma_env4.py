@@ -72,6 +72,7 @@ from isaaclab_tasks.direct.iris_ma4.controller import PointMass, PointMassCfg, G
 from isaaclab_tasks.direct.iris_ma4.safety import SafetyManager, SafetyManagerCfg, CollisionDetectorCfg, TTCComputerCfg
 from isaaclab_tasks.direct.iris_ma4.randomization import Randomizer
 from isaaclab_tasks.direct.iris_ma4.visualization import CustomVisualization
+from isaaclab_tasks.direct.iris_ma4.target_movement import TargetMovement
 
 import carb
 
@@ -364,6 +365,13 @@ class IrisMAEnvV4(DirectMARLEnv):
         self.cfg.target_cfg.spawn.semantic_tags = [("class", "target")]
         self.target = RigidObject(self.cfg.target_cfg)
 
+        # Create target movement controller
+        self.target_movement = TargetMovement(
+            cfg=self.cfg.target_movement,
+            num_envs=self.num_envs,
+            device=self.device,
+        )
+
         # Clone environments
         self.scene.clone_environments(copy_from_source=False)
         if self.cfg.terrain is not None:
@@ -480,6 +488,21 @@ class IrisMAEnvV4(DirectMARLEnv):
 
             self.zoom_level[:, idx] += self.cmd_vel[:, idx, 6] * self.cfg.max_zoom_rate * self.cfg.sim.dt
             self.zoom_level[:, idx] = torch.clamp(self.zoom_level[:, idx], min=1.0, max=self.cfg.max_zoom_level)
+
+        # Update target movement
+        self._update_target_movement()
+
+    def _update_target_movement(self):
+        """Update target movement each physics step."""
+        velocity = self.target_movement.step(
+            current_position=self.target.data.root_pos_w,
+            env_origins=self._terrain.env_origins,
+            curriculum_progress=self.progress_move,
+            dt=self.cfg.sim.dt,
+        )
+        self.target.write_root_velocity_to_sim(velocity)
+        # carb.log_warn(f"Target velocity command: {velocity.cpu().numpy()}")
+        # carb.log_warn(f"Target velocity: {self.target.data.root_lin_vel_w.cpu().numpy()}")
 
     def _linear_progress(self, start: int, end: int, current=None):
         if end <= start:
@@ -1181,6 +1204,9 @@ class IrisMAEnvV4(DirectMARLEnv):
         )
         self.target.write_root_pose_to_sim(target_state[:, :7], env_ids)
         self.target.write_root_velocity_to_sim(target_state[:, 7:], env_ids)
+
+        # Reset target movement module
+        self.target_movement.reset(env_ids)
 
         reset_states = {}
 
