@@ -243,8 +243,26 @@ The gimbal is mounted on the drone body and provides camera stabilization throug
    - Automatically computed to keep horizon level
 
 3. **Pitch Joint** (β): Rotation around rotated Y-axis (after yaw and roll)
-   - Positive: Camera tilts down
-   - Limits: Typically [-π/2, 0] rad (looking down)
+   - **Sign Convention**: Positive pitch = camera tilts DOWN, negative pitch = camera tilts UP
+   - Default limits: [-70°, +70°] (can look 70° up and 70° down)
+   - Configured in `gimbal_stabilizer_cfg.py`
+
+**Pitch Sign Convention Reference:**
+
+The authoritative source for pitch sign convention is `gimbal_stabilizer.py`:
+```python
+# From gimbal_stabilizer.py:102
+gimbal_pitch = torch.atan2(-z, horizontal_dist)  # Negative z because down is positive pitch
+```
+
+Mathematical derivation:
+- Given target at position (x, y, z) relative to drone
+- Horizontal distance: `d_h = sqrt(x² + y²)`
+- Vertical offset: `dz = z_target - z_drone`
+- Pitch angle: `pitch = atan2(-dz, d_h)`
+
+When target is BELOW drone (`dz < 0`): `-dz > 0`, so `pitch > 0` (positive, looking down)
+When target is ABOVE drone (`dz > 0`): `-dz < 0`, so `pitch < 0` (negative, looking up)
 
 **Rotation Composition:**
 ```

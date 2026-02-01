@@ -273,10 +273,15 @@ class IrisMAEnvV4(DirectMARLEnv):
             gimbal_pitch_limits=list(self.cfg.gimbal.pitch_limits)
         )
 
-        # Tune randomizer for desired target distances
-        self.randomizer.initial_states.cfg.max_agent_separation = 3.0
-        self.randomizer.initial_states.cfg.min_agent_separation = 2.0
-        self.randomizer.initial_states.cfg.z_variation_range = (0.0, 1.0)
+        # Configure formation for curriculum learning
+        # At scale_factor=0: minimal separation, no height variation (easy)
+        # At scale_factor=1: full separation, moderate height variation (harder)
+        self.randomizer.initial_states.cfg.max_agent_separation = 5.0  # Max separation at full curriculum
+        self.randomizer.initial_states.cfg.min_agent_separation = 2.0  # Minimum safety distance
+        self.randomizer.initial_states.cfg.z_variation_curriculum_enabled = True
+        self.randomizer.initial_states.cfg.z_variation_min = (0.0, 0.0)  # No height variation at start
+        self.randomizer.initial_states.cfg.z_variation_max = (0.0, 2.0)  # Up to 2m variation at full curriculum
+        self.randomizer.initial_states.cfg.line_max_z_component = 0.3  # Limit line vertical angle
         self.randomizer.targets.cfg.distance_scale_factor = 2.0
 
         # Curriculum parameters
@@ -289,6 +294,7 @@ class IrisMAEnvV4(DirectMARLEnv):
         self.progress_safety = 0.0
         self.progress_move = 0.0
         self.progress_dynamics = 0.0
+        self.current_max_zoom = self.cfg.curriculum.get_max_zoom_level(0)  # Initial zoom limit
         # Triangulation covariance placeholders
         self.Sigma_X_invalid = torch.eye(3, device=self.device).unsqueeze(0).unsqueeze(0).expand(
             self.num_envs, 1, 3, 3
@@ -390,6 +396,7 @@ class IrisMAEnvV4(DirectMARLEnv):
         self.progress_safety = self._linear_progress(curr.safety_start_step, curr.safety_end_step, current_step)
         self.progress_move = self._linear_progress(curr.moving_target_start_step, curr.moving_target_end_step, current_step)
         self.progress_dynamics = self._linear_progress(curr.dynamics_start_step, curr.dynamics_end_step, current_step)
+        self.current_max_zoom = curr.get_max_zoom_level(current_step)
 
         for idx, agent_id in enumerate(self.cfg.possible_agents):
             # Clip and store actions
@@ -1037,13 +1044,25 @@ class IrisMAEnvV4(DirectMARLEnv):
                 data.body_orientation_w[:, 0] = 1.0
                 data.body_orientation_w[env_ids] = rs['orientation']
 
-                data.camera_orientation_w = data.body_orientation_w.clone()
-
                 data.joint_positions_b = torch.zeros(self.num_envs, 3, device=self.device)
                 data.joint_positions_b[env_ids] = rs['joint_positions']
 
                 data.joint_velocities_b = torch.zeros(self.num_envs, 3, device=self.device)
                 data.joint_velocities_b[env_ids] = rs['joint_velocities']
+
+                # Camera offset rotation (identity quaternion - no rotation offset)
+                data.camera_offset_rotation_b = torch.zeros(self.num_envs, 4, device=self.device)
+                data.camera_offset_rotation_b[:, 0] = 1.0  # Identity quaternion [1, 0, 0, 0]
+
+                # Compute camera orientation from body + gimbal angles
+                from isaaclab_tasks.direct.iris_ma4.delay_system.derived_field_computers import (
+                    compute_camera_orientation_from_gimbal
+                )
+                data.camera_orientation_w = compute_camera_orientation_from_gimbal(
+                    body_orientation_w=data.body_orientation_w,
+                    joint_positions_b=data.joint_positions_b,
+                    camera_offset_rotation_b=data.camera_offset_rotation_b,
+                )
 
                 data.joint_accelerations_b = torch.zeros(self.num_envs, 3, device=self.device)
 
@@ -1064,7 +1083,6 @@ class IrisMAEnvV4(DirectMARLEnv):
                 data.body_angular_acceleration_b = torch.zeros_like(robot.data.root_pos_w)
 
                 data.body_orientation_w = robot.data.root_quat_w.clone()
-                data.camera_orientation_w = robot.data.root_quat_w.clone()
 
                 # joint_positions_b uses [pitch, yaw, roll] convention
                 gimbal_joint_ids = [
@@ -1075,6 +1093,20 @@ class IrisMAEnvV4(DirectMARLEnv):
                 data.joint_positions_b = robot.data.joint_pos[:, gimbal_joint_ids].clone()
                 data.joint_velocities_b = robot.data.joint_vel[:, gimbal_joint_ids].clone()
                 data.joint_accelerations_b = torch.zeros(self.num_envs, 3, device=self.device)
+
+                # Camera offset rotation (identity quaternion - no rotation offset)
+                data.camera_offset_rotation_b = torch.zeros(self.num_envs, 4, device=self.device)
+                data.camera_offset_rotation_b[:, 0] = 1.0  # Identity quaternion [1, 0, 0, 0]
+
+                # Compute camera orientation from body + gimbal angles
+                from isaaclab_tasks.direct.iris_ma4.delay_system.derived_field_computers import (
+                    compute_camera_orientation_from_gimbal
+                )
+                data.camera_orientation_w = compute_camera_orientation_from_gimbal(
+                    body_orientation_w=data.body_orientation_w,
+                    joint_positions_b=data.joint_positions_b,
+                    camera_offset_rotation_b=data.camera_offset_rotation_b,
+                )
 
             data.camera_zoom_level = torch.ones(self.num_envs, 1, device=self.device)
             if reset_states and agent_id in reset_states and 'zoom_level' in reset_states[agent_id]:
@@ -1111,9 +1143,21 @@ class IrisMAEnvV4(DirectMARLEnv):
         # Use tracking curriculum progress to scale randomization difficulty
         formation_scale = self.progress_tracking  # 0.0 -> 1.0 as training progresses
 
+        # Select formation type based on curriculum progress
+        # Early: planar (simplest, all agents same height, guaranteed gimbal feasibility)
+        # Mid: grid (2D grid with curriculum-scaled height variation)
+        # Late: line (full 3D formations with height variation)
+        if formation_scale < 0.3:
+            formation_type = "planar"
+        elif formation_scale < 0.7:
+            formation_type = "grid"
+        else:
+            formation_type = "line"
+
         formation_data = self.randomizer.initial_states.get_random_formation(
             num_agents=len(self.cfg.possible_agents),
             num_envs=len(env_ids),
+            formation_type=formation_type,
             scale_factor=formation_scale,
         )
 
@@ -1211,6 +1255,10 @@ class IrisMAEnvV4(DirectMARLEnv):
             #     env_ids=env_ids
             # )
 
+            # Randomize zoom level between 1.0 and current_max_zoom
+            random_zoom = 1.0 + torch.rand(len(env_ids), device=self.device) * (self.current_max_zoom - 1.0)
+            self.zoom_level[env_ids, i] = random_zoom
+            
             reset_states[agent_id] = {
                 'position': agent_root_state[:, 0:3].clone(),
                 'orientation': agent_root_state[:, 3:7].clone(),

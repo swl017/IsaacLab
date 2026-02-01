@@ -37,8 +37,9 @@ class InitialStatesRandomizerCfg:
         "z_max": 20.0
     }
 
-    # Formation types: "random", "line", "grid"
-    formation_types: list = ["line", "grid"]
+    # Formation types: "random", "line", "grid", "planar"
+    # "planar" is a simple horizontal line formation with no height variation
+    formation_types: list = ["line", "grid", "planar"]
     default_formation_type: str = "random"  # "random" picks from formation_types
 
     # Agent separation constraints
@@ -51,7 +52,15 @@ class InitialStatesRandomizerCfg:
 
     # 3D formation options
     allow_vertical_variation: bool = True
-    z_variation_range: tuple = (0.0, 5.0)  # Additional Z variation within formation
+    z_variation_range: tuple = (0.0, 5.0)  # Additional Z variation within formation (legacy)
+
+    # Curriculum-controlled height variation (preferred over z_variation_range)
+    z_variation_curriculum_enabled: bool = False  # Enable curriculum-based z variation
+    z_variation_min: tuple = (0.0, 0.0)  # Z variation range at scale_factor=0
+    z_variation_max: tuple = (0.0, 2.0)  # Z variation range at scale_factor=1
+
+    # Line formation direction constraint
+    line_max_z_component: float = 0.5  # Max absolute Z component in line direction (0=horizontal)
 
     # Orientation options
     orientation_mode: str = "random_yaw"  # "formation_aligned" or "random_yaw"
@@ -141,6 +150,8 @@ class InitialStatesRandomizer:
                 local_positions = self._generate_line_formation(num_agents, len(type_envs), scale_factor)
             elif formation_type == "grid":
                 local_positions = self._generate_grid_formation(num_agents, len(type_envs), scale_factor)
+            elif formation_type == "planar":
+                local_positions = self._generate_planar_formation(num_agents, len(type_envs), scale_factor)
             else:
                 raise ValueError(f"Unknown formation type: {formation_type}")
 
@@ -210,8 +221,11 @@ class InitialStatesRandomizer:
         self, num_agents: int, num_envs: int, scale_factor: float
     ) -> torch.Tensor:
         """
-        Generate line formation along an arbitrary 3D line.
+        Generate line formation along a 3D line.
         Agents placed at random distances from each other along the line.
+
+        The Z component of the line direction is constrained based on curriculum
+        (scale_factor), starting horizontal and allowing more vertical as training progresses.
 
         Returns:
             torch.Tensor: [num_envs, num_agents, 3] local positions
@@ -219,16 +233,18 @@ class InitialStatesRandomizer:
         positions = torch.zeros(num_envs, num_agents, 3, device=self.device)
 
         for env_idx in range(num_envs):
-            # Generate random line direction (not confined to Y-axis)
-            # Random direction in 3D, then normalize
-            direction = torch.randn(3, device=self.device)
-            direction = direction / direction.norm()
+            # Generate random line direction
+            # XY components are random, Z is constrained by curriculum
+            xy_dir = torch.randn(2, device=self.device)
+            xy_dir = xy_dir / (xy_dir.norm() + 1e-6)
 
-            # Ensure line respects minimum height by limiting Z component
-            # If line goes too steep downward, reflect it upward
-            if direction[2] < -0.5:  # Too steep downward
-                direction[2] = -direction[2]
-                direction = direction / direction.norm()
+            # Z component scaled by curriculum: at scale_factor=0, Z=0 (horizontal)
+            # At scale_factor=1, Z can be up to line_max_z_component
+            max_z = self.cfg.line_max_z_component * scale_factor
+            z_component = (torch.rand(1, device=self.device).item() * 2 - 1) * max_z
+
+            direction = torch.tensor([xy_dir[0].item(), xy_dir[1].item(), z_component], device=self.device)
+            direction = direction / (direction.norm() + 1e-6)
 
             # Generate random distances along the line for each agent
             # Start from 0 and accumulate random steps
@@ -239,7 +255,7 @@ class InitialStatesRandomizer:
                 step = torch.rand(1, device=self.device).item() * (
                     self.cfg.max_agent_separation - self.cfg.min_agent_separation
                 ) + self.cfg.min_agent_separation
-                distances[i] = distances[i - 1] + step * scale_factor
+                distances[i] = distances[i - 1] + step * max(scale_factor, 0.3)  # Ensure minimum spacing
 
             # Center the line around origin
             distances = distances - distances.mean()
@@ -248,14 +264,38 @@ class InitialStatesRandomizer:
             for i in range(num_agents):
                 positions[env_idx, i] = direction * distances[i]
 
-            # Add optional vertical variation
+            # Add optional vertical variation (curriculum-controlled if enabled)
             if self.cfg.allow_vertical_variation:
-                z_var = torch.rand(num_agents, device=self.device) * (
-                    self.cfg.z_variation_range[1] - self.cfg.z_variation_range[0]
-                ) + self.cfg.z_variation_range[0]
+                z_range_min, z_range_max = self._get_z_variation_range(scale_factor)
+                z_var = torch.rand(num_agents, device=self.device) * (z_range_max - z_range_min) + z_range_min
                 positions[env_idx, :, 2] += z_var
 
         return positions
+
+    def _get_z_variation_range(self, scale_factor: float) -> tuple[float, float]:
+        """
+        Get the Z variation range based on curriculum progress.
+
+        Args:
+            scale_factor: Curriculum progress (0.0 to 1.0)
+
+        Returns:
+            (z_min, z_max) tuple for sampling Z variation
+        """
+        if self.cfg.z_variation_curriculum_enabled:
+            # Interpolate between min and max ranges based on scale_factor
+            z_min = self.cfg.z_variation_min[0] + scale_factor * (
+                self.cfg.z_variation_max[0] - self.cfg.z_variation_min[0]
+            )
+            z_max = self.cfg.z_variation_min[1] + scale_factor * (
+                self.cfg.z_variation_max[1] - self.cfg.z_variation_min[1]
+            )
+        else:
+            # Use legacy z_variation_range
+            z_min = self.cfg.z_variation_range[0]
+            z_max = self.cfg.z_variation_range[1]
+
+        return z_min, z_max
 
     def _generate_grid_formation(
         self, num_agents: int, num_envs: int, scale_factor: float
@@ -283,8 +323,9 @@ class InitialStatesRandomizer:
                 self.cfg.max_agent_separation - self.cfg.min_agent_separation
             ) + self.cfg.min_agent_separation
 
-            spacing_y *= scale_factor
-            spacing_x *= scale_factor
+            # Scale spacing by curriculum, with minimum to ensure separation
+            spacing_y *= max(scale_factor, 0.3)
+            spacing_x *= max(scale_factor, 0.3)
 
             agent_idx = 0
             for row in range(rows):
@@ -301,13 +342,56 @@ class InitialStatesRandomizer:
 
                     agent_idx += 1
 
-            # Add optional vertical variation
+            # Add optional vertical variation (curriculum-controlled if enabled)
             if self.cfg.allow_vertical_variation:
-                z_var = torch.rand(num_agents, device=self.device) * (
-                    self.cfg.z_variation_range[1] - self.cfg.z_variation_range[0]
-                ) + self.cfg.z_variation_range[0]
+                z_range_min, z_range_max = self._get_z_variation_range(scale_factor)
+                z_var = torch.rand(num_agents, device=self.device) * (z_range_max - z_range_min) + z_range_min
                 positions[env_idx, :, 2] += z_var
 
+        return positions
+
+    def _generate_planar_formation(
+        self, num_agents: int, num_envs: int, scale_factor: float
+    ) -> torch.Tensor:
+        """
+        Generate planar formation in XY plane with NO height variation.
+        Agents are placed in a line along a random horizontal direction.
+
+        This is the simplest formation for early curriculum - all agents at the same height.
+        It guarantees that any target in front of the formation is gimbal-feasible.
+
+        Args:
+            num_agents: Number of agents per environment
+            num_envs: Number of environments
+            scale_factor: Scaling factor for agent separation (curriculum)
+
+        Returns:
+            torch.Tensor: [num_envs, num_agents, 3] local positions (Z = 0 for all)
+        """
+        positions = torch.zeros(num_envs, num_agents, 3, device=self.device)
+
+        for env_idx in range(num_envs):
+            # Random direction in XY plane ONLY (no Z component)
+            angle = torch.rand(1, device=self.device).item() * 2 * math.pi
+            direction = torch.tensor([math.cos(angle), math.sin(angle), 0.0], device=self.device)
+
+            # Generate cumulative distances along the line
+            distances = torch.zeros(num_agents, device=self.device)
+            for i in range(1, num_agents):
+                step = torch.rand(1, device=self.device).item() * (
+                    self.cfg.max_agent_separation - self.cfg.min_agent_separation
+                ) + self.cfg.min_agent_separation
+                # Ensure minimum spacing even at low scale_factor
+                distances[i] = distances[i - 1] + step * max(scale_factor, 0.3)
+
+            # Center around origin
+            distances = distances - distances.mean()
+
+            # Place agents along direction (Z stays 0)
+            for i in range(num_agents):
+                positions[env_idx, i] = direction * distances[i]
+
+        # No vertical variation for planar formation - this is the key feature
         return positions
 
     def _ensure_minimum_separation(self, positions: torch.Tensor) -> torch.Tensor:

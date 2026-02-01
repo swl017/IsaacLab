@@ -13,7 +13,7 @@ from isaaclab.utils.math import quat_mul, quat_rotate_inverse, matrix_from_quat
 
 def compute_camera_orientation_from_gimbal(
     body_orientation_w: torch.Tensor,       # [N, 4] quaternion (w, x, y, z)
-    joint_positions_b: torch.Tensor,        # [N, J] where J >= 2 (pitch, yaw)
+    joint_positions_b: torch.Tensor,        # [N, J] where J >= 2 (pitch, yaw) or J >= 3 (pitch, yaw, roll)
     camera_offset_rotation_b: torch.Tensor, # [N, 4] quaternion
 ) -> torch.Tensor:
     """
@@ -22,37 +22,45 @@ def compute_camera_orientation_from_gimbal(
     The camera orientation is computed by composing:
     world → body → gimbal → camera_offset
 
+    Gimbal rotation order: yaw (Z) → roll (X) → pitch (Y)
+    This matches the gimbal_stabilizer.py convention (ZXY intrinsic rotation).
+
     Args:
         body_orientation_w: Body orientation in world frame [N, 4] (w, x, y, z)
-        joint_positions_b: Gimbal joint angles [N, J] (at least pitch, yaw)
+        joint_positions_b: Gimbal joint angles [N, J] where:
+            - joint[0] = pitch (rotation around Y axis)
+            - joint[1] = yaw (rotation around Z axis)
+            - joint[2] = roll (rotation around X axis, optional)
         camera_offset_rotation_b: Camera mounting offset rotation [N, 4]
 
     Returns:
         camera_orientation_w: Camera orientation in world frame [N, 4]
     """
-    # Extract gimbal angles (pitch=joint[0], yaw=joint[1])
+    # Extract gimbal angles (pitch=joint[0], yaw=joint[1], roll=joint[2])
     pitch = joint_positions_b[:, 0]  # [N]
     yaw = joint_positions_b[:, 1] if joint_positions_b.shape[1] > 1 else torch.zeros_like(pitch)
+    roll = joint_positions_b[:, 2] if joint_positions_b.shape[1] > 2 else torch.zeros_like(pitch)
 
-    # Convert Euler angles to quaternion
-    # Gimbal rotation: pitch around Y, yaw around Z
-    # q = quat_from_euler_xyz(roll=0, pitch=pitch, yaw=yaw)
-
-    # Simplified gimbal quaternion (yaw around Z, then pitch around Y)
-    half_pitch = pitch * 0.5
+    # Compute half angles
     half_yaw = yaw * 0.5
+    half_roll = roll * 0.5
+    half_pitch = pitch * 0.5
 
-    cp = torch.cos(half_pitch)
-    sp = torch.sin(half_pitch)
     cy = torch.cos(half_yaw)
     sy = torch.sin(half_yaw)
+    cr = torch.cos(half_roll)
+    sr = torch.sin(half_roll)
+    cp = torch.cos(half_pitch)
+    sp = torch.sin(half_pitch)
 
-    # Gimbal quaternion: first yaw (Z), then pitch (Y)
+    # Gimbal quaternion: yaw (Z) * roll (X) * pitch (Y)
+    # Using quaternion multiplication formula for ZXY intrinsic rotation
+    # q_total = q_yaw * q_roll * q_pitch
     gimbal_quat = torch.stack([
-        cy * cp,           # w
-        -sy * sp,          # x
-        cy * sp,           # y
-        sy * cp,           # z
+        cy * cr * cp + sy * sr * sp,    # w
+        cy * sr * cp - sy * cr * sp,    # x
+        cy * cr * sp + sy * sr * cp,    # y
+        sy * cr * cp - cy * sr * sp,    # z
     ], dim=-1)  # [N, 4]
 
     # Compose: world → body → gimbal

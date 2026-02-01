@@ -30,8 +30,8 @@ class GimbalStabilizerCfg:
     yaw_limits: tuple[float, float] = (math.radians(-200.0), math.radians(200.0))
     """Yaw angle limits [min, max] in radians. CCW positive when viewed from above."""
 
-    pitch_limits: tuple[float, float] = (math.radians(-45.0), math.radians(10.0))
-    """Pitch angle limits [min, max] in radians. Down is negative."""
+    pitch_limits: tuple[float, float] = (math.radians(-70.0), math.radians(70.0))
+    """Pitch angle limits [min, max] in radians. Down is positive (camera tilts down), up is negative."""
 
     roll_limits: tuple[float, float] = (math.radians(-45.0), math.radians(45.0))
     """Roll angle limits [min, max] in radians."""

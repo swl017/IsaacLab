@@ -18,7 +18,7 @@
 
 3. (Raised at 2026-01-30 23:00) 30,000 step training session ETA 12 hours, at decimation=4 dt=1/100.
 
-4. (Raised at 2026-01-30 23:00) Check initial state (especially gimbal pointing to the target and formation) and randomization is correct and respects curriculum and physical limits, like gimbal tilt limits, at reset. Gimbal joint_id inconsistancy must be resolved prior to this issue.
+4. (Raised at 2026-01-30 23:00) Check initial state (especially gimbal pointing to the target and formation) and randomization(including robot, gimbal orientation, zoom level) is correct and respects curriculum and physical limits(gimbal tilt limits, max speed, distance, height, etc.) at reset.
 
 5. (Raised at 2026-02-01 00:50, resolved 2026-02-01 02:30) Gimbal joint_id inconsistant between set_joint_position and reading actual joint angles. We need to review the structure inside Iris USDA model.
     - Now Convention Established
@@ -27,3 +27,5 @@
         Index 1: yaw
         Index 2: roll
         This convention is camera-centric and matches what compute_camera_orientation_from_gimbal() expects.
+
+6. (Raised at 2026-02-01 03:00) Robot and gimbal not facing the target correctly at reset.

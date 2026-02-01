@@ -31,11 +31,12 @@ class TargetSamplerCfg:
     distance_scale_factor: float = 2.5  # Multiply formation spread by this
 
     # Gimbal pitch limits (must match environment config)
-    pitch_limit_min: float = math.radians(-45.0)  # Can look up 45°
-    pitch_limit_max: float = math.radians(10.0)   # Can look down 10°
+    # Sign convention: down is positive pitch, up is negative pitch
+    pitch_limit_min: float = math.radians(-70.0)  # Looking UP limit (negative = up)
+    pitch_limit_max: float = math.radians(70.0)   # Looking DOWN limit (positive = down)
 
     # Safety margins (reduce usable range to avoid edge cases)
-    pitch_safety_margin: float = math.radians(5.0)  # 5° margin
+    pitch_safety_margin: float = math.radians(25.0)  # 25° margin
 
     # Bearing constraints (direction from formation to target)
     bearing_min: float = 0.0  # Minimum bearing (radians)
@@ -46,8 +47,11 @@ class TargetSamplerCfg:
     height_offset_max: float = 10.0   # Maximum height offset
 
     # Fallback behavior when no feasible solution exists
-    use_formation_height_fallback: bool = True
-    fallback_height_margin: float = 5.0  # Meters above/below formation center
+    # Instead of using a fixed height margin (which doesn't guarantee constraints),
+    # we iteratively expand the horizontal distance until the height range is feasible.
+    fallback_distance_increase_factor: float = 1.15  # Multiply distance by this per iteration
+    fallback_max_iterations: int = 10  # Maximum iterations for distance expansion
+    fallback_max_distance_multiplier: float = 3.0  # Maximum distance as multiple of original
 
 
 class TargetSampler:
@@ -159,20 +163,65 @@ class TargetSampler:
             self.cfg.bearing_max - self.cfg.bearing_min
         ) + self.cfg.bearing_min
 
-        # Step 3: Compute target horizontal position (without z)
-        target_x = formation_center[:, 0] + horizontal_distance * torch.cos(bearing)
-        target_y = formation_center[:, 1] + horizontal_distance * torch.sin(bearing)
+        # Step 3: Compute target horizontal position and iteratively expand distance if needed
+        current_distance = horizontal_distance.clone()
+        max_distance = horizontal_distance * self.cfg.fallback_max_distance_multiplier
 
-        # Step 4: Compute feasible height range
-        z_min, z_max = self._compute_feasible_height_range(
+        for iteration in range(self.cfg.fallback_max_iterations):
+            # Compute target XY at current distance
+            target_x = formation_center[:, 0] + current_distance * torch.cos(bearing)
+            target_y = formation_center[:, 1] + current_distance * torch.sin(bearing)
+
+            # Step 4: Compute feasible height range
+            z_min, z_max, is_valid = self._compute_feasible_height_range(
+                agent_positions,
+                target_x,
+                target_y,
+            )
+
+            # Check which environments are still infeasible
+            infeasible_mask = ~is_valid
+            if not infeasible_mask.any():
+                break  # All environments have feasible height ranges
+
+            # Expand distance for infeasible environments
+            current_distance[infeasible_mask] = torch.minimum(
+                current_distance[infeasible_mask] * self.cfg.fallback_distance_increase_factor,
+                max_distance[infeasible_mask]
+            )
+
+            # Check if all infeasible envs have hit max distance
+            at_max = current_distance[infeasible_mask] >= max_distance[infeasible_mask]
+            if at_max.all():
+                # Print warning and use current (possibly infeasible) state
+                num_still_infeasible = infeasible_mask.sum().item()
+                if num_still_infeasible > 0 and not hasattr(self, '_fallback_warning_logged'):
+                    print(f"Warning: {num_still_infeasible} environments still infeasible after max distance expansion.")
+                    self._fallback_warning_logged = True
+                break
+
+        # Recompute final target positions with final distance
+        target_x = formation_center[:, 0] + current_distance * torch.cos(bearing)
+        target_y = formation_center[:, 1] + current_distance * torch.sin(bearing)
+
+        # Recompute final feasible height range
+        z_min, z_max, is_valid = self._compute_feasible_height_range(
             agent_positions,
             target_x,
             target_y,
-            formation_center,
         )
 
+        # For any remaining infeasible environments, use a safe fallback
+        # (this should be rare with proper distance expansion)
+        final_infeasible = ~is_valid
+        if final_infeasible.any():
+            # Use formation center height as fallback (constrained to stay within some range)
+            fallback_z = formation_center[final_infeasible, 2]
+            z_min[final_infeasible] = fallback_z - 1.0  # Small range
+            z_max[final_infeasible] = fallback_z + 1.0
+
         # Step 5: Sample target height uniformly within feasible range
-        # The feasible range [z_min, z_max] already accounts for all gimbal constraints
+        # The feasible range [z_min, z_max] now accounts for all gimbal constraints
         target_z = torch.rand(num_envs, device=self.device) * (z_max - z_min) + z_min
 
         # Step 6: Construct target position
@@ -218,8 +267,7 @@ class TargetSampler:
         agent_positions: torch.Tensor,
         target_x: torch.Tensor,
         target_y: torch.Tensor,
-        formation_center: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Compute height range where ALL agents can point to target.
 
@@ -229,11 +277,11 @@ class TargetSampler:
             agent_positions: [num_envs, num_agents, 3]
             target_x: [num_envs] target X coordinate
             target_y: [num_envs] target Y coordinate
-            formation_center: [num_envs, 3] formation center
 
         Returns:
             z_min: [num_envs] minimum feasible target height
             z_max: [num_envs] maximum feasible target height
+            is_valid: [num_envs] bool tensor (True = feasible range exists)
         """
         num_envs, num_agents, _ = agent_positions.shape
 
@@ -249,36 +297,12 @@ class TargetSampler:
             dy = target_y - agent_pos[:, 1]
             d_horizontal = torch.sqrt(dx**2 + dy**2 + 1e-8)  # Small epsilon for stability
 
-            # Compute height bounds based on pitch limits
-            # pitch = atan2(-Δz, d_h) => Δz = -d_h * tan(pitch)
-            # => z_target = z_agent + Δz = z_agent - d_h * tan(pitch)
-            #
-            # For pitch_min = -45° (looking up, most negative):
-            #   z_target_max = z_agent - d_h * tan(-45°)
-            #   tan(-45°) = -1, so z_target_max = z_agent + d_h
-            #   (target can be up to d_h ABOVE agent)
-            #
-            # For pitch_max = +10° (looking down, most positive):
-            #   z_target_min = z_agent - d_h * tan(+10°)
-            #   tan(+10°) ≈ 0.176, so z_target_min = z_agent - 0.176*d_h
-            #   (target must be at least 0.176*d_h BELOW agent)
-
             z_agent = agent_pos[:, 2]
 
-            # Height range for this agent
-            # From z_target = z_agent - d_h * tan(pitch):
-            #
-            # pitch_min_safe = -40° (looking up, most negative):
-            #   tan(-40°) = -0.839 (negative)
-            #   z_target_max = z_agent - d_h * (-0.839) = z_agent + 0.839*d_h (above agent)
-            #
-            # pitch_max_safe = +5° (looking down, most positive):
-            #   tan(+5°) = 0.087 (positive)
-            #   z_target_min = z_agent - d_h * 0.087 = z_agent - 0.087*d_h (below agent)
-            #
-            # Therefore:
-            #   z_min comes from pitch_max_safe (looking down the most)
-            #   z_max comes from pitch_min_safe (looking up the most)
+            # Height range for this agent based on pitch limits:
+            # z_target = z_agent - d_h * tan(pitch)
+            # z_min comes from pitch_max_safe (looking down the most)
+            # z_max comes from pitch_min_safe (looking up the most)
             z_min_i = z_agent - d_horizontal * self.tan_pitch_max_safe  # Lower bound
             z_max_i = z_agent - d_horizontal * self.tan_pitch_min_safe  # Upper bound
 
@@ -293,23 +317,10 @@ class TargetSampler:
         z_min_feasible = z_min_per_agent.max(dim=1)[0]  # [num_envs]
         z_max_feasible = z_max_per_agent.min(dim=1)[0]  # [num_envs]
 
-        # Handle empty intersection (z_min > z_max)
-        invalid_mask = z_min_feasible > z_max_feasible
+        # Check validity (z_min <= z_max means feasible range exists)
+        is_valid = z_min_feasible <= z_max_feasible
 
-        if invalid_mask.any() and self.cfg.use_formation_height_fallback:
-            # Fallback: use formation center height with margin
-            fallback_z_min = formation_center[invalid_mask, 2] - self.cfg.fallback_height_margin
-            fallback_z_max = formation_center[invalid_mask, 2] + self.cfg.fallback_height_margin
-
-            z_min_feasible[invalid_mask] = fallback_z_min
-            z_max_feasible[invalid_mask] = fallback_z_max
-
-            # Optional: print warning
-            num_invalid = invalid_mask.sum().item()
-            if num_invalid > 0:
-                print(f"Warning: {num_invalid} environments have infeasible height ranges. Using fallback.")
-
-        return z_min_feasible, z_max_feasible
+        return z_min_feasible, z_max_feasible, is_valid
 
     def validate_target_feasibility(
         self,
