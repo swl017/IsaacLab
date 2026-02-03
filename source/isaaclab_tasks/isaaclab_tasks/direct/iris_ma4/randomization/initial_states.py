@@ -43,8 +43,8 @@ class InitialStatesRandomizerCfg:
     default_formation_type: str = "random"  # "random" picks from formation_types
 
     # Agent separation constraints
-    min_agent_separation: float = 3.0  # Minimum distance between agents
-    max_agent_separation: float = 12.0  # Maximum distance between agents
+    min_agent_separation: float = 20.0  # Minimum distance between agents
+    max_agent_separation: float = 30.0  # Maximum distance between agents
 
     # Formation scaling (hook for future curriculum)
     formation_scale_min: float = 0.8
@@ -67,7 +67,7 @@ class InitialStatesRandomizerCfg:
     orientation_noise_std: float = 0.087  # ~5 degrees in radians
 
     # Safety constraints
-    ground_clearance_min: float = 1.0
+    ground_clearance_min: float = 2.0
     max_collision_retries: int = 10
 
 class InitialStatesRandomizer:

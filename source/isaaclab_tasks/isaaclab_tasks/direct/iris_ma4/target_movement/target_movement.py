@@ -450,7 +450,7 @@ class TargetMovement:
         current_position: torch.Tensor,
         env_origins: torch.Tensor,
     ):
-        """Apply minimum altitude constraint."""
+        """Apply minimum and maximum altitude constraints."""
         # Altitude relative to terrain (env origin Z)
         altitude = current_position[:, 2] - env_origins[:, 2]
 
@@ -463,6 +463,17 @@ class TargetMovement:
             self.velocity[low_indices, 2] = torch.clamp(
                 self.velocity[low_indices, 2],
                 min=self.cfg.altitude_bounce_velocity,
+            )
+
+        # Check maximum altitude
+        too_high = altitude > self.cfg.max_altitude
+        high_indices = env_ids[too_high]
+
+        # Bounce downward if too high
+        if len(high_indices) > 0:
+            self.velocity[high_indices, 2] = torch.clamp(
+                self.velocity[high_indices, 2],
+                max=-self.cfg.altitude_bounce_velocity,
             )
 
     def get_motion_mode(self) -> torch.Tensor:

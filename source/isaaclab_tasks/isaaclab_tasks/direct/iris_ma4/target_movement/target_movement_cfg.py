@@ -116,6 +116,9 @@ class TargetMovementCfg:
     altitude_bounce_velocity: float = 1.0
     """Upward velocity applied when hitting altitude floor (m/s)."""
 
+    max_altitude: float = 100.0
+    """Maximum altitude above ground (m)."""
+
     # ==========================================================================
     # Mode Switching
     # ==========================================================================

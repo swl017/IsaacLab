@@ -51,3 +51,6 @@ self.target = RigidObject(self.cfg.target_cfg)
 
 10. (Raised at 2026-02-03 13:11) For 3 or more agents
     - Triangulation validity currently requires all agents’ bboxes valid (bbox_valid_mask.all(dim=1) in _compute_triangulation_covariance). With detection dropout, this can zero out triangulation rewards often and create “dead” learning periods; consider “at least 2 valid views” (for 2 agents: both; for >2: any pair) instead of all.
+
+11. Running `iris_ma4_mappo_rnn_tuning6_20260203_151152` experiment...
+    - Training collapsed at 20k step.

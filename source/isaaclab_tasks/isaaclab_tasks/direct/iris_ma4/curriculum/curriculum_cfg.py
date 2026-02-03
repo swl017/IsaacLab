@@ -40,34 +40,34 @@ class CurriculumCfg:
     tracking_start_step: int = 10000
     """Step to start increasing tracking difficulty."""
 
-    tracking_end_step: int = 80000
+    tracking_end_step: int = 60000
     """Step when tracking difficulty reaches maximum."""
 
     # ==========================================================================
     # Phase 2: Delay and Noise System
     # ==========================================================================
 
-    delay_start_step: int = 60000
+    delay_start_step: int = 10000
     """Step to start introducing communication delays."""
 
-    delay_end_step: int = 150000
+    delay_end_step: int = 80000
     """Step when delays reach maximum realistic values."""
 
     # ==========================================================================
     # Phase 3: Multi-Agent Coordination
     # ==========================================================================
 
-    coordination_start_step: int = 120000
+    coordination_start_step: int = 80000
     """Step to start rewarding coordination (triangulation)."""
 
-    coordination_end_step: int = 200000
+    coordination_end_step: int = 100000
     """Step when coordination rewards reach full scale."""
 
     # ==========================================================================
     # Safety Curriculum
     # ==========================================================================
 
-    safety_start_step: int = 180000
+    safety_start_step: int = 150000
     """Step to start enforcing safety constraints (collision, TTC)."""
 
     safety_end_step: int = 230000

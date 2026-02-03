@@ -280,8 +280,8 @@ class IrisMAEnvV4(DirectMARLEnv):
         # Configure formation for curriculum learning
         # At scale_factor=0: minimal separation, no height variation (easy)
         # At scale_factor=1: full separation, moderate height variation (harder)
-        self.randomizer.initial_states.cfg.max_agent_separation = 5.0  # Max separation at full curriculum
-        self.randomizer.initial_states.cfg.min_agent_separation = 2.0  # Minimum safety distance
+        self.randomizer.initial_states.cfg.max_agent_separation = 30.0  # Max separation at full curriculum
+        self.randomizer.initial_states.cfg.min_agent_separation = 20.0  # Minimum safety distance
         self.randomizer.initial_states.cfg.z_variation_curriculum_enabled = True
         self.randomizer.initial_states.cfg.z_variation_min = (0.0, 0.0)  # No height variation at start
         self.randomizer.initial_states.cfg.z_variation_max = (0.0, 2.0)  # Up to 2m variation at full curriculum
@@ -416,7 +416,8 @@ class IrisMAEnvV4(DirectMARLEnv):
 
             # Scale actions
             # [0 vx, 1 vy, 2 vz, 3 yaw_rate, 4 gimbal_yaw_rate, 5 gimbal_pitch_rate, 6 zoom_rate]
-            self.cmd_vel[:, idx, 0:3] = action[:, 0:3] * self.cfg.max_lin_vel
+            self.cmd_vel[:, idx, 0:2] = action[:, 0:2] * self.cfg.max_lin_vel
+            self.cmd_vel[:, idx, 2] = action[:, 2] * self.cfg.max_lin_vel / 2.0
             self.cmd_vel[:, idx, 3] = action[:, 3] * self.cfg.max_yaw_rate
             self.cmd_vel[:, idx, 4:6] = action[:, 4:6] * self.cfg.gimbal.max_rate
             self.cmd_vel[:, idx, 6] = action[:, 6] * self.cfg.max_zoom_rate
@@ -801,7 +802,7 @@ class IrisMAEnvV4(DirectMARLEnv):
 
             triangulation_quality = torch.where(
                 is_tri_cov_valid[:, 0],
-                torch.exp(-trace_cov[:, 0]),
+                1.0 / (1.0 + trace_cov[:, 0] / 7.0),
                 torch.zeros_like(trace_cov[:, 0])
             )
 
@@ -813,9 +814,9 @@ class IrisMAEnvV4(DirectMARLEnv):
                 "action_delta": action_delta * self.cfg.action_delta_penalty_scale * self.step_dt,
                 "bbox_center": bbox_center_mapped * self.cfg.bbox_center_reward_scale * self.step_dt,
                 "bbox_size": bbox_size_mapped * self.cfg.bbox_size_reward_scale * self.step_dt,
-                "triangulation": triangulation_quality * self.cfg.triangulation_reward_scale * self.step_dt,
-                "collision": collision_penalty * self.cfg.collision_penalty_scale * self.step_dt * self.progress_coord,
-                "ttc": ttc_penalty * self.cfg.ttc_penalty_scale * self.step_dt * self.progress_coord,
+                "triangulation": triangulation_quality * self.cfg.triangulation_reward_scale * self.step_dt * self.progress_coord,
+                "collision": collision_penalty * self.cfg.collision_penalty_scale * self.step_dt * self.progress_safety,
+                "ttc": ttc_penalty * self.cfg.ttc_penalty_scale * self.step_dt * self.progress_safety,
             }
 
             for key, value in rewards.items():
@@ -1003,7 +1004,7 @@ class IrisMAEnvV4(DirectMARLEnv):
 
         for agent_id in self.cfg.possible_agents:
             robot = self._robots[agent_id]
-            died = robot.data.root_pos_w[:, 2] < 0.7
+            died = (robot.data.root_pos_w[:, 2] < 2.0) | (robot.data.root_pos_w[:, 2] > 50.0)
             terminated_dict[agent_id] = died
             time_out_dict[agent_id] = time_out
 
