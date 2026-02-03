@@ -46,4 +46,8 @@ self.target = RigidObject(self.cfg.target_cfg)
 8. (Raised at 2026-02-02 00:25, resolved at 2026-02-02 00:40) Can we better implement `direction_change_prob` at
 @source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma4/target_movement/target_movement.py#L283 in terms of distribution, learnability and curriculum. What interpretation can we give around this whole 'target movement' issue?
 
-9. Running `iris_ma4_mappo_rnn_tuning6_20260202_004546` experiment...
+9. Running `iris_ma4_mappo_rnn_tuning6_20260203_014758` experiment...
+    - triangulation_quality = exp(-trace_cov) (iris_ma_env4.py (lines 802-806)) will saturate fast and is unit-sensitive (trace is in ~m²). If trace is commonly >1, this term becomes near-zero almost always; if trace is <<1, it’s almost always ~1. Consider exp(-trace_cov / s) with a tuned s, or a gentler map like 1 / (1 + trace_cov / s) or -log(trace_cov + eps).
+
+10. (Raised at 2026-02-03 13:11) For 3 or more agents
+    - Triangulation validity currently requires all agents’ bboxes valid (bbox_valid_mask.all(dim=1) in _compute_triangulation_covariance). With detection dropout, this can zero out triangulation rewards often and create “dead” learning periods; consider “at least 2 valid views” (for 2 agents: both; for >2: any pair) instead of all.

@@ -214,6 +214,9 @@ class IrisMAEnvV4(DirectMARLEnv):
         horizontal_aperture = self.cfg.camera.spawn.horizontal_aperture
         vertical_aperture = horizontal_aperture * (height / width)
 
+        # Cache image dimensions for bbox normalization
+        self._img_dims = torch.tensor([width, height], device=self.device, dtype=torch.float32)
+
         # Get camera offset from config
         offset_pos = torch.tensor(self.cfg.camera.offset.pos, device=self.device)
         offset_rot = torch.tensor([0.5, -0.5, 0.5, -0.5], device=self.device)
@@ -640,12 +643,12 @@ class IrisMAEnvV4(DirectMARLEnv):
                 gimbal_yaws=gimbal_yaws,
                 gimbal_pitches=gimbal_pitches,
                 camera_intrinsics=camera_intrinsics,
-                Sigma_pix=self.Sigma_pix * progress_coord,
-                Sigma_twb=self.Sigma_twb * progress_coord,
-                Sigma_phiwb=self.Sigma_phiwb * progress_coord,
-                Sigma_alpha=self.Sigma_alpha * progress_coord,
-                Sigma_beta=self.Sigma_beta * progress_coord,
-                Sigma_K=self.Sigma_K * progress_coord,
+                Sigma_pix=self.Sigma_pix,
+                Sigma_twb=self.Sigma_twb,
+                Sigma_phiwb=self.Sigma_phiwb,
+                Sigma_alpha=self.Sigma_alpha,
+                Sigma_beta=self.Sigma_beta,
+                Sigma_K=self.Sigma_K,
                 include_pose=True,
                 include_gimbal=True,
                 include_intrinsics=True
@@ -781,9 +784,14 @@ class IrisMAEnvV4(DirectMARLEnv):
                 dim=1
             )
 
-            bbox_center = delayed_state.data.bboxes_2d[:, 0, 0:2]
-            bbox_size = delayed_state.data.bboxes_2d[:, 0, 2:4]
+            # Extract raw bbox values (in pixel coordinates) and normalize to [0, 1]
+            bbox_center_raw = delayed_state.data.bboxes_2d[:, 0, 0:2]
+            bbox_size_raw = delayed_state.data.bboxes_2d[:, 0, 2:4]
             bbox_valid = self.bbox_raycaster.validate_bbox(delayed_state.data.bboxes_2d[:, 0, :]).squeeze(-1)
+
+            # Normalize using cached image dimensions
+            bbox_center = bbox_center_raw / self._img_dims
+            bbox_size = bbox_size_raw / self._img_dims
 
             bbox_center_dist = torch.norm(bbox_center - 0.5, dim=1)
             bbox_center_mapped = torch.exp(-10.0 * bbox_center_dist) * bbox_valid.float()
@@ -805,7 +813,7 @@ class IrisMAEnvV4(DirectMARLEnv):
                 "action_delta": action_delta * self.cfg.action_delta_penalty_scale * self.step_dt,
                 "bbox_center": bbox_center_mapped * self.cfg.bbox_center_reward_scale * self.step_dt,
                 "bbox_size": bbox_size_mapped * self.cfg.bbox_size_reward_scale * self.step_dt,
-                "triangulation": triangulation_quality * self.cfg.triangulation_reward_scale * self.step_dt * self.progress_coord,
+                "triangulation": triangulation_quality * self.cfg.triangulation_reward_scale * self.step_dt,
                 "collision": collision_penalty * self.cfg.collision_penalty_scale * self.step_dt * self.progress_coord,
                 "ttc": ttc_penalty * self.cfg.ttc_penalty_scale * self.step_dt * self.progress_coord,
             }
@@ -922,8 +930,10 @@ class IrisMAEnvV4(DirectMARLEnv):
             gimbal_yaw = ego_state.data.joint_positions_b[:, 1:2]    # [1] = yaw
             combined_ang_vel = ego_state.data.body_combined_angular_velocity_w
 
-            bbox = ego_state.data.bboxes_2d[:, 0, :]
-            bbox_valid = self.bbox_raycaster.validate_bbox(bbox).unsqueeze(-1)
+            bbox_raw = ego_state.data.bboxes_2d[:, 0, :]
+            bbox_valid = self.bbox_raycaster.validate_bbox(bbox_raw).unsqueeze(-1)
+            # Normalize bbox to [0, 1]: [x_center, y_center, width, height] / [w, h, w, h]
+            bbox = bbox_raw / self._img_dims.repeat(2)
             time_since_detection = (self.delay_system.current_time - ego_state.data.timestamp_detection).unsqueeze(-1)
             zoom = ego_state.data.camera_zoom_level.unsqueeze(-1)
             ray_dir = ego_state.data.camera_ray_directions_w[:, 0, :]
@@ -1274,14 +1284,8 @@ class IrisMAEnvV4(DirectMARLEnv):
                 joint_ids=gimbal_joint_ids,
                 env_ids=env_ids
             )
-            self.cmd_gimbal_yaw[:, i] = gimbal_yaw.clone()
-            self.cmd_gimbal_pitch[:, i] = gimbal_pitch.clone()
-            # robot.write_joint_state_to_sim(
-            #     position=torch.stack([torch.ones_like(gimbal_yaw)*1, torch.ones_like(gimbal_roll)*0.2, torch.ones_like(gimbal_pitch)*0.5], dim=-1),
-            #     velocity=joint_vel,
-            #     joint_ids=gimbal_joint_ids,
-            #     env_ids=env_ids
-            # )
+            self.cmd_gimbal_yaw[env_ids, i] = gimbal_yaw.clone()
+            self.cmd_gimbal_pitch[env_ids, i] = gimbal_pitch.clone()
 
             # Randomize zoom level between 1.0 and current_max_zoom
             random_zoom = 1.0 + torch.rand(len(env_ids), device=self.device) * (self.current_max_zoom - 1.0)

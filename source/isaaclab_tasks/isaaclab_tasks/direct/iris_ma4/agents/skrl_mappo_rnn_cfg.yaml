@@ -23,7 +23,7 @@ models:
 # Agent configuration
 agent:
   # RNN-specific parameters
-  sequence_length: 64        # RNN sequence length for training
+  sequence_length: 32        # RNN sequence length for training
   
   # Burn-in steps for hidden state warm-up (0 = disabled, must be < sequence_length)
   # Disable it at all times
@@ -31,10 +31,10 @@ agent:
 
   # D steps to mask from loss at episode start (0 = disabled, use for delay compensation)
   # Do match with delay using hydra override
-  episode_start_mask_steps: 0  
+  episode_start_mask_steps: 8  
 
   # PPO parameters
-  rollouts: 64              # Number of rollouts before updating
+  rollouts: 32              # Number of rollouts before updating
   learning_epochs: 6         # Number of learning epochs during each update
   mini_batches: 8            # Number of mini batches (lower = better sequence sampling)
 
