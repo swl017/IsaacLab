@@ -221,10 +221,10 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     """Penalty scale for total action magnitude. Increased from -1.0 for smoother actions."""
 
     # [0 vx, 1 vy, 2 vz, 3 yaw_rate, 4 gimbal_yaw_rate, 5 gimbal_pitch_rate, 6 zoom_rate]
-    action_weight: list = [1, 1, 5, 1, 1, 1, 0.3]
+    action_weight: list = [1, 1, 5, 1, 0.5, 0.5, 0.3]
     """Weights for each action dimension in penalty computation."""
 
-    action_delta_weight: list = [1, 1, 1, 1, 1, 1, 0.3]
+    action_delta_weight: list = [1, 1, 1, 1, 0.5, 0.5, 0.3]
     """Weights for action delta (smoothness) penalty."""
 
     action_delta_penalty_scale: float = -0.2
@@ -317,5 +317,5 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     # Debug
     # ==========================================================================
 
-    play_sim_at_step: int = 0#200000
+    play_sim_at_step: int = 200000
     """Training step at which to enable rendering for debugging."""

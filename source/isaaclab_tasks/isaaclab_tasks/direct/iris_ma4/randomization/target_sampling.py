@@ -21,14 +21,31 @@ from isaaclab.utils import configclass
 
 @configclass
 class TargetSamplerCfg:
-    """Configuration for gimbal-aware target sampling."""
+    """Configuration for gimbal-aware target sampling.
+
+    Target Distance Calculation:
+        1. Minimum distance = max(target_distance_min, formation_spread × distance_scale_factor)
+        2. Maximum distance = target_distance_max × scale_factor (curriculum parameter)
+        3. Final distance sampled uniformly in [min, max] range
+
+    Curriculum Integration:
+        The `scale_factor` parameter in sample_target_position() controls curriculum:
+        - At scale_factor=0: max distance ≈ 0, so targets are at minimum distance (~15m)
+        - At scale_factor=1: full range (15m to target_distance_max)
+    """
 
     # Target distance range from formation center
     target_distance_min: float = 15.0  # Minimum horizontal distance (meters)
-    target_distance_max: float = 20.0  # Maximum horizontal distance (meters)
+    target_distance_max: float = 60.0  # Maximum horizontal distance (meters) - curriculum scales this
+    """Maximum target distance. Multiplied by curriculum scale_factor (0→1) during training."""
 
-    # Distance scaling based on formation size
-    distance_scale_factor: float = 2.5  # Multiply formation spread by this
+    # Formation safety factor (NOT a curriculum parameter)
+    distance_scale_factor: float = 1.0
+    """Multiplier for formation spread to ensure target is OUTSIDE formation.
+
+    Example: If agents are spread 10m apart, target is at least 10m × 2.5 = 25m away.
+    This is a geometric safety constraint, NOT affected by curriculum.
+    """
 
     # Gimbal pitch limits (must match environment config)
     # Sign convention: down is positive pitch, up is negative pitch

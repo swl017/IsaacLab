@@ -100,7 +100,7 @@ class TargetMovementCfg:
     geofence_min_size: float = 50.0
     """Minimum geofence half-width at curriculum progress 0.0 (m)."""
 
-    geofence_max_size: float = 500.0
+    geofence_max_size: float = 100.0
     """Maximum geofence half-width at curriculum progress 1.0 (m)."""
 
     geofence_bounce_factor: float = 0.8

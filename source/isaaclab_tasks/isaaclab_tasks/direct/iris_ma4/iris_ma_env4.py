@@ -292,7 +292,6 @@ class IrisMAEnvV4(DirectMARLEnv):
         self.progress_delay = 0.0
         self.progress_coord = 0.0
         self.progress_all = 0.0
-        self.progress_delay = 0.0
         self.progress_tracking = 0.0
         self.progress_coord = 0.0
         self.progress_safety = 0.0
@@ -306,22 +305,23 @@ class IrisMAEnvV4(DirectMARLEnv):
         self.trace_cov_invalid = torch.ones(self.num_envs, 1, device=self.device) * (-1.0)
 
         # Uncertainty matrices for triangulation covariance computation
-        self.Sigma_pix = torch.eye(2, device=self.device).unsqueeze(0).unsqueeze(0).expand(
-            self.num_envs, len(self.cfg.possible_agents), 2, 2
-        ) * (self.cfg.pix_std ** 2)
-        self.Sigma_twb = torch.eye(3, device=self.device).unsqueeze(0).unsqueeze(0).expand(
-            self.num_envs, len(self.cfg.possible_agents), 3, 3
-        ) * (self.cfg.pos_std ** 2)
-        self.Sigma_phiwb = torch.eye(3, device=self.device).unsqueeze(0).unsqueeze(0).expand(
-            self.num_envs, len(self.cfg.possible_agents), 3, 3
-        ) * (self.cfg.ori_std ** 2)
-        self.Sigma_alpha = torch.ones(self.num_envs, len(self.cfg.possible_agents), 1, 1,
-                                device=self.device) * (self.cfg.gimbal_std ** 2)
-        self.Sigma_beta = torch.ones(self.num_envs, len(self.cfg.possible_agents), 1, 1,
-                                device=self.device) * (self.cfg.gimbal_std ** 2)
-        self.Sigma_K = torch.eye(4, device=self.device).unsqueeze(0).unsqueeze(0).expand(
-            self.num_envs, len(self.cfg.possible_agents), 4, 4
-        ) * (self.cfg.intrinsics_std ** 2)
+        # Use .repeat() instead of .expand() so each env can have independent values
+        # (expand creates views that share memory, repeat creates actual copies)
+        C = len(self.cfg.possible_agents)
+        self.Sigma_pix = (
+            torch.eye(2, device=self.device) * (self.cfg.pix_std ** 2)
+        ).unsqueeze(0).unsqueeze(0).repeat(self.num_envs, C, 1, 1)
+        self.Sigma_twb = (
+            torch.eye(3, device=self.device) * (self.cfg.pos_std ** 2)
+        ).unsqueeze(0).unsqueeze(0).repeat(self.num_envs, C, 1, 1)
+        self.Sigma_phiwb = (
+            torch.eye(3, device=self.device) * (self.cfg.ori_std ** 2)
+        ).unsqueeze(0).unsqueeze(0).repeat(self.num_envs, C, 1, 1)
+        self.Sigma_alpha = torch.ones(self.num_envs, C, 1, 1, device=self.device) * (self.cfg.gimbal_std ** 2)
+        self.Sigma_beta = torch.ones(self.num_envs, C, 1, 1, device=self.device) * (self.cfg.gimbal_std ** 2)
+        self.Sigma_K = (
+            torch.eye(4, device=self.device) * (self.cfg.intrinsics_std ** 2)
+        ).unsqueeze(0).unsqueeze(0).repeat(self.num_envs, C, 1, 1)
 
         # Episode tracking
         self._episode_sums = {
@@ -1179,6 +1179,51 @@ class IrisMAEnvV4(DirectMARLEnv):
 
         return initial_gt_states
 
+    def _update_sigma_matrices(self, env_ids: torch.Tensor, sampled_noise: Dict[str, torch.Tensor]):
+        """Update triangulation covariance Sigma matrices with sampled noise values.
+
+        This is called on reset to update each environment's noise variance based on
+        the sampled values from the delay system. This provides domain randomization
+        where each environment has different noise characteristics.
+
+        Args:
+            env_ids: Environment indices that were reset.
+            sampled_noise: Dictionary of sampled noise std values from delay system.
+                Keys: "position", "orientation", "gimbal", "bbox", etc.
+                Values: Tensor of shape [len(env_ids)] with sampled std per env.
+        """
+        C = len(self.cfg.possible_agents)
+        K = len(env_ids)
+
+        # Get sampled std values (shape: [K])
+        pix_std = sampled_noise["bbox"]
+        pos_std = sampled_noise["position"]
+        ori_std = sampled_noise["orientation"]
+        gimbal_std = sampled_noise["gimbal"]
+
+        # Update Sigma_pix: [N, C, 2, 2] - diagonal matrix scaled by pix_std^2
+        # Variance = std^2, broadcast [K] -> [K, C, 2, 2]
+        pix_var = (pix_std ** 2).view(K, 1, 1, 1)  # [K, 1, 1, 1]
+        eye2 = torch.eye(2, device=self.device)  # [2, 2]
+        self.Sigma_pix[env_ids] = pix_var * eye2.view(1, 1, 2, 2).expand(K, C, 2, 2)
+
+        # Update Sigma_twb: [N, C, 3, 3] - diagonal matrix scaled by pos_std^2
+        pos_var = (pos_std ** 2).view(K, 1, 1, 1)
+        eye3 = torch.eye(3, device=self.device)
+        self.Sigma_twb[env_ids] = pos_var * eye3.view(1, 1, 3, 3).expand(K, C, 3, 3)
+
+        # Update Sigma_phiwb: [N, C, 3, 3] - diagonal matrix scaled by ori_std^2
+        ori_var = (ori_std ** 2).view(K, 1, 1, 1)
+        self.Sigma_phiwb[env_ids] = ori_var * eye3.view(1, 1, 3, 3).expand(K, C, 3, 3)
+
+        # Update Sigma_alpha, Sigma_beta: [N, C, 1, 1] - scalar gimbal_std^2
+        gimbal_var = (gimbal_std ** 2).view(K, 1, 1, 1)
+        self.Sigma_alpha[env_ids] = gimbal_var.expand(K, C, 1, 1)
+        self.Sigma_beta[env_ids] = gimbal_var.expand(K, C, 1, 1)
+
+        # Note: Sigma_K (camera intrinsics) is kept constant for now
+        # Could be extended to support per-env sampling if needed
+
     def _reset_idx(self, env_ids: torch.Tensor | None):
         """Reset environments at specified indices."""
         if env_ids is None or len(env_ids) == self.num_envs:
@@ -1349,7 +1394,17 @@ class IrisMAEnvV4(DirectMARLEnv):
             }
 
         initial_gt_states = self._build_initial_gt_states_for_reset(env_ids, reset_states=reset_states)
-        self.delay_system.reset(env_ids=env_ids, initial_gt_states=initial_gt_states)
+
+        # Reset delay system with noise resampling based on curriculum progress
+        # Each environment gets its noise std sampled from Uniform(0, sigma_max * progress)
+        sampled_noise = self.delay_system.reset(
+            env_ids=env_ids,
+            initial_gt_states=initial_gt_states,
+            noise_progress=self.progress_delay,  # Use delay curriculum progress
+        )
+
+        # Update Sigma matrices with sampled noise values for triangulation covariance
+        self._update_sigma_matrices(env_ids, sampled_noise)
 
         super()._reset_idx(env_ids)
 

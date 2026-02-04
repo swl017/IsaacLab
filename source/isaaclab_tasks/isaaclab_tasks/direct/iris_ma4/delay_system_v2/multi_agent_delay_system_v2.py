@@ -132,8 +132,21 @@ class MultiAgentDelaySystemV2:
         # Camera configuration storage
         self._camera_configs: Dict[AgentID, Dict[str, Any]] = {}
 
-        # Noise progress scale (for curriculum learning)
+        # Noise progress scale (for curriculum learning) - deprecated, use per-env noise
         self._noise_progress_scale = 1.0 if cfg.enable_noise else 0.0
+
+        # Per-environment noise standard deviations (sampled on reset)
+        # Each environment gets its own noise level for domain randomization
+        self._per_env_noise_std = {
+            "position": torch.zeros(num_envs, device=device),
+            "orientation": torch.zeros(num_envs, device=device),
+            "linear_velocity": torch.zeros(num_envs, device=device),
+            "angular_velocity": torch.zeros(num_envs, device=device),
+            "linear_acceleration": torch.zeros(num_envs, device=device),
+            "gimbal": torch.zeros(num_envs, device=device),
+            "bbox": torch.zeros(num_envs, device=device),
+            "zoom": torch.zeros(num_envs, device=device),
+        }
 
         # Build field dimensions and configs
         self._field_dims = self._build_field_dims()
@@ -630,9 +643,12 @@ class MultiAgentDelaySystemV2:
         joint_positions_b: torch.Tensor,
         zoom_level: torch.Tensor,
     ):
-        """Store states to clean and noisy pipelines."""
+        """Store states to clean and noisy pipelines.
+
+        Uses per-environment noise standard deviations for domain randomization.
+        Each environment has its own noise level sampled on reset.
+        """
         cfg = self.cfg
-        scale = self._noise_progress_scale
 
         # Select appropriate delay systems based on perspective
         if perspective == "ego":
@@ -642,21 +658,28 @@ class MultiAgentDelaySystemV2:
             delay_clean = self._delay_clean_other
             delay_noisy = self._delay_noisy_other
 
-        # Motion fields
+        # Get per-env noise std and reshape for broadcasting: [N] -> [N, 1]
+        position_noise_std = self._per_env_noise_std["position"].unsqueeze(-1)
+        lin_vel_noise_std = self._per_env_noise_std["linear_velocity"].unsqueeze(-1)
+        ang_vel_noise_std = self._per_env_noise_std["angular_velocity"].unsqueeze(-1)
+        lin_acc_noise_std = self._per_env_noise_std["linear_acceleration"].unsqueeze(-1)
+
+        # Motion fields with per-env noise
         fields_data = {
-            "body_position_w": (body_position_w, cfg.position_noise_std),
-            "body_linear_velocity_w": (body_linear_velocity_w, cfg.linear_velocity_noise_std),
-            "body_angular_velocity_w": (body_angular_velocity_w, cfg.angular_velocity_noise_std),
-            "body_linear_acceleration_w": (body_linear_acceleration_w, cfg.linear_acceleration_noise_std),
+            "body_position_w": (body_position_w, position_noise_std),
+            "body_linear_velocity_w": (body_linear_velocity_w, lin_vel_noise_std),
+            "body_angular_velocity_w": (body_angular_velocity_w, ang_vel_noise_std),
+            "body_linear_acceleration_w": (body_linear_acceleration_w, lin_acc_noise_std),
         }
 
         for field_name, (data, noise_std) in fields_data.items():
             full_name = f"{agent_id}.{field_name}.{perspective}"
             # Clean pipeline
             delay_clean.store(full_name, data)
-            # Noisy pipeline (with noise)
-            if cfg.enable_noise and noise_std > 0 and scale > 0:
-                noisy_data = data + torch.randn_like(data) * noise_std * scale
+            # Noisy pipeline (with per-env noise)
+            if cfg.enable_noise:
+                # noise_std is [N, 1], broadcasts to [N, 3]
+                noisy_data = data + torch.randn_like(data) * noise_std
                 delay_noisy.store(full_name, noisy_data)
             else:
                 delay_noisy.store(full_name, data)
@@ -664,19 +687,20 @@ class MultiAgentDelaySystemV2:
         # Orientation field (special handling for quaternions)
         full_name = f"{agent_id}.body_orientation_w.{perspective}"
         delay_clean.store(full_name, body_orientation_w)
-        if cfg.enable_noise and cfg.orientation_noise_std > 0 and scale > 0:
-            # Add noise to quaternion and normalize
-            noisy_quat = body_orientation_w + torch.randn_like(body_orientation_w) * cfg.orientation_noise_std * scale
+        if cfg.enable_noise:
+            ori_noise_std = self._per_env_noise_std["orientation"].unsqueeze(-1)  # [N, 1]
+            noisy_quat = body_orientation_w + torch.randn_like(body_orientation_w) * ori_noise_std
             noisy_quat = normalize(noisy_quat)
             delay_noisy.store(full_name, noisy_quat)
         else:
             delay_noisy.store(full_name, body_orientation_w)
 
-        # Joint fields
+        # Joint fields (gimbal)
         full_name = f"{agent_id}.joint_positions_b.{perspective}"
         delay_clean.store(full_name, joint_positions_b)
-        if cfg.enable_noise and cfg.gimbal_noise_std > 0 and scale > 0:
-            noisy_joints = joint_positions_b + torch.randn_like(joint_positions_b) * cfg.gimbal_noise_std * scale
+        if cfg.enable_noise:
+            gimbal_noise_std = self._per_env_noise_std["gimbal"].unsqueeze(-1)  # [N, 1]
+            noisy_joints = joint_positions_b + torch.randn_like(joint_positions_b) * gimbal_noise_std
             delay_noisy.store(full_name, noisy_joints)
         else:
             delay_noisy.store(full_name, joint_positions_b)
@@ -691,8 +715,9 @@ class MultiAgentDelaySystemV2:
         full_name = f"{agent_id}.camera_zoom_level.{perspective}"
         zoom_expanded = zoom_level.unsqueeze(-1) if zoom_level.dim() == 1 else zoom_level
         delay_clean.store(full_name, zoom_expanded)
-        if cfg.enable_noise and cfg.zoom_noise_std > 0 and scale > 0:
-            noisy_zoom = zoom_expanded + torch.randn_like(zoom_expanded) * cfg.zoom_noise_std * scale
+        if cfg.enable_noise:
+            zoom_noise_std = self._per_env_noise_std["zoom"].unsqueeze(-1)  # [N, 1]
+            noisy_zoom = zoom_expanded + torch.randn_like(zoom_expanded) * zoom_noise_std
             noisy_zoom = torch.clamp(noisy_zoom, min=1.0)
             delay_noisy.store(full_name, noisy_zoom)
         else:
@@ -705,12 +730,13 @@ class MultiAgentDelaySystemV2:
     ):
         """Update detection (bounding box) data for an agent.
 
+        Uses per-environment noise standard deviations for domain randomization.
+
         Args:
             agent_id: Agent identifier.
             bboxes_2d_gt: Ground truth bounding boxes [N, T, 4] (x, y, w, h).
         """
         cfg = self.cfg
-        scale = self._noise_progress_scale
 
         # Store GT
         gt_state = self._gt_states[agent_id]
@@ -747,8 +773,10 @@ class MultiAgentDelaySystemV2:
             full_name = f"{agent_id}.bboxes_2d.{perspective}"
             delay_clean.store(full_name, bboxes_flat)
 
-            if cfg.enable_noise and cfg.bbox_noise_std > 0 and scale > 0:
-                noisy_bbox = bboxes_flat + torch.randn_like(bboxes_flat) * cfg.bbox_noise_std * scale
+            # Use per-env bbox noise std for domain randomization
+            if cfg.enable_noise:
+                bbox_noise_std = self._per_env_noise_std["bbox"].unsqueeze(-1)  # [N, 1]
+                noisy_bbox = bboxes_flat + torch.randn_like(bboxes_flat) * bbox_noise_std
                 delay_noisy.store(full_name, noisy_bbox)
             else:
                 delay_noisy.store(full_name, bboxes_flat)
@@ -939,15 +967,29 @@ class MultiAgentDelaySystemV2:
         self,
         env_ids: torch.Tensor,
         initial_gt_states: Optional[Dict[AgentID, Any]] = None,
-    ):
+        noise_progress: float = 1.0,
+    ) -> Dict[str, torch.Tensor]:
         """Reset delay system for specified environments.
+
+        Resamples per-environment noise standard deviations for domain randomization.
+        Each environment gets noise sampled from Uniform(0, sigma_max * noise_progress).
 
         Args:
             env_ids: Environment indices to reset.
             initial_gt_states: Optional initial GT states to warm-start filters.
+            noise_progress: Curriculum progress in [0, 1] for noise scaling.
+                0 = no noise, 1 = full noise range.
+
+        Returns:
+            Dictionary of sampled noise std values for the reset environments.
+            Keys: "position", "orientation", "gimbal", "bbox", etc.
+            Values: Tensor of shape [len(env_ids)] with sampled std per env.
         """
         # Reset simulation time for these environments
         self._current_time[env_ids] = 0.0
+
+        # Resample noise standard deviations for reset environments
+        sampled_noise = self.resample_noise_std(env_ids, progress=noise_progress)
 
         # Reset all delay systems
         self._delay_clean_ego.reset(env_ids)
@@ -996,13 +1038,84 @@ class MultiAgentDelaySystemV2:
         # This ensures the delay systems have data available for get_delayed_* calls
         self._initialize_pipelines_from_gt_states()
 
+        return sampled_noise
+
     def set_noise_progress_scale(self, progress: float):
         """Set noise progress scale for curriculum learning.
 
         Args:
             progress: Progress value in [0, 1]. 0 = no noise, 1 = full noise.
+
+        Note: This is deprecated in favor of per-env noise sampling via resample_noise_std().
+        Kept for backward compatibility.
         """
         self._noise_progress_scale = progress if self.cfg.enable_noise else 0.0
+
+    def resample_noise_std(
+        self,
+        env_ids: torch.Tensor,
+        progress: float = 1.0,
+    ) -> Dict[str, torch.Tensor]:
+        """Resample noise standard deviations for specified environments.
+
+        For curriculum learning, noise is sampled uniformly:
+            sigma ~ Uniform(0, sigma_max * progress)
+
+        This provides domain randomization where each environment has its own
+        noise level, with the maximum noise scaling with curriculum progress.
+
+        Args:
+            env_ids: Environment indices to resample.
+            progress: Curriculum progress in [0, 1]. Scales maximum noise.
+
+        Returns:
+            Dictionary mapping field names to sampled std values for the reset
+            environments. Shape: [len(env_ids)] per field.
+        """
+        if not self.cfg.enable_noise:
+            # Return zeros if noise disabled
+            for key in self._per_env_noise_std:
+                self._per_env_noise_std[key][env_ids] = 0.0
+            return {k: self._per_env_noise_std[k][env_ids].clone()
+                    for k in self._per_env_noise_std}
+
+        num_reset = len(env_ids)
+        cfg = self.cfg
+
+        # Map field names to max std values from config
+        max_std_map = {
+            "position": cfg.position_noise_std,
+            "orientation": cfg.orientation_noise_std,
+            "linear_velocity": cfg.linear_velocity_noise_std,
+            "angular_velocity": cfg.angular_velocity_noise_std,
+            "linear_acceleration": cfg.linear_acceleration_noise_std,
+            "gimbal": cfg.gimbal_noise_std,
+            "bbox": cfg.bbox_noise_std,
+            "zoom": cfg.zoom_noise_std,
+        }
+
+        sampled = {}
+        for key, max_std in max_std_map.items():
+            # Sample uniformly from [0, max_std * progress]
+            max_value = max_std * progress
+            samples = torch.rand(num_reset, device=self._device) * max_value
+            self._per_env_noise_std[key][env_ids] = samples
+            sampled[key] = samples.clone()
+
+        return sampled
+
+    def get_noise_std(self, env_ids: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        """Get current noise standard deviations for specified environments.
+
+        Args:
+            env_ids: Environment indices. If None, returns all.
+
+        Returns:
+            Dictionary mapping noise field names to their current std values.
+        """
+        if env_ids is None:
+            return {k: v.clone() for k, v in self._per_env_noise_std.items()}
+        return {k: v[env_ids].clone() for k, v in self._per_env_noise_std.items()}
 
     def _initialize_pipelines_from_gt_states(self):
         """Initialize delay pipelines with current GT states.
