@@ -222,3 +222,44 @@ class CurriculumCfg:
         else:
             # After all_end_step: Full zoom capability
             return self.zoom_final_max
+
+    # ==========================================================================
+    # Phase 3/4 Delay Curriculum Methods
+    # ==========================================================================
+
+    def get_delay_mode(self, current_step: int) -> str:
+        """Get current delay mode based on curriculum progress.
+
+        Returns:
+            'none': No delay applied (pre-Phase 3)
+            'fixed': Fixed deterministic delay (Phase 3)
+            'random': Random delay with staleness (Phase 4+)
+        """
+        if current_step < self.fixed_delay_start_step:
+            return "none"
+        elif current_step < self.random_delay_start_step:
+            return "fixed"
+        else:
+            return "random"
+
+    def get_noise_progress(self, current_step: int) -> float:
+        """Get progress within noise phase [0, 1]."""
+        return self.get_progress(current_step, self.noise_start_step, self.noise_end_step)
+
+    def get_fixed_delay_progress(self, current_step: int) -> float:
+        """Get progress within fixed delay phase [0, 1].
+
+        Used to ramp delay magnitude from 0 to config mean values.
+        """
+        return self.get_progress(current_step, self.fixed_delay_start_step, self.fixed_delay_end_step)
+
+    def get_random_delay_progress(self, current_step: int) -> float:
+        """Get progress within random delay phase [0, 1].
+
+        Used to ramp delay variance from 0 to config std values.
+        """
+        return self.get_progress(current_step, self.random_delay_start_step, self.random_delay_end_step)
+
+    def get_dropout_progress(self, current_step: int) -> float:
+        """Get progress within dropout phase [0, 1]."""
+        return self.get_progress(current_step, self.dropout_start_step, self.dropout_end_step)

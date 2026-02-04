@@ -507,6 +507,34 @@ class DelaySystemV2:
         for pipeline in self._noisy_pipelines.values():
             pipeline.update_dropout_prob(dropout_prob)
 
+    def set_all_delay_modes(self, mode: str, progress: float = 1.0):
+        """Set delay mode for all fields (curriculum learning).
+
+        Args:
+            mode: Delay mode - 'none', 'fixed', or 'random'
+                - 'none': No latency delay applied
+                - 'fixed': Fixed deterministic delay (all envs get same delay)
+                - 'random': Random delay sampled per environment
+            progress: Curriculum progress [0, 1] for ramping delay magnitude/variance
+        """
+        for pipeline in self._clean_pipelines.values():
+            pipeline.set_delay_mode(mode, progress)
+        for pipeline in self._noisy_pipelines.values():
+            pipeline.set_delay_mode(mode, progress)
+
+    def set_field_delay_mode(self, field_name: str, mode: str, progress: float = 1.0):
+        """Set delay mode for a specific field.
+
+        Args:
+            field_name: Name of the field.
+            mode: Delay mode - 'none', 'fixed', or 'random'
+            progress: Curriculum progress [0, 1] for ramping
+        """
+        if field_name in self._clean_pipelines:
+            self._clean_pipelines[field_name].set_delay_mode(mode, progress)
+        if field_name in self._noisy_pipelines:
+            self._noisy_pipelines[field_name].set_delay_mode(mode, progress)
+
     # ==========================================================================
     # Utility Methods
     # ==========================================================================

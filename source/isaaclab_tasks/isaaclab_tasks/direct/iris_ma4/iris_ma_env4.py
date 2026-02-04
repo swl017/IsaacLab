@@ -306,6 +306,14 @@ class IrisMAEnvV4(DirectMARLEnv):
         self.progress_dynamics = self._linear_progress(curr.dynamics_start_step, curr.dynamics_end_step, current_step)
         self.current_max_zoom = curr.get_max_zoom_level(current_step)
 
+        # Phase 3/4 curriculum state for delay mode
+        self.progress_fixed_delay = curr.get_fixed_delay_progress(current_step)
+        self.progress_random_delay = curr.get_random_delay_progress(current_step)
+        self.progress_dropout = curr.get_dropout_progress(current_step)
+        self._current_delay_mode = curr.get_delay_mode(current_step)
+        # Apply the initial delay mode to the delay system
+        self._apply_delay_mode(self._current_delay_mode, current_step)
+
         # Triangulation covariance placeholders
         self.Sigma_X_invalid = torch.eye(3, device=self.device).unsqueeze(0).unsqueeze(0).expand(
             self.num_envs, 1, 3, 3
@@ -426,6 +434,17 @@ class IrisMAEnvV4(DirectMARLEnv):
         self.progress_dynamics = self._linear_progress(curr.dynamics_start_step, curr.dynamics_end_step, current_step)
         self.current_max_zoom = curr.get_max_zoom_level(current_step)
 
+        # Phase 3/4 curriculum: delay mode
+        self.progress_fixed_delay = curr.get_fixed_delay_progress(current_step)
+        self.progress_random_delay = curr.get_random_delay_progress(current_step)
+        self.progress_dropout = curr.get_dropout_progress(current_step)
+
+        # Check if delay mode changed and apply
+        new_delay_mode = curr.get_delay_mode(current_step)
+        if new_delay_mode != self._current_delay_mode:
+            self._current_delay_mode = new_delay_mode
+            self._apply_delay_mode(new_delay_mode, current_step)
+
         for idx, agent_id in enumerate(self.cfg.possible_agents):
             # Clip and store actions
             action = torch.clamp(actions[agent_id], min=-1.0, max=1.0)
@@ -533,6 +552,35 @@ class IrisMAEnvV4(DirectMARLEnv):
         x = (current - start) / (end - start)
         return 0.0 if x < 0 else (1.0 if x > 1 else float(x))
 
+    def _apply_delay_mode(self, mode: str, current_step: int):
+        """Apply delay mode to the delay system based on curriculum phase.
+
+        Phase 3 (fixed delay): Deterministic latency, all envs get same delay
+        Phase 4 (random delay): Stochastic delay sampled per environment
+
+        Args:
+            mode: Delay mode - 'none', 'fixed', or 'random'
+            current_step: Current training step
+        """
+        curr = self.cfg.curriculum
+
+        if mode == "none":
+            # Pre-Phase 3: No delay applied
+            self.delay_system.set_delay_mode("none", progress=0.0)
+            self.delay_system.set_dropout_enabled(False)
+        elif mode == "fixed":
+            # Phase 3: Fixed delay, ramp magnitude from 0 to config mean
+            progress = curr.get_fixed_delay_progress(current_step)
+            self.delay_system.set_delay_mode("fixed", progress=progress)
+            self.delay_system.set_dropout_enabled(False)  # No dropout in Phase 3
+        elif mode == "random":
+            # Phase 4+: Random delay, ramp variance from 0 to config std
+            progress = curr.get_random_delay_progress(current_step)
+            self.delay_system.set_delay_mode("random", progress=progress)
+            # Dropout only enabled in Phase 5+
+            dropout_progress = curr.get_dropout_progress(current_step)
+            self.delay_system.set_dropout_enabled(dropout_progress > 0, progress=dropout_progress)
+
     def _initialize_bbox_raycaster(self):
         """Lazy initialization of BBoxRayCaster after targets are spawned."""
         if self._bbox_raycaster_initialized:
@@ -570,8 +618,11 @@ class IrisMAEnvV4(DirectMARLEnv):
         # ========================================
         self.delay_system.update_time()
 
-        # Update curriculum scaling
-        self.delay_system.set_noise_progress_scale(self.progress_delay)
+        # Update noise curriculum scaling (Phase 2: noise ramps from 80k-100k)
+        noise_progress = self.cfg.curriculum.get_noise_progress(
+            self.cfg.play_sim_at_step if DEBUG_DRAW else self.common_step_counter
+        )
+        self.delay_system.set_noise_progress_scale(noise_progress)
 
         # ========== Update GT states for all agents ==========
         for i, agent_id in enumerate(self.cfg.possible_agents):

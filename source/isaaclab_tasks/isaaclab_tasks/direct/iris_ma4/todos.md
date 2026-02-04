@@ -63,3 +63,8 @@ self.target = RigidObject(self.cfg.target_cfg)
     - Added noise in observations
     - Adjusted target distance
     - Adjusted reward weights
+
+14. Running `iris_ma4_mappo_rnn_tuning6_20260205_031038` experiment...
+    - Adjusted curriculum
+    - Modified delay system accroding to the new curriculum
+    - Adjusted reward weights

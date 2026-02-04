@@ -5,6 +5,8 @@
 
 EXP_DIR="iris_ma4_mappo_rnn_tuning6_$(date +%Y%m%d_%H%M%S)"
 
+export IDE_DEBUG_MODE=True
+
 set -e  # Exit on error
 
 # Task configuration
@@ -29,7 +31,7 @@ GRU_HIDDEN_SIZES=(64)
 GRU_NUM_LAYERS=(1)
 GRAD_NORM_CLIPS=(0.3)
 KL_THRESHOLDS=(0.02)
-BURN_IN_STEPS=(0 8)
+BURN_IN_STEPS=(4 8)
 
 # ============================================================================
 # Handle empty arrays (use placeholder for single iteration)
@@ -104,6 +106,16 @@ for lr in "${LEARNING_RATES[@]}"; do
                         fi
                     fi
 
+                    # Skip invalid configurations where burn_in >= seq_len / 4
+                    # (burn_in should be less than 1/4 of sequence_length for effective learning)
+                    if [[ "$seq_len" != "_default_" && "$burn_in" != "_default_" ]]; then
+                        if (( burn_in >= seq_len / 4 )); then
+                            echo "[$current/$total] Skipping: burn_in=$burn_in >= seq_len/4=$((seq_len / 4)) (invalid)"
+                            skipped=$((skipped + 1))
+                            continue
+                        fi
+                    fi
+
                     # Build experiment name (only include non-default params)
                     exp_name=""
                     if [[ "$lr" != "_default_" ]]; then exp_name+="lr${lr}_"; fi
@@ -164,6 +176,6 @@ done
 echo "========================================"
 echo "Hyperparameter sweep completed!"
 echo "Total configurations: $total"
-echo "Skipped (rollout < seq_len): $skipped"
+echo "Skipped (invalid configs): $skipped"
 echo "Actual runs: $((total - skipped))"
 echo "========================================"

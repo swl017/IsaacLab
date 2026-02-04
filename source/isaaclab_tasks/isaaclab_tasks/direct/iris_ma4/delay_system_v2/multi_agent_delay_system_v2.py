@@ -1117,6 +1117,59 @@ class MultiAgentDelaySystemV2:
             return {k: v.clone() for k, v in self._per_env_noise_std.items()}
         return {k: v[env_ids].clone() for k, v in self._per_env_noise_std.items()}
 
+    # ==========================================================================
+    # Curriculum Learning API for Phase 3/4
+    # ==========================================================================
+
+    def set_delay_mode(self, mode: str, progress: float = 1.0):
+        """Set delay mode for all pipelines (curriculum learning).
+
+        This method controls how latency delays are applied:
+        - 'none': No latency delay (Phase 0-2)
+        - 'fixed': Fixed deterministic delay, all envs same (Phase 3)
+        - 'random': Random delay sampled per environment (Phase 4+)
+
+        The progress parameter ramps the delay magnitude:
+        - In 'fixed' mode: delay = config_mean * progress
+        - In 'random' mode: delay ~ N(config_mean * progress, config_std * progress)
+
+        Args:
+            mode: Delay mode - 'none', 'fixed', or 'random'
+            progress: Curriculum progress [0, 1] for ramping delay magnitude/variance
+        """
+        # Apply to all 4 delay systems
+        self._delay_clean_ego.set_all_delay_modes(mode, progress)
+        self._delay_clean_other.set_all_delay_modes(mode, progress)
+        self._delay_noisy_ego.set_all_delay_modes(mode, progress)
+        self._delay_noisy_other.set_all_delay_modes(mode, progress)
+
+    def set_dropout_enabled(self, enabled: bool, progress: float = 0.0):
+        """Enable/disable dropout with curriculum scaling.
+
+        Args:
+            enabled: Whether dropout is enabled
+            progress: Curriculum progress [0, 1] for ramping dropout rate
+                When enabled, dropout_rate = config_rate * progress
+        """
+        if enabled and progress > 0:
+            # Ramp dropout rate based on progress
+            # Use original config dropout rates scaled by progress
+            cfg = self.cfg
+            detection_dropout = cfg.detection_dropout_rate * progress
+            comm_dropout = cfg.inter_agent_comm_dropout_rate * progress
+
+            # Apply scaled dropout to all noisy pipelines
+            self._delay_noisy_ego.set_all_dropout_rates(detection_dropout)
+            self._delay_noisy_other.set_all_dropout_rates(min(1.0, detection_dropout + comm_dropout))
+        else:
+            # Disable dropout
+            self._delay_noisy_ego.set_all_dropout_rates(0.0)
+            self._delay_noisy_other.set_all_dropout_rates(0.0)
+
+        # Clean pipelines never have dropout
+        self._delay_clean_ego.set_all_dropout_rates(0.0)
+        self._delay_clean_other.set_all_dropout_rates(0.0)
+
     def _initialize_pipelines_from_gt_states(self):
         """Initialize delay pipelines with current GT states.
 

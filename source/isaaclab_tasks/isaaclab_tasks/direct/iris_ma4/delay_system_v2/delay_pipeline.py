@@ -103,6 +103,15 @@ class DelayPipeline:
         # Track previous data for dropout (keep stale data when dropout occurs)
         self.dropout_held_data: torch.Tensor | None = None
 
+        # === Curriculum delay mode state ===
+        self._delay_mode: str = "none"  # "none", "fixed", "random"
+        self._delay_progress: float = 0.0  # Curriculum progress [0, 1]
+
+        # Store original config latency parameters for curriculum scaling
+        self._cfg_latency_mean: float = self._get_config_latency_mean()
+        self._cfg_latency_std: float = self._get_config_latency_std()
+        self._cfg_dropout_prob: float = cfg.dropout_prob
+
     def process(
         self,
         data: torch.Tensor,
@@ -126,7 +135,9 @@ class DelayPipeline:
             result = self._apply_first_order_lag(result)
 
         # Stage 2: Staleness (sample-and-hold at lower rate)
-        if self.cfg.staleness_enabled:
+        # Only apply in 'random' mode (Phase 4+). In 'fixed' mode (Phase 3),
+        # data must be fresh every step for deterministic temporal alignment.
+        if self.cfg.staleness_enabled and self._delay_mode == "random":
             result = self._apply_staleness(result, t_current)
 
         # Stage 3: Random latency (transport delay via history buffer)
@@ -337,12 +348,28 @@ class DelayPipeline:
             new_periods = self._sample_period()
             self.next_sample_period[env_ids] = new_periods[env_ids]
 
-        # Reset latency buffer
+        # Reset latency buffer with curriculum-aware delay mode
         if self._latency_buffer is not None:
             self._latency_buffer.reset(env_ids.tolist())
-            # Resample latencies
-            new_latencies = self._sample_latency()
-            self._latency_delays[env_ids] = new_latencies[env_ids]
+
+            # Handle latency based on curriculum delay mode
+            if self._delay_mode == "none":
+                # No delay
+                self._latency_delays[env_ids] = 0.0
+            elif self._delay_mode == "fixed":
+                # Fixed: all envs get same delay (mean * progress)
+                effective_mean = self._get_effective_latency_mean()
+                self._latency_delays[env_ids] = effective_mean
+            else:  # random
+                # Random: sample from N(mean * progress, std * progress)
+                effective_mean = self._get_effective_latency_mean()
+                effective_std = self._get_effective_latency_std()
+                if effective_std > 0:
+                    # Sample and ensure non-negative
+                    sampled = torch.randn(len(env_ids), device=self.device) * effective_std + effective_mean
+                    self._latency_delays[env_ids] = torch.clamp(sampled, min=0.0)
+                else:
+                    self._latency_delays[env_ids] = effective_mean
 
         # Reset dropout state
         if self.dropout_held_data is not None:
@@ -372,3 +399,71 @@ class DelayPipeline:
         if not 0 <= dropout_prob <= 1:
             raise ValueError(f"dropout_prob must be in [0, 1], got {dropout_prob}")
         self.cfg.dropout_prob = dropout_prob
+
+    # ==========================================================================
+    # Curriculum Delay Mode Control
+    # ==========================================================================
+
+    def _get_config_latency_mean(self) -> float:
+        """Extract latency mean from config distribution."""
+        if not self.cfg.latency_enabled:
+            return 0.0
+        dist = self.cfg.latency
+        if dist.type == "constant":
+            return dist.value or 0.0
+        elif dist.type in ("uniform", "normal"):
+            return dist.mean or 0.0
+        return 0.0
+
+    def _get_config_latency_std(self) -> float:
+        """Extract latency std from config distribution."""
+        if not self.cfg.latency_enabled:
+            return 0.0
+        dist = self.cfg.latency
+        if dist.type == "constant":
+            return 0.0
+        elif dist.type == "uniform":
+            # For uniform [mean - half_range, mean + half_range], std = half_range / sqrt(3)
+            return (dist.half_range or 0.0) / 1.732
+        elif dist.type == "normal":
+            return dist.std or 0.0
+        return 0.0
+
+    def set_delay_mode(self, mode: str, progress: float = 1.0):
+        """Set delay mode for curriculum learning.
+
+        Args:
+            mode: Delay mode - 'none', 'fixed', or 'random'
+                - 'none': No latency delay applied
+                - 'fixed': Fixed deterministic delay (all envs get same delay)
+                - 'random': Random delay sampled per environment
+            progress: Curriculum progress [0, 1] for ramping delay magnitude/variance
+                - In 'fixed' mode: delay = mean * progress
+                - In 'random' mode: delay ~ N(mean, std * progress)
+        """
+        if mode not in ("none", "fixed", "random"):
+            raise ValueError(f"Unknown delay mode: {mode}. Expected 'none', 'fixed', or 'random'")
+        self._delay_mode = mode
+        self._delay_progress = max(0.0, min(1.0, progress))
+
+    def set_dropout_rate(self, dropout_rate: float):
+        """Set dropout rate for curriculum control.
+
+        Args:
+            dropout_rate: Dropout probability [0, 1].
+        """
+        self.cfg.dropout_prob = max(0.0, min(1.0, dropout_rate))
+
+    def _get_effective_latency_mean(self) -> float:
+        """Get effective latency mean based on mode and progress."""
+        if self._delay_mode == "none":
+            return 0.0
+        # Ramp from 0 to config mean based on progress
+        return self._cfg_latency_mean * self._delay_progress
+
+    def _get_effective_latency_std(self) -> float:
+        """Get effective latency std based on mode and progress."""
+        if self._delay_mode in ("none", "fixed"):
+            return 0.0  # No variance in fixed mode
+        # Ramp from 0 to config std based on progress
+        return self._cfg_latency_std * self._delay_progress

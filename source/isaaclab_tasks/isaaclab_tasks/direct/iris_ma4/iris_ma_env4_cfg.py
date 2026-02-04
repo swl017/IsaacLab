@@ -39,7 +39,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     # Environment Meta
     # ==========================================================================
 
-    episode_length_s: float = 20.0
+    episode_length_s: float = 2.0
     """Episode length in seconds."""
 
     decimation: int = 4
