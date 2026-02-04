@@ -745,41 +745,47 @@ class BBoxRayCaster:
 
     def validate_bbox(self, bbox: torch.Tensor) -> torch.Tensor:
         """Validate arbitrary bounding boxes based on size and center criteria.
+
         Args:
-            bboxes: Tensor of shape (N, 4) in normalized (x_center, y_center, width, height) format.
+            bbox: Tensor of shape (N, 4) in pixel coordinates (x_center, y_center, width, height).
+                The bbox is normalized internally using the camera image dimensions.
+
         Returns:
-            Tensor of shape (N,) with boolean validity mask.
+            Tensor of shape (N,) with boolean validity mask. A bbox is valid if:
+                - Normalized size is within [min_bbox_size, max_bbox_size]
+                - Center is within image bounds (0.01-0.99 normalized)
+                - Width and height are positive
+                - Pixel area >= min_bbox_area_pixels
         """
-        # Normalize one bbox
-        # Extract dimensions
+        # Extract image dimensions
         img_h = self._data.image_shapes[:, 0, 0]
         img_w = self._data.image_shapes[:, 0, 1]
         
         # Prevent division by zero
-        img_w_safe = torch.clamp(img_w, min=self.cfg.projection_epsilon)
-        img_h_safe = torch.clamp(img_h, min=self.cfg.projection_epsilon)
-        
-        # Split bbox components
+        # NOTE: Must unsqueeze to (N, 1) for proper broadcasting with (N, 1) bbox components
+        img_w_safe = torch.clamp(img_w, min=self.cfg.projection_epsilon).unsqueeze(-1)  # (N,) → (N, 1)
+        img_h_safe = torch.clamp(img_h, min=self.cfg.projection_epsilon).unsqueeze(-1)  # (N,) → (N, 1)
+
+        # Split bbox components: each is (N, 1)
         cx, cy, w, h = bbox.split(1, dim=-1)
 
-        # Normalize
+        # Normalize: (N, 1) / (N, 1) → (N, 1)
         cx_norm = cx / img_w_safe
         cy_norm = cy / img_h_safe
         w_norm = w / img_w_safe
         h_norm = h / img_h_safe
-        
-        # Clamp to [0, 1] to handle numerical errors
-        # cx_norm = torch.clamp(cx_norm, 0.0, 1.0)
-        # cy_norm = torch.clamp(cy_norm, 0.0, 1.0)
-        # w_norm = torch.clamp(w_norm, 0.0, 1.0)
-        # h_norm = torch.clamp(h_norm, 0.0, 1.0)
-        bbox_normalized = torch.cat([cx_norm, cy_norm, w_norm, h_norm], dim=-1) # (N, 4)
 
+        # Concatenate to (N, 4)
+        bbox_normalized = torch.cat([cx_norm, cy_norm, w_norm, h_norm], dim=-1)
+
+        # Check normalized size constraints
         size_ok = validate_bbox_sizes(
             bbox_normalized,
             self.cfg.min_bbox_size,
             self.cfg.max_bbox_size
         )
+
+        # Check center is within image bounds
         center_x = bbox_normalized[..., 0]
         center_y = bbox_normalized[..., 1]
         center_ok = (
@@ -787,7 +793,19 @@ class BBoxRayCaster:
             (center_y > 0.01) & (center_y < 0.99)
         )
 
-        valid_mask = size_ok & center_ok
+        # Check for positive dimensions (reject negative width/height)
+        positive_dims = (w_norm > 0) & (h_norm > 0)
+        positive_dims = positive_dims.squeeze(-1)  # (N, 1) → (N,)
+
+        # Check pixel area threshold
+        if self.cfg.min_bbox_area_pixels > 0:
+            # Compute actual pixel area from normalized dimensions
+            area_pixels = (w_norm * img_w_safe) * (h_norm * img_h_safe)
+            area_ok = area_pixels.squeeze(-1) >= self.cfg.min_bbox_area_pixels
+        else:
+            area_ok = torch.ones_like(size_ok)
+
+        valid_mask = size_ok & center_ok & positive_dims & area_ok
 
         return valid_mask
 

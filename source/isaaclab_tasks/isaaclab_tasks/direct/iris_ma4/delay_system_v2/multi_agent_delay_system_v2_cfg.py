@@ -66,7 +66,7 @@ class MultiAgentDelaySystemV2Cfg:
     joint_time_constant: float = 0.05
     """Time constant for joint fields (gimbal positions, velocities) in seconds."""
 
-    zoom_time_constant: float = 0.1
+    zoom_time_constant: float = 0.01
     """Time constant for camera zoom level in seconds."""
 
     # =========================================================================

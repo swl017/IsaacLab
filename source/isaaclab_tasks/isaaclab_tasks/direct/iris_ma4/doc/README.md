@@ -6,6 +6,8 @@ A GPU-accelerated multi-agent reinforcement learning environment for cooperative
 
 **iris_ma4** simulates multiple drones equipped with gimbal-stabilized cameras that must cooperatively track and triangulate a target. Each drone observes the target from its own perspective, and the agents share information (with realistic delays) to improve localization accuracy through multi-view triangulation.
 
+For a full technical breakdown (including mathematical formulations per submodule), see `IRIS_MA4_TECHNICAL_REPORT.md`.
+
 This environment is designed for research in:
 - Multi-agent reinforcement learning (MARL)
 - Cooperative perception and sensor fusion

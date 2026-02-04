@@ -3,6 +3,14 @@
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
+import debugpy
+import os
+
+# Only start debugger if an environment variable is set
+if os.getenv("IDE_DEBUG_MODE") == "True":
+    debugpy.listen(("localhost", 5678))
+    print("Waiting for debugger attach on port 5678...")
+    debugpy.wait_for_client() # The script will freeze here until you hit F5
 
 """
 Train RL agent with MAPPO-RNN using Hydra configuration system.

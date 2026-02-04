@@ -198,11 +198,11 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     # Motion Limits
     # ==========================================================================
 
-    max_lin_vel: float = 20.0
-    """Maximum linear velocity (m/s)."""
+    max_lin_vel: float = 10.0
+    """Maximum linear velocity (m/s). Reduced from 20.0 for smoother actions."""
 
-    max_yaw_rate: float = math.radians(180.0)
-    """Maximum yaw rate (rad/s)."""
+    max_yaw_rate: float = math.radians(90.0)
+    """Maximum yaw rate (rad/s). Reduced from 180° for smoother rotations."""
 
     max_zoom_rate: float = 2.0
     """Maximum zoom rate (zoom levels per second)."""
@@ -217,8 +217,8 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     lin_vel_penalty_scale: float = -0.1
     """Penalty scale for linear velocity."""
 
-    action_sum_penalty_scale: float = -1.0
-    """Penalty scale for total action magnitude."""
+    action_sum_penalty_scale: float = -5.0
+    """Penalty scale for total action magnitude. Increased from -1.0 for smoother actions."""
 
     # [0 vx, 1 vy, 2 vz, 3 yaw_rate, 4 gimbal_yaw_rate, 5 gimbal_pitch_rate, 6 zoom_rate]
     action_weight: list = [1, 1, 5, 1, 1, 1, 0.3]
@@ -227,8 +227,8 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     action_delta_weight: list = [1, 1, 1, 1, 1, 1, 0.3]
     """Weights for action delta (smoothness) penalty."""
 
-    action_delta_penalty_scale: float = -0.05
-    """Penalty scale for action changes (smoothness)."""
+    action_delta_penalty_scale: float = -0.2
+    """Penalty scale for action changes (smoothness). Increased from -0.05 for less jerky actions."""
 
     # Single-agent tracking rewards
     bbox_center_reward_scale: float = 60.0
@@ -317,5 +317,5 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     # Debug
     # ==========================================================================
 
-    play_sim_at_step: int = 200000
+    play_sim_at_step: int = 0#200000
     """Training step at which to enable rendering for debugging."""

@@ -340,6 +340,15 @@ class IrisMAEnvV4(DirectMARLEnv):
             for agent in self.cfg.possible_agents
         }
 
+        # FIX: Detection dropout tracking for debugging
+        # Tracks per-episode statistics on detection failures
+        self._detection_stats = {
+            "total_steps": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            "valid_triangulations": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            "invalid_all_agents": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),  # Steps where ALL agents had detection failures
+            "pair_valid_count": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),  # Steps with at least 2 valid detections
+        }
+
         # Visualization
         self.set_debug_vis(self.cfg.debug_vis)
         if DEBUG_DRAW and omni_debug_draw is not None:
@@ -658,9 +667,12 @@ class IrisMAEnvV4(DirectMARLEnv):
             is_trace_valid = (trace_cov >= 0.0) & torch.isfinite(trace_cov)
             is_sigma_finite = torch.isfinite(Sigma_X).all(dim=(-2, -1))
             is_not_nan = ~torch.isnan(Sigma_X).any(dim=(-2, -1))
-            is_all_bboxes_valid = bbox_valid_mask.all(dim=1).unsqueeze(-1)
+            # FIX: Changed from ALL agents valid to at least 2 valid (pair requirement)
+            # This prevents cascading failures from 5% detection dropout
+            num_valid_agents = bbox_valid_mask.sum(dim=1).unsqueeze(-1)
+            is_pair_valid = num_valid_agents >= 2  # At least 2 agents for triangulation
             is_diag_positive = torch.diagonal(Sigma_X, dim1=-2, dim2=-1).min(dim=-1).values > 0.0
-            is_tri_cov_valid = is_trace_valid & is_sigma_finite & is_not_nan & is_all_bboxes_valid & is_diag_positive & is_triangulation_valid
+            is_tri_cov_valid = is_trace_valid & is_sigma_finite & is_not_nan & is_pair_valid & is_diag_positive & is_triangulation_valid
 
             Sigma_X = torch.where(
                 is_tri_cov_valid.unsqueeze(-1).unsqueeze(-1),
@@ -743,6 +755,14 @@ class IrisMAEnvV4(DirectMARLEnv):
                 torch.ones_like(std_dev) * 1e6
             )
             self.triangulation_results[ego_agent_id] = (X_w_gt, Sigma_X, std_dev, trace_cov, is_tri_cov_valid)
+
+            # FIX: Track detection dropout statistics (only for first agent to avoid double counting)
+            if i == 0:
+                num_valid_detections = bbox_valid_mask.sum(dim=1)  # [N]
+                self._detection_stats["total_steps"] += 1.0
+                self._detection_stats["valid_triangulations"] += is_tri_cov_valid.squeeze(-1).float()
+                self._detection_stats["invalid_all_agents"] += (num_valid_detections == 0).float()
+                self._detection_stats["pair_valid_count"] += (num_valid_detections >= 2).float()
 
         # ========== Compute safety penalties for all agents ==========
         agent_positions = {}
@@ -920,6 +940,14 @@ class IrisMAEnvV4(DirectMARLEnv):
 
             X_w_tri, Sigma_X, std_tri, trace_cov, is_tri_cov_valid = self.triangulation_results_noisy[ego_agent_id]
 
+            # FIX: Mask invalid triangulation coordinates to prevent NaN/Inf in observations
+            # Use ego position as fallback when triangulation is invalid
+            X_w_tri_masked = torch.where(
+                is_tri_cov_valid.unsqueeze(-1),
+                X_w_tri,
+                torch.zeros_like(ego_state.data.body_position_w).unsqueeze(1)  # Set to zero as fallback
+            )
+
             pos = ego_state.data.body_position_w
             roll, pitch, yaw = euler_xyz_from_quat(ego_state.data.body_orientation_w)
             yaw = yaw.unsqueeze(-1)
@@ -983,7 +1011,7 @@ class IrisMAEnvV4(DirectMARLEnv):
                 *other_ray_dirs,
                 *other_data_age,
                 *other_detection_age,
-                X_w_tri[:, 0, :],
+                X_w_tri_masked[:, 0, :],  # FIX: Use masked triangulation position
                 std_tri[:, 0, :],
             ], dim=-1)
 
@@ -1169,6 +1197,24 @@ class IrisMAEnvV4(DirectMARLEnv):
                 episodic_sum_avg = torch.mean(value[env_ids])
                 all_extras[f"Episode_Reward/{agent_id}_{key}"] = episodic_sum_avg / self.max_episode_length_s
                 self._episode_sums[agent_id][key][env_ids] = 0.0
+
+        # FIX: Log detection dropout statistics for debugging
+        total_steps = self._detection_stats["total_steps"][env_ids]
+        # Avoid division by zero
+        valid_total = torch.clamp(total_steps, min=1.0)
+        all_extras["Detection/valid_triangulation_rate"] = torch.mean(
+            self._detection_stats["valid_triangulations"][env_ids] / valid_total
+        )
+        all_extras["Detection/pair_valid_rate"] = torch.mean(
+            self._detection_stats["pair_valid_count"][env_ids] / valid_total
+        )
+        all_extras["Detection/all_invalid_rate"] = torch.mean(
+            self._detection_stats["invalid_all_agents"][env_ids] / valid_total
+        )
+        # Reset detection stats for these envs
+        for key in self._detection_stats:
+            self._detection_stats[key][env_ids] = 0.0
+
         if "log" not in self.extras:
             self.extras["log"] = {}
         self.extras["log"].update(all_extras)
@@ -1289,7 +1335,7 @@ class IrisMAEnvV4(DirectMARLEnv):
             self.cmd_gimbal_pitch[env_ids, i] = gimbal_pitch.clone()
 
             # Randomize zoom level between 1.0 and current_max_zoom
-            random_zoom = 1.0 + torch.rand(len(env_ids), device=self.device) * (self.current_max_zoom - 1.0)
+            random_zoom = 1.0 + torch.rand(len(env_ids), device=self.device) * (5.0 - 1.0)
             self.zoom_level[env_ids, i] = random_zoom
             
             reset_states[agent_id] = {
@@ -1315,6 +1361,9 @@ class IrisMAEnvV4(DirectMARLEnv):
         """Debug visualization callback."""
         if not DEBUG_DRAW:
             return
+
+        # Increment frame counter for visualization warmup (prevents GPU crashes)
+        self.visualization.step()
 
         # Safety check: ensure triangulation results exist before visualization
         if not hasattr(self, 'triangulation_results_noisy') or not self.triangulation_results_noisy:

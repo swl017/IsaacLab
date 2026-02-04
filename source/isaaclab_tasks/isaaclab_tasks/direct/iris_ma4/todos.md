@@ -54,3 +54,7 @@ self.target = RigidObject(self.cfg.target_cfg)
 
 11. Running `iris_ma4_mappo_rnn_tuning6_20260203_151152` experiment...
     - Training collapsed at 20k step.
+
+12. Running `iris_ma4_mappo_rnn_tuning6_20260203_230558` experiment...
+    - RNN trained somewhat
+    - bbox validation bug identified

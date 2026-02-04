@@ -57,11 +57,18 @@ class CurriculumCfg:
     # Phase 3: Multi-Agent Coordination
     # ==========================================================================
 
-    coordination_start_step: int = 80000
-    """Step to start rewarding coordination (triangulation)."""
+    coordination_start_step: int = 40000
+    """Step to start rewarding coordination (triangulation).
 
-    coordination_end_step: int = 100000
-    """Step when coordination rewards reach full scale."""
+    FIX: Moved from 80k to 40k to provide earlier coordination signal.
+    This prevents agent from overfitting to single-agent tracking for too long.
+    """
+
+    coordination_end_step: int = 60000
+    """Step when coordination rewards reach full scale.
+
+    FIX: Moved from 100k to 60k to match earlier start.
+    """
 
     # ==========================================================================
     # Safety Curriculum
@@ -106,8 +113,12 @@ class CurriculumCfg:
     zoom_phase3_end_step: int = 150000
     """End of phase 3: zoom allowed up to 4.0 (moderate zoom)."""
 
-    zoom_phase1_max: float = 3.0
-    """Maximum zoom in phase 1 (no zoom)."""
+    zoom_phase1_max: float = 1.5
+    """Maximum zoom in phase 1.
+
+    FIX: Changed from 3.0 to 1.5 (was contradicting "no zoom" comment).
+    Allowing limited zoom (1.0-1.5) from start prevents action dead zone.
+    """
 
     zoom_phase2_max: float = 6.0
     """Maximum zoom in phase 2 (conservative)."""

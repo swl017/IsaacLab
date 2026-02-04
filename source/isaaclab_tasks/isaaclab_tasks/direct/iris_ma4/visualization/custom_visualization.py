@@ -10,6 +10,12 @@ from .camera_frustum import CameraFrustum, create_camera_cfg_tensor, project_2d_
 from .detection_indicator import DetectionIndicator
 
 
+# Minimum frames to wait before allowing VisualizationMarkers to render.
+# This prevents GPU crashes from Isaac Sim 4.5's timing bug where Vulkan
+# tries to access USD prims before mesh data is fully populated.
+MIN_FRAMES_BEFORE_VISUALIZATION = 10
+
+
 def is_prim_ready_for_visualization(prim_path: str) -> bool:
     """Check if a USD prim is ready for visualization.
 
@@ -43,6 +49,10 @@ class CustomVisualization:
         self.possible_agents = possible_agents
         self.device = device
 
+        # Frame counter for warmup period (prevents GPU crashes from early visualization)
+        self._frame_count = 0
+        self._visualization_enabled = False
+
         self.camera_frustum = {
             agent_id: CameraFrustum() for agent_id in possible_agents
         }
@@ -73,6 +83,16 @@ class CustomVisualization:
             )
             self.tri_cov_visualizer[agent_id] = VisualizationMarkers(marker_cfg)
 
+    def step(self):
+        """Increment frame counter for warmup tracking.
+
+        Call this method each frame to track warmup progress. After
+        MIN_FRAMES_BEFORE_VISUALIZATION frames, visualization will be enabled.
+        """
+        self._frame_count += 1
+        if self._frame_count >= MIN_FRAMES_BEFORE_VISUALIZATION:
+            self._visualization_enabled = True
+
     def is_tri_cov_visualizer_ready(self, agent_id: str) -> bool:
         """Check if the triangulation covariance visualizer is ready for the given agent.
 
@@ -82,6 +102,10 @@ class CustomVisualization:
         Returns:
             True if the visualizer is ready to use, False otherwise.
         """
+        # Warmup check: ensure sufficient frames have passed for USD prims to populate
+        if not self._visualization_enabled:
+            return False
+
         # Once marked ready, stay ready (avoid repeated checks)
         if self._tri_cov_ready.get(agent_id, False):
             return True
