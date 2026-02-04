@@ -70,7 +70,7 @@ from isaaclab_tasks.direct.iris_ma4.delay_system_v2 import (
 # Controller and safety modules
 from isaaclab_tasks.direct.iris_ma4.controller import PointMass, PointMassCfg, GimbalStabilizer, GimbalStabilizerCfg
 from isaaclab_tasks.direct.iris_ma4.safety import SafetyManager, SafetyManagerCfg, CollisionDetectorCfg, TTCComputerCfg
-from isaaclab_tasks.direct.iris_ma4.randomization import Randomizer
+from isaaclab_tasks.direct.iris_ma4.randomization import Randomizer, DistanceBasedFormationCfg
 from isaaclab_tasks.direct.iris_ma4.visualization import CustomVisualization
 from isaaclab_tasks.direct.iris_ma4.target_movement import TargetMovement
 
@@ -270,34 +270,42 @@ class IrisMAEnvV4(DirectMARLEnv):
             device=self.device,
         )
 
-        # Randomizer for initial states (gimbal-aware formation and target sampling)
+        # Randomizer for initial states (distance-based formation generation)
+        # Primary curriculum factor is distance to target
+        formation_cfg = DistanceBasedFormationCfg(
+            distance_min=10.0,   # Easy: 10m at scale_factor=0
+            distance_max=80.0,   # Hard: 80m at scale_factor=1
+            min_agent_separation=5.0,
+            max_agent_separation=30.0,
+            formation_height_min=10.0,
+            formation_height_max=30.0,
+            target_height_offset_min=-2.0,
+            target_height_offset_max=2.0,
+            z_variation_min=0.0,
+            z_variation_max=3.0,
+            line_max_z_component=0.3,
+        )
         self.randomizer = Randomizer(
-            self.num_envs,
-            self.device,
-            gimbal_pitch_limits=list(self.cfg.gimbal.pitch_limits)
+            num_envs=self.num_envs,
+            num_agents=len(cfg.possible_agents),
+            device=self.device,
+            cfg=formation_cfg,
+            max_lin_vel=self.cfg.max_lin_vel,
+            max_yaw_rate=self.cfg.max_yaw_rate,
         )
 
-        # Configure formation for curriculum learning
-        # At scale_factor=0: minimal separation, no height variation (easy)
-        # At scale_factor=1: full separation, moderate height variation (harder)
-        self.randomizer.initial_states.cfg.max_agent_separation = 30.0  # Max separation at full curriculum
-        self.randomizer.initial_states.cfg.min_agent_separation = 20.0  # Minimum safety distance
-        self.randomizer.initial_states.cfg.z_variation_curriculum_enabled = True
-        self.randomizer.initial_states.cfg.z_variation_min = (0.0, 0.0)  # No height variation at start
-        self.randomizer.initial_states.cfg.z_variation_max = (0.0, 2.0)  # Up to 2m variation at full curriculum
-        self.randomizer.initial_states.cfg.line_max_z_component = 0.3  # Limit line vertical angle
-        self.randomizer.targets.cfg.distance_scale_factor = 2.0
-
         # Curriculum parameters
-        self.progress_delay = 0.0
-        self.progress_coord = 0.0
-        self.progress_all = 0.0
-        self.progress_tracking = 0.0
-        self.progress_coord = 0.0
-        self.progress_safety = 0.0
-        self.progress_move = 0.0
-        self.progress_dynamics = 0.0
-        self.current_max_zoom = self.cfg.curriculum.get_max_zoom_level(0)  # Initial zoom limit
+        current_step = self.cfg.play_sim_at_step if DEBUG_DRAW else self.common_step_counter
+        curr = self.cfg.curriculum
+        self.progress_all = self._linear_progress(0, curr.all_end_step, current_step)
+        self.progress_delay = self._linear_progress(curr.delay_start_step, curr.delay_end_step, current_step)
+        self.progress_tracking = self._linear_progress(curr.tracking_start_step, curr.tracking_end_step, current_step)
+        self.progress_coord = 1.0 if DEBUG_DRAW else self._linear_progress(curr.coordination_start_step, curr.coordination_end_step, current_step)
+        self.progress_safety = self._linear_progress(curr.safety_start_step, curr.safety_end_step, current_step)
+        self.progress_move = self._linear_progress(curr.moving_target_start_step, curr.moving_target_end_step, current_step)
+        self.progress_dynamics = self._linear_progress(curr.dynamics_start_step, curr.dynamics_end_step, current_step)
+        self.current_max_zoom = curr.get_max_zoom_level(current_step)
+
         # Triangulation covariance placeholders
         self.Sigma_X_invalid = torch.eye(3, device=self.device).unsqueeze(0).unsqueeze(0).expand(
             self.num_envs, 1, 3, 3
@@ -1264,12 +1272,12 @@ class IrisMAEnvV4(DirectMARLEnv):
             self.extras["log"] = {}
         self.extras["log"].update(all_extras)
 
-        # Generate formation and target positions
-        # Use tracking curriculum progress to scale randomization difficulty
+        # Generate formation and target positions using distance-based generator
+        # Primary curriculum factor is distance to target (not gimbal constraints)
         formation_scale = self.progress_tracking  # 0.0 -> 1.0 as training progresses
 
         # Select formation type based on curriculum progress
-        # Early: planar (simplest, all agents same height, guaranteed gimbal feasibility)
+        # Early: planar (simplest, all agents same height)
         # Mid: grid (2D grid with curriculum-scaled height variation)
         # Late: line (full 3D formations with height variation)
         if formation_scale < 0.3:
@@ -1279,17 +1287,16 @@ class IrisMAEnvV4(DirectMARLEnv):
         else:
             formation_type = "line"
 
-        formation_data = self.randomizer.initial_states.get_random_formation(
-            num_agents=len(self.cfg.possible_agents),
-            num_envs=len(env_ids),
-            formation_type=formation_type,
+        # Single call generates both formation and target
+        # Distance to target is the PRIMARY difficulty factor
+        formation_result = self.randomizer.generate_formation_and_target(
+            env_ids=torch.arange(len(env_ids), device=self.device),
             scale_factor=formation_scale,
+            formation_type=formation_type,
         )
 
-        target_positions = self.randomizer.targets.sample_target_position(
-            formation_data=formation_data,
-            scale_factor=formation_scale,
-        )
+        formation_data = formation_result.agent_root_states
+        target_positions = formation_result.target_position
         target_positions0 = torch.tensor([10.0, 0.0, 0.5], device=self.device).unsqueeze(0).repeat(len(env_ids), 1)
 
         terrain_offset = self._terrain.env_origins[env_ids]
@@ -1380,7 +1387,7 @@ class IrisMAEnvV4(DirectMARLEnv):
             self.cmd_gimbal_pitch[env_ids, i] = gimbal_pitch.clone()
 
             # Randomize zoom level between 1.0 and current_max_zoom
-            random_zoom = 1.0 + torch.rand(len(env_ids), device=self.device) * (5.0 - 1.0)
+            random_zoom = 1.0 + torch.rand(len(env_ids), device=self.device) * (10.0 - 1.0)
             self.zoom_level[env_ids, i] = random_zoom
             
             reset_states[agent_id] = {

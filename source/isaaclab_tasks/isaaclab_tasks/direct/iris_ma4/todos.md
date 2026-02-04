@@ -59,6 +59,7 @@ self.target = RigidObject(self.cfg.target_cfg)
     - RNN trained somewhat
     - bbox validation bug identified
 
-13. Running `iris_ma4_mappo_rnn_tuning6_20260204_214115` experiment...
+13. Running `iris_ma4_mappo_rnn_tuning6_20260204_231120` experiment...
     - Added noise in observations
     - Adjusted target distance
+    - Adjusted reward weights

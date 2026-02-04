@@ -18,10 +18,11 @@ class CurriculumCfg:
     and their difficulty progression. Each phase has a start and end step,
     with linear interpolation between them.
 
-    Training phases are designed to introduce complexity gradually:
-    - Phase 1: Single-agent tracking (basic skills)
-    - Phase 2: Delay and noise system (realism)
-    - Phase 3: Multi-agent coordination (teamwork)
+    Training phases are designed to increase difficulty along (mostly) one axis
+    at a time:
+    - Coupling/geometry first (triangulation + collision avoidance)
+    - Then target dynamics (track moving target with clean observations)
+    - Then partial observability (noise → delay/staleness → dropout)
 
     The phases can overlap, allowing gradual transitions.
     """
@@ -34,84 +35,119 @@ class CurriculumCfg:
     """Step at which all curriculum factors reach their final values."""
 
     # ==========================================================================
-    # Phase 1: Single-Agent Tracking
+    # Phase 0/1: Geometry + Formation (clean observations, static target)
     # ==========================================================================
 
-    tracking_start_step: int = 10000
-    """Step to start increasing tracking difficulty."""
+    tracking_start_step: int = 0
+    """Step to start increasing formation/initialization difficulty."""
 
     tracking_end_step: int = 60000
-    """Step when tracking difficulty reaches maximum."""
+    """Step when formation/initialization difficulty reaches maximum."""
 
     # ==========================================================================
-    # Phase 2: Delay and Noise System
+    # Phase 2: Noise Introduction (before delay)
     # ==========================================================================
 
-    delay_start_step: int = 10000
-    """Step to start introducing communication delays."""
+    noise_start_step: int = 80000
+    """Step to start introducing observation noise."""
 
-    delay_end_step: int = 80000
-    """Step when delays reach maximum realistic values."""
-
-    # ==========================================================================
-    # Phase 3: Multi-Agent Coordination
-    # ==========================================================================
-
-    coordination_start_step: int = 40000
-    """Step to start rewarding coordination (triangulation).
-
-    FIX: Moved from 80k to 40k to provide earlier coordination signal.
-    This prevents agent from overfitting to single-agent tracking for too long.
-    """
-
-    coordination_end_step: int = 60000
-    """Step when coordination rewards reach full scale.
-
-    FIX: Moved from 100k to 60k to match earlier start.
-    """
+    noise_end_step: int = 100000
+    """Step when noise reaches maximum realistic values."""
 
     # ==========================================================================
-    # Safety Curriculum
+    # Phase 3: Fixed Delay (Deterministic Latency)
     # ==========================================================================
 
-    safety_start_step: int = 150000
+    fixed_delay_start_step: int = 100000
+    """Step to start introducing fixed (deterministic) delay."""
+
+    fixed_delay_end_step: int = 130000
+    """Step when fixed delay reaches maximum value (uses config latency means)."""
+
+    # NOTE: Fixed delay magnitude uses existing detection_latency_mean and
+    # inter_agent_comm_latency_mean from MultiAgentDelaySystemV2Cfg.
+
+    # ==========================================================================
+    # Phase 4: Random Delay + Staleness
+    # ==========================================================================
+
+    random_delay_start_step: int = 130000
+    """Step to transition from fixed to random delay."""
+
+    random_delay_end_step: int = 160000
+    """Step when random delay variance reaches maximum."""
+
+    # NOTE: Random delay uses existing latency_std parameters from config.
+
+    # ==========================================================================
+    # Phase 5: Dropout (after delay phases)
+    # ==========================================================================
+
+    dropout_start_step: int = 160000
+    """Step to start introducing dropout."""
+
+    dropout_end_step: int = 200000
+    """Step when dropout reaches maximum rate."""
+
+    # Legacy alias for backward compatibility
+    delay_start_step: int = 80000
+    """[DEPRECATED] Use noise_start_step, fixed_delay_start_step, etc."""
+
+    delay_end_step: int = 160000
+    """[DEPRECATED] Use random_delay_end_step."""
+
+    # ==========================================================================
+    # Phase 0: Multi-Agent Coupling (triangulation geometry)
+    # ==========================================================================
+
+    coordination_start_step: int = 0
+    """Step to start rewarding coordination (triangulation)."""
+
+    coordination_end_step: int = 20000
+    """Step when coordination rewards reach full scale."""
+
+    # ==========================================================================
+    # Phase 0: Safety (collision/TTC) should be present from the start
+    # ==========================================================================
+
+    safety_start_step: int = 0
     """Step to start enforcing safety constraints (collision, TTC)."""
 
-    safety_end_step: int = 230000
+    safety_end_step: int = 20000
     """Step when safety penalties reach full scale."""
 
     # ==========================================================================
-    # Moving Target Curriculum
+    # Phase 1: Target Dynamics (still clean observations)
     # ==========================================================================
 
-    moving_target_start_step: int = 10000
+    moving_target_start_step: int = 20000
     """Step to start introducing target motion."""
 
     moving_target_end_step: int = 80000
     """Step when target reaches maximum speed/maneuverability."""
 
     # ==========================================================================
-    # Dynamics Randomization Curriculum
+    # Phase 3+: Robot/Camera Dynamics Randomization (last)
     # ==========================================================================
 
-    dynamics_start_step: int = 40000
+    dynamics_start_step: int = 160000
     """Step to start dynamics randomization (mass, inertia)."""
 
-    dynamics_end_step: int = 120000
+    dynamics_end_step: int = 200000
     """Step when dynamics randomization reaches full range."""
 
     # ==========================================================================
     # Zoom Capability Curriculum
     # ==========================================================================
 
-    zoom_phase1_end_step: int = 30000
-    """End of phase 1: zoom locked at 1.0 (no zoom capability)."""
+    zoom_phase1_end_step: int = 20000
+    """End of phase 1: limited zoom (geometry-first phase)."""
 
     zoom_phase2_end_step: int = 80000
-    """End of phase 2: zoom allowed up to 2.0 (conservative zoom)."""
+    """End of phase 2: zoom ramp during target dynamics phase."""
 
-    zoom_phase3_end_step: int = 150000
-    """End of phase 3: zoom allowed up to 4.0 (moderate zoom)."""
+    zoom_phase3_end_step: int = 160000
+    """End of phase 3: zoom ramp during observability degradation phase."""
 
     zoom_phase1_max: float = 1.5
     """Maximum zoom in phase 1.
@@ -151,7 +187,7 @@ class CurriculumCfg:
         """Get curriculum-scaled maximum zoom level.
 
         The zoom curriculum has 4 phases with piecewise linear interpolation:
-        - Phase 1 (0 to zoom_phase1_end_step): Locked at zoom_phase1_max (1.0)
+        - Phase 1 (0 to zoom_phase1_end_step): Locked at zoom_phase1_max
         - Phase 2 (phase1_end to phase2_end): Ramp from phase1_max to phase2_max
         - Phase 3 (phase2_end to phase3_end): Ramp from phase2_max to phase3_max
         - Phase 4 (phase3_end to all_end): Ramp from phase3_max to zoom_final_max
@@ -163,7 +199,7 @@ class CurriculumCfg:
             Maximum allowed zoom level for this training phase.
         """
         if current_step < self.zoom_phase1_end_step:
-            # Phase 1: No zoom
+            # Phase 1: Limited zoom
             return self.zoom_phase1_max
         elif current_step < self.zoom_phase2_end_step:
             # Phase 2: Linear interpolation from phase1 to phase2

@@ -207,7 +207,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     max_zoom_rate: float = 2.0
     """Maximum zoom rate (zoom levels per second)."""
 
-    max_zoom_level: float = 6.0
+    max_zoom_level: float = 10.0
     """Maximum zoom level."""
 
     # ==========================================================================
@@ -217,7 +217,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     lin_vel_penalty_scale: float = -0.1
     """Penalty scale for linear velocity."""
 
-    action_sum_penalty_scale: float = -5.0
+    action_sum_penalty_scale: float = -2.0
     """Penalty scale for total action magnitude. Increased from -1.0 for smoother actions."""
 
     # [0 vx, 1 vy, 2 vz, 3 yaw_rate, 4 gimbal_yaw_rate, 5 gimbal_pitch_rate, 6 zoom_rate]
@@ -227,7 +227,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     action_delta_weight: list = [1, 1, 1, 1, 0.5, 0.5, 0.3]
     """Weights for action delta (smoothness) penalty."""
 
-    action_delta_penalty_scale: float = -0.2
+    action_delta_penalty_scale: float = -0.05
     """Penalty scale for action changes (smoothness). Increased from -0.05 for less jerky actions."""
 
     # Single-agent tracking rewards
@@ -244,7 +244,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     collision_penalty_scale: float = -100.0
     """Penalty scale for inter-agent collisions."""
 
-    collision_min_safe_distance: float = 10.0
+    collision_min_safe_distance: float = 5.0
     """Minimum safe distance between agents (m)."""
 
     ttc_penalty_scale: float = -10.0
