@@ -15,16 +15,10 @@ RNN_CMD="python /home/usrg/IsaacPX4/IsaacLab/scripts/reinforcement_learning/skrl
 for exp_case in "${EXPERIMENT_CASE[@]}"; do
     $RNN_CMD --num_envs 1024 --task Isaac-Iris-MA4-Direct-v0 \
         agent.agent.experiment.directory=\"$EXP_DIR\" \
-        agent.agent.experiment.experiment_name="tri_reward_scale5" \
+        agent.agent.experiment.experiment_name="reward_rework" \
         agent.trainer.timesteps=200000
 
     sleep 5
-    $RNN_CMD --num_envs 1024 --task Isaac-Iris-MA4-Direct-v0 \
-        agent.agent.experiment.directory=\"$EXP_DIR\" \
-        agent.agent.experiment.experiment_name="tri_reward_scale60" \
-        agent.trainer.timesteps=200000 \
-        env.triangulation_reward_scale=60.0
 
-    sleep 5
 
 done

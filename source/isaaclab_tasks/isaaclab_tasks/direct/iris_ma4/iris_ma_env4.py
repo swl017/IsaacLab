@@ -346,9 +346,8 @@ class IrisMAEnvV4(DirectMARLEnv):
                 for key in [
                     "action_sum",
                     "action_delta",
-                    "bbox_center",
-                    "bbox_size",
                     "triangulation",
+                    "visibility_barrier",
                     "collision",
                     "ttc",
                 ]
@@ -551,6 +550,75 @@ class IrisMAEnvV4(DirectMARLEnv):
             current = self.common_step_counter
         x = (current - start) / (end - start)
         return 0.0 if x < 0 else (1.0 if x > 1 else float(x))
+
+    # ==========================================================================
+    # Visibility Gate and Barrier Functions
+    # ==========================================================================
+
+    def _gate_center(self, d: torch.Tensor) -> torch.Tensor:
+        """Gate function for bbox center distance.
+
+        Returns ~1 when target is within plateau distance of image center,
+        smoothly transitions to 0 as distance approaches vis_zero.
+
+        Args:
+            d: Center distance from image center (0.5, 0.5), range [0, ~0.707]
+
+        Returns:
+            Gate value in [0, 1], ~1 in plateau, →0 near edges
+        """
+        plateau = self.cfg.vis_plateau
+        zero = self.cfg.vis_zero
+        t = (d - plateau) / (zero - plateau)
+        t = torch.clamp(t, 0.0, 1.0)
+        smooth = t * t * (3.0 - 2.0 * t)  # smoothstep (Hermite interpolation)
+        return 1.0 - smooth
+
+    def _gate_area(self, a: torch.Tensor) -> torch.Tensor:
+        """Band-pass gate for bbox area.
+
+        Returns ~1 when bbox area is within [area_min, area_max] range,
+        using sigmoid transitions for smooth gradients.
+
+        Args:
+            a: Normalized bbox area (width * height), range [0, 1]
+
+        Returns:
+            Gate value in [0, 1], ~1 when area in valid band
+        """
+        a_min = self.cfg.area_min
+        a_max = self.cfg.area_max
+        tau = self.cfg.area_tau
+        return torch.sigmoid((a - a_min) / tau) * torch.sigmoid((a_max - a) / tau)
+
+    def _barrier_center(self, d: torch.Tensor) -> torch.Tensor:
+        """Barrier penalty for center distance exceeding threshold.
+
+        Returns 0 when within valid region, quadratic penalty outside.
+
+        Args:
+            d: Center distance from image center
+
+        Returns:
+            Barrier penalty (0 inside, quadratic outside)
+        """
+        d_max = self.cfg.vis_zero
+        return torch.relu(d - d_max) ** 2
+
+    def _barrier_area(self, a: torch.Tensor) -> torch.Tensor:
+        """Barrier penalty for area outside valid band.
+
+        Returns 0 when within [area_min, area_max], quadratic penalty outside.
+
+        Args:
+            a: Normalized bbox area
+
+        Returns:
+            Barrier penalty (0 inside band, quadratic outside)
+        """
+        a_min = self.cfg.area_min
+        a_max = self.cfg.area_max
+        return torch.relu(a_min - a) ** 2 + torch.relu(a - a_max) ** 2
 
     def _apply_delay_mode(self, mode: str, current_step: int):
         """Apply delay mode to the delay system based on curriculum phase.
@@ -873,27 +941,43 @@ class IrisMAEnvV4(DirectMARLEnv):
             bbox_center = bbox_center_raw / self._img_dims
             bbox_size = bbox_size_raw / self._img_dims
 
-            bbox_center_dist = torch.norm(bbox_center - 0.5, dim=1)
-            bbox_center_mapped = torch.exp(-10.0 * bbox_center_dist) * bbox_valid.float()
+            # --- Compute visibility gate and barrier ---
+            # Center distance from image center (0.5, 0.5)
+            d = torch.norm(bbox_center - 0.5, dim=1)
+            # Normalized bbox area (width * height in [0, 1])
+            a = bbox_size[:, 0] * bbox_size[:, 1]
+            valid = bbox_valid.float()
 
-            bbox_area = bbox_size[:, 0] * bbox_size[:, 1]
-            bbox_size_mapped = torch.exp(-torch.abs(bbox_area - 0.2)) * bbox_valid.float()
+            # Visibility gate: multiplicative factor on triangulation reward
+            # ~1 when detection is centered and properly sized, →0 at edges/extremes
+            g_vis = valid * self._gate_center(d) * self._gate_area(a)
 
+            # Visibility barrier: penalty for constraint violations
+            # 0 when within valid region, quadratic penalty outside
+            b_vis = valid * (self._barrier_center(d) + self._barrier_area(a))
+
+            # --- Triangulation quality (sole positive driver, gated by visibility) ---
             triangulation_quality = torch.where(
                 is_tri_cov_valid[:, 0],
-                1.0 / (1.0 + trace_cov[:, 0] / 7.0),
+                torch.clip(torch.sqrt(10.0 / (trace_cov[:, 0] + 1e-6)), min=0.0, max=3.0),
                 torch.zeros_like(trace_cov[:, 0])
             )
+
+            # Gate triangulation reward by visibility
+            r_tri = triangulation_quality * g_vis
 
             collision_penalty = -safety_penalties[agent_id]["collision"]
             ttc_penalty = safety_penalties[agent_id]["ttc_penalty"]
 
+            # --- Assemble rewards ---
+            # Layer A: Mission objective (triangulation) - gated by visibility
+            # Layer B: Feasibility constraints (visibility barrier) - penalize violations
+            # Layer C: Safety + regularizers (collision, ttc, action penalties)
             rewards = {
                 "action_sum": action_sum * self.cfg.action_sum_penalty_scale * self.step_dt,
                 "action_delta": action_delta * self.cfg.action_delta_penalty_scale * self.step_dt,
-                "bbox_center": bbox_center_mapped * self.cfg.bbox_center_reward_scale * self.step_dt,
-                "bbox_size": bbox_size_mapped * self.cfg.bbox_size_reward_scale * self.step_dt,
-                "triangulation": triangulation_quality * self.cfg.triangulation_reward_scale * self.step_dt * self.progress_coord,
+                "triangulation": r_tri * self.cfg.triangulation_reward_scale * self.step_dt * self.progress_coord,
+                "visibility_barrier": -b_vis * self.cfg.visibility_barrier_scale * self.step_dt * self.progress_coord,
                 "collision": collision_penalty * self.cfg.collision_penalty_scale * self.step_dt * self.progress_safety,
                 "ttc": ttc_penalty * self.cfg.ttc_penalty_scale * self.step_dt * self.progress_safety,
             }

@@ -39,7 +39,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     # Environment Meta
     # ==========================================================================
 
-    episode_length_s: float = 2.0
+    episode_length_s: float = 20.0
     """Episode length in seconds."""
 
     decimation: int = 4
@@ -230,16 +230,34 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     action_delta_penalty_scale: float = -0.05
     """Penalty scale for action changes (smoothness). Increased from -0.05 for less jerky actions."""
 
-    # Single-agent tracking rewards
-    bbox_center_reward_scale: float = 60.0
-    """Reward scale for centering target in image."""
+    # ==========================================================================
+    # Visibility Gate/Barrier Parameters
+    # ==========================================================================
 
-    bbox_size_reward_scale: float = 60.0
-    """Reward scale for appropriate bbox size."""
+    vis_plateau: float = 0.15
+    """Center distance threshold for full gate value (fraction of image half-width)."""
 
-    # Multi-agent coordination rewards
+    vis_zero: float = 0.50
+    """Center distance where gate reaches zero (image edge)."""
+
+    area_min: float = 0.10
+    """Minimum valid bbox area (fraction of image)."""
+
+    area_max: float = 0.35
+    """Maximum valid bbox area (fraction of image)."""
+
+    area_tau: float = 0.02
+    """Sigmoid temperature for area gate transitions."""
+
+    visibility_barrier_scale: float = 20.0
+    """Penalty scale for visibility constraint violations."""
+
+    # ==========================================================================
+    # Multi-agent Coordination Rewards
+    # ==========================================================================
+
     triangulation_reward_scale: float = 5.0
-    """Reward scale for triangulation quality."""
+    """Reward scale for triangulation quality (sole positive driver, gated by visibility)."""
 
     collision_penalty_scale: float = -100.0
     """Penalty scale for inter-agent collisions."""
