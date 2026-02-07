@@ -71,3 +71,6 @@ self.target = RigidObject(self.cfg.target_cfg)
 
 15. Running `iris_ma4_mappo_rnn_tuning6_20260205_231147` experiment...
     - Reworked reward shaping
+    - Big fail, will revert shaping
+
+16. Running `iris_ma4/2026-02-07_11-03-03_mappo_rnn_torch_reward_rework` experiment...

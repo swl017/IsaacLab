@@ -25,6 +25,20 @@ class CurriculumCfg:
     - Then partial observability (noise → delay/staleness → dropout)
 
     The phases can overlap, allowing gradual transitions.
+
+    Step:    0k   20k   40k   60k   80k   100k  130k  160k  200k
+             |     |     |     |     |     |     |     |     |
+    Safety:  [=ramp=]full────────────────────────────────────────
+    Tracking:[────────────ramp────────────]full───────────────────
+    Target:        [────────────ramp────────────]full─────────────
+    Coord:                      [────ramp────]full───────────────
+    Anneal:                     [────────very slow ramp─────────]
+    Noise:                              [─ramp─]full─────────────
+    FixDelay:                                   [───ramp───]full─
+    RndDelay:                                         [──ramp──]f
+    Dropout:                                                [ramp]
+    Dynamics:                                                [ramp]
+
     """
 
     # ==========================================================================
@@ -100,10 +114,10 @@ class CurriculumCfg:
     # Phase 0: Multi-Agent Coupling (triangulation geometry)
     # ==========================================================================
 
-    coordination_start_step: int = 0
+    coordination_start_step: int = 60000
     """Step to start rewarding coordination (triangulation)."""
 
-    coordination_end_step: int = 20000
+    coordination_end_step: int = 100000
     """Step when coordination rewards reach full scale."""
 
     # ==========================================================================
@@ -136,34 +150,6 @@ class CurriculumCfg:
     dynamics_end_step: int = 200000
     """Step when dynamics randomization reaches full range."""
 
-    # ==========================================================================
-    # Zoom Capability Curriculum
-    # ==========================================================================
-
-    zoom_phase1_end_step: int = 20000
-    """End of phase 1: limited zoom (geometry-first phase)."""
-
-    zoom_phase2_end_step: int = 80000
-    """End of phase 2: zoom ramp during target dynamics phase."""
-
-    zoom_phase3_end_step: int = 160000
-    """End of phase 3: zoom ramp during observability degradation phase."""
-
-    zoom_phase1_max: float = 1.5
-    """Maximum zoom in phase 1.
-
-    FIX: Changed from 3.0 to 1.5 (was contradicting "no zoom" comment).
-    Allowing limited zoom (1.0-1.5) from start prevents action dead zone.
-    """
-
-    zoom_phase2_max: float = 6.0
-    """Maximum zoom in phase 2 (conservative)."""
-
-    zoom_phase3_max: float = 6.0
-    """Maximum zoom in phase 3 (moderate)."""
-
-    zoom_final_max: float = 6.0
-    """Final maximum zoom level (full capability)."""
 
     def get_progress(self, current_step: int, start_step: int, end_step: int) -> float:
         """Calculate curriculum progress for a given phase.
@@ -182,46 +168,6 @@ class CurriculumCfg:
             return 1.0
         else:
             return (current_step - start_step) / (end_step - start_step)
-
-    def get_max_zoom_level(self, current_step: int) -> float:
-        """Get curriculum-scaled maximum zoom level.
-
-        The zoom curriculum has 4 phases with piecewise linear interpolation:
-        - Phase 1 (0 to zoom_phase1_end_step): Locked at zoom_phase1_max
-        - Phase 2 (phase1_end to phase2_end): Ramp from phase1_max to phase2_max
-        - Phase 3 (phase2_end to phase3_end): Ramp from phase2_max to phase3_max
-        - Phase 4 (phase3_end to all_end): Ramp from phase3_max to zoom_final_max
-
-        Args:
-            current_step: Current training step.
-
-        Returns:
-            Maximum allowed zoom level for this training phase.
-        """
-        if current_step < self.zoom_phase1_end_step:
-            # Phase 1: Limited zoom
-            return self.zoom_phase1_max
-        elif current_step < self.zoom_phase2_end_step:
-            # Phase 2: Linear interpolation from phase1 to phase2
-            progress = (current_step - self.zoom_phase1_end_step) / (
-                self.zoom_phase2_end_step - self.zoom_phase1_end_step
-            )
-            return self.zoom_phase1_max + progress * (self.zoom_phase2_max - self.zoom_phase1_max)
-        elif current_step < self.zoom_phase3_end_step:
-            # Phase 3: Linear interpolation from phase2 to phase3
-            progress = (current_step - self.zoom_phase2_end_step) / (
-                self.zoom_phase3_end_step - self.zoom_phase2_end_step
-            )
-            return self.zoom_phase2_max + progress * (self.zoom_phase3_max - self.zoom_phase2_max)
-        elif current_step < self.all_end_step:
-            # Phase 4: Linear interpolation from phase3 to final
-            progress = (current_step - self.zoom_phase3_end_step) / (
-                self.all_end_step - self.zoom_phase3_end_step
-            )
-            return self.zoom_phase3_max + progress * (self.zoom_final_max - self.zoom_phase3_max)
-        else:
-            # After all_end_step: Full zoom capability
-            return self.zoom_final_max
 
     # ==========================================================================
     # Phase 3/4 Delay Curriculum Methods
