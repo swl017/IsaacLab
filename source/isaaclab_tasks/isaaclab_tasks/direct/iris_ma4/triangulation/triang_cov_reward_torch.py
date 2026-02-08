@@ -431,7 +431,7 @@ def triangulation_covariance_simple(
         include_pose=False, include_gimbal=False, include_intrinsics=False
     )
 
-def midpoint_method_batched(pts: torch.Tensor, dirs: torch.Tensor, bbox_valid_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+def midpoint_method_batched(pts: torch.Tensor, dirs: torch.Tensor, valid_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute midpoint of batched rays using least squares (batched).
 
@@ -470,22 +470,31 @@ def midpoint_method_batched(pts: torch.Tensor, dirs: torch.Tensor, bbox_valid_ma
     # Sum over cameras: b = sum((I - d @ d^T) @ p) [N, T, 3]
     b = I_minus_dd_p.sum(dim=1)
 
-    # Check rank and solve
-    # If rank < 3, use mean of points as fallback
-    try:
-        X_mid = torch.linalg.solve(A, b.unsqueeze(-1)).squeeze(-1)  # [N, T, 3]
-    except:
-        # Fallback to mean if singular
-        X_mid = pts.mean(dim=1)  # [N, T, 3]
-
-    # Check for singular matrices per batch and use mean as fallback
+    # Compute rank BEFORE solving to isolate degenerate envs
     rank = torch.linalg.matrix_rank(A)  # [N, T]
-    is_singular = rank < 3
-    if is_singular.any():
-        mean_pts = pts.mean(dim=1)  # [N, T, 3]
-        X_mid = torch.where(is_singular.unsqueeze(-1), mean_pts, X_mid)
+    is_solvable = rank >= 3             # [N, T]
 
-    return X_mid, ~is_singular
+    # Default: mean of camera positions as fallback
+    mean_pts = pts.mean(dim=1).unsqueeze(1).expand(N, T, 3)  # [N, T, 3]
+    X_mid = mean_pts.clone()
+
+    # Flatten [N, T] -> [N*T] for per-element indexing, solve only solvable entries
+    N_T = N * T
+    solvable_flat = is_solvable.reshape(N_T)
+    solvable_indices = torch.where(solvable_flat)[0]
+
+    if solvable_indices.numel() > 0:
+        A_flat = A.reshape(N_T, 3, 3)
+        b_flat = b.reshape(N_T, 3)
+        X_solved = torch.linalg.solve(
+            A_flat[solvable_indices],
+            b_flat[solvable_indices].unsqueeze(-1)
+        ).squeeze(-1)  # [V, 3]
+        X_mid_flat = X_mid.reshape(N_T, 3)
+        X_mid_flat[solvable_indices] = X_solved
+        X_mid = X_mid_flat.reshape(N, T, 3)
+
+    return X_mid, is_solvable
 
 def get_ray_dir_from_bbox(
     bbox_2d: torch.Tensor,

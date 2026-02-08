@@ -92,10 +92,10 @@ class MultiAgentDelaySystemV2:
     RAW_ZOOM_FIELDS = [
         "camera_zoom_level",
     ]
-    # Timestamp fields (delayed identically to their associated data)
-    RAW_TIMESTAMP_FIELDS = [
-        "timestamp_detection",  # Timestamp when detection data was captured
-    ]
+    # NOTE: timestamp_detection is NOT a separate pipeline field. It is concatenated
+    # as the last dimension of bboxes_2d so it shares the exact same DelayPipeline
+    # (identical staleness, latency, and dropout behavior).
+
     # Static fields (no delay, passthrough)
     STATIC_FIELDS = [
         "camera_offset_position_b",
@@ -254,16 +254,12 @@ class MultiAgentDelaySystemV2:
                 for field in self.RAW_JOINT_FIELDS:
                     dims[f"{agent_id}.{field}.{perspective}"] = num_joints
 
-                # Detection fields (flattened)
+                # Detection fields (flattened bbox + coupled timestamp)
                 for field in self.RAW_DETECTION_FIELDS:
-                    dims[f"{agent_id}.{field}.{perspective}"] = num_targets * 4  # [T, 4] flattened
+                    dims[f"{agent_id}.{field}.{perspective}"] = num_targets * 4 + 1  # [T*4] bbox + [1] timestamp
 
                 # Zoom field
                 for field in self.RAW_ZOOM_FIELDS:
-                    dims[f"{agent_id}.{field}.{perspective}"] = 1
-
-                # Timestamp fields (scalar values)
-                for field in self.RAW_TIMESTAMP_FIELDS:
                     dims[f"{agent_id}.{field}.{perspective}"] = 1
 
         return dims
@@ -304,12 +300,14 @@ class MultiAgentDelaySystemV2:
                 ego_configs[f"{agent_id}.{field}.ego"] = joint_cfg_ego
 
             # Detection fields: staleness + latency + dropout (same for ego)
+            # NOTE: first_order_lag MUST remain disabled for detection fields because
+            # the last dimension is a concatenated timestamp that must not be smoothed.
             detection_cfg_ego = FieldDelayCfg(
                 staleness_enabled=True,
                 sample_rate=DistributionCfg(
-                    type="normal",
+                    type="uniform",
                     mean=cfg.detection_fps_mean,
-                    std=cfg.detection_fps_std,
+                    half_range=cfg.detection_fps_std,
                 ),
                 latency_enabled=True,
                 latency=DistributionCfg(
@@ -331,28 +329,6 @@ class MultiAgentDelaySystemV2:
             for field in self.RAW_ZOOM_FIELDS:
                 ego_configs[f"{agent_id}.{field}.ego"] = zoom_cfg_ego
 
-            # Timestamp fields: same delay as detection, but NO first-order lag
-            # Timestamps should not be smoothed, but should be delayed identically
-            timestamp_cfg_ego = FieldDelayCfg(
-                first_order_lag_enabled=False,  # No smoothing for timestamps
-                staleness_enabled=True,
-                sample_rate=DistributionCfg(
-                    type="normal",
-                    mean=cfg.detection_fps_mean,
-                    std=cfg.detection_fps_std,
-                ),
-                latency_enabled=True,
-                latency=DistributionCfg(
-                    type="normal",
-                    mean=cfg.detection_latency_mean,
-                    std=cfg.detection_latency_std,
-                ),
-                dropout_enabled=True,
-                dropout_prob=cfg.detection_dropout_rate,
-            )
-            for field in self.RAW_TIMESTAMP_FIELDS:
-                ego_configs[f"{agent_id}.{field}.ego"] = timestamp_cfg_ego
-
             # === Other perspective (slow inter-agent communication) ===
             # Motion fields: first-order lag + staleness + latency + dropout
             motion_cfg_other = FieldDelayCfg(
@@ -360,9 +336,9 @@ class MultiAgentDelaySystemV2:
                 time_constant=cfg.motion_time_constant,
                 staleness_enabled=True,
                 sample_rate=DistributionCfg(
-                    type="normal",
+                    type="uniform",
                     mean=cfg.inter_agent_comm_fps_mean,
-                    std=cfg.inter_agent_comm_fps_std,
+                    half_range=cfg.inter_agent_comm_fps_std,
                 ),
                 latency_enabled=True,
                 latency=DistributionCfg(
@@ -382,9 +358,9 @@ class MultiAgentDelaySystemV2:
                 time_constant=cfg.orientation_time_constant,
                 staleness_enabled=True,
                 sample_rate=DistributionCfg(
-                    type="normal",
+                    type="uniform",
                     mean=cfg.inter_agent_comm_fps_mean,
-                    std=cfg.inter_agent_comm_fps_std,
+                    half_range=cfg.inter_agent_comm_fps_std,
                 ),
                 latency_enabled=True,
                 latency=DistributionCfg(
@@ -404,9 +380,9 @@ class MultiAgentDelaySystemV2:
                 time_constant=cfg.joint_time_constant,
                 staleness_enabled=True,
                 sample_rate=DistributionCfg(
-                    type="normal",
+                    type="uniform",
                     mean=cfg.inter_agent_comm_fps_mean,
-                    std=cfg.inter_agent_comm_fps_std,
+                    half_range=cfg.inter_agent_comm_fps_std,
                 ),
                 latency_enabled=True,
                 latency=DistributionCfg(
@@ -421,12 +397,14 @@ class MultiAgentDelaySystemV2:
                 other_configs[f"{agent_id}.{field}.other"] = joint_cfg_other
 
             # Detection fields: combined detector + communication delays
+            # NOTE: first_order_lag MUST remain disabled for detection fields because
+            # the last dimension is a concatenated timestamp that must not be smoothed.
             detection_cfg_other = FieldDelayCfg(
                 staleness_enabled=True,
                 sample_rate=DistributionCfg(
-                    type="normal",
+                    type="uniform",
                     mean=cfg.detection_fps_mean,
-                    std=cfg.detection_fps_std,
+                    half_range=cfg.detection_fps_std,
                 ),
                 latency_enabled=True,
                 latency=DistributionCfg(
@@ -446,9 +424,9 @@ class MultiAgentDelaySystemV2:
                 time_constant=cfg.zoom_time_constant,
                 staleness_enabled=True,
                 sample_rate=DistributionCfg(
-                    type="normal",
+                    type="uniform",
                     mean=cfg.inter_agent_comm_fps_mean,
-                    std=cfg.inter_agent_comm_fps_std,
+                    half_range=cfg.inter_agent_comm_fps_std,
                 ),
                 latency_enabled=True,
                 latency=DistributionCfg(
@@ -461,28 +439,6 @@ class MultiAgentDelaySystemV2:
             )
             for field in self.RAW_ZOOM_FIELDS:
                 other_configs[f"{agent_id}.{field}.other"] = zoom_cfg_other
-
-            # Timestamp fields: same delay as detection, but NO first-order lag
-            # Timestamps should not be smoothed, but should be delayed identically
-            timestamp_cfg_other = FieldDelayCfg(
-                first_order_lag_enabled=False,  # No smoothing for timestamps
-                staleness_enabled=True,
-                sample_rate=DistributionCfg(
-                    type="normal",
-                    mean=cfg.detection_fps_mean,
-                    std=cfg.detection_fps_std,
-                ),
-                latency_enabled=True,
-                latency=DistributionCfg(
-                    type="normal",
-                    mean=cfg.detection_latency_mean + cfg.inter_agent_comm_latency_mean,
-                    std=(cfg.detection_latency_std**2 + cfg.inter_agent_comm_latency_std**2)**0.5,
-                ),
-                dropout_enabled=True,
-                dropout_prob=min(1.0, cfg.detection_dropout_rate + cfg.inter_agent_comm_dropout_rate),
-            )
-            for field in self.RAW_TIMESTAMP_FIELDS:
-                other_configs[f"{agent_id}.{field}.other"] = timestamp_cfg_other
 
         return ego_configs, other_configs
 
@@ -761,7 +717,12 @@ class MultiAgentDelaySystemV2:
         # Flatten bboxes for storage: [N, T, 4] -> [N, T*4]
         bboxes_flat = bboxes_2d_gt.flatten(start_dim=1)
 
+        # Timestamp: [N] -> [N, 1] for concatenation
+        timestamp_data = self._current_time.unsqueeze(-1)
+
         # Store to both perspectives
+        # Timestamp is concatenated as the last dimension of the detection tensor
+        # so it shares the exact same DelayPipeline (identical staleness/latency/dropout).
         for perspective in ["ego", "other"]:
             if perspective == "ego":
                 delay_clean = self._delay_clean_ego
@@ -771,22 +732,19 @@ class MultiAgentDelaySystemV2:
                 delay_noisy = self._delay_noisy_other
 
             full_name = f"{agent_id}.bboxes_2d.{perspective}"
-            delay_clean.store(full_name, bboxes_flat)
 
-            # Use per-env bbox noise std for domain randomization
+            # Clean: concat bbox + timestamp -> [N, T*4+1]
+            clean_concat = torch.cat([bboxes_flat, timestamp_data], dim=-1)
+            delay_clean.store(full_name, clean_concat)
+
+            # Noisy: add noise ONLY to bbox dimensions, NOT to timestamp
             if cfg.enable_noise:
                 bbox_noise_std = self._per_env_noise_std["bbox"].unsqueeze(-1)  # [N, 1]
                 noisy_bbox = bboxes_flat + torch.randn_like(bboxes_flat) * bbox_noise_std
-                delay_noisy.store(full_name, noisy_bbox)
+                noisy_concat = torch.cat([noisy_bbox, timestamp_data], dim=-1)
+                delay_noisy.store(full_name, noisy_concat)
             else:
-                delay_noisy.store(full_name, bboxes_flat)
-
-            # Store timestamp_detection alongside bboxes (same delay pipeline)
-            # This ensures the timestamp is delayed identically to the detection data
-            timestamp_field_name = f"{agent_id}.timestamp_detection.{perspective}"
-            timestamp_data = self._current_time.unsqueeze(-1)  # [N] -> [N, 1]
-            delay_clean.store(timestamp_field_name, timestamp_data)
-            delay_noisy.store(timestamp_field_name, timestamp_data)  # No noise for timestamps
+                delay_noisy.store(full_name, clean_concat)
 
     def get_all_states_for_rewards(self, ego_agent_id: AgentID) -> Dict[AgentID, AgentStates]:
         """Get clean delayed states for reward computation.
@@ -883,8 +841,10 @@ class MultiAgentDelaySystemV2:
             zoom = torch.clamp(zoom, min=0.1)
             agent_states.data.camera_zoom_level[:] = zoom
 
-            # Detection field (unflatten)
-            bboxes_flat = get_field("bboxes_2d")
+            # Detection field with coupled timestamp: [N, T*4+1]
+            detection_data = get_field("bboxes_2d")
+            bboxes_flat = detection_data[:, :-1]  # [N, T*4]
+            detection_timestamp = detection_data[:, -1]  # [N]
             agent_states.data.bboxes_2d[:] = bboxes_flat.reshape(self._num_envs, num_targets, 4)
 
             # Compute body-frame velocities from world-frame
@@ -954,10 +914,10 @@ class MultiAgentDelaySystemV2:
             # Timestamps
             # timestamp_motion: Use current time (motion data is continuously streamed)
             agent_states.data.timestamp_motion[:] = self._current_time
-            # timestamp_detection: Retrieve from delay pipeline (delayed with detection data)
-            # This ensures the timestamp reflects when the detection data was captured
-            delayed_timestamp = get_field("timestamp_detection")
-            agent_states.data.timestamp_detection[:] = delayed_timestamp.squeeze(-1)
+            # timestamp_detection: Extracted from the coupled detection pipeline above.
+            # This guarantees the timestamp reflects exactly when the bbox was captured,
+            # with identical staleness, latency, and dropout as the bbox data.
+            agent_states.data.timestamp_detection[:] = detection_timestamp
 
             result[agent_id] = agent_states
 
@@ -1202,9 +1162,10 @@ class MultiAgentDelaySystemV2:
                 gt_state.data.camera_zoom_level,
             )
 
-            # Push bbox data and timestamp_detection
-            bboxes_flat = gt_state.data.bboxes_2d.flatten(start_dim=1)
-            timestamp_data = self._current_time.unsqueeze(-1)  # [N] -> [N, 1]
+            # Push bbox data with coupled timestamp_detection
+            bboxes_flat = gt_state.data.bboxes_2d.flatten(start_dim=1)  # [N, T*4]
+            timestamp_data = self._current_time.unsqueeze(-1)  # [N, 1]
+            concat_data = torch.cat([bboxes_flat, timestamp_data], dim=-1)  # [N, T*4+1]
             for perspective in ["ego", "other"]:
                 if perspective == "ego":
                     delay_clean = self._delay_clean_ego
@@ -1213,15 +1174,9 @@ class MultiAgentDelaySystemV2:
                     delay_clean = self._delay_clean_other
                     delay_noisy = self._delay_noisy_other
 
-                # Store bboxes
                 full_name = f"{agent_id}.bboxes_2d.{perspective}"
-                delay_clean.store(full_name, bboxes_flat)
-                delay_noisy.store(full_name, bboxes_flat)
-
-                # Store timestamp_detection (initialized to 0, same as current_time at init)
-                timestamp_field_name = f"{agent_id}.timestamp_detection.{perspective}"
-                delay_clean.store(timestamp_field_name, timestamp_data)
-                delay_noisy.store(timestamp_field_name, timestamp_data)
+                delay_clean.store(full_name, concat_data)
+                delay_noisy.store(full_name, concat_data)
 
         # Step delay systems to process the initial data
         # This ensures data is available for immediate retrieval

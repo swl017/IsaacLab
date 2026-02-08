@@ -46,7 +46,7 @@ class DistanceBasedFormationCfg:
     Should be set such that target is reliably detected (bbox > min_bbox_size).
     """
 
-    distance_max: float = 50.0
+    distance_max: float = 30.0
     """Maximum distance from formation center to target (meters).
 
     This is the distance used when scale_factor=1 (hardest difficulty).

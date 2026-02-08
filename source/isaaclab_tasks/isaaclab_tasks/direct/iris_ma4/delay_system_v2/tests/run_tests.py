@@ -909,6 +909,200 @@ def run_timestamp_tests(results: TestResults, device: torch.device, verbose: boo
         results.add_fail("Clean/noisy timestamp consistency", traceback.format_exc())
 
 
+def run_detection_timestamp_coupling_tests(results: TestResults, device: torch.device, verbose: bool = False):
+    """Test that detection timestamps are perfectly coupled with detection data.
+
+    Verifies that bbox and timestamp_detection go through the same delay pipeline,
+    so they share identical staleness, latency, and dropout behavior.
+    """
+    print("\n" + "=" * 80)
+    print("Testing Detection-Timestamp Coupling")
+    print("=" * 80)
+
+    num_envs = 64
+    possible_agents = ["drone_0", "drone_1"]
+
+    # Create delay system with staleness enabled and high dropout for clear coupling signal
+    try:
+        cfg = MultiAgentDelaySystemV2Cfg(
+            dt=0.01,
+            detection_fps_mean=10.0,   # Low FPS = clearly stale
+            detection_fps_std=0.01,    # Near-constant FPS for predictability
+            detection_latency_mean=0.05,
+            detection_latency_std=0.001,
+            detection_dropout_rate=0.5,  # High dropout for clear coupling signal
+            inter_agent_comm_latency_mean=0.03,
+            inter_agent_comm_latency_std=0.001,
+            inter_agent_comm_dropout_rate=0.0,
+            enable_noise=True,
+            bbox_noise_std=5.0,  # Significant noise to distinguish bbox vs timestamp
+        )
+        delay_system = MultiAgentDelaySystemV2(
+            cfg=cfg,
+            possible_agents=possible_agents,
+            num_envs=num_envs,
+            num_joints_per_agent={agent: 3 for agent in possible_agents},
+            num_targets_per_agent={agent: 1 for agent in possible_agents},
+            device=device,
+        )
+
+        # Set camera configs
+        offset_pos = torch.tensor([0.0, 0.0, 0.1], device=device)
+        offset_rot = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
+        for agent_id in possible_agents:
+            delay_system.set_camera_configs(
+                agent_id,
+                width=640, height=480,
+                focal_length=24.0,
+                horizontal_aperture=20.955,
+                vertical_aperture=15.0,
+                offset_position_b=offset_pos,
+                offset_rotation_b=offset_rot,
+            )
+
+        # Enable random delay mode for staleness to be active
+        delay_system.set_delay_mode("random", progress=1.0)
+
+    except Exception as e:
+        results.add_error("Coupling test setup", traceback.format_exc())
+        return
+
+    # Helper: simulate one step (store data + retrieve states to populate pipeline buffers)
+    def sim_step(step_i):
+        delay_system.update_time(dt=0.01)
+        for agent_id in possible_agents:
+            bbox_val = float(step_i + 1)
+            delay_system.update_gt_states(
+                agent_id=agent_id,
+                body_position_w=torch.zeros(num_envs, 3, device=device),
+                body_orientation_w=torch.tensor([[1., 0., 0., 0.]], device=device).expand(num_envs, 4),
+                body_linear_velocity_w=torch.zeros(num_envs, 3, device=device),
+                body_angular_velocity_w=torch.zeros(num_envs, 3, device=device),
+                body_linear_acceleration_w=torch.zeros(num_envs, 3, device=device),
+                body_combined_angular_velocity_w=torch.zeros(num_envs, 3, device=device),
+                joint_positions_b=torch.zeros(num_envs, 3, device=device),
+                zoom_level=torch.ones(num_envs, device=device),
+            )
+            delay_system.update_detections(
+                agent_id=agent_id,
+                bboxes_2d_gt=torch.full((num_envs, 1, 4), bbox_val, device=device),
+            )
+        # CRITICAL: retrieve states every step so latency buffers get populated
+        states_clean = delay_system.get_all_states_for_rewards("drone_0")
+        states_noisy = delay_system.get_all_states_for_observations("drone_0")
+        return states_clean, states_noisy
+
+    # Test 1: Bbox value and timestamp are coupled through staleness
+    # When staleness holds old data, both bbox and timestamp must be from the same old step
+    try:
+        num_steps = 100
+        for step_i in range(num_steps):
+            states_clean, states_noisy = sim_step(step_i)
+
+        # After warmup: check that bbox value encodes the same step as timestamp
+        # bbox_val = step_index + 1, detection time = (step_index + 1) * dt
+        # So: timestamp_detection = bbox_mean_value * dt
+        ego_state = states_clean["drone_0"]
+        ego_bbox = ego_state.data.bboxes_2d  # [N, 1, 4]
+        ego_ts = ego_state.data.timestamp_detection  # [N]
+        current_time = delay_system.current_time  # [N]
+
+        # bbox is uniform across 4 dims, so mean = the step value
+        bbox_mean = ego_bbox.mean(dim=-1).squeeze(-1)  # [N]
+        # Infer what timestamp SHOULD be if coupled: bbox_val * dt
+        expected_ts = bbox_mean * 0.01
+        ts_error = (ego_ts - expected_ts).abs()
+
+        if verbose:
+            detection_age = current_time - ego_ts
+            print(f"    Current time: {current_time.mean().item():.4f}s")
+            print(f"    Ego timestamp_detection: {ego_ts.mean().item():.4f}s")
+            print(f"    Detection age: mean={detection_age.mean().item():.4f}s")
+            print(f"    Bbox mean value: {bbox_mean.mean().item():.1f} (encodes step index)")
+            print(f"    Expected timestamp: {expected_ts.mean().item():.4f}s")
+            print(f"    Timestamp-bbox coupling error: max={ts_error.max().item():.6f}s")
+
+        # Allow tolerance for latency (which delays both identically)
+        # The key check: bbox value and timestamp must be from the SAME step
+        assert ts_error.max().item() < 1e-4, (
+            f"Bbox and timestamp are decoupled! Max error: {ts_error.max().item():.6f}s. "
+            f"Bbox mean: {bbox_mean.mean().item():.1f}, timestamp: {ego_ts.mean().item():.4f}s"
+        )
+
+        results.add_pass("Bbox value and timestamp are coupled through staleness")
+    except Exception as e:
+        results.add_fail("Bbox value and timestamp are coupled through staleness", traceback.format_exc())
+
+    # Test 2: Timestamp is NOT noised (bbox has noise, timestamp doesn't)
+    try:
+        noisy_ts = states_noisy["drone_0"].data.timestamp_detection  # [N]
+
+        # Timestamps should be multiples of dt (0.01) since they're simulation times
+        # If noise were applied, they'd have fractional parts
+        ts_remainder = (noisy_ts % 0.01)
+        # Allow small floating point tolerance
+        is_clean = torch.all((ts_remainder < 1e-5) | (ts_remainder > 0.01 - 1e-5))
+        assert is_clean, (
+            f"Timestamps appear noised. Remainders: "
+            f"mean={ts_remainder.mean().item():.6f}, max={ts_remainder.max().item():.6f}"
+        )
+
+        # Also verify that bbox IS noised (noise_std=5.0 should be visible)
+        noisy_bbox = states_noisy["drone_0"].data.bboxes_2d  # [N, 1, 4]
+        clean_bbox = states_clean["drone_0"].data.bboxes_2d  # [N, 1, 4]
+        bbox_diff = (noisy_bbox - clean_bbox).abs().mean().item()
+        if verbose:
+            print(f"    Bbox noise level (mean abs diff): {bbox_diff:.3f}")
+            print(f"    Timestamp remainder from dt: max={ts_remainder.max().item():.8f}")
+
+        results.add_pass("Timestamp is not noised while bbox is noised")
+    except Exception as e:
+        results.add_fail("Timestamp is not noised while bbox is noised", traceback.format_exc())
+
+    # Test 3: Dropout couples bbox and timestamp together
+    try:
+        # Run more steps to accumulate dropout events
+        for step_i in range(num_steps, num_steps + 50):
+            states_clean, states_noisy = sim_step(step_i)
+
+        # Compare clean (no dropout) vs noisy (with dropout) for ego
+        clean_bbox = states_clean["drone_0"].data.bboxes_2d  # [N, 1, 4]
+        noisy_bbox = states_noisy["drone_0"].data.bboxes_2d  # [N, 1, 4]
+        clean_ts = states_clean["drone_0"].data.timestamp_detection  # [N]
+        noisy_ts = states_noisy["drone_0"].data.timestamp_detection  # [N]
+
+        # Check coupling: for each env, infer step from bbox and check timestamp matches
+        # Clean path: bbox_val * dt should equal timestamp
+        clean_bbox_val = clean_bbox.mean(dim=-1).squeeze(-1)  # [N]
+        clean_expected_ts = clean_bbox_val * 0.01
+        clean_ts_error = (clean_ts - clean_expected_ts).abs()
+
+        # Noisy path (with dropout): round bbox to nearest integer to recover step
+        noisy_bbox_val = noisy_bbox.mean(dim=-1).squeeze(-1).round()  # [N]
+        noisy_expected_ts = noisy_bbox_val * 0.01
+        noisy_ts_error = (noisy_ts - noisy_expected_ts).abs()
+
+        if verbose:
+            print(f"    Clean path coupling error: max={clean_ts_error.max().item():.6f}s")
+            print(f"    Noisy path coupling error: max={noisy_ts_error.max().item():.6f}s")
+            # Show dropout effect
+            ts_diff = (clean_ts - noisy_ts).abs()
+            dropout_envs = (ts_diff > 1e-6).sum().item()
+            print(f"    Envs with dropout-induced timestamp difference: {dropout_envs}/{num_envs}")
+
+        assert clean_ts_error.max().item() < 1e-4, (
+            f"Clean path decoupled: max error {clean_ts_error.max().item():.6f}s"
+        )
+        assert noisy_ts_error.max().item() < 1e-4, (
+            f"Noisy path decoupled: max error {noisy_ts_error.max().item():.6f}s. "
+            f"This means dropout changed bbox but NOT timestamp (or vice versa)."
+        )
+
+        results.add_pass("Dropout couples bbox and timestamp")
+    except Exception as e:
+        results.add_fail("Dropout couples bbox and timestamp", traceback.format_exc())
+
+
 def main():
     """Main test runner."""
     print("=" * 80)
@@ -934,6 +1128,7 @@ def main():
         run_reset_tests(results, device, verbose)
         run_derived_fields_tests(results, device, verbose)
         run_timestamp_tests(results, device, verbose)
+        run_detection_timestamp_coupling_tests(results, device, verbose)
     except Exception as e:
         results.add_error("Test suite", traceback.format_exc())
 

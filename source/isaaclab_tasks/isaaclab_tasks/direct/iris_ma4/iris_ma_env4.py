@@ -173,8 +173,8 @@ class IrisMAEnvV4(DirectMARLEnv):
             joint_time_constant=cfg.gimbal_time_constant,
             zoom_time_constant=0.1,
             # Detection
-            detection_fps_mean=cfg.detection_fps,
-            detection_fps_std=5.0,
+            detection_fps_mean=cfg.detection_fps_mean,
+            detection_fps_std=cfg.detection_fps_std,
             detection_latency_mean=cfg.detection_mean_latency,
             detection_latency_std=cfg.detection_std_latency,
             detection_dropout_rate=cfg.detection_failure_rate,
@@ -272,19 +272,7 @@ class IrisMAEnvV4(DirectMARLEnv):
 
         # Randomizer for initial states (distance-based formation generation)
         # Primary curriculum factor is distance to target
-        formation_cfg = DistanceBasedFormationCfg(
-            distance_min=10.0,   # Easy: 10m at scale_factor=0
-            distance_max=80.0,   # Hard: 80m at scale_factor=1
-            min_agent_separation=5.0,
-            max_agent_separation=30.0,
-            formation_height_min=10.0,
-            formation_height_max=30.0,
-            target_height_offset_min=-2.0,
-            target_height_offset_max=2.0,
-            z_variation_min=0.0,
-            z_variation_max=3.0,
-            line_max_z_component=0.3,
-        )
+        formation_cfg = DistanceBasedFormationCfg()
         self.randomizer = Randomizer(
             num_envs=self.num_envs,
             num_agents=len(cfg.possible_agents),
@@ -698,7 +686,30 @@ class IrisMAEnvV4(DirectMARLEnv):
 
     def _compute_triangulation_covariance(self, X_w, robot_positions, robot_quats,
                                           gimbal_yaws, gimbal_pitches,
-                                          camera_intrinsics, bbox_valid_mask, is_triangulation_valid) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                                          camera_intrinsics, bbox_valid_mask, is_triangulation_valid,
+                                          env_indices=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # When env_indices is provided, slice self.Sigma_* to match the subset of envs
+        if env_indices is not None:
+            Sigma_pix = self.Sigma_pix[env_indices]
+            Sigma_twb = self.Sigma_twb[env_indices]
+            Sigma_phiwb = self.Sigma_phiwb[env_indices]
+            Sigma_alpha = self.Sigma_alpha[env_indices]
+            Sigma_beta = self.Sigma_beta[env_indices]
+            Sigma_K = self.Sigma_K[env_indices]
+            Sigma_X_invalid = self.Sigma_X_invalid[env_indices]
+            trace_cov_invalid = self.trace_cov_invalid[env_indices]
+            num_envs_local = env_indices.shape[0]
+        else:
+            Sigma_pix = self.Sigma_pix
+            Sigma_twb = self.Sigma_twb
+            Sigma_phiwb = self.Sigma_phiwb
+            Sigma_alpha = self.Sigma_alpha
+            Sigma_beta = self.Sigma_beta
+            Sigma_K = self.Sigma_K
+            Sigma_X_invalid = self.Sigma_X_invalid
+            trace_cov_invalid = self.trace_cov_invalid
+            num_envs_local = self.num_envs
+
         try:
             progress_coord = self.progress_coord
             Sigma_X, trace_cov = triangulation_covariance_multi_camera(
@@ -708,12 +719,12 @@ class IrisMAEnvV4(DirectMARLEnv):
                 gimbal_yaws=gimbal_yaws,
                 gimbal_pitches=gimbal_pitches,
                 camera_intrinsics=camera_intrinsics,
-                Sigma_pix=self.Sigma_pix,
-                Sigma_twb=self.Sigma_twb,
-                Sigma_phiwb=self.Sigma_phiwb,
-                Sigma_alpha=self.Sigma_alpha,
-                Sigma_beta=self.Sigma_beta,
-                Sigma_K=self.Sigma_K,
+                Sigma_pix=Sigma_pix,
+                Sigma_twb=Sigma_twb,
+                Sigma_phiwb=Sigma_phiwb,
+                Sigma_alpha=Sigma_alpha,
+                Sigma_beta=Sigma_beta,
+                Sigma_K=Sigma_K,
                 include_pose=True,
                 include_gimbal=True,
                 include_intrinsics=True
@@ -732,18 +743,18 @@ class IrisMAEnvV4(DirectMARLEnv):
             Sigma_X = torch.where(
                 is_tri_cov_valid.unsqueeze(-1).unsqueeze(-1),
                 Sigma_X,
-                self.Sigma_X_invalid
+                Sigma_X_invalid
             )
             trace_cov = torch.where(
                 is_tri_cov_valid,
                 trace_cov,
-                self.trace_cov_invalid
+                trace_cov_invalid
             )
         except Exception as e:
             print(f"Warning: Triangulation covariance computation failed: {e}")
-            is_tri_cov_valid = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.bool)
-            Sigma_X = self.Sigma_X_invalid.clone()
-            trace_cov = self.trace_cov_invalid.clone()
+            is_tri_cov_valid = torch.zeros(num_envs_local, 1, device=self.device, dtype=torch.bool)
+            Sigma_X = Sigma_X_invalid.clone()
+            trace_cov = trace_cov_invalid.clone()
 
         return Sigma_X, trace_cov, is_tri_cov_valid
 
@@ -877,7 +888,7 @@ class IrisMAEnvV4(DirectMARLEnv):
 
             triangulation_quality = torch.where(
                 is_tri_cov_valid[:, 0],
-                torch.clip(torch.sqrt(10.0 / (trace_cov[:, 0] + 1e-6)), min=0.0, max=3.0),
+                torch.clip(torch.sqrt(10.0 / (trace_cov[:, 0] + 1e-6)), min=0.0, max=100.0),
                 # 1.0 / (1.0 + trace_cov[:, 0] / 7.0),
                 torch.zeros_like(trace_cov[:, 0])
             )
@@ -959,24 +970,53 @@ class IrisMAEnvV4(DirectMARLEnv):
             ray_dirs = torch.stack(ray_dirs_list, dim=1)
 
             ray_dirs_expanded = ray_dirs.unsqueeze(2)
-            X_w_triangulated, is_triangulation_valid = midpoint_method_batched(
-                pts=ray_origins,
-                dirs=ray_dirs_expanded,
-                valid_mask=bbox_valid_mask
-            )
 
-            Sigma_X, trace_cov, is_cov_valid = self._compute_triangulation_covariance(
-                X_w=X_w_triangulated,
-                robot_positions=ray_origins,
-                robot_quats=robot_quats,
-                gimbal_yaws=gimbal_yaws.squeeze(-1),
-                gimbal_pitches=gimbal_pitches.squeeze(-1),
-                camera_intrinsics=camera_intrinsics,
-                bbox_valid_mask=bbox_valid_mask,
-                is_triangulation_valid=is_triangulation_valid
-            )
+            # Pre-filter: need >= 2 valid cameras for triangulation
+            has_enough_cameras = bbox_valid_mask.sum(dim=1) >= 2  # [N]
+            tri_valid_indices = torch.where(has_enough_cameras)[0]  # [V]
 
-            is_valid = is_triangulation_valid & is_cov_valid
+            if tri_valid_indices.numel() > 0:
+                X_w_tri_v, is_tri_valid_v = midpoint_method_batched(
+                    pts=ray_origins[tri_valid_indices],
+                    dirs=ray_dirs_expanded[tri_valid_indices],
+                    valid_mask=bbox_valid_mask[tri_valid_indices]
+                )
+                X_w_triangulated = torch.zeros(self.num_envs, 1, 3, device=self.device)
+                X_w_triangulated[tri_valid_indices] = X_w_tri_v
+                is_triangulation_valid = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.bool)
+                is_triangulation_valid[tri_valid_indices] = is_tri_valid_v
+            else:
+                X_w_triangulated = torch.zeros(self.num_envs, 1, 3, device=self.device)
+                is_triangulation_valid = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.bool)
+
+            # Only compute covariance for envs with valid triangulation
+            valid_mask = is_triangulation_valid.squeeze(-1)  # [N]
+            valid_indices = torch.where(valid_mask)[0]  # [V]
+
+            if valid_indices.numel() > 0:
+                Sigma_X_v, trace_cov_v, is_cov_valid_v = self._compute_triangulation_covariance(
+                    X_w=X_w_triangulated[valid_indices],
+                    robot_positions=ray_origins[valid_indices],
+                    robot_quats=robot_quats[valid_indices],
+                    gimbal_yaws=gimbal_yaws[valid_indices].squeeze(-1),
+                    gimbal_pitches=gimbal_pitches[valid_indices].squeeze(-1),
+                    camera_intrinsics=camera_intrinsics[valid_indices],
+                    bbox_valid_mask=bbox_valid_mask[valid_indices],
+                    is_triangulation_valid=is_triangulation_valid[valid_indices],
+                    env_indices=valid_indices,
+                )
+
+                # Reconstruct full-sized tensors with invalid defaults
+                Sigma_X = self.Sigma_X_invalid.clone()
+                Sigma_X[valid_indices] = Sigma_X_v
+                trace_cov = self.trace_cov_invalid.clone()
+                trace_cov[valid_indices] = trace_cov_v
+                is_valid = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.bool)
+                is_valid[valid_indices] = is_cov_valid_v
+            else:
+                Sigma_X = self.Sigma_X_invalid.clone()
+                trace_cov = self.trace_cov_invalid.clone()
+                is_valid = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.bool)
 
             std_dev = torch.sqrt(torch.diagonal(Sigma_X, dim1=-2, dim2=-1))
             std_dev = torch.where(
@@ -1459,7 +1499,7 @@ class IrisMAEnvV4(DirectMARLEnv):
         )
 
         # Update Sigma matrices with sampled noise values for triangulation covariance
-        self._update_sigma_matrices(env_ids, sampled_noise)
+        # self._update_sigma_matrices(env_ids, sampled_noise)
 
         super()._reset_idx(env_ids)
 

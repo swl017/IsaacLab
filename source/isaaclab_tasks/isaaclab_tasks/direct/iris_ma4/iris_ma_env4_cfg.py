@@ -287,8 +287,11 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     """Gimbal filtering time constant (s)."""
 
     # Detection
-    detection_fps: float = 20.0
+    detection_fps_mean: float = 20.0
     """Detection frame rate (Hz)."""
+
+    detection_fps_std: float = 1.0
+    """Standard deviation of detection frame rate (Hz)."""
 
     detection_mean_latency: float = 0.1
     """Mean detection latency (s)."""
@@ -317,5 +320,5 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     # Debug
     # ==========================================================================
 
-    play_sim_at_step: int = 200000
+    play_sim_at_step: int = 100000#200000
     """Training step at which to enable rendering for debugging."""

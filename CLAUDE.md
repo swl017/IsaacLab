@@ -130,6 +130,9 @@ Each environment supports multiple RL frameworks:
 - Documentation building with Sphinx
 - Continuous integration workflows
 
+## Important Conventions
+- Quaternion: `wxyz` convention
+
 ## Generating Tests for Functional Modules
 
 When creating tests for functional modules (e.g., controllers, sensors, safety systems, utilities), follow these guidelines to ensure Isaac Sim compatibility and consistency.
@@ -384,7 +387,9 @@ When adding new features:
    - Integration with other components
    - Reset and state management
 
-7. **Error Handling**: Catch exceptions and provide useful error messages
+7. **2-step Scheme**: First test with simple values, then with realistic values when testing the core funcionality and integration.
+
+8. **Error Handling**: Catch exceptions and provide useful error messages
    ```python
    try:
        # Test code
@@ -1135,3 +1140,13 @@ my_module/
 - Init file: `__init__.py` (can be empty or export test utilities)
 - Current test output: `test_result.txt` (overwritten each run, optional `.gitignore`)
 - Error history: `error_log.txt` (appended each run, keep in repo for docs)
+
+## Guide on Generating Technical Documents
+### File structure
+```
+my_module/
+├── doc/
+├    ├── DOCUMENT_INDEX.md                  # Keep track of each documents and provide summary
+├    └── SOME_PLAN_OR_RECORD_OF_WORK.md     # Organize execution plan / provide the summary to the work done for each task.
+└── tests/
+```
