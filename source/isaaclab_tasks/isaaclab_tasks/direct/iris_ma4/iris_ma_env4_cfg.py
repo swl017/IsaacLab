@@ -244,7 +244,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     collision_penalty_scale: float = -100.0
     """Penalty scale for inter-agent collisions."""
 
-    collision_min_safe_distance: float = 5.0
+    collision_min_safe_distance: float = 2.0
     """Minimum safe distance between agents (m)."""
 
     ttc_penalty_scale: float = -10.0
@@ -296,7 +296,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     detection_mean_latency: float = 0.1
     """Mean detection latency (s)."""
 
-    detection_std_latency: float = 0.1
+    detection_std_latency: float = 0.08
     """Standard deviation of detection latency (s)."""
 
     detection_failure_rate: float = 0.05
@@ -306,7 +306,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     comm_mean_latency: float = 0.1
     """Mean inter-agent communication latency (s)."""
 
-    comm_std_latency: float = 0.1
+    comm_std_latency: float = 0.08
     """Standard deviation of communication latency (s)."""
 
     comm_dropout_rate: float = 0.05

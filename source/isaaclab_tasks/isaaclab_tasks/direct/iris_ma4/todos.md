@@ -76,6 +76,6 @@ self.target = RigidObject(self.cfg.target_cfg)
 16. Running `iris_ma4/2026-02-07_11-03-03_mappo_rnn_torch_reward_rework` experiment...
     - Big performance drop at 130k step (fixed delay) -> expected as delay itself can impose performance limits that can't be overcome.
 
-17. Running 2026-02-08_22-55-49_mappo_rnn_torch_reward_rework experiment
+17. Running 2026-02-08_23-51-31_mappo_rnn_torch_reward_rework experiment
     - Fixed timestamp sampling issue; Now correctly coupled to detection sampling
     - Improved midpoint method and triangulation uncertainty computation by computing only the relavent/valid envs
