@@ -74,3 +74,4 @@ self.target = RigidObject(self.cfg.target_cfg)
     - Big fail, will revert shaping
 
 16. Running `iris_ma4/2026-02-07_11-03-03_mappo_rnn_torch_reward_rework` experiment...
+    - Big performance drop at 130k step (fixed delay) -> expected as delay itself can impose performance limits that can't be overcome.

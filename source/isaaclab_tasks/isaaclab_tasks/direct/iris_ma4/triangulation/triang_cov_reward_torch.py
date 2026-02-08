@@ -278,18 +278,8 @@ def jacs_for_view_batch(
         Sigma_theta = torch.zeros(N, C, 0, 0, device=device)
     
     # Weight matrix (inverse pixel covariance)
-    # Add minimum eigenvalue floor to prevent singularity when curriculum scales Sigma_pix near zero
-    MIN_SIGMA_PIX_DIAG = 1e-6
-    Sigma_pix_safe = Sigma_pix.clone()
-    Sigma_pix_safe[:, :, 0, 0] = torch.clamp(Sigma_pix_safe[:, :, 0, 0], min=MIN_SIGMA_PIX_DIAG)
-    Sigma_pix_safe[:, :, 1, 1] = torch.clamp(Sigma_pix_safe[:, :, 1, 1], min=MIN_SIGMA_PIX_DIAG)
-
-    try:
-        W_i = torch.linalg.inv(Sigma_pix_safe)  # [N, C, 2, 2]
-    except RuntimeError:
-        # Fallback to pseudo-inverse if still singular (edge case)
-        W_i = torch.linalg.pinv(Sigma_pix_safe)
-
+    W_i = torch.linalg.inv(Sigma_pix)  # [N, C, 2, 2]
+    
     return JX, J_theta, Sigma_theta, W_i
 
 
@@ -441,26 +431,16 @@ def triangulation_covariance_simple(
         include_pose=False, include_gimbal=False, include_intrinsics=False
     )
 
-def midpoint_method_batched(
-    pts: torch.Tensor,
-    dirs: torch.Tensor,
-    valid_mask: Optional[torch.Tensor] = None
-) -> Tuple[torch.Tensor, torch.Tensor]:
+def midpoint_method_batched(pts: torch.Tensor, dirs: torch.Tensor, bbox_valid_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute midpoint of batched rays using least squares (batched).
 
     Args:
         pts: Points on each ray [N, C, 3]
         dirs: Direction vectors (unit) for each ray [N, C, T, 3]
-        valid_mask: Per-camera validity mask [N, C]. Invalid cameras excluded from computation.
-                   If None, all cameras are considered valid.
 
     Returns:
         X_mid: Midpoint of closest approach [N, T, 3]
-        is_valid: Validity flag for each triangulation [N, T]. False if:
-                  - Insufficient cameras (< 2 valid)
-                  - Singular matrix (rank < 3)
-                  - Result is behind all valid cameras
     """
     N, C, T = dirs.shape[:3]
 
@@ -478,13 +458,6 @@ def midpoint_method_batched(
     # Compute I - d @ d^T for each ray [N, C, T, 3, 3]
     I_minus_dd = I - dd_T
 
-    # Apply valid_mask BEFORE summing over cameras
-    # This prevents invalid cameras from contributing to triangulation
-    if valid_mask is not None:
-        # Expand mask: [N, C] -> [N, C, 1, 1, 1] for broadcasting with [N, C, T, 3, 3]
-        mask_expanded = valid_mask.float().unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)  # [N, C, 1, 1, 1]
-        I_minus_dd = I_minus_dd * mask_expanded
-
     # Sum over cameras: A = sum(I - d @ d^T) [N, T, 3, 3]
     A = I_minus_dd.sum(dim=1)
 
@@ -494,109 +467,25 @@ def midpoint_method_batched(
     # Compute (I - d @ d^T) @ p for each ray [N, C, T, 3]
     I_minus_dd_p = torch.matmul(I_minus_dd, pts_exp.unsqueeze(-1)).squeeze(-1)
 
-    # Apply valid_mask to the b vector computation as well
-    if valid_mask is not None:
-        # Mask already applied to I_minus_dd, so I_minus_dd_p is already masked
-        pass
-
     # Sum over cameras: b = sum((I - d @ d^T) @ p) [N, T, 3]
     b = I_minus_dd_p.sum(dim=1)
 
-    # Count valid cameras per batch for determining insufficient detection
-    if valid_mask is not None:
-        num_valid = valid_mask.sum(dim=1)  # [N]
-        insufficient = num_valid < 2  # Need at least 2 cameras for triangulation
-    else:
-        insufficient = torch.zeros(N, dtype=torch.bool, device=device)
-
-    # Compute fallback: mean of VALID camera positions only
-    if valid_mask is not None:
-        # Compute weighted mean: only include valid camera positions
-        valid_pts = pts * valid_mask.unsqueeze(-1).float()  # [N, C, 3]
-        num_valid_clamped = num_valid.clamp(min=1).unsqueeze(-1)  # [N, 1]
-        mean_pts = valid_pts.sum(dim=1) / num_valid_clamped  # [N, 3]
-    else:
-        mean_pts = pts.mean(dim=1)  # [N, 3]
-
-    # Expand to match target dimension: [N, 3] -> [N, T, 3]
-    mean_pts = mean_pts.unsqueeze(1).expand(-1, T, -1)  # [N, T, 3]
-
-    # Check for singular matrices per environment BEFORE solving
-    rank = torch.linalg.matrix_rank(A)  # [N, T]
-    is_singular = (rank < 3) | insufficient.unsqueeze(-1)  # [N, T]
-
-    # Use lstsq instead of solve - it's more robust and handles singular matrices gracefully
-    # lstsq returns least-squares solution even for rank-deficient matrices
-    # This avoids the issue where one singular env causes ALL envs to fail
+    # Check rank and solve
+    # If rank < 3, use mean of points as fallback
     try:
-        # lstsq returns (solution, residuals, rank, singular_values)
-        # For batched input A [N, T, 3, 3] and b [N, T, 3, 1], we need to reshape
-        A_flat = A.reshape(N * T, 3, 3)  # [N*T, 3, 3]
-        b_flat = b.reshape(N * T, 3, 1)  # [N*T, 3, 1]
+        X_mid = torch.linalg.solve(A, b.unsqueeze(-1)).squeeze(-1)  # [N, T, 3]
+    except:
+        # Fallback to mean if singular
+        X_mid = pts.mean(dim=1)  # [N, T, 3]
 
-        # Use lstsq which is robust to singular matrices
-        X_mid_flat = torch.linalg.lstsq(A_flat, b_flat).solution  # [N*T, 3, 1]
-        X_mid = X_mid_flat.reshape(N, T, 3)  # [N, T, 3]
+    # Check for singular matrices per batch and use mean as fallback
+    rank = torch.linalg.matrix_rank(A)  # [N, T]
+    is_singular = rank < 3
+    if is_singular.any():
+        mean_pts = pts.mean(dim=1)  # [N, T, 3]
+        X_mid = torch.where(is_singular.unsqueeze(-1), mean_pts, X_mid)
 
-        # Check for NaN/Inf per-environment (can happen with very ill-conditioned matrices)
-        has_nan_inf = torch.isnan(X_mid).any(dim=-1) | torch.isinf(X_mid).any(dim=-1)  # [N, T]
-        is_triangulation_successful = ~has_nan_inf  # [N, T] - per-environment success flag
-
-    except Exception:
-        # Complete fallback if lstsq itself fails (shouldn't happen normally)
-        X_mid = mean_pts.clone()  # [N, T, 3]
-        is_triangulation_successful = torch.zeros(N, T, dtype=torch.bool, device=device)
-
-    # Use torch.where for per-environment fallback (not global .any())
-    # Replace singular or NaN/Inf results with mean_pts
-    needs_fallback = is_singular | ~is_triangulation_successful  # [N, T]
-    X_mid = torch.where(needs_fallback.unsqueeze(-1), mean_pts, X_mid)
-
-    # ========== Behind Camera Check ==========
-    # A triangulated point is "behind" a camera if the dot product of
-    # (X_mid - camera_pos) with the ray direction is negative.
-    # If the point is behind ALL valid cameras, the triangulation is invalid.
-
-    # Expand X_mid and pts for per-camera check
-    # X_mid: [N, T, 3] -> [N, 1, T, 3]
-    # pts: [N, C, 3] -> [N, C, 1, 3]
-    X_mid_exp = X_mid.unsqueeze(1)  # [N, 1, T, 3]
-    pts_exp_check = pts.unsqueeze(2)  # [N, C, 1, 3]
-
-    # Vector from camera to triangulated point [N, C, T, 3]
-    cam_to_point = X_mid_exp - pts_exp_check  # [N, C, T, 3]
-
-    # Dot product with normalized ray direction [N, C, T]
-    dot_with_ray = (cam_to_point * dirs_norm).sum(dim=-1)  # [N, C, T]
-
-    # A point is "behind" a camera if dot product < 0
-    is_behind_camera = dot_with_ray < 0  # [N, C, T]
-
-    # Apply valid_mask: only consider valid cameras for the behind check
-    if valid_mask is not None:
-        # Expand mask: [N, C] -> [N, C, T]
-        mask_exp = valid_mask.unsqueeze(-1).expand(-1, -1, T)  # [N, C, T]
-        # For invalid cameras, treat as "not behind" (True -> in front)
-        # so they don't contribute to the "behind all cameras" check
-        is_behind_camera = is_behind_camera & mask_exp
-
-        # Count valid cameras that see the point in front
-        in_front = (~is_behind_camera) & mask_exp  # [N, C, T]
-        num_in_front = in_front.sum(dim=1)  # [N, T]
-
-        # Invalid if no valid camera sees the point in front
-        is_behind_all = num_in_front == 0  # [N, T]
-    else:
-        # All cameras valid: check if behind ALL cameras
-        is_behind_all = is_behind_camera.all(dim=1)  # [N, T]
-
-    # Use torch.where for per-environment fallback for behind-camera cases
-    X_mid = torch.where(is_behind_all.unsqueeze(-1), mean_pts, X_mid)
-
-    # Combined validity: valid if not singular AND not behind all cameras
-    is_valid = ~(is_singular | is_behind_all) & is_triangulation_successful  # [N, T]
-
-    return X_mid, is_valid
+    return X_mid, ~is_singular
 
 def get_ray_dir_from_bbox(
     bbox_2d: torch.Tensor,
