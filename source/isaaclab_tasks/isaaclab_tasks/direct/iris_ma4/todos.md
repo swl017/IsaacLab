@@ -79,3 +79,8 @@ self.target = RigidObject(self.cfg.target_cfg)
 17. Running 2026-02-08_23-51-31_mappo_rnn_torch_reward_rework experiment
     - Fixed timestamp sampling issue; Now correctly coupled to detection sampling
     - Improved midpoint method and triangulation uncertainty computation by computing only the relavent/valid envs
+    - Decreased task difficulty (max distance to target 80m -> 30m)
+    - Finally working as intended!
+
+18. Running iris_ma4_mappo_rnn_tuning7_20260209_145123 experiments
+    - Configurations: sequence 32(1) x rollout 32, 64(2) x GRU num layers 1, 2(2)

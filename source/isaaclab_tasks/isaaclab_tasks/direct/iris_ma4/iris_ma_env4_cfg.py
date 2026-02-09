@@ -320,5 +320,5 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     # Debug
     # ==========================================================================
 
-    play_sim_at_step: int = 100000#200000
+    play_sim_at_step: int = 200000
     """Training step at which to enable rendering for debugging."""
