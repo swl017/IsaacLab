@@ -22,6 +22,7 @@ MAPPO_RNN_DEFAULT_CONFIG.update({
     "shared_state_preprocessor": None,
     "shared_state_preprocessor_kwargs": {},
     "burn_in_steps": 0,  # (0 = disabled, >0 = enabled)
+    "episode_start_mask_steps": 0,  # D (0 = disabled) - mask out first D steps of each episode from loss
 })
 
 
@@ -105,6 +106,10 @@ class MAPPO_RNN(MultiAgent):
         self._burn_in_steps = self.cfg.get("burn_in_steps", 0)
         if self._burn_in_steps > 0:
             logger.info(f"RNN burn-in enabled: {self._burn_in_steps} steps will be used for hidden state warm-up")
+
+        self._episode_start_mask_steps = self.cfg.get("episode_start_mask_steps", 0)
+        if self._episode_start_mask_steps > 0:
+            logger.info(f"Episode-start loss masking enabled: first {self._episode_start_mask_steps} steps are masked out")
         
         self._mixed_precision = self.cfg["mixed_precision"]
         
@@ -182,7 +187,8 @@ class MAPPO_RNN(MultiAgent):
                 self.memories[uid].create_tensor(name="values", size=1, dtype=torch.float32)
                 self.memories[uid].create_tensor(name="returns", size=1, dtype=torch.float32)
                 self.memories[uid].create_tensor(name="advantages", size=1, dtype=torch.float32)
-                
+                self.memories[uid].create_tensor(name="episode_step", size=1, dtype=torch.int32)
+
                 # Initialize RNN states for each agent's policy
                 policy_spec = self.policies[uid].get_specification()
                 policy_rnn_spec = policy_spec.get("rnn", {})
@@ -240,6 +246,12 @@ class MAPPO_RNN(MultiAgent):
         self._current_log_prob = {}
         self._current_shared_next_states = None
         self._rnn_states = copy.deepcopy(self._rnn_initial_states)
+
+        # per-agent per-env episode step counters (int32)
+        self._episode_steps = {}
+        for uid in self.possible_agents:
+            num_envs = self.memories[uid].num_envs
+            self._episode_steps[uid] = torch.zeros(num_envs, dtype=torch.int32, device=self.device)
     
     def act(self, states: Mapping[str, torch.Tensor], timestep: int, timesteps: int) -> torch.Tensor:
         """Process the environment's states to make a decision (actions) using the main policies"""
@@ -294,8 +306,19 @@ class MAPPO_RNN(MultiAgent):
             # Obtain shared states for centralized training.
             # If the environment doesn't provide them, concatenate all agent observations.
             if "shared_states" in infos and "shared_next_states" in infos:
-                shared_states_payload = infos["shared_states"]
-                self._current_shared_next_states = infos["shared_next_states"]
+                shared_states_raw = infos["shared_states"]
+                shared_next_states_raw = infos["shared_next_states"]
+
+                # Handle both tensor and dict formats from environment
+                if isinstance(shared_states_raw, torch.Tensor):
+                    shared_states_payload = {uid: shared_states_raw for uid in self.possible_agents}
+                else:
+                    shared_states_payload = shared_states_raw
+
+                if isinstance(shared_next_states_raw, torch.Tensor):
+                    self._current_shared_next_states = {uid: shared_next_states_raw for uid in self.possible_agents}
+                else:
+                    self._current_shared_next_states = shared_next_states_raw
             else:
                 # Concatenate states and next_states along the last dimension
                 sorted_states_list = [states[uid] for uid in self.possible_agents]
@@ -355,6 +378,7 @@ class MAPPO_RNN(MultiAgent):
                     log_prob=self._current_log_prob[uid],
                     values=values,
                     shared_states=shared_states_payload[uid],
+                    episode_step=self._episode_steps[uid].view(-1, 1),  # (N, 1) for memory storage
                     **rnn_states_storage,
                 )
                 
@@ -366,7 +390,12 @@ class MAPPO_RNN(MultiAgent):
                     if self.policies[uid] is not self.values[uid]:
                         for rnn_state in self._rnn_states[uid]["value"]:
                             rnn_state[:, finished[:, 0]] = 0
-                
+
+                # Update episode step counters: step++ for all, reset finished envs to 0
+                self._episode_steps[uid] += 1
+                if finished.numel():
+                    self._episode_steps[uid][finished[:, 0]] = 0
+
                 # Update initial states for next step
                 self._rnn_initial_states[uid] = copy.deepcopy(self._rnn_states[uid])
     
@@ -476,6 +505,7 @@ class MAPPO_RNN(MultiAgent):
             raw_values = memory.get_tensor_by_name("values")
             raw_returns = memory.get_tensor_by_name("returns")
             raw_advantages = memory.get_tensor_by_name("advantages")
+            raw_episode_step = memory.get_tensor_by_name("episode_step")  # (T, N, 1) int32
 
             # Get RNN initial states if available
             raw_rnn_states = []
@@ -493,6 +523,7 @@ class MAPPO_RNN(MultiAgent):
             values_NT = raw_values.transpose(0, 1).contiguous()
             returns_NT = raw_returns.transpose(0, 1).contiguous()
             advantages_NT = raw_advantages.transpose(0, 1).contiguous()
+            episode_step_NT = raw_episode_step.transpose(0, 1).contiguous()  # (N, T, 1)
 
             rnn_states_NT = [r.transpose(0, 1).contiguous() for r in raw_rnn_states]  # List of (N, T, layers, hidden)
 
@@ -512,6 +543,7 @@ class MAPPO_RNN(MultiAgent):
                 values_NT = values_NT[:, :effective_T]
                 returns_NT = returns_NT[:, :effective_T]
                 advantages_NT = advantages_NT[:, :effective_T]
+                episode_step_NT = episode_step_NT[:, :effective_T]
                 rnn_states_NT = [r[:, :effective_T] for r in rnn_states_NT]
 
             # Reshape to (N * num_seq, seq_len, ...)
@@ -535,6 +567,7 @@ class MAPPO_RNN(MultiAgent):
             seq_values = reshape_to_sequences(values_NT, seq_len)
             seq_returns = reshape_to_sequences(returns_NT, seq_len)
             seq_advantages = reshape_to_sequences(advantages_NT, seq_len)
+            seq_episode_step = reshape_to_sequences(episode_step_NT, seq_len)  # (B, S, 1)
 
             # For RNN initial states, we need the state at the START of each sequence
             # rnn_states_NT is (N, T, layers, hidden)
@@ -572,6 +605,7 @@ class MAPPO_RNN(MultiAgent):
                     seq_values[mb_indices],
                     seq_returns[mb_indices],
                     seq_advantages[mb_indices],
+                    seq_episode_step[mb_indices],     # (B, S, 1) int32
                 ))
 
                 if seq_rnn_initial:
@@ -627,6 +661,21 @@ class MAPPO_RNN(MultiAgent):
                 if combined_dones.dim() == 3 and combined_dones.shape[-1] == 1:
                     logger.info("  Note: dones has trailing dim 1, will be squeezed")
 
+                # Check 4: Episode-start masking configuration
+                if self._episode_start_mask_steps > 0:
+                    sampled_episode_step_check = first_batch[9]  # episode_step
+                    logger.info(f"\n[CHECK 4] Episode-start masking:")
+                    logger.info(f"  D (mask steps): {self._episode_start_mask_steps}")
+                    logger.info(f"  sampled_episode_step.shape: {sampled_episode_step_check.shape}")
+                    logger.info(f"  episode_step range: [{sampled_episode_step_check.min().item()}, {sampled_episode_step_check.max().item()}]")
+                    # Preview mask coverage
+                    preview_mask = (sampled_episode_step_check.squeeze(-1) >= self._episode_start_mask_steps)
+                    mask_coverage = preview_mask.float().mean().item()
+                    logger.info(f"  Mask coverage (True ratio): {mask_coverage:.3f}")
+                    if mask_coverage < 0.5:
+                        logger.warning(f"  WARNING: Low mask coverage ({mask_coverage:.1%}). "
+                                      f"Consider reducing D or increasing sequence length.")
+
                 # Summary
                 is_seq = sampled_states_check.dim() == 3
                 logger.info(f"\n{'='*60}")
@@ -652,6 +701,7 @@ class MAPPO_RNN(MultiAgent):
                     sampled_values,
                     sampled_returns,
                     sampled_advantages,
+                    sampled_episode_step,
                 ) in enumerate(sampled_batches):
                     
                     # Prepare RNN inputs if available
@@ -693,6 +743,28 @@ class MAPPO_RNN(MultiAgent):
                         is_sequence = sampled_states.dim() == 3
                         batch_size, seq_length = (sampled_states.shape[0], sampled_states.shape[1]) if is_sequence else (sampled_states.shape[0], 1)
 
+                        # Episode-start mask helper function
+                        # mask: (B, S) bool tensor where True = include in loss
+                        episode_mask = None
+                        effective_seq_length = seq_length  # May change after burn-in slicing
+
+                        def masked_mean(x: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
+                            """Compute masked mean over a tensor.
+
+                            Args:
+                                x: (B*S,) or (B*S, 1) or (B, S) or (B, S, 1) tensor
+                                m: (B, S) boolean mask where True = include in mean
+                            Returns:
+                                Scalar mean over masked elements
+                            """
+                            # First flatten to 1D if needed, then reshape to (B, S)
+                            x_flat = x.flatten()
+                            x_reshaped = x_flat.view(batch_size, effective_seq_length)
+                            # Apply mask
+                            m_f = m.float()
+                            denom = m_f.sum().clamp_min(1.0)
+                            return (x_reshaped * m_f).sum() / denom
+
                         # For sequence training:
                         # - States stay 3D (B, S, obs) -> model processes sequences with GRU, outputs (B*S, hidden)
                         # - Actions must be flattened to (B*S, action_dim) to match model output
@@ -720,20 +792,34 @@ class MAPPO_RNN(MultiAgent):
                         # Apply burn-in masking
                         if is_sequence and self._burn_in_steps > 0:
                             burn_in = self._burn_in_steps
+                            # Guard burn-in range: clamp to [0, seq_length-1]
+                            burn_in = min(burn_in, seq_length - 1)
+                            if burn_in < 0:
+                                burn_in = 0
 
                             # Reshape model outputs back to (B, S, ...) for burn-in slicing
                             next_log_prob = next_log_prob.view(batch_size, seq_length, -1)
                             predicted_values = predicted_values.view(batch_size, seq_length, -1)
 
-                            if seq_length > burn_in:
-                                # Slice out burn-in steps from model outputs
-                                next_log_prob = next_log_prob[:, burn_in:]
-                                predicted_values = predicted_values[:, burn_in:]
-                                # Slice out burn-in steps from targets
-                                sampled_log_prob = sampled_log_prob[:, burn_in:]
-                                sampled_values = sampled_values[:, burn_in:]
-                                sampled_returns = sampled_returns[:, burn_in:]
-                                sampled_advantages = sampled_advantages[:, burn_in:]
+                            # Slice out burn-in steps from model outputs
+                            # (guard above ensures burn_in < seq_length, so we always have >=1 timestep remaining)
+                            next_log_prob = next_log_prob[:, burn_in:]
+                            predicted_values = predicted_values[:, burn_in:]
+                            # Slice out burn-in steps from targets
+                            sampled_log_prob = sampled_log_prob[:, burn_in:]
+                            sampled_values = sampled_values[:, burn_in:]
+                            sampled_returns = sampled_returns[:, burn_in:]
+                            sampled_advantages = sampled_advantages[:, burn_in:]
+                            sampled_episode_step = sampled_episode_step[:, burn_in:]
+
+                            # Update effective_seq_length for masked_mean
+                            effective_seq_length = seq_length - burn_in
+
+                            # Create episode-start mask AFTER burn-in slicing
+                            if self._episode_start_mask_steps > 0:
+                                D = self._episode_start_mask_steps
+                                # sampled_episode_step: (B, S', 1) int32 -> (B, S') bool
+                                episode_mask = (sampled_episode_step.squeeze(-1) >= D)
 
                             # Flatten everything for loss computation
                             next_log_prob = next_log_prob.flatten()
@@ -743,17 +829,29 @@ class MAPPO_RNN(MultiAgent):
                             sampled_returns = sampled_returns.flatten()
                             sampled_advantages = sampled_advantages.flatten()
                         elif is_sequence:
-                            # No burn-in, but still need to flatten sequence targets
+                            # No burn-in, but still need to flatten everything for loss computation
+                            # Model outputs may be (B*S, 1) - flatten to (B*S,) to match targets
+                            next_log_prob = next_log_prob.flatten()
+                            predicted_values = predicted_values.flatten()
                             sampled_log_prob = sampled_log_prob.flatten()
                             sampled_values = sampled_values.flatten()
                             sampled_returns = sampled_returns.flatten()
                             sampled_advantages = sampled_advantages.flatten()
-                            # Model outputs are already flattened (B*S, ...)
+
+                            # Create episode-start mask (no burn-in case)
+                            if self._episode_start_mask_steps > 0:
+                                D = self._episode_start_mask_steps
+                                # sampled_episode_step: (B, S, 1) int32 -> (B, S) bool
+                                episode_mask = (sampled_episode_step.squeeze(-1) >= D)
                         
                         # compute approximate KL divergence
                         with torch.no_grad():
                             ratio = next_log_prob - sampled_log_prob
-                            kl_divergence = ((torch.exp(ratio) - 1) - ratio).mean()
+                            kl_terms = (torch.exp(ratio) - 1) - ratio
+                            if episode_mask is not None:
+                                kl_divergence = masked_mean(kl_terms, episode_mask)
+                            else:
+                                kl_divergence = kl_terms.mean()
                             kl_divergences.append(kl_divergence)
                         
                         # early stopping with KL divergence
@@ -762,7 +860,14 @@ class MAPPO_RNN(MultiAgent):
                         
                         # compute entropy loss
                         if self._entropy_loss_scale[uid]:
-                            entropy_loss = -self._entropy_loss_scale[uid] * policy.get_entropy(role="policy").mean()
+                            entropy = policy.get_entropy(role="policy")  # (B*S,) or (B*S, action_dim)
+                            # Sum across action dimensions if multi-dimensional to get per-timestep entropy
+                            if entropy.dim() > 1:
+                                entropy = entropy.sum(dim=-1)  # (B*S,)
+                            if episode_mask is not None:
+                                entropy_loss = -self._entropy_loss_scale[uid] * masked_mean(entropy, episode_mask)
+                            else:
+                                entropy_loss = -self._entropy_loss_scale[uid] * entropy.mean()
                         else:
                             entropy_loss = 0
                         
@@ -772,14 +877,24 @@ class MAPPO_RNN(MultiAgent):
                         surrogate_clipped = sampled_advantages * torch.clip(
                             ratio, 1.0 - self._ratio_clip[uid], 1.0 + self._ratio_clip[uid]
                         )
-                        
-                        policy_loss = -torch.min(surrogate, surrogate_clipped).mean()
+
+                        policy_terms = torch.min(surrogate, surrogate_clipped)  # (B*S,)
+                        if episode_mask is not None:
+                            policy_loss = -masked_mean(policy_terms, episode_mask)
+                        else:
+                            policy_loss = -policy_terms.mean()
                         
                         if self._clip_predicted_values[uid]:
                             predicted_values = sampled_values + torch.clip(
                                 predicted_values - sampled_values, min=-self._value_clip[uid], max=self._value_clip[uid]
                             )
-                        value_loss = self._value_loss_scale[uid] * F.mse_loss(sampled_returns, predicted_values)
+
+                        # Compute value loss with optional masking
+                        mse = (sampled_returns - predicted_values).pow(2)  # (B*S,) or (B*S, 1)
+                        if episode_mask is not None:
+                            value_loss = self._value_loss_scale[uid] * masked_mean(mse.flatten(), episode_mask)
+                        else:
+                            value_loss = self._value_loss_scale[uid] * mse.mean()
                     
                     # optimization step
                     self.optimizers[uid].zero_grad()
