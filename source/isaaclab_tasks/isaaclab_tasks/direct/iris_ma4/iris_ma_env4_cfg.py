@@ -317,6 +317,46 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     """Time constant for detection confidence decay (s)."""
 
     # ==========================================================================
+    # Experiment Ablation Flags
+    # ==========================================================================
+
+    reward_mode: str = "analytical"
+    """Reward mode for ablation studies.
+
+    Options:
+        'analytical'   - Multi-source covariance reward (pixel+pose+gimbal+intrinsics, paper system)
+        'angular_only' - Angular-noise-only covariance (Gavin2024-style, pixel noise only)
+        'heuristic'    - Distance + viewing angle heuristic
+        'image_only'   - Bbox center + size only (no triangulation component)
+    """
+
+    use_noisy_rewards: bool = False
+    """If True, compute rewards using the noisy delayed pipeline instead of
+    the clean pipeline. Used for A3 dual-path ablation."""
+
+    mask_aoi_in_obs: bool = False
+    """If True, zero out all Age-of-Information fields in observations.
+    Used for A1 AoI ablation. Affects: time_since_detection, other_data_age,
+    other_detection_age."""
+
+    use_omnidirectional_cameras: bool = False
+    """If True, simulate omnidirectional cameras (Gavin2024-style).
+    Forces all bbox detections to be valid in the reward path (target always
+    visible regardless of FoV). Use with bbox/TTC reward scales set to 0."""
+
+    use_gavin2024_reward: bool = False
+    """If True, use Gavin2024 Eq. 15 reward structure instead of summed components.
+    Reward = 1/sqrt(Tr(Sigma_X)) if all distances safe, else -r_penalty.
+    Distance checks: agent-to-target, agent-to-ground, agent-to-agent."""
+
+    gavin2024_d_threshold: float = 2.0
+    """Distance threshold (m) for Gavin2024 reward gating. Applies to
+    target distance, ground clearance, and inter-agent distance."""
+
+    gavin2024_r_penalty: float = 1.0
+    """Flat penalty when distance threshold is violated in Gavin2024 reward."""
+
+    # ==========================================================================
     # Debug
     # ==========================================================================
 

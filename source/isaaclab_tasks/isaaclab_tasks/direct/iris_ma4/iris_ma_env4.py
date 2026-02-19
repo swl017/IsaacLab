@@ -306,6 +306,9 @@ class IrisMAEnvV4(DirectMARLEnv):
         ) * (-1.0)
         self.trace_cov_invalid = torch.ones(self.num_envs, 1, device=self.device) * (-1.0)
 
+        # NaN recovery: envs flagged for termination due to NaN/Inf in observations
+        self._nan_terminated_envs: Dict[str, torch.Tensor] = {}
+
         # Uncertainty matrices for triangulation covariance computation
         # Use .repeat() instead of .expand() so each env can have independent values
         # (expand creates views that share memory, repeat creates actual copies)
@@ -430,8 +433,17 @@ class IrisMAEnvV4(DirectMARLEnv):
             self._apply_delay_mode(new_delay_mode, current_step)
 
         for idx, agent_id in enumerate(self.cfg.possible_agents):
-            # Clip and store actions
-            action = torch.clamp(actions[agent_id], min=-1.0, max=1.0)
+            # Clip and store actions; sanitize NaN from policy divergence
+            action = actions[agent_id]
+            nan_action_mask = torch.isnan(action) | torch.isinf(action)
+            if nan_action_mask.any():
+                action = torch.where(nan_action_mask, torch.zeros_like(action), action)
+                bad_envs = nan_action_mask.any(dim=1)
+                if agent_id not in self._nan_terminated_envs:
+                    self._nan_terminated_envs[agent_id] = bad_envs
+                else:
+                    self._nan_terminated_envs[agent_id] = self._nan_terminated_envs[agent_id] | bad_envs
+            action = torch.clamp(action, min=-1.0, max=1.0)
             self._actions[agent_id] = action.clone()
 
             # Scale actions
@@ -712,23 +724,38 @@ class IrisMAEnvV4(DirectMARLEnv):
 
         try:
             progress_coord = self.progress_coord
-            Sigma_X, trace_cov = triangulation_covariance_multi_camera(
-                X_w=X_w,
-                robot_positions=robot_positions,
-                robot_quats=robot_quats,
-                gimbal_yaws=gimbal_yaws,
-                gimbal_pitches=gimbal_pitches,
-                camera_intrinsics=camera_intrinsics,
-                Sigma_pix=Sigma_pix,
-                Sigma_twb=Sigma_twb,
-                Sigma_phiwb=Sigma_phiwb,
-                Sigma_alpha=Sigma_alpha,
-                Sigma_beta=Sigma_beta,
-                Sigma_K=Sigma_K,
-                include_pose=True,
-                include_gimbal=True,
-                include_intrinsics=True
-            )
+            if self.cfg.reward_mode == "angular_only":
+                # Gavin2024-style: only pixel detection noise contributes to covariance
+                Sigma_X, trace_cov = triangulation_covariance_multi_camera(
+                    X_w=X_w,
+                    robot_positions=robot_positions,
+                    robot_quats=robot_quats,
+                    gimbal_yaws=gimbal_yaws,
+                    gimbal_pitches=gimbal_pitches,
+                    camera_intrinsics=camera_intrinsics,
+                    Sigma_pix=Sigma_pix,
+                    include_pose=False,
+                    include_gimbal=False,
+                    include_intrinsics=False,
+                )
+            else:
+                Sigma_X, trace_cov = triangulation_covariance_multi_camera(
+                    X_w=X_w,
+                    robot_positions=robot_positions,
+                    robot_quats=robot_quats,
+                    gimbal_yaws=gimbal_yaws,
+                    gimbal_pitches=gimbal_pitches,
+                    camera_intrinsics=camera_intrinsics,
+                    Sigma_pix=Sigma_pix,
+                    Sigma_twb=Sigma_twb,
+                    Sigma_phiwb=Sigma_phiwb,
+                    Sigma_alpha=Sigma_alpha,
+                    Sigma_beta=Sigma_beta,
+                    Sigma_K=Sigma_K,
+                    include_pose=True,
+                    include_gimbal=True,
+                    include_intrinsics=True,
+                )
 
             is_trace_valid = (trace_cov >= 0.0) & torch.isfinite(trace_cov)
             is_sigma_finite = torch.isfinite(Sigma_X).all(dim=(-2, -1))
@@ -766,8 +793,11 @@ class IrisMAEnvV4(DirectMARLEnv):
         self.triangulation_results = {}
 
         for i, ego_agent_id in enumerate(self.cfg.possible_agents):
-            # Get all agent states from ego perspective (clean, no noise)
-            all_states = self.delay_system.get_all_states_for_rewards(ego_agent_id)
+            # Get all agent states from ego perspective
+            if self.cfg.use_noisy_rewards:
+                all_states = self.delay_system.get_all_states_for_observations(ego_agent_id)
+            else:
+                all_states = self.delay_system.get_all_states_for_rewards(ego_agent_id)
 
             # Build camera geometry from all agent states
             robot_positions_list = []
@@ -802,6 +832,10 @@ class IrisMAEnvV4(DirectMARLEnv):
             bbox_valid_mask = torch.stack(bbox_valid_list, dim=1)
             ray_origins = torch.stack(ray_origin_list, dim=1)
 
+            # Omnidirectional cameras: target always visible (no FoV constraints)
+            if self.cfg.use_omnidirectional_cameras:
+                bbox_valid_mask = torch.ones_like(bbox_valid_mask)
+
             X_w_gt = self.target.data.root_pos_w.unsqueeze(1)
 
             Sigma_X, trace_cov, is_tri_cov_valid = self._compute_triangulation_covariance(
@@ -814,7 +848,8 @@ class IrisMAEnvV4(DirectMARLEnv):
                 bbox_valid_mask=bbox_valid_mask,
                 is_triangulation_valid=torch.ones(self.num_envs, 1, device=self.device, dtype=torch.bool)
             )
-            std_dev = torch.sqrt(torch.diagonal(Sigma_X, dim1=-2, dim2=-1))
+            diag = torch.diagonal(Sigma_X, dim1=-2, dim2=-1)
+            std_dev = torch.sqrt(torch.clamp(diag, min=0.0))
             std_dev = torch.where(
                 is_tri_cov_valid.unsqueeze(-1),
                 std_dev,
@@ -837,7 +872,10 @@ class IrisMAEnvV4(DirectMARLEnv):
         agent_focal_lengths = {}
 
         for agent_id in self.cfg.possible_agents:
-            ego_states = self.delay_system.get_all_states_for_rewards(agent_id)
+            if self.cfg.use_noisy_rewards:
+                ego_states = self.delay_system.get_all_states_for_observations(agent_id)
+            else:
+                ego_states = self.delay_system.get_all_states_for_rewards(agent_id)
             ego_state = ego_states[agent_id]
             agent_positions[agent_id] = ego_state.data.body_position_w
             agent_bboxes[agent_id] = ego_state.data.bboxes_2d[:, 0, :]
@@ -860,7 +898,10 @@ class IrisMAEnvV4(DirectMARLEnv):
 
         # ========== Compute rewards for each agent ==========
         for i, agent_id in enumerate(self.cfg.possible_agents):
-            ego_states = self.delay_system.get_all_states_for_rewards(agent_id)
+            if self.cfg.use_noisy_rewards:
+                ego_states = self.delay_system.get_all_states_for_observations(agent_id)
+            else:
+                ego_states = self.delay_system.get_all_states_for_rewards(agent_id)
             delayed_state = ego_states[agent_id]
 
             X_w_gt, Sigma_X, std_dev, trace_cov, is_tri_cov_valid = self.triangulation_results[agent_id]
@@ -876,6 +917,10 @@ class IrisMAEnvV4(DirectMARLEnv):
             bbox_size_raw = delayed_state.data.bboxes_2d[:, 0, 2:4]
             bbox_valid = self.bbox_raycaster.validate_bbox(delayed_state.data.bboxes_2d[:, 0, :]).squeeze(-1)
 
+            # Omnidirectional cameras: target always visible
+            if self.cfg.use_omnidirectional_cameras:
+                bbox_valid = torch.ones_like(bbox_valid)
+
             # Normalize using cached image dimensions
             bbox_center = bbox_center_raw / self._img_dims
             bbox_size = bbox_size_raw / self._img_dims
@@ -886,40 +931,102 @@ class IrisMAEnvV4(DirectMARLEnv):
             bbox_area = bbox_size[:, 0] * bbox_size[:, 1]
             bbox_size_mapped = torch.exp(-torch.abs(bbox_area - 0.2)) * bbox_valid.float()
 
-            triangulation_quality = torch.where(
-                is_tri_cov_valid[:, 0],
-                torch.clip(torch.sqrt(10.0 / (trace_cov[:, 0] + 1e-6)), min=0.0, max=100.0),
-                # 1.0 / (1.0 + trace_cov[:, 0] / 7.0),
-                torch.zeros_like(trace_cov[:, 0])
-            )
+            if self.cfg.reward_mode in ("analytical", "angular_only"):
+                safe_trace = torch.clamp(trace_cov[:, 0], min=1e-6)
+                triangulation_quality = torch.where(
+                    is_tri_cov_valid[:, 0],
+                    torch.clip(torch.sqrt(10.0 / safe_trace), min=0.0, max=100.0),
+                    torch.zeros_like(trace_cov[:, 0])
+                )
+            elif self.cfg.reward_mode == "heuristic":
+                # Build bbox_valid_mask for current ego agent's perspective
+                heuristic_bbox_valid_list = []
+                for aid in self.cfg.possible_agents:
+                    s = ego_states[aid]
+                    heuristic_bbox_valid_list.append(
+                        self.bbox_raycaster.validate_bbox(s.data.bboxes_2d[:, 0, :]).squeeze(-1)
+                    )
+                heuristic_bbox_valid_mask = torch.stack(heuristic_bbox_valid_list, dim=1)
+                triangulation_quality = self._compute_heuristic_reward(
+                    ego_states, heuristic_bbox_valid_mask
+                )
+            elif self.cfg.reward_mode == "image_only":
+                triangulation_quality = torch.zeros(self.num_envs, device=self.device)
+            else:
+                raise ValueError(f"Unknown reward_mode: {self.cfg.reward_mode}")
 
             collision_penalty = -safety_penalties[agent_id]["collision"]
             ttc_penalty = safety_penalties[agent_id]["ttc_penalty"]
 
-            rewards = {
-                "action_sum": action_sum * self.cfg.action_sum_penalty_scale * self.step_dt,
-                "action_delta": action_delta * self.cfg.action_delta_penalty_scale * self.step_dt,
-                "bbox_center": bbox_center_mapped * self.cfg.bbox_center_reward_scale * self.step_dt,
-                "bbox_size": bbox_size_mapped * self.cfg.bbox_size_reward_scale * self.step_dt,
-                "triangulation": triangulation_quality * self.cfg.triangulation_reward_scale * self.step_dt * self.progress_coord,
-                "collision": collision_penalty * self.cfg.collision_penalty_scale * self.step_dt * self.progress_safety,
-                "ttc": ttc_penalty * self.cfg.ttc_penalty_scale * self.step_dt * self.progress_safety,
-            }
+            if self.cfg.use_gavin2024_reward:
+                # Gavin2024 Eq. 15: conditional reward
+                # r_i = 1/sqrt(Tr(Sigma_X))  if all distances safe
+                #      = -r_penalty           otherwise
+                d_thresh = self.cfg.gavin2024_d_threshold
+                agent_pos = delayed_state.data.body_position_w  # [N, 3]
+                target_pos = self.target.data.root_pos_w        # [N, 3]
+
+                # Distance checks
+                d_target = torch.norm(agent_pos - target_pos, dim=-1)        # [N]
+                d_ground = agent_pos[:, 2]                                    # [N] z-height as ground clearance
+                d_inter_agent_safe = torch.ones(self.num_envs, device=self.device, dtype=torch.bool)
+                for j, other_id in enumerate(self.cfg.possible_agents):
+                    if other_id == agent_id:
+                        continue
+                    other_state = ego_states[other_id]
+                    d_ij = torch.norm(agent_pos - other_state.data.body_position_w, dim=-1)
+                    d_inter_agent_safe = d_inter_agent_safe & (d_ij > d_thresh)
+
+                all_safe = (d_target > d_thresh) & (d_ground > d_thresh) & d_inter_agent_safe
+
+                # Covariance reward: 1/sqrt(Tr(Sigma_X))
+                safe_trace_g = torch.clamp(trace_cov[:, 0], min=1e-6)
+                cov_reward = torch.where(
+                    is_tri_cov_valid[:, 0],
+                    1.0 / (torch.sqrt(safe_trace_g) + 1e-6),
+                    torch.zeros_like(trace_cov[:, 0])
+                )
+
+                gavin_reward = torch.where(
+                    all_safe,
+                    cov_reward,
+                    -self.cfg.gavin2024_r_penalty * torch.ones_like(cov_reward),
+                )
+
+                rewards = {
+                    "action_sum": torch.zeros_like(gavin_reward),
+                    "action_delta": torch.zeros_like(gavin_reward),
+                    "bbox_center": torch.zeros_like(gavin_reward),
+                    "bbox_size": torch.zeros_like(gavin_reward),
+                    "triangulation": gavin_reward * self.step_dt,
+                    "collision": torch.zeros_like(gavin_reward),
+                    "ttc": torch.zeros_like(gavin_reward),
+                }
+            else:
+                rewards = {
+                    "action_sum": action_sum * self.cfg.action_sum_penalty_scale * self.step_dt,
+                    "action_delta": action_delta * self.cfg.action_delta_penalty_scale * self.step_dt,
+                    "bbox_center": bbox_center_mapped * self.cfg.bbox_center_reward_scale * self.step_dt,
+                    "bbox_size": bbox_size_mapped * self.cfg.bbox_size_reward_scale * self.step_dt,
+                    "triangulation": triangulation_quality * self.cfg.triangulation_reward_scale * self.step_dt * self.progress_coord,
+                    "collision": collision_penalty * self.cfg.collision_penalty_scale * self.step_dt * self.progress_safety,
+                    "ttc": ttc_penalty * self.cfg.ttc_penalty_scale * self.step_dt * self.progress_safety,
+                }
+
+            # Sanitize NaN in rewards: replace with zeros, mark envs for termination
+            for key in rewards:
+                nan_mask = torch.isnan(rewards[key]) | torch.isinf(rewards[key])
+                if nan_mask.any():
+                    rewards[key] = torch.where(nan_mask, torch.zeros_like(rewards[key]), rewards[key])
+                    if agent_id not in self._nan_terminated_envs:
+                        self._nan_terminated_envs[agent_id] = nan_mask
+                    else:
+                        self._nan_terminated_envs[agent_id] = self._nan_terminated_envs[agent_id] | nan_mask
 
             for key, value in rewards.items():
                 self._episode_sums[agent_id][key] += value
 
             total_reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
-
-            # Check for NaN values
-            for reward_name, reward_value in rewards.items():
-                if torch.isnan(reward_value).any():
-                    nan_envs = torch.nonzero(torch.isnan(reward_value)).flatten()
-                    raise ValueError(f"NaN detected in {agent_id} reward '{reward_name}' at environments: {nan_envs.tolist()}")
-
-            if torch.isnan(total_reward).any():
-                nan_envs = torch.nonzero(torch.isnan(total_reward)).flatten()
-                raise ValueError(f"NaN detected in {agent_id} total reward at environments: {nan_envs.tolist()}")
 
             rewards_dict[agent_id] = total_reward
             self._last_actions[agent_id] = self._actions[agent_id].clone()
@@ -927,9 +1034,83 @@ class IrisMAEnvV4(DirectMARLEnv):
 
         return rewards_dict
 
+    def _compute_heuristic_reward(
+        self,
+        all_states: Dict[str, "AgentStates"],
+        bbox_valid_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Heuristic triangulation reward based on distance and viewing angle diversity.
+
+        Gavin2024-style reward that does NOT use analytical covariance. Instead:
+        1. Proximity term: reward for maintaining ~20m distance to target
+        2. Angle diversity term: reward for maximizing angular separation between views
+
+        Args:
+            all_states: All agent states dict from delay system.
+            bbox_valid_mask: [N, C] boolean tensor of valid detections.
+
+        Returns:
+            [N] tensor of heuristic triangulation quality.
+        """
+        target_pos = self.target.data.root_pos_w  # [N, 3]
+
+        ray_dirs_list = []
+        distances_list = []
+        for agent_id in self.cfg.possible_agents:
+            state = all_states[agent_id]
+            cam_pos = state.data.camera_position_w  # [N, 3]
+            to_target = target_pos - cam_pos
+            dist = to_target.norm(dim=-1, keepdim=True)  # [N, 1]
+            ray_dir = to_target / (dist + 1e-6)  # [N, 3]
+            ray_dirs_list.append(ray_dir)
+            distances_list.append(dist.squeeze(-1))
+
+        # Proximity term: reward appropriate distance (~20m)
+        distances = torch.stack(distances_list, dim=1)  # [N, C]
+        ideal_dist = 20.0
+        proximity = torch.exp(-0.01 * (distances - ideal_dist).pow(2))  # [N, C]
+        proximity_reward = (proximity * bbox_valid_mask.float()).mean(dim=1)  # [N]
+
+        # Angular diversity term: maximize angle between ray directions
+        if len(ray_dirs_list) >= 2:
+            cos_angles = []
+            for k in range(len(ray_dirs_list)):
+                for j in range(k + 1, len(ray_dirs_list)):
+                    cos_angle = (ray_dirs_list[k] * ray_dirs_list[j]).sum(dim=-1)  # [N]
+                    cos_angles.append(cos_angle)
+            cos_mean = torch.stack(cos_angles, dim=1).mean(dim=1)  # [N]
+            # Reward lower cosine (larger angles), ideal is cos(90deg)=0
+            angle_reward = 1.0 - cos_mean.abs()  # [N], max at 90 degrees
+        else:
+            angle_reward = torch.zeros(self.num_envs, device=self.device)
+
+        # Combined heuristic quality (only active when all agents detect)
+        all_valid = bbox_valid_mask.all(dim=1).float()
+        return (proximity_reward + angle_reward) * all_valid
+
+    def _get_aoi_indices(self) -> list[int]:
+        """Return observation indices corresponding to Age-of-Information fields.
+
+        Obs layout: ego block (26D) + other fields (15*(C-1)D) + tri tail (6D)
+        - Ego AoI: time_since_detection at index 21
+        - Other AoI: data_age and detection_age at indices
+          [26 + 13*(C-1), 26 + 15*(C-1))
+
+        Returns:
+            List of AoI observation indices.
+        """
+        C = len(self.cfg.possible_agents)
+        indices = [21]  # ego time_since_detection
+        # Other agent data_age and detection_age fields
+        start = 26 + 13 * (C - 1)
+        end = 26 + 15 * (C - 1)
+        indices.extend(range(start, end))
+        return indices
+
     def _get_observations(self) -> Dict[str, torch.Tensor]:
         """Get observations for all agents using delayed+noisy states."""
         self.triangulation_results_noisy = {}
+        self._nan_terminated_envs = {}  # Reset NaN flags each step
 
         for i, ego_agent_id in enumerate(self.cfg.possible_agents):
             all_states = self.delay_system.get_all_states_for_observations(ego_agent_id)
@@ -1018,7 +1199,8 @@ class IrisMAEnvV4(DirectMARLEnv):
                 trace_cov = self.trace_cov_invalid.clone()
                 is_valid = torch.zeros(self.num_envs, 1, device=self.device, dtype=torch.bool)
 
-            std_dev = torch.sqrt(torch.diagonal(Sigma_X, dim1=-2, dim2=-1))
+            diag = torch.diagonal(Sigma_X, dim1=-2, dim2=-1)
+            std_dev = torch.sqrt(torch.clamp(diag, min=0.0))
             std_dev = torch.where(
                 is_valid.unsqueeze(-1),
                 std_dev,
@@ -1111,10 +1293,16 @@ class IrisMAEnvV4(DirectMARLEnv):
                 std_tri[:, 0, :],
             ], dim=-1)
 
-            # Check for NaN/Inf values
-            if torch.isnan(obs).any() or torch.isinf(obs).any():
-                nan_envs = torch.nonzero((torch.isnan(obs) | torch.isinf(obs)).any(dim=1)).flatten()
-                raise ValueError(f"NaN/Inf in {ego_agent_id} obs at envs {nan_envs.tolist()}")
+            # A1 ablation: zero out AoI fields if configured
+            if self.cfg.mask_aoi_in_obs:
+                obs[:, self._get_aoi_indices()] = 0.0
+
+            # Sanitize NaN/Inf: replace with zeros, mark envs for termination
+            nan_mask = torch.isnan(obs) | torch.isinf(obs)
+            if nan_mask.any():
+                bad_envs = nan_mask.any(dim=1)
+                obs = torch.where(nan_mask, torch.zeros_like(obs), obs)
+                self._nan_terminated_envs[ego_agent_id] = bad_envs
 
             observations[ego_agent_id] = obs
 
@@ -1129,6 +1317,9 @@ class IrisMAEnvV4(DirectMARLEnv):
         for agent_id in self.cfg.possible_agents:
             robot = self._robots[agent_id]
             died = (robot.data.root_pos_w[:, 2] < 2.0) | (robot.data.root_pos_w[:, 2] > 50.0)
+            # Also terminate envs that had NaN/Inf in observations
+            if agent_id in self._nan_terminated_envs:
+                died = died | self._nan_terminated_envs[agent_id]
             terminated_dict[agent_id] = died
             time_out_dict[agent_id] = time_out
 

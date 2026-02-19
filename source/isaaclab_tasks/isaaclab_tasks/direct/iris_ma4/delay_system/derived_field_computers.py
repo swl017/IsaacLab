@@ -7,8 +7,27 @@ being delayed independently.
 """
 
 from __future__ import annotations
+import logging
 import torch
 from isaaclab.utils.math import quat_mul, quat_rotate_inverse, matrix_from_quat
+
+logger = logging.getLogger(__name__)
+
+
+def _sanitize_quaternion(quat: torch.Tensor) -> torch.Tensor:
+    """Replace NaN/Inf quaternions with identity [1, 0, 0, 0].
+
+    This guards against physics engine producing invalid orientations when
+    a drone enters an extreme state (e.g. crash). Without this, a single
+    NaN quaternion propagates through all downstream derived fields and
+    crashes training.
+    """
+    bad = torch.isnan(quat).any(dim=-1, keepdim=True) | torch.isinf(quat).any(dim=-1, keepdim=True)
+    if not bad.any():
+        return quat
+    identity = torch.zeros_like(quat)
+    identity[..., 0] = 1.0  # w=1, x=y=z=0
+    return torch.where(bad, identity, quat)
 
 
 def compute_camera_orientation_from_gimbal(
@@ -36,6 +55,9 @@ def compute_camera_orientation_from_gimbal(
     Returns:
         camera_orientation_w: Camera orientation in world frame [N, 4]
     """
+    # Sanitize: replace NaN/Inf quaternions with identity to survive physics instabilities
+    body_orientation_w = _sanitize_quaternion(body_orientation_w)
+
     # Extract gimbal angles (pitch=joint[0], yaw=joint[1], roll=joint[2])
     pitch = joint_positions_b[:, 0]  # [N]
     yaw = joint_positions_b[:, 1] if joint_positions_b.shape[1] > 1 else torch.zeros_like(pitch)
@@ -88,6 +110,9 @@ def compute_camera_position(
     Returns:
         camera_position_w: Camera position in world frame [N, 3]
     """
+    # Sanitize: replace NaN/Inf quaternions with identity to survive physics instabilities
+    body_orientation_w = _sanitize_quaternion(body_orientation_w)
+
     # Rotate camera offset from body frame to world frame
     # Note: quat_rotate_inverse actually rotates the vector by the quaternion
     # (the name is confusing, but it's the standard rotation operation)
@@ -208,15 +233,20 @@ def compute_ray_directions_from_bbox(
         img_w_safe = torch.clamp(img_w, min=1e-6)
         img_h_safe = torch.clamp(img_h, min=1e-6)
         
-        # Split bbox components
-        cx, cy, w, h = bbox.split(1, dim=-1)
+        # Split bbox components (raw pixel values, before normalization)
+        cx_raw, cy_raw, w_raw, h_raw = bbox.split(1, dim=-1)
+
+        # Reject non-positive dimensions before normalization/clamping.
+        # Sentinel values like -2e6 from detection failures must be caught here;
+        # clamping would hide them and let invalid bboxes pass.
+        positive_size = (w_raw > 0) & (h_raw > 0)
 
         # Normalize
-        cx_norm = cx / img_w_safe
-        cy_norm = cy / img_h_safe
-        w_norm = w / img_w_safe
-        h_norm = h / img_h_safe
-        
+        cx_norm = cx_raw / img_w_safe
+        cy_norm = cy_raw / img_h_safe
+        w_norm = w_raw / img_w_safe
+        h_norm = h_raw / img_h_safe
+
         # Clamp to [0, 1] to handle numerical errors
         cx_norm = torch.clamp(cx_norm, 0.0, 1.0)
         cy_norm = torch.clamp(cy_norm, 0.0, 1.0)
@@ -224,34 +254,11 @@ def compute_ray_directions_from_bbox(
         h_norm = torch.clamp(h_norm, 0.0, 1.0)
         bbox_normalized = torch.cat([cx_norm, cy_norm, w_norm, h_norm], dim=-1) # (N, 4)
 
-        def validate_bbox_sizes(
-            bboxes_norm: torch.Tensor,
-            min_size: tuple[float, float],
-            max_size: tuple[float, float]
-        ) -> torch.Tensor:
-            """Check if normalized bbox sizes are within valid range.
-            
-            Args:
-                bboxes_norm: Normalized bboxes (cx, cy, w, h). Shape (N, C, T, 4).
-                min_size: Minimum (width, height) as fraction of image.
-                max_size: Maximum (width, height) as fraction of image.
-                
-            Returns:
-                Boolean mask for valid bbox sizes. Shape (N, C, T).
-            """
-            # Extract width and height
-            w = bboxes_norm[..., 2]
-            h = bboxes_norm[..., 3]
-            
-            # Check size constraints
-            valid_w = (w >= min_size[0]) & (w <= max_size[0])
-            valid_h = (h >= min_size[1]) & (h <= max_size[1])
-            return valid_w & valid_h
-        size_ok = validate_bbox_sizes(
-            bbox_normalized,
-            (0, 0),
-            (1, 1)
-        )
+        # Check normalized size within valid range (strictly positive after raw check above)
+        w_n = bbox_normalized[..., 2]
+        h_n = bbox_normalized[..., 3]
+        size_ok = (w_n > 0) & (w_n <= 1.0) & (h_n > 0) & (h_n <= 1.0)
+
         center_x = bbox_normalized[..., 0]
         center_y = bbox_normalized[..., 1]
         center_ok = (
@@ -259,7 +266,7 @@ def compute_ray_directions_from_bbox(
             (center_y > 0.0) & (center_y < 1.0)
         )
 
-        valid_mask = size_ok & center_ok
+        valid_mask = positive_size.squeeze(-1) & size_ok & center_ok
 
         return valid_mask
 
@@ -291,17 +298,15 @@ def compute_ray_directions_from_bbox(
         inf_mask = torch.isinf(ray_directions_w).any(dim=-1).any(dim=-1)  # [N]
         bad_envs = torch.nonzero(nan_mask | inf_mask).squeeze(-1).tolist()
 
-        # Debug info
-        debug_info = (
-            f"\nray_directions_w NaN/Inf detected in envs: {bad_envs}"
-            f"\n  camera_orientation_w: {camera_orientation_w[bad_envs[:3]] if bad_envs else 'N/A'}"
-            f"\n  bboxes_2d: {bboxes_2d[bad_envs[:3]] if bad_envs else 'N/A'}"
-            f"\n  is_bbox_valid: {is_bbox_valid[bad_envs[:3]] if bad_envs else 'N/A'}"
-            f"\n  fx (first 3): {fx[:3].squeeze() if fx.numel() > 0 else 'N/A'}"
-            f"\n  fy (first 3): {fy[:3].squeeze() if fy.numel() > 0 else 'N/A'}"
-            f"\n  dirs_camera_norm: {dirs_camera_norm[bad_envs[:3]] if bad_envs else 'N/A'}"
+        # Zero out NaN/Inf rays instead of crashing training.
+        # This is a safety net — the quaternion sanitization and bbox validation
+        # fixes above should prevent most NaN propagation, but if any slip through
+        # we log a warning and zero the affected rays.
+        logger.warning(
+            f"ray_directions_w NaN/Inf in {len(bad_envs)} envs (zeroed out): {bad_envs[:5]}"
         )
-        raise ValueError(f"NaN/Inf in ray_directions_w computation. {debug_info}")
+        bad_mask = nan_mask | inf_mask  # [N]
+        ray_directions_w[bad_mask] = 0.0
 
     return ray_directions_w
 
@@ -383,6 +388,9 @@ def compute_combined_angular_velocity(
         combined_angular_velocity_w: Combined velocity in world frame [N, 3]
         combined_angular_velocity_b: Combined velocity in body frame [N, 3]
     """
+    # Sanitize: replace NaN/Inf quaternions with identity to survive physics instabilities
+    body_orientation_w = _sanitize_quaternion(body_orientation_w)
+
     # Extract gimbal velocities (pitch_rate, yaw_rate)
     pitch_rate = joint_velocities_b[:, 0] if joint_velocities_b.shape[1] > 0 else torch.zeros(
         body_angular_velocity_b.shape[0], device=body_angular_velocity_b.device
