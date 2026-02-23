@@ -134,6 +134,30 @@ register_experiment(ExperimentCfg(
     },
 ))
 
+register_experiment(ExperimentCfg(
+    name="a1_curriculum_no_delay",
+    description="Full curriculum (tracking/safety/coordination/moving-target) but zero delay/noise/dropout",
+    group="A1",
+    env_overrides={
+        # Disable delay/noise/dropout curriculum phases
+        "curriculum.noise_start_step": 999999,
+        "curriculum.noise_end_step": 999999,
+        "curriculum.fixed_delay_start_step": 999999,
+        "curriculum.fixed_delay_end_step": 999999,
+        "curriculum.random_delay_start_step": 999999,
+        "curriculum.random_delay_end_step": 999999,
+        "curriculum.dropout_start_step": 999999,
+        "curriculum.dropout_end_step": 999999,
+        # Explicitly zero latencies
+        "detection_mean_latency": 0.0,
+        "detection_std_latency": 0.0,
+        "comm_mean_latency": 0.0,
+        "comm_std_latency": 0.0,
+        "enable_noise_in_observations": False,
+        # tracking/safety/coordination/moving_target curriculum stays at defaults
+    },
+))
+
 # A1 delay sweep: 0, 50, 100, 150, 200ms
 for _delay_ms in [0, 50, 100, 150, 200]:
     _delay_s = _delay_ms / 1000.0
@@ -342,6 +366,7 @@ register_suite(ExperimentSuiteCfg(
     name="iros2026_must",
     experiments=[
         "a1_no_delay", "a1_stochastic_delay", "a1_with_aoi", "a1_without_aoi",
+        "a1_curriculum_no_delay",
         "a2_rnn", "a2_mlp",
         "a3_clean_reward", "a3_noisy_reward",
         "a4_analytical", "a4_angular_only", "a4_heuristic", "a4_image_only",

@@ -84,3 +84,5 @@ self.target = RigidObject(self.cfg.target_cfg)
 
 18. Running iris_ma4_mappo_rnn_tuning7_20260209_145123 experiments
     - Configurations: sequence 32(1) x rollout 32, 64(2) x GRU num layers 1, 2(2)
+
+19. Running `multirun_ablations.bash` for "a1_with_aoi", "a1_without_aoi"(fixing nan error), "a1_curriculum_no_delay(fixing performance collaps at 10k step)" experiments

@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Evaluate a trained checkpoint and compute the 7 IROS 2026 paper metrics.
+"""Evaluate a trained checkpoint and compute the 8 IROS 2026 paper metrics.
 
 Usage:
     # Evaluate a trained policy
@@ -16,13 +16,23 @@ Usage:
     # Evaluate greedy baseline (no checkpoint needed)
     ./isaaclab.sh -p .../experiments/evaluate.py \\
         --experiment baseline_greedy --num_episodes 100
+
+    # Evaluation with runtime parameter sweep (delay override)
+    ./isaaclab.sh -p .../experiments/evaluate.py \\
+        --experiment a1_with_aoi \\
+        --checkpoint /path/to/best_agent.pt \\
+        --delay-override 0.1 --output results_100ms.json
+
+Supports two checkpoint formats:
+    - agent_drone_0_final.pt: {policy_state_dict, value_state_dict}
+    - best_agent.pt (SKRL): {drone_0: {policy, value, ...}, ...}
 """
 
 import argparse
 import json
 import sys
 
-parser = argparse.ArgumentParser(description="Evaluate trained policy with 7 paper metrics.")
+parser = argparse.ArgumentParser(description="Evaluate trained policy with 8 paper metrics.")
 parser.add_argument("--experiment", type=str, required=True, help="Experiment name from registry")
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to trained checkpoint (.pt)")
 parser.add_argument("--num_episodes", type=int, default=100, help="Number of evaluation episodes")
@@ -30,7 +40,25 @@ parser.add_argument("--num_envs", type=int, default=256, help="Number of paralle
 parser.add_argument("--task", type=str, default="Isaac-Iris-MA4-Direct-v0")
 parser.add_argument("--output", type=str, default=None, help="Output JSON path for results")
 parser.add_argument("--headless", action="store_true", default=True)
-args_cli = parser.parse_args()
+# Runtime parameter overrides for evaluation sweeps
+parser.add_argument("--delay-override", type=float, default=None,
+                    help="Override detection latency in seconds (e.g., 0.1 for 100ms)")
+parser.add_argument("--comm-delay-override", type=float, default=None,
+                    help="Override communication latency in seconds")
+parser.add_argument("--target-speed", type=float, default=None,
+                    help="Override target speed in m/s")
+parser.add_argument("--noise-override", type=float, default=None,
+                    help="Override pixel noise std (pix_std) in pixels")
+parser.add_argument("--accel-override", type=float, default=None,
+                    help="Override target max acceleration in m/s^2")
+parser.add_argument("--detection-dropout-override", type=float, default=None,
+                    help="Override detection failure rate (0-1)")
+parser.add_argument("--comm-dropout-override", type=float, default=None,
+                    help="Override communication dropout rate (0-1)")
+args_cli, hydra_args = parser.parse_known_args()
+
+# Clear sys.argv so Hydra only sees its own arguments
+sys.argv = [sys.argv[0]] + hydra_args
 
 from isaaclab.app import AppLauncher
 
@@ -53,39 +81,45 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 from isaaclab_tasks.direct.iris_ma4.experiments import (
     get_experiment,
     apply_env_overrides,
+    apply_agent_overrides,
 )
 from isaaclab_tasks.direct.iris_ma4.experiments.metrics import MetricTracker
 
+# Add skrl scripts dir to path for mappo_rnn imports
+_skrl_scripts_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..", "..",
+                                  "scripts", "reinforcement_learning", "skrl")
+_skrl_scripts_dir = os.path.normpath(_skrl_scripts_dir)
+sys.path.insert(0, _skrl_scripts_dir)
+
 
 def _collect_step_metrics(tracker: MetricTracker, env) -> None:
-    """Extract per-step metrics from environment internals."""
+    """Extract per-step metrics from environment internals.
+
+    Uses the noisy-path triangulation for position estimate and trace, since
+    that reflects actual system performance. RMSE compares the midpoint-method
+    triangulation estimate against ground truth target position.
+
+    The rewards-path ``triangulation_results`` stores ``X_w_gt`` (ground truth)
+    at index 0, not an estimate, so it cannot be used for RMSE.
+    """
     first_agent = env.cfg.possible_agents[0]
 
-    # Get triangulation results (noisy path, what the agent observes)
+    # Get triangulation results from the noisy (observation) path.
+    # Index 0 = X_w_triangulated (midpoint-method estimate), not GT.
     if hasattr(env, "triangulation_results_noisy") and first_agent in env.triangulation_results_noisy:
-        X_w_gt, Sigma_X, std_dev, trace_cov, is_valid = env.triangulation_results_noisy[first_agent]
+        X_w_tri, Sigma_X, std_dev, trace_cov, is_valid = env.triangulation_results_noisy[first_agent]
     else:
         trace_cov = torch.ones(env.num_envs, 1, device=env.device) * 999.0
-        X_w_gt = torch.zeros(env.num_envs, 1, 3, device=env.device)
+        X_w_tri = torch.zeros(env.num_envs, 1, 3, device=env.device)
         is_valid = torch.zeros(env.num_envs, 1, device=env.device, dtype=torch.bool)
-
-    # Also get clean triangulation for RMSE (use rewards path for ground truth comparison)
-    if hasattr(env, "triangulation_results") and first_agent in env.triangulation_results:
-        X_w_gt_clean, Sigma_X_clean, std_clean, trace_clean, is_valid_clean = env.triangulation_results[first_agent]
-    else:
-        X_w_gt_clean = X_w_gt
-        is_valid_clean = is_valid
 
     # Ground truth target position
     gt_target_pos = env.target.data.root_pos_w
 
-    # Triangulated position from clean path (for RMSE)
-    # Note: X_w_gt from triangulation_results is actually the GT position used for covariance
-    # The actual triangulated position is computed differently. For RMSE, we use the
-    # noisy triangulation estimate if available.
-    tri_pos = X_w_gt_clean.squeeze(1) if X_w_gt_clean.dim() == 3 else X_w_gt_clean
+    # Triangulated position estimate (from noisy path midpoint method)
+    tri_pos = X_w_tri.squeeze(1) if X_w_tri.dim() == 3 else X_w_tri
 
-    # Bbox validity for all agents
+    # Bbox validity for all agents (from current observation states)
     bbox_valid_list = []
     for aid in env.cfg.possible_agents:
         states = env.delay_system.get_all_states_for_observations(aid)
@@ -94,8 +128,12 @@ def _collect_step_metrics(tracker: MetricTracker, env) -> None:
         bbox_valid_list.append(valid)
     bbox_valid_mask = torch.stack(bbox_valid_list, dim=1)
 
-    # Collision detection
-    collision_flags = env.safety_manager.get_collision_flags()
+    # Collision detection — any pair in collision → per-env flag [N]
+    coll_mat = env.safety_manager.get_collision_matrix()
+    if coll_mat is not None:
+        collision_flags = coll_mat.any(dim=-1).any(dim=-1)  # [N, A, A] → [N]
+    else:
+        collision_flags = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
 
     tracker.step(
         trace_sigma=trace_cov,
@@ -103,7 +141,7 @@ def _collect_step_metrics(tracker: MetricTracker, env) -> None:
         gt_target_pos=gt_target_pos,
         bbox_valid_mask=bbox_valid_mask,
         collision_flags=collision_flags,
-        tri_valid=is_valid_clean,
+        tri_valid=is_valid,
     )
 
 
@@ -152,12 +190,6 @@ def _load_rnn_policy(checkpoint_path, env, agent_cfg, possible_agents):
         num_envs=env.num_envs,
         sequence_length=sequence_length,
     )
-
-    # Load checkpoint
-    ckpt = torch.load(checkpoint_path, map_location=device)
-    shared_policy.load_state_dict(ckpt["policy_state_dict"])
-    shared_value.load_state_dict(ckpt["value_state_dict"])
-    print(f"[EVAL] Loaded checkpoint: {checkpoint_path}")
 
     models = {}
     memories = {}
@@ -208,6 +240,161 @@ def _load_rnn_policy(checkpoint_path, env, agent_cfg, possible_agents):
         cfg=mappo_cfg,
         shared_observation_spaces=shared_observation_spaces,
     )
+
+    # Load checkpoint — use agent.load() for best_agent.pt (SKRL format)
+    # which includes preprocessor state. For final.pt, load policy/value manually
+    # and also load preprocessor from companion best_agent.pt if available.
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if "drone_0" in ckpt:
+        # best_agent.pt (SKRL multi-agent format) — use agent.load() for full state
+        agent.load(checkpoint_path)
+        print(f"[EVAL] Loaded checkpoint (best_agent.pt SKRL, with preprocessors): {checkpoint_path}")
+    elif "policy_state_dict" in ckpt:
+        # agent_drone_0_final.pt format — manual policy/value load
+        shared_policy.load_state_dict(ckpt["policy_state_dict"])
+        shared_value.load_state_dict(ckpt["value_state_dict"])
+        print(f"[EVAL] Loaded checkpoint (final.pt): {checkpoint_path}")
+
+        # Try to load preprocessor state from companion best_agent.pt
+        companion = os.path.join(os.path.dirname(checkpoint_path), "checkpoints", "best_agent.pt")
+        if not os.path.exists(companion):
+            companion = os.path.join(os.path.dirname(checkpoint_path), "best_agent.pt")
+        if os.path.exists(companion):
+            agent.load(companion)
+            # Re-load policy/value from final.pt (agent.load overwrote with best_agent weights)
+            shared_policy.load_state_dict(ckpt["policy_state_dict"])
+            shared_value.load_state_dict(ckpt["value_state_dict"])
+            print(f"[EVAL] Loaded preprocessor state from: {companion}")
+        else:
+            print(f"[EVAL] WARNING: No preprocessor state found — observations may not be normalized correctly")
+    else:
+        raise ValueError(f"Unknown checkpoint format. Keys: {list(ckpt.keys())}")
+
+    agent.set_mode("eval")
+    return agent
+
+
+def _load_mlp_policy(checkpoint_path, env, agent_cfg, possible_agents):
+    """Load a trained MAPPO-MLP policy from checkpoint."""
+    from isaaclab_tasks.direct.iris_ma4.experiments.models.mappo_mlp import (
+        MAPPOMLPPolicy,
+        MAPPOMLPValue,
+    )
+    from isaaclab_tasks.direct.iris_ma4.experiments.models.mappo_mlp_agent import (
+        MAPPO_MLP,
+        MAPPO_MLP_DEFAULT_CONFIG,
+    )
+    from skrl.memories.torch import RandomMemory
+    from skrl.resources.preprocessors.torch import RunningStandardScaler
+    from skrl.resources.schedulers.torch import KLAdaptiveLR
+    import copy
+
+    device = env.device
+    model_cfg = agent_cfg.get("models", {})
+    policy_cfg = model_cfg.get("policy", {})
+    value_cfg = model_cfg.get("value", {})
+
+    # Shared obs space
+    try:
+        shared_observation_spaces = env.shared_observation_spaces
+    except AttributeError:
+        obs_shape = sum(space.shape[0] for space in env.observation_spaces.values())
+        shared_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(obs_shape,), dtype=np.float32)
+        shared_observation_spaces = {agent_id: shared_space for agent_id in possible_agents}
+
+    shared_policy = MAPPOMLPPolicy(
+        observation_space=env.observation_spaces[possible_agents[0]],
+        action_space=env.action_spaces[possible_agents[0]],
+        device=device,
+        hidden_size=policy_cfg.get("hidden_size", 256),
+        num_hidden_layers=policy_cfg.get("num_hidden_layers", 3),
+        num_envs=env.num_envs,
+        initial_log_std=policy_cfg.get("initial_log_std", -0.5),
+        min_log_std=policy_cfg.get("min_log_std", -5.0),
+        max_log_std=policy_cfg.get("max_log_std", 0.7),
+    )
+    shared_value = MAPPOMLPValue(
+        observation_space=shared_observation_spaces[possible_agents[0]],
+        action_space=env.action_spaces[possible_agents[0]],
+        device=device,
+        hidden_size=value_cfg.get("hidden_size", 256),
+        num_hidden_layers=value_cfg.get("num_hidden_layers", 3),
+        num_envs=env.num_envs,
+    )
+
+    models = {}
+    memories = {}
+    for agent_id in possible_agents:
+        models[agent_id] = {"policy": shared_policy, "value": shared_value}
+        memories[agent_id] = RandomMemory(
+            memory_size=agent_cfg.get("agent", {}).get("rollouts", 32),
+            num_envs=env.num_envs,
+            device=device,
+        )
+
+    # Setup preprocessors
+    agent_cfg_copy = copy.deepcopy(agent_cfg)
+    if "state_preprocessor" in agent_cfg_copy.get("agent", {}):
+        if agent_cfg_copy["agent"]["state_preprocessor"] == "RunningStandardScaler":
+            agent_cfg_copy["agent"]["state_preprocessor"] = RunningStandardScaler
+        if agent_cfg_copy["agent"].get("state_preprocessor_kwargs") is None:
+            agent_cfg_copy["agent"]["state_preprocessor_kwargs"] = {}
+        agent_cfg_copy["agent"]["state_preprocessor_kwargs"]["size"] = env.observation_spaces[possible_agents[0]]
+        agent_cfg_copy["agent"]["state_preprocessor_kwargs"]["device"] = device
+    if "shared_state_preprocessor" in agent_cfg_copy.get("agent", {}):
+        if agent_cfg_copy["agent"]["shared_state_preprocessor"] == "RunningStandardScaler":
+            agent_cfg_copy["agent"]["shared_state_preprocessor"] = RunningStandardScaler
+        if agent_cfg_copy["agent"].get("shared_state_preprocessor_kwargs") is None:
+            agent_cfg_copy["agent"]["shared_state_preprocessor_kwargs"] = {}
+        agent_cfg_copy["agent"]["shared_state_preprocessor_kwargs"]["size"] = shared_observation_spaces[possible_agents[0]]
+        agent_cfg_copy["agent"]["shared_state_preprocessor_kwargs"]["device"] = device
+    if "value_preprocessor" in agent_cfg_copy.get("agent", {}):
+        if agent_cfg_copy["agent"]["value_preprocessor"] == "RunningStandardScaler":
+            agent_cfg_copy["agent"]["value_preprocessor"] = RunningStandardScaler
+        if agent_cfg_copy["agent"].get("value_preprocessor_kwargs") is None:
+            agent_cfg_copy["agent"]["value_preprocessor_kwargs"] = {}
+        agent_cfg_copy["agent"]["value_preprocessor_kwargs"]["device"] = device
+    if "learning_rate_scheduler" in agent_cfg_copy.get("agent", {}):
+        if agent_cfg_copy["agent"]["learning_rate_scheduler"] == "KLAdaptiveLR":
+            agent_cfg_copy["agent"]["learning_rate_scheduler"] = KLAdaptiveLR
+
+    mappo_cfg = copy.deepcopy(MAPPO_MLP_DEFAULT_CONFIG)
+    mappo_cfg.update(agent_cfg_copy.get("agent", {}))
+
+    agent = MAPPO_MLP(
+        possible_agents=possible_agents,
+        models=models,
+        memories=memories,
+        observation_spaces=env.observation_spaces,
+        action_spaces=env.action_spaces,
+        device=device,
+        cfg=mappo_cfg,
+        shared_observation_spaces=shared_observation_spaces,
+    )
+
+    # Load checkpoint — same logic as RNN loader
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if "drone_0" in ckpt:
+        agent.load(checkpoint_path)
+        print(f"[EVAL] Loaded MLP checkpoint (best_agent.pt SKRL, with preprocessors): {checkpoint_path}")
+    elif "policy_state_dict" in ckpt:
+        shared_policy.load_state_dict(ckpt["policy_state_dict"])
+        shared_value.load_state_dict(ckpt["value_state_dict"])
+        print(f"[EVAL] Loaded MLP checkpoint (final.pt): {checkpoint_path}")
+
+        companion = os.path.join(os.path.dirname(checkpoint_path), "checkpoints", "best_agent.pt")
+        if not os.path.exists(companion):
+            companion = os.path.join(os.path.dirname(checkpoint_path), "best_agent.pt")
+        if os.path.exists(companion):
+            agent.load(companion)
+            shared_policy.load_state_dict(ckpt["policy_state_dict"])
+            shared_value.load_state_dict(ckpt["value_state_dict"])
+            print(f"[EVAL] Loaded preprocessor state from: {companion}")
+        else:
+            print(f"[EVAL] WARNING: No preprocessor state found")
+    else:
+        raise ValueError(f"Unknown checkpoint format. Keys: {list(ckpt.keys())}")
+
     agent.set_mode("eval")
     return agent
 
@@ -221,6 +408,33 @@ def main(env_cfg, agent_cfg: dict):
     # Apply experiment overrides
     if exp_cfg.env_overrides:
         apply_env_overrides(env_cfg, exp_cfg.env_overrides)
+    if exp_cfg.agent_overrides:
+        apply_agent_overrides(agent_cfg, exp_cfg.agent_overrides)
+
+    # Apply runtime parameter overrides for evaluation sweeps
+    if args_cli.delay_override is not None:
+        env_cfg.detection_mean_latency = args_cli.delay_override
+        env_cfg.detection_std_latency = 0.001  # near-deterministic
+        print(f"[EVAL] Detection delay override: {args_cli.delay_override*1000:.0f}ms")
+    if args_cli.comm_delay_override is not None:
+        env_cfg.comm_mean_latency = args_cli.comm_delay_override
+        env_cfg.comm_std_latency = 0.001
+        print(f"[EVAL] Comm delay override: {args_cli.comm_delay_override*1000:.0f}ms")
+    if args_cli.target_speed is not None:
+        env_cfg.target_movement.max_speed = args_cli.target_speed
+        print(f"[EVAL] Target speed override: {args_cli.target_speed:.1f} m/s")
+    if args_cli.noise_override is not None:
+        env_cfg.pix_std = args_cli.noise_override
+        print(f"[EVAL] Pixel noise override: {args_cli.noise_override:.1f} px")
+    if args_cli.accel_override is not None:
+        env_cfg.target_movement.max_acceleration = args_cli.accel_override
+        print(f"[EVAL] Target acceleration override: {args_cli.accel_override:.1f} m/s^2")
+    if args_cli.detection_dropout_override is not None:
+        env_cfg.detection_failure_rate = args_cli.detection_dropout_override
+        print(f"[EVAL] Detection dropout override: {args_cli.detection_dropout_override:.2f}")
+    if args_cli.comm_dropout_override is not None:
+        env_cfg.comm_dropout_rate = args_cli.comm_dropout_override
+        print(f"[EVAL] Comm dropout override: {args_cli.comm_dropout_override:.2f}")
 
     # Set eval params
     env_cfg.scene.num_envs = args_cli.num_envs
@@ -261,7 +475,7 @@ def main(env_cfg, agent_cfg: dict):
         device=unwrapped.device,
     )
 
-    # Load policy
+    # Load policy — route based on experiment type
     is_greedy = (args_cli.experiment == "baseline_greedy")
     if is_greedy:
         from isaaclab_tasks.direct.iris_ma4.experiments.baselines.greedy_policy import (
@@ -274,7 +488,10 @@ def main(env_cfg, agent_cfg: dict):
     else:
         if args_cli.checkpoint is None:
             raise ValueError("--checkpoint required for trained policy evaluation")
-        policy = _load_rnn_policy(args_cli.checkpoint, env_wrapped, agent_cfg, possible_agents)
+        if exp_cfg.use_mlp_model:
+            policy = _load_mlp_policy(args_cli.checkpoint, env_wrapped, agent_cfg, possible_agents)
+        else:
+            policy = _load_rnn_policy(args_cli.checkpoint, env_wrapped, agent_cfg, possible_agents)
 
     # Run evaluation rollouts
     completed = 0
@@ -321,6 +538,17 @@ def main(env_cfg, agent_cfg: dict):
     results = tracker.compute_final_metrics()
     results["experiment"] = exp_cfg.name
     results["checkpoint"] = args_cli.checkpoint or "greedy"
+    results["eval_params"] = {
+        "num_episodes": args_cli.num_episodes,
+        "num_envs": args_cli.num_envs,
+        "delay_override": args_cli.delay_override,
+        "comm_delay_override": args_cli.comm_delay_override,
+        "target_speed": args_cli.target_speed,
+        "noise_override": args_cli.noise_override,
+        "accel_override": args_cli.accel_override,
+        "detection_dropout_override": args_cli.detection_dropout_override,
+        "comm_dropout_override": args_cli.comm_dropout_override,
+    }
 
     print(f"\n{'='*80}")
     print("EVALUATION RESULTS")

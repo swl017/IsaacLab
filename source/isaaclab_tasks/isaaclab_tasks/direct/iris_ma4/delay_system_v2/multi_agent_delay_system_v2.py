@@ -12,7 +12,8 @@ from typing import Dict, List, Optional, Any
 import copy
 
 from isaaclab.envs.common import AgentID
-from isaaclab.utils.math import quat_rotate_inverse, normalize
+import logging
+from isaaclab.utils.math import quat_rotate_inverse, normalize, quat_mul, quat_from_angle_axis
 
 # Import local delay system V2 components (self-contained)
 from .delay_system_v2 import DelaySystemV2
@@ -32,6 +33,8 @@ from .derived_field_computers import (
     compute_ray_directions_from_bbox,
     compute_combined_angular_velocity,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class MultiAgentDelaySystemV2:
@@ -523,10 +526,13 @@ class MultiAgentDelaySystemV2:
         body_combined_angular_velocity_w: torch.Tensor,
         joint_positions_b: torch.Tensor,
         zoom_level: torch.Tensor,
-    ):
+    ) -> torch.Tensor:
         """Update ground truth states for an agent.
 
         This stores the raw states and feeds them to the delay pipelines.
+        Detects NaN/Inf in simulator states and sanitizes them to prevent
+        pipeline corruption. Returns a mask of environments with bad states
+        so the caller can terminate those episodes.
 
         Args:
             agent_id: Agent identifier.
@@ -538,7 +544,58 @@ class MultiAgentDelaySystemV2:
             body_combined_angular_velocity_w: Combined angular velocity [N, 3].
             joint_positions_b: Gimbal joint positions [N, J].
             zoom_level: Camera zoom level [N].
+
+        Returns:
+            nan_env_mask: Boolean tensor [N] indicating environments with NaN/Inf
+                in any state. These environments should be terminated by the caller.
         """
+        # Check all input states for NaN/Inf before processing
+        states_to_check = {
+            "body_position_w": body_position_w,
+            "body_orientation_w": body_orientation_w,
+            "body_linear_velocity_w": body_linear_velocity_w,
+            "body_angular_velocity_w": body_angular_velocity_w,
+            "body_linear_acceleration_w": body_linear_acceleration_w,
+            "body_combined_angular_velocity_w": body_combined_angular_velocity_w,
+            "joint_positions_b": joint_positions_b,
+        }
+        zoom_expanded = zoom_level.unsqueeze(-1) if zoom_level.dim() == 1 else zoom_level
+        states_to_check["zoom_level"] = zoom_expanded
+
+        nan_env_mask = torch.zeros(self._num_envs, dtype=torch.bool, device=self._device)
+        for field_name, state in states_to_check.items():
+            bad = torch.isnan(state) | torch.isinf(state)
+            if bad.any():
+                bad_envs = bad.any(dim=-1) if state.dim() > 1 else bad
+                nan_env_mask = nan_env_mask | bad_envs
+                bad_count = bad_envs.sum().item()
+                logger.warning(
+                    f"NaN/Inf in simulator state '{field_name}' for agent '{agent_id}' "
+                    f"in {bad_count} envs"
+                )
+
+        # Sanitize NaN environments to prevent pipeline corruption
+        if nan_env_mask.any():
+            body_position_w = body_position_w.clone()
+            body_orientation_w = body_orientation_w.clone()
+            body_linear_velocity_w = body_linear_velocity_w.clone()
+            body_angular_velocity_w = body_angular_velocity_w.clone()
+            body_linear_acceleration_w = body_linear_acceleration_w.clone()
+            body_combined_angular_velocity_w = body_combined_angular_velocity_w.clone()
+            joint_positions_b = joint_positions_b.clone()
+            zoom_level = zoom_level.clone()
+
+            body_position_w[nan_env_mask] = 0.0
+            body_orientation_w[nan_env_mask] = torch.tensor(
+                [1.0, 0.0, 0.0, 0.0], device=self._device
+            )
+            body_linear_velocity_w[nan_env_mask] = 0.0
+            body_angular_velocity_w[nan_env_mask] = 0.0
+            body_linear_acceleration_w[nan_env_mask] = 0.0
+            body_combined_angular_velocity_w[nan_env_mask] = 0.0
+            joint_positions_b[nan_env_mask] = 0.0
+            zoom_level[nan_env_mask] = 1.0
+
         # Store GT states
         gt_state = self._gt_states[agent_id]
         gt_state.data.body_position_w[:] = body_position_w
@@ -586,6 +643,8 @@ class MultiAgentDelaySystemV2:
         self._store_to_pipelines(agent_id, "other", body_position_w, body_orientation_w,
                                   body_linear_velocity_w, body_angular_velocity_w,
                                   body_linear_acceleration_w, joint_positions_b, zoom_level)
+
+        return nan_env_mask
 
     def _store_to_pipelines(
         self,
@@ -640,13 +699,29 @@ class MultiAgentDelaySystemV2:
             else:
                 delay_noisy.store(full_name, data)
 
-        # Orientation field (special handling for quaternions)
+        # Orientation field (rotation-based noise for quaternions)
+        # Instead of additive noise + normalize (which is geometrically incorrect),
+        # we compose the original quaternion with a small random rotation.
+        # The perturbation angle is sampled from N(0, noise_std) in radians,
+        # applied around a uniformly random axis on the unit sphere.
         full_name = f"{agent_id}.body_orientation_w.{perspective}"
         delay_clean.store(full_name, body_orientation_w)
         if cfg.enable_noise:
-            ori_noise_std = self._per_env_noise_std["orientation"].unsqueeze(-1)  # [N, 1]
-            noisy_quat = body_orientation_w + torch.randn_like(body_orientation_w) * ori_noise_std
+            N = body_orientation_w.shape[0]
+            ori_noise_std = self._per_env_noise_std["orientation"]  # [N]
+
+            # Sample random rotation axis (uniform on unit sphere)
+            random_axis = torch.randn(N, 3, device=self._device)
+            random_axis = normalize(random_axis)  # [N, 3]
+
+            # Sample perturbation angle from N(0, noise_std) in radians
+            perturbation_angle = torch.randn(N, device=self._device) * ori_noise_std  # [N]
+
+            # Create perturbation quaternion and compose with original
+            perturbation_quat = quat_from_angle_axis(perturbation_angle, random_axis)  # [N, 4]
+            noisy_quat = quat_mul(body_orientation_w, perturbation_quat)  # [N, 4]
             noisy_quat = normalize(noisy_quat)
+
             delay_noisy.store(full_name, noisy_quat)
         else:
             delay_noisy.store(full_name, body_orientation_w)
@@ -815,14 +890,15 @@ class MultiAgentDelaySystemV2:
             agent_states.data.body_angular_velocity_w[:] = get_field("body_angular_velocity_w")
             agent_states.data.body_linear_acceleration_w[:] = get_field("body_linear_acceleration_w")
 
-            # Orientation (normalize after filtering with zero-quaternion protection)
+            # Orientation (normalize after filtering with zero/NaN quaternion protection)
             body_orientation = get_field("body_orientation_w")
             body_orientation_norm = normalize(body_orientation)
-            # Detect invalid quaternions (zero or near-zero norm) and replace with identity
+            # Detect invalid quaternions: zero norm, NaN, or Inf
             quat_norm = body_orientation.norm(dim=-1, keepdim=True)
-            invalid_quat_mask = quat_norm < 1e-6  # [N, 1]
+            invalid_quat_mask = (
+                torch.isnan(quat_norm) | torch.isinf(quat_norm) | (quat_norm < 1e-6)
+            )  # [N, 1]
             if invalid_quat_mask.any():
-                # Create identity quaternion [1, 0, 0, 0] for invalid entries
                 identity_quat = torch.zeros_like(body_orientation_norm)
                 identity_quat[..., 0] = 1.0  # w=1 for identity
                 body_orientation_norm = torch.where(

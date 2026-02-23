@@ -636,7 +636,7 @@ class IrisMAEnvV4(DirectMARLEnv):
             ], device=self.device)
 
             # Update GT states (automatically creates delayed and delayed+noisy)
-            self.delay_system.update_gt_states(
+            nan_env_mask = self.delay_system.update_gt_states(
                 agent_id=agent_id,
                 body_position_w=robot.data.root_pos_w,
                 body_orientation_w=robot.data.root_quat_w,
@@ -647,6 +647,12 @@ class IrisMAEnvV4(DirectMARLEnv):
                 joint_positions_b=robot.data.joint_pos[:, gimbal_joint_indices],
                 zoom_level=self.zoom_level[:, i]
             )
+            # Mark environments with NaN simulator states for termination
+            if nan_env_mask.any():
+                if agent_id not in self._nan_terminated_envs:
+                    self._nan_terminated_envs[agent_id] = nan_env_mask
+                else:
+                    self._nan_terminated_envs[agent_id] = self._nan_terminated_envs[agent_id] | nan_env_mask
 
         # ========== Get GT bounding boxes using BBoxRayCaster ==========
         gt_camera_poses = {}
@@ -1110,7 +1116,6 @@ class IrisMAEnvV4(DirectMARLEnv):
     def _get_observations(self) -> Dict[str, torch.Tensor]:
         """Get observations for all agents using delayed+noisy states."""
         self.triangulation_results_noisy = {}
-        self._nan_terminated_envs = {}  # Reset NaN flags each step
 
         for i, ego_agent_id in enumerate(self.cfg.possible_agents):
             all_states = self.delay_system.get_all_states_for_observations(ego_agent_id)
@@ -1317,11 +1322,15 @@ class IrisMAEnvV4(DirectMARLEnv):
         for agent_id in self.cfg.possible_agents:
             robot = self._robots[agent_id]
             died = (robot.data.root_pos_w[:, 2] < 2.0) | (robot.data.root_pos_w[:, 2] > 50.0)
-            # Also terminate envs that had NaN/Inf in observations
+            # Also terminate envs that had NaN/Inf in states/observations/rewards
             if agent_id in self._nan_terminated_envs:
                 died = died | self._nan_terminated_envs[agent_id]
             terminated_dict[agent_id] = died
             time_out_dict[agent_id] = time_out
+
+        # Clear NaN flags after reading — they'll be re-set by _get_rewards()
+        # and _get_observations() if NaN persists in the next step.
+        self._nan_terminated_envs = {}
 
         return terminated_dict, time_out_dict
 
@@ -1404,7 +1413,7 @@ class IrisMAEnvV4(DirectMARLEnv):
                 data.camera_offset_rotation_b[:, 0] = 1.0  # Identity quaternion [1, 0, 0, 0]
 
                 # Compute camera orientation from body + gimbal angles
-                from isaaclab_tasks.direct.iris_ma4.delay_system.derived_field_computers import (
+                from isaaclab_tasks.direct.iris_ma4.delay_system_v2.derived_field_computers import (
                     compute_camera_orientation_from_gimbal
                 )
                 data.camera_orientation_w = compute_camera_orientation_from_gimbal(
@@ -1448,7 +1457,7 @@ class IrisMAEnvV4(DirectMARLEnv):
                 data.camera_offset_rotation_b[:, 0] = 1.0  # Identity quaternion [1, 0, 0, 0]
 
                 # Compute camera orientation from body + gimbal angles
-                from isaaclab_tasks.direct.iris_ma4.delay_system.derived_field_computers import (
+                from isaaclab_tasks.direct.iris_ma4.delay_system_v2.derived_field_computers import (
                     compute_camera_orientation_from_gimbal
                 )
                 data.camera_orientation_w = compute_camera_orientation_from_gimbal(

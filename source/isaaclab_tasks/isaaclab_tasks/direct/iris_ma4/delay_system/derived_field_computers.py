@@ -14,22 +14,6 @@ from isaaclab.utils.math import quat_mul, quat_rotate_inverse, matrix_from_quat
 logger = logging.getLogger(__name__)
 
 
-def _sanitize_quaternion(quat: torch.Tensor) -> torch.Tensor:
-    """Replace NaN/Inf quaternions with identity [1, 0, 0, 0].
-
-    This guards against physics engine producing invalid orientations when
-    a drone enters an extreme state (e.g. crash). Without this, a single
-    NaN quaternion propagates through all downstream derived fields and
-    crashes training.
-    """
-    bad = torch.isnan(quat).any(dim=-1, keepdim=True) | torch.isinf(quat).any(dim=-1, keepdim=True)
-    if not bad.any():
-        return quat
-    identity = torch.zeros_like(quat)
-    identity[..., 0] = 1.0  # w=1, x=y=z=0
-    return torch.where(bad, identity, quat)
-
-
 def compute_camera_orientation_from_gimbal(
     body_orientation_w: torch.Tensor,       # [N, 4] quaternion (w, x, y, z)
     joint_positions_b: torch.Tensor,        # [N, J] where J >= 2 (pitch, yaw) or J >= 3 (pitch, yaw, roll)
@@ -55,8 +39,6 @@ def compute_camera_orientation_from_gimbal(
     Returns:
         camera_orientation_w: Camera orientation in world frame [N, 4]
     """
-    # Sanitize: replace NaN/Inf quaternions with identity to survive physics instabilities
-    body_orientation_w = _sanitize_quaternion(body_orientation_w)
 
     # Extract gimbal angles (pitch=joint[0], yaw=joint[1], roll=joint[2])
     pitch = joint_positions_b[:, 0]  # [N]
@@ -110,8 +92,6 @@ def compute_camera_position(
     Returns:
         camera_position_w: Camera position in world frame [N, 3]
     """
-    # Sanitize: replace NaN/Inf quaternions with identity to survive physics instabilities
-    body_orientation_w = _sanitize_quaternion(body_orientation_w)
 
     # Rotate camera offset from body frame to world frame
     # Note: quat_rotate_inverse actually rotates the vector by the quaternion
@@ -388,8 +368,6 @@ def compute_combined_angular_velocity(
         combined_angular_velocity_w: Combined velocity in world frame [N, 3]
         combined_angular_velocity_b: Combined velocity in body frame [N, 3]
     """
-    # Sanitize: replace NaN/Inf quaternions with identity to survive physics instabilities
-    body_orientation_w = _sanitize_quaternion(body_orientation_w)
 
     # Extract gimbal velocities (pitch_rate, yaw_rate)
     pitch_rate = joint_velocities_b[:, 0] if joint_velocities_b.shape[1] > 0 else torch.zeros(

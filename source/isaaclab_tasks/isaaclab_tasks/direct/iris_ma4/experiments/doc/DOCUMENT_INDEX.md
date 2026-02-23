@@ -14,8 +14,8 @@ experiments for the IROS 2026 paper on multi-agent active visual triangulation.
 | `env_overrides.py` | `apply_env_overrides()` and `apply_agent_overrides()` utilities |
 | `run_experiment.py` | CLI entry point for training a single named experiment |
 | `run_suite.py` | CLI entry point for batch-running a suite of experiments |
-| `evaluate.py` | Post-training evaluation with 7 paper metrics |
-| `metrics/metric_tracker.py` | `MetricTracker` class for all 7 metrics |
+| `evaluate.py` | Post-training evaluation with 8 paper metrics (see `doc/EVALUATION.md`) |
+| `metrics/metric_tracker.py` | `MetricTracker` class for all 8 metrics |
 | `baselines/greedy_policy.py` | Scripted equiangular orbit policy |
 | `models/mappo_mlp.py` | MLP-only policy/value models for A2 ablation |
 | `models/mappo_mlp_agent.py` | `MAPPO_MLP` agent (inherits from `MAPPO_RNN`) |
@@ -46,3 +46,9 @@ experiments for the IROS 2026 paper on multi-agent active visual triangulation.
 - **baseline**: Gavin2024-style (MLP, no delay, angular-noise-only covariance) and greedy orbit
 - **agent_sweep**: N=1,2,3,4 agent count
 - **noise_sweep**: sigma_pixel=0,1,2,4
+
+## Additional Documentation
+
+| Document | Description |
+|----------|-------------|
+| `doc/EVALUATION.md` | Detailed evaluation pipeline documentation: 8 metrics, checkpoint formats, CLI usage, data flow |

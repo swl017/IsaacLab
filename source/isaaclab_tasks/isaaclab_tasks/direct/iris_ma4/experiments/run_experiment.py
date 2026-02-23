@@ -20,6 +20,7 @@ Usage:
 """
 
 import argparse
+import re
 import sys
 import os
 
@@ -30,6 +31,8 @@ parser.add_argument("--seed", type=int, default=None, help="Override seed (else 
 parser.add_argument("--num_envs", type=int, default=None, help="Override num_envs")
 parser.add_argument("--task", type=str, default="Isaac-Iris-MA4-Direct-v0", help="Task name")
 parser.add_argument("--headless", action="store_true", default=True)
+parser.add_argument("--checkpoint", type=str, default=None,
+                    help="Path to checkpoint file to resume training from (e.g., checkpoints/agent_140000.pt)")
 parser.add_argument("--list", action="store_true", help="List all registered experiments and exit")
 args_cli, hydra_args = parser.parse_known_args()
 
@@ -188,6 +191,50 @@ def _create_env(task, env_cfg):
     return env, possible_agents, is_multi_agent
 
 
+def _resume_from_checkpoint(checkpoint_path, trainer, agent):
+    """Load checkpoint into agent and set trainer to resume from the correct timestep."""
+    checkpoint_path = os.path.abspath(checkpoint_path)
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    print(f"[INFO] Loading checkpoint: {checkpoint_path}")
+    agent.load(checkpoint_path)
+
+    # Auto-detect timestep from filename (e.g., agent_140000.pt -> 140000)
+    match = re.search(r"agent_(\d+)\.pt$", os.path.basename(checkpoint_path))
+    if match:
+        resume_timestep = int(match.group(1))
+    else:
+        # For best_agent.pt, find highest numbered checkpoint in same dir
+        ckpt_dir = os.path.dirname(checkpoint_path)
+        numbered = [
+            int(re.search(r"agent_(\d+)\.pt$", f).group(1))
+            for f in os.listdir(ckpt_dir)
+            if re.search(r"agent_(\d+)\.pt$", f)
+        ]
+        if numbered:
+            resume_timestep = max(numbered)
+            print(f"[INFO] Inferred resume timestep {resume_timestep} from highest numbered checkpoint")
+        else:
+            raise ValueError(
+                f"Cannot determine resume timestep from '{os.path.basename(checkpoint_path)}'. "
+                "Use a numbered checkpoint (e.g., agent_140000.pt) instead."
+            )
+
+    trainer.initial_timestep = resume_timestep
+    print(f"[INFO] Resuming training from timestep {resume_timestep}")
+
+
+def _log_dir_from_checkpoint(checkpoint_path):
+    """Derive the original log directory from a checkpoint path.
+
+    E.g. .../2026-02-14_15-58-58_a1_with_aoi_seed42/checkpoints/agent_140000.pt
+      -> .../2026-02-14_15-58-58_a1_with_aoi_seed42/
+    """
+    ckpt_abs = os.path.abspath(checkpoint_path)
+    return os.path.dirname(os.path.dirname(ckpt_abs))
+
+
 def _setup_logging(agent_cfg, exp_name, seed):
     """Configure logging directories."""
     log_root_path = os.path.join(
@@ -204,7 +251,7 @@ def _setup_logging(agent_cfg, exp_name, seed):
     return full_log_dir
 
 
-def _train_rnn(env, possible_agents, agent_cfg, exp_cfg, seed, log_dir, env_cfg):
+def _train_rnn(env, possible_agents, agent_cfg, exp_cfg, seed, log_dir, env_cfg, checkpoint_path=None):
     """Train with MAPPO-RNN (default path)."""
     device = env.device
     sequence_length = agent_cfg.get("agent", {}).get("sequence_length", 32)
@@ -287,6 +334,9 @@ def _train_rnn(env, possible_agents, agent_cfg, exp_cfg, seed, log_dir, env_cfg)
     }
     trainer = SequentialTrainer(cfg=trainer_cfg, env=env, agents=agent)
 
+    if checkpoint_path:
+        _resume_from_checkpoint(checkpoint_path, trainer, agent)
+
     print("=" * 80)
     print(f"MAPPO-RNN Training: {exp_cfg.name} (seed={seed})")
     print("=" * 80)
@@ -302,7 +352,7 @@ def _train_rnn(env, possible_agents, agent_cfg, exp_cfg, seed, log_dir, env_cfg)
     print(f"[INFO] Models saved to: {log_dir}")
 
 
-def _train_mlp(env, possible_agents, agent_cfg, exp_cfg, seed, log_dir, env_cfg):
+def _train_mlp(env, possible_agents, agent_cfg, exp_cfg, seed, log_dir, env_cfg, checkpoint_path=None):
     """Train with MAPPO-MLP (no recurrence)."""
     from isaaclab_tasks.direct.iris_ma4.experiments.models.mappo_mlp import (
         MAPPOMLPPolicy,
@@ -389,6 +439,9 @@ def _train_mlp(env, possible_agents, agent_cfg, exp_cfg, seed, log_dir, env_cfg)
     }
     trainer = SequentialTrainer(cfg=trainer_cfg, env=env, agents=agent)
 
+    if checkpoint_path:
+        _resume_from_checkpoint(checkpoint_path, trainer, agent)
+
     print("=" * 80)
     print(f"MAPPO-MLP Training: {exp_cfg.name} (seed={seed})")
     print("=" * 80)
@@ -434,8 +487,16 @@ def main(env_cfg, agent_cfg: dict):
     set_seed(seed)
 
     # Setup logging
-    log_dir = _setup_logging(agent_cfg, exp_cfg.name, seed)
-    print(f"[EXPERIMENT] Log dir: {log_dir}")
+    if args_cli.checkpoint:
+        # Resume into original experiment directory
+        log_dir = _log_dir_from_checkpoint(args_cli.checkpoint)
+        log_root = os.path.dirname(log_dir)
+        agent_cfg["agent"]["experiment"]["directory"] = log_root
+        agent_cfg["agent"]["experiment"]["experiment_name"] = os.path.basename(log_dir)
+        print(f"[EXPERIMENT] Resuming into existing log dir: {log_dir}")
+    else:
+        log_dir = _setup_logging(agent_cfg, exp_cfg.name, seed)
+        print(f"[EXPERIMENT] Log dir: {log_dir}")
 
     # Create environment
     env, possible_agents, _ = _create_env(args_cli.task, env_cfg)
@@ -443,9 +504,9 @@ def main(env_cfg, agent_cfg: dict):
 
     # Route to appropriate training function
     if exp_cfg.use_mlp_model:
-        _train_mlp(env, possible_agents, agent_cfg, exp_cfg, seed, log_dir, env_cfg)
+        _train_mlp(env, possible_agents, agent_cfg, exp_cfg, seed, log_dir, env_cfg, args_cli.checkpoint)
     else:
-        _train_rnn(env, possible_agents, agent_cfg, exp_cfg, seed, log_dir, env_cfg)
+        _train_rnn(env, possible_agents, agent_cfg, exp_cfg, seed, log_dir, env_cfg, args_cli.checkpoint)
 
     print(f"\n{'='*80}")
     print(f"[EXPERIMENT] Completed: {exp_cfg.name} (seed={seed})")
