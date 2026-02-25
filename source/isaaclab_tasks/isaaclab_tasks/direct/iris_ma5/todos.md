@@ -3,7 +3,7 @@
 ## Goal for iris_ma5
 - [X] Generalize to 3 or more agents
 - [ ] Investigate and add more randomization(control gain, mass, target size, etc.)
-- [ ] Add stacked observations for MLP case
+- [X] Add stacked observations for MLP case
 - [ ] Introduce false negative and false positive to the detection pipeline
   - **Root cause analysis (2026-02-25):** Current hold-last-value dropout semantics model packet
     jitter, not communication loss. When comm drops, `dropout_held_data` (initialized to the
