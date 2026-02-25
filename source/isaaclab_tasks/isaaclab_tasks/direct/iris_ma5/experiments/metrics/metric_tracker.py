@@ -95,10 +95,13 @@ class MetricTracker:
         # Per-env accumulators (reset on episode end)
         self._step_count = torch.zeros(num_envs, device=device, dtype=torch.long)
         self._trace_sum = torch.zeros(num_envs, device=device)
+        self._trace_sq_sum = torch.zeros(num_envs, device=device)
         self._trace_valid_count = torch.zeros(num_envs, device=device)
         self._rmse_sum = torch.zeros(num_envs, device=device)
+        self._rmse_sq_sum = torch.zeros(num_envs, device=device)
         self._rmse_valid_count = torch.zeros(num_envs, device=device)
         self._visibility_steps = torch.zeros(num_envs, device=device)
+        self._visibility_sq_sum = torch.zeros(num_envs, device=device)
         self._collision_count = torch.zeros(num_envs, device=device)
         self._first_lock_step = torch.full((num_envs,), -1, device=device, dtype=torch.long)
         self._converged_step = torch.full((num_envs,), -1, device=device, dtype=torch.long)
@@ -117,10 +120,13 @@ class MetricTracker:
         """Reset trackers for given environment indices."""
         self._step_count[env_ids] = 0
         self._trace_sum[env_ids] = 0.0
+        self._trace_sq_sum[env_ids] = 0.0
         self._trace_valid_count[env_ids] = 0.0
         self._rmse_sum[env_ids] = 0.0
+        self._rmse_sq_sum[env_ids] = 0.0
         self._rmse_valid_count[env_ids] = 0.0
         self._visibility_steps[env_ids] = 0.0
+        self._visibility_sq_sum[env_ids] = 0.0
         self._collision_count[env_ids] = 0.0
         self._first_lock_step[env_ids] = -1
         self._converged_step[env_ids] = -1
@@ -155,6 +161,7 @@ class MetricTracker:
         trace_val = trace_sigma.squeeze(-1)  # [N]
         valid = tri_valid.squeeze(-1).bool()  # [N]
         self._trace_sum += torch.where(valid, trace_val, torch.zeros_like(trace_val))
+        self._trace_sq_sum += torch.where(valid, trace_val ** 2, torch.zeros_like(trace_val))
         self._trace_valid_count += valid.float()
 
         # RMSE
@@ -164,6 +171,7 @@ class MetricTracker:
             tri_pos = triangulated_pos
         rmse = (tri_pos - gt_target_pos).norm(dim=-1)  # [N]
         self._rmse_sum += torch.where(valid, rmse, torch.zeros_like(rmse))
+        self._rmse_sq_sum += torch.where(valid, rmse ** 2, torch.zeros_like(rmse))
         self._rmse_valid_count += valid.float()
 
         # Visibility: mean fraction of agents with valid bbox per step
@@ -171,6 +179,7 @@ class MetricTracker:
         # Better for N>2 agents since triangulation needs >=2 valid detections
         agent_visibility_frac = bbox_valid_mask.float().mean(dim=-1)  # [N]
         self._visibility_steps += agent_visibility_frac
+        self._visibility_sq_sum += agent_visibility_frac ** 2
 
         # Collisions
         self._collision_count += collision_flags.float()
@@ -233,10 +242,18 @@ class MetricTracker:
                 "trace_sigma_mean": (
                     self._trace_sum[i].item() / max(valid_count, 1)
                 ),
+                "trace_sigma_sum": self._trace_sum[i].item(),
+                "trace_sigma_sq_sum": self._trace_sq_sum[i].item(),
+                "trace_valid_count": valid_count,
                 "rmse_mean": (
                     self._rmse_sum[i].item() / max(self._rmse_valid_count[i].item(), 1)
                 ),
+                "rmse_sum": self._rmse_sum[i].item(),
+                "rmse_sq_sum": self._rmse_sq_sum[i].item(),
+                "rmse_valid_count": self._rmse_valid_count[i].item(),
                 "visibility_ratio": self._visibility_steps[i].item() / steps,
+                "visibility_sum": self._visibility_steps[i].item(),
+                "visibility_sq_sum": self._visibility_sq_sum[i].item(),
                 "collision_count": self._collision_count[i].item(),
                 "first_lock_step": self._first_lock_step[i].item(),
                 "convergence_step": self._converged_step[i].item(),
@@ -280,6 +297,20 @@ class MetricTracker:
                 return -1.0, 0.0
             return _mean_std(pos)
 
+        def _pooled_mean_std(sum_key: str, sq_sum_key: str, count_key: str):
+            """Compute overall mean and std pooled across all steps from all episodes.
+
+            Uses Var(X) = E[X^2] - E[X]^2 with raw sums across all episodes.
+            """
+            total_sum = sum(e[sum_key] for e in eps)
+            total_sq_sum = sum(e[sq_sum_key] for e in eps)
+            total_count = sum(e[count_key] for e in eps)
+            if total_count == 0:
+                return 0.0, 0.0
+            mean = total_sum / total_count
+            var = total_sq_sum / total_count - mean ** 2
+            return mean, math.sqrt(max(var, 0.0))
+
         def _robust_stats(values: List[float]):
             """Compute median, percentiles, and clipped (5th-95th) mean/std."""
             sv = sorted(values)
@@ -301,9 +332,14 @@ class MetricTracker:
                 return -1.0, -1.0, -1.0, -1.0, 0.0
             return _robust_stats(pos)
 
-        trace_m, trace_s = _mean_std([e["trace_sigma_mean"] for e in eps])
-        rmse_m, rmse_s = _mean_std([e["rmse_mean"] for e in eps])
-        vis_m, vis_s = _mean_std([e["visibility_ratio"] for e in eps])
+        # Step-level metrics: pooled std across all steps from all episodes
+        trace_m, trace_s = _pooled_mean_std(
+            "trace_sigma_sum", "trace_sigma_sq_sum", "trace_valid_count")
+        rmse_m, rmse_s = _pooled_mean_std(
+            "rmse_sum", "rmse_sq_sum", "rmse_valid_count")
+        vis_m, vis_s = _pooled_mean_std(
+            "visibility_sum", "visibility_sq_sum", "episode_length")
+        # Episode-level metrics: std across episodes
         coll_m, coll_s = _mean_std([e["collision_count"] for e in eps])
         conv_m, conv_s = _mean_std_positive([e["convergence_step"] for e in eps])
         lock_m, lock_s = _mean_std_positive([e["first_lock_step"] for e in eps])

@@ -35,9 +35,9 @@ import sys
 parser = argparse.ArgumentParser(description="Evaluate trained policy with 8 paper metrics.")
 parser.add_argument("--experiment", type=str, required=True, help="Experiment name from registry")
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to trained checkpoint (.pt)")
-parser.add_argument("--num_episodes", type=int, default=100, help="Number of evaluation episodes")
-parser.add_argument("--num_envs", type=int, default=256, help="Number of parallel eval envs")
-parser.add_argument("--task", type=str, default="Isaac-Iris-MA4-Direct-v0")
+parser.add_argument("--num_episodes", type=int, default=1, help="Episodes per env (total = num_episodes * num_envs)")
+parser.add_argument("--num_envs", type=int, default=4096, help="Number of parallel eval envs")
+parser.add_argument("--task", type=str, default="Isaac-Iris-MA5-Direct-v0")
 parser.add_argument("--output", type=str, default=None, help="Output JSON path for results")
 parser.add_argument("--headless", action="store_true", default=True)
 # Runtime parameter overrides for evaluation sweeps
@@ -462,6 +462,12 @@ def main(env_cfg, agent_cfg: dict):
     env_wrapped = SkrlVecEnvWrapper(env)
     unwrapped = env.unwrapped
 
+    # Apply frame-skip stacking for MLP evaluation
+    if exp_cfg.frame_stack > 1:
+        from isaaclab_tasks.direct.iris_ma5.experiments.frame_stack_wrapper import MultiAgentFrameStackWrapper
+        env_wrapped = MultiAgentFrameStackWrapper(env_wrapped, num_stack=exp_cfg.frame_stack, frame_skip=exp_cfg.frame_skip)
+        print(f"[EVAL] Frame stacking: K={exp_cfg.frame_stack}, skip={exp_cfg.frame_skip}")
+
     is_multi_agent = isinstance(unwrapped, DirectMARLEnv)
     if is_multi_agent:
         possible_agents = env_wrapped.possible_agents
@@ -495,11 +501,12 @@ def main(env_cfg, agent_cfg: dict):
 
     # Run evaluation rollouts
     completed = 0
+    total_target = args_cli.num_episodes * args_cli.num_envs
     obs, info = env_wrapped.reset()
 
-    print(f"[EVAL] Starting evaluation: {args_cli.num_episodes} episodes, {args_cli.num_envs} envs")
+    print(f"[EVAL] Starting evaluation: {args_cli.num_episodes} ep/env × {args_cli.num_envs} envs = {total_target} total episodes")
 
-    while completed < args_cli.num_episodes:
+    while completed < total_target:
         # Compute actions
         if is_greedy:
             agent_positions = {
@@ -531,8 +538,8 @@ def main(env_cfg, agent_cfg: dict):
         if done_envs.numel() > 0:
             tracker.record_episode_end(done_envs)
             completed += done_envs.numel()
-            if completed % 20 == 0 or completed >= args_cli.num_episodes:
-                print(f"[EVAL] Completed {completed}/{args_cli.num_episodes} episodes")
+            if completed % max(total_target // 10, 1) == 0 or completed >= total_target:
+                print(f"[EVAL] Completed {completed}/{total_target} episodes")
 
     # Compute final metrics
     results = tracker.compute_final_metrics()

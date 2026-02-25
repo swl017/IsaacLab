@@ -29,7 +29,7 @@ parser = argparse.ArgumentParser(description="Run a named experiment from the re
 parser.add_argument("--experiment", type=str, default=None, help="Experiment name from registry")
 parser.add_argument("--seed", type=int, default=None, help="Override seed (else uses experiment default)")
 parser.add_argument("--num_envs", type=int, default=None, help="Override num_envs")
-parser.add_argument("--task", type=str, default="Isaac-Iris-MA4-Direct-v0", help="Task name")
+parser.add_argument("--task", type=str, default="Isaac-Iris-MA5-Direct-v0", help="Task name")
 parser.add_argument("--headless", action="store_true", default=True)
 parser.add_argument("--checkpoint", type=str, default=None,
                     help="Path to checkpoint file to resume training from (e.g., checkpoints/agent_140000.pt)")
@@ -501,6 +501,12 @@ def main(env_cfg, agent_cfg: dict):
     # Create environment
     env, possible_agents, _ = _create_env(args_cli.task, env_cfg)
     print(f"[EXPERIMENT] Agents: {possible_agents}, Envs: {num_envs}")
+
+    # Apply frame-skip stacking if configured (for MLP temporal context)
+    if exp_cfg.frame_stack > 1:
+        from isaaclab_tasks.direct.iris_ma5.experiments.frame_stack_wrapper import MultiAgentFrameStackWrapper
+        env = MultiAgentFrameStackWrapper(env, num_stack=exp_cfg.frame_stack, frame_skip=exp_cfg.frame_skip)
+        print(f"[EXPERIMENT] Frame stacking: K={exp_cfg.frame_stack}, skip={exp_cfg.frame_skip}")
 
     # Route to appropriate training function
     if exp_cfg.use_mlp_model:

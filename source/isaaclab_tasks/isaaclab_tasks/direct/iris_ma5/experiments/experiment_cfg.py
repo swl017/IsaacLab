@@ -60,6 +60,13 @@ class ExperimentCfg:
     use_mlp_model: bool = False
     """If True, use MLP-only policy/value models instead of RNN."""
 
+    frame_stack: int = 1
+    """Number of observation frames to stack (1 = no stacking). Used with MLP policies."""
+
+    frame_skip: int = 1
+    """Gap between stacked frames in timesteps (1 = consecutive). E.g., frame_skip=10 at 25Hz
+    means 400ms between frames. With frame_stack=4, frame_skip=10: spans ~1.2s of history."""
+
     # Evaluation params
     eval_num_envs: int = 256
     """Number of envs for evaluation rollouts."""

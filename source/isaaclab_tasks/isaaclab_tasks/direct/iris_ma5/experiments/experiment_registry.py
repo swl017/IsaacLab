@@ -199,12 +199,17 @@ register_experiment(ExperimentCfg(
 
 register_experiment(ExperimentCfg(
     name="a2_mlp",
-    description="MAPPO-MLP (same obs with AoI, no recurrence)",
+    description="MAPPO-MLP with frame-skip stacking (K=4, skip=10, ~1.2s horizon)",
     group="A2",
     use_mlp_model=True,
+    frame_stack=4,
+    frame_skip=10,
     agent_overrides={
         "models.policy.hidden_size": 256,
         "models.policy.num_hidden_layers": 3,
+        "agent.sequence_length": 1,
+        "agent.learning_rate": 1e-4,
+        "agent.grad_norm_clip": 1.0,
     },
 ))
 
@@ -251,6 +256,8 @@ register_experiment(ExperimentCfg(
     group="A4",
     env_overrides={
         "reward_mode": "angular_only",
+        "pos_std": 0.001,
+        "intrinsics_std": 0.001,
     },
 ))
 

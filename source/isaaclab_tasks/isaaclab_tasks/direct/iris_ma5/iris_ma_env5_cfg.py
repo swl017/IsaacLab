@@ -46,7 +46,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     # Environment Meta
     # ==========================================================================
 
-    num_agents: int = 3
+    num_agents: int = 2
     """Number of agents. Controls possible_agents, action_spaces, observation_spaces,
     and bbox_raycaster.num_cameras_per_env. Minimum 2."""
 
@@ -95,6 +95,8 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
             # Reference: humanoid_amp uses 2^23 for similar reasons.
             gpu_found_lost_pairs_capacity=2**23,
             gpu_total_aggregate_pairs_capacity=2**23,
+            gpu_max_rigid_patch_count=2**23,
+            gpu_max_rigid_contact_count=2**23,
         ),
     )
 
@@ -144,7 +146,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     target_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/target",
         spawn=sim_utils.UsdFileCfg(
-            usd_path="/workspace/PegasusSimulator/extensions/pegasus.simulator/pegasus/simulator/assets/Robots/Iris/iris_body.usda",
+            usd_path="/home/usrg/IsaacPX4/PegasusSimulator/extensions/pegasus.simulator/pegasus/simulator/assets/Robots/Iris/iris_body.usda",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=False,
                 disable_gravity=True,
