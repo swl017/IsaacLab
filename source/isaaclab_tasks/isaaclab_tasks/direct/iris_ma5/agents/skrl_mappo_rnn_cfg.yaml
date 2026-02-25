@@ -1,0 +1,97 @@
+# MAPPO-RNN configuration for Quadcopter environment
+# This config is loaded when using --algorithm MAPPO_RNN
+
+seed: 42
+
+# Model parameters
+models:
+  policy:
+    class_name: mappo_rnn  # Will use MAPPORNNPolicy from scripts/reinforcement_learning/skrl/mappo_rnn.py
+    hidden_size: 64
+    gru_num_layers: 1      # Tune it for robust final policy later. May take longer to train.
+    gru_hidden_size: 64
+    initial_log_std: -0.5  # σ ≈ 0.6
+    min_log_std: -5.0      # σ_min ≈ 0.007, prevents collapse
+    max_log_std: 0.7       # σ_max ≈ 2.0, caps exploration
+
+  value:
+    class_name: mappo_rnn  # Will use MAPPORNNValue
+    hidden_size: 64
+    gru_num_layers: 1
+    gru_hidden_size: 64
+
+# Agent configuration
+agent:
+  # RNN-specific parameters
+  sequence_length: 32        # RNN sequence length for training
+  
+  # Burn-in steps for hidden state warm-up (0 = disabled, must be < sequence_length)
+  # Disable it at all times
+  burn_in_steps: 0
+
+  # D steps to mask from loss at episode start (0 = disabled, use for delay compensation)
+  # Do match with delay using hydra override
+  episode_start_mask_steps: 8  
+
+  # PPO parameters
+  rollouts: 32              # Number of rollouts before updating
+  learning_epochs: 6         # Number of learning epochs during each update
+  mini_batches: 8            # Number of mini batches (lower = better sequence sampling)
+
+  discount_factor: 0.99      # Discount factor (gamma)
+  lambda: 0.95               # TD(lambda) coefficient for GAE
+
+  learning_rate: 0.0003     # Learning rate (lower = better RNN stability)
+  random_timesteps: 0        # Random exploration steps
+  learning_starts: 0         # Learning starts after this many steps
+
+  # Gradient and clipping
+  grad_norm_clip: 0.3        # Gradient norm clipping (lower = more conservative)
+  ratio_clip: 0.2            # PPO ratio clipping
+  value_clip: 0.2            # Value clipping
+  clip_predicted_values: true
+
+  # Loss scales
+  entropy_loss_scale: 0.01   # Entropy loss scaling
+  value_loss_scale: 1.0      # Value loss scaling
+
+  # KL divergence
+  kl_threshold: 0.02         # KL divergence threshold for early stopping
+
+  # Learning rate scheduler
+  learning_rate_scheduler: KLAdaptiveLR
+  learning_rate_scheduler_kwargs:
+    kl_threshold: 0.02       # Higher = better exploration
+
+  # Preprocessors
+  state_preprocessor: RunningStandardScaler
+  state_preprocessor_kwargs: null  # Will be set automatically
+
+  shared_state_preprocessor: RunningStandardScaler
+  shared_state_preprocessor_kwargs: null  # Will be set automatically
+
+  value_preprocessor: RunningStandardScaler
+  value_preprocessor_kwargs:
+    size: 1
+    device: null  # Will be set automatically
+
+  # Other settings
+  rewards_shaper: null
+  time_limit_bootstrap: true
+  mixed_precision: false
+
+  # Experiment tracking
+  experiment:
+    directory: iris_ma5
+    experiment_name: ""      # Will be set by training script
+    write_interval: auto
+    checkpoint_interval: auto
+    store_separately: false
+    wandb: false
+    wandb_kwargs: {}
+
+# Trainer configuration
+trainer:
+  timesteps: 200000          # Total training timesteps
+  headless: true
+  environment_info: log

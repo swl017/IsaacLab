@@ -1,0 +1,595 @@
+[3gH    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H  [INFO] Using python from: /home/usrg/miniconda3/envs/env_isaaclab/bin/python
+Loading user config located at: '/home/usrg/isaacsim/kit/data/Kit/Isaac-Sim/4.5/user.config.json'
+[Info] [carb] Logging to file: /home/usrg/isaacsim/kit/logs/Kit/Isaac-Sim/4.5/kit_20251119_170618.log
+2025-11-19 08:06:18 [0ms] [Warning] [omni.kit.app.plugin] No crash reporter present, dumps uploading isn't available.
+2025-11-19 08:06:18 [3ms] [Warning] [omni.ext.plugin] [ext: rendering_modes] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes' or '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes/config'
+2025-11-19 08:06:18 [425ms] [Warning] [omni.usd_config.extension] Enable omni.materialx.libs extension to use MaterialX
+2025-11-19 08:06:19 [786ms] [Warning] [omni.isaac.dynamic_control] omni.isaac.dynamic_control is deprecated as of Isaac Sim 4.5. No action is needed from end-users.
+
+|---------------------------------------------------------------------------------------------|
+| Driver Version: 535.230.02    | Graphics API: Vulkan
+|=============================================================================================|
+| GPU | Name                             | Active | LDA | GPU Memory | Vendor-ID | LUID       |
+|     |                                  |        |     |            | Device-ID | UUID       |
+|     |                                  |        |     |            | Bus-ID    |            |
+|---------------------------------------------------------------------------------------------|
+| 0   | NVIDIA GeForce RTX 3090          | Yes: 0 |     | 24822   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2204      | 7116df58.. |
+|     |                                  |        |     |            | 9         |            |
+|=============================================================================================|
+| OS: 20.04.6 LTS (Focal Fossa) ubuntu, Version: 20.04.6, Kernel: 5.15.0-139-generic
+| XServer Vendor: The X.Org Foundation, XServer Version: 12013000 (1.20.13.0)
+| Processor: AMD Ryzen 9 5950X 16-Core Processor
+| Cores: 16 | Logical Cores: 32
+|---------------------------------------------------------------------------------------------|
+| Total Memory (MB): 64194 | Free Memory: 28462
+| Total Page/Swap (MB): 13730 | Free Page/Swap: 13730
+|---------------------------------------------------------------------------------------------|
+2025-11-19 08:06:22 [3,770ms] [Warning] [isaaclab.envs.direct_rl_env] Seed not set for the environment. The environment creation may not be deterministic.
+2025-11-19 08:06:24 [5,988ms] [Warning] [isaaclab.assets.articulation.articulation] Not all actuators are configured! Total number of actuated joints not equal to number of joints available: 3 != 7.
+2025-11-19 08:06:24 [6,017ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdPreviewSurface.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+2025-11-19 08:06:24 [6,017ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdUVTexture.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+2025-11-19 08:06:24 [6,017ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdPrimvarReader_float.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+2025-11-19 08:06:24 [6,017ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdPrimvarReader_float2.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+2025-11-19 08:06:24 [6,017ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdPrimvarReader_float3.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+2025-11-19 08:06:24 [6,017ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdPrimvarReader_float4.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+2025-11-19 08:06:24 [6,017ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdPrimvarReader_int.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+2025-11-19 08:06:24 [6,017ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdPrimvarReader_string.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+2025-11-19 08:06:24 [6,018ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdPrimvarReader_normal.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+2025-11-19 08:06:24 [6,018ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdPrimvarReader_point.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+2025-11-19 08:06:24 [6,018ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdPrimvarReader_vector.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+2025-11-19 08:06:24 [6,018ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdPrimvarReader_matrix.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+2025-11-19 08:06:24 [6,018ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdTransform2d.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+[INFO][AppLauncher]: Using device: cuda:0
+[INFO][AppLauncher]: Loading experience file: /home/usrg/IsaacPX4/IsaacLab/apps/isaaclab.python.headless.kit
+
+======================================================================
+Creating QuadcopterEnv with 2 environments...
+======================================================================
+
+[INFO]: Base environment:
+	Environment device    : cuda:0
+	Environment seed      : None
+	Physics step-size     : 0.01
+	Rendering step-size   : 0.02
+	Environment step-size : 0.02
+[INFO]: Time taken for scene creation : 0.999382 seconds
+[INFO]: Scene manager:  <class InteractiveScene>
+	Number of environments: 2
+	Environment spacing   : 2.5
+	Source prim name      : /World/envs/env_0
+	Global prim paths     : []
+	Replicate physics     : True
+[INFO]: Starting the simulation. This may take a few seconds. Please wait...
+[INFO]: Time taken for simulation start : 1.204546 seconds
+[INFO]: Completed setting up the environment...
+
+======================================================================
+[DIAGNOSTIC] Robot body structure:
+  Body names found: ['body']
+  Body IDs: [0]
+  Total num_bodies: 8
+  Total num_instances: 2
+======================================================================
+
+
+======================================================================
+[GIMBAL] Gimbal joints found:
+  Yaw joint ID: 4
+  Pitch joint ID: 6
+  Roll joint ID: 5
+======================================================================
+
+
+======================================================================
+Starting stabilization test for 500 steps...
+Test scenario:
+  Base command: 1 m/s forward velocity
+  Gimbal motion: Aggressive sinusoidal yaw/pitch (±90°/±45°)
+Expected result:
+  - Roll/pitch should remain near 0° (level flight)
+  - Forward velocity should track 1 m/s
+  - Gimbal motion should NOT disturb base body control
+======================================================================
+
+
+=== RESET DIAGNOSTIC - Env IDs: tensor([0, 1], device='cuda:0') ===
+Reset 2 environments
+Root velocity after reset: tensor([0., 0., 0.], device='cuda:0')
+Root ang velocity after reset: tensor([0., 0., 0.], device='cuda:0')
+Acceleration (world) after reset: tensor([0., 0., 0.], device='cuda:0')
+Acceleration (body) after reset: tensor([0., 0., 0.], device='cuda:0')
+
+=== Step 0 ===
+Actions (cmd): tensor([1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.5196], device='cuda:0')
+Attitude (r,p,y): [359.4, 1.3, 360.0] deg
+Current quat: tensor([ 9.9993e-01, -5.1009e-03,  1.0937e-02,  5.5761e-05], device='cuda:0')
+Ang Vel (body): tensor([0., 0., 0.], device='cuda:0')
+Lin Vel (world): tensor([0., 0., 0.], device='cuda:0')
+Force (body): tensor([ 8.0131e+00, -1.7881e-03,  1.7531e-01], device='cuda:0')
+Moment (body): tensor([5.0000e+00, 3.4922e-03, 0.0000e+00], device='cuda:0')
+Gains: kp_att=20.00, kd_att=3.00
+Robot mass: 1.622 kg, weight: 15.908 N
+
+[DIAGNOSTIC - Isaac Lab API]:
+  Applied force: tensor([ 8.0131e+00, -1.7881e-03,  1.7531e-01], device='cuda:0')
+  Applied torque: tensor([5.0000e+00, 3.4922e-03, 0.0000e+00], device='cuda:0')
+  has_external_wrench: True
+  _external_force_b shape: torch.Size([2, 8, 3])
+  _external_force_b[0, 0]: tensor([ 8.0131e+00, -1.7881e-03,  1.7531e-01], device='cuda:0')
+  _external_torque_b[0, 0]: tensor([5.0000e+00, 3.4922e-03, 0.0000e+00], device='cuda:0')
+
+[GIMBAL CONTROL]:
+  Action gimbal commands: yaw=0.00, pitch=0.52
+  Gimbal targets (rad): yaw=0.00, pitch=0.82, roll_stab=0.01
+  Gimbal current (rad): yaw=0.00, pitch=0.00
+
+=== Step 0 ===
+Actions (cmd): tensor([1.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.5196], device='cuda:0')
+Attitude (r,p,y): [0.2, 1.3, 0.0] deg
+Current quat: tensor([ 9.9994e-01,  2.1104e-03,  1.0931e-02, -2.0928e-05], device='cuda:0')
+Ang Vel (body): tensor([ 1.4424e+00, -1.2532e-03,  4.3152e-04], device='cuda:0')
+Lin Vel (world): tensor([4.9430e-02, 2.7800e-03, 1.8931e-05], device='cuda:0')
+Force (body): tensor([ 3.6786, -0.2443,  0.0830], device='cuda:0')
+Moment (body): tensor([-5.0000e+00,  5.0728e-03, -3.4522e-03], device='cuda:0')
+Gains: kp_att=20.00, kd_att=3.00
+Robot mass: 1.622 kg, weight: 15.908 N
+
+[DIAGNOSTIC - Isaac Lab API]:
+  Applied force: tensor([ 3.6786, -0.2443,  0.0830], device='cuda:0')
+  Applied torque: tensor([-5.0000e+00,  5.0728e-03, -3.4522e-03], device='cuda:0')
+  has_external_wrench: True
+  _external_force_b shape: torch.Size([2, 8, 3])
+  _external_force_b[0, 0]: tensor([ 3.6786, -0.2443,  0.0830], device='cuda:0')
+  _external_torque_b[0, 0]: tensor([-5.0000e+00,  5.0728e-03, -3.4522e-03], device='cuda:0')
+
+[GIMBAL CONTROL]:
+  Action gimbal commands: yaw=0.00, pitch=0.52
+  Gimbal targets (rad): yaw=0.00, pitch=0.82, roll_stab=-0.00
+  Gimbal current (rad): yaw=0.00, pitch=0.09
+
+=== Step 0/500 ===
+Base Body State:
+  Attitude (r,p,y): [0.24, 1.25, 360.03] deg
+  Velocity (world): [0.072, -0.002, 0.000] m/s
+  Angular velocity: 0.004 rad/s
+Tracking Errors:
+  Roll error: 0.24°
+  Pitch error: 1.25°
+  Velocity error: 0.928 m/s
+Gimbal State:
+  Yaw: -0.0°, Pitch: 10.8°
+
+=== Step 50 ===
+Actions (cmd): tensor([1.0000, 0.0000, 0.0000, 0.0000, 0.7608, 0.1247], device='cuda:0')
+Attitude (r,p,y): [359.4, 1.2, 0.0] deg
+Current quat: tensor([ 9.9993e-01, -5.1058e-03,  1.0803e-02,  5.5786e-05], device='cuda:0')
+Ang Vel (body): tensor([0.0003, 0.0022, 0.0006], device='cuda:0')
+Lin Vel (world): tensor([ 1.0096e+00,  1.1923e-03, -2.4333e-05], device='cuda:0')
+Force (body): tensor([ 0.2146, -0.2823,  0.0044], device='cuda:0')
+Moment (body): tensor([ 5.0000e+00, -2.9862e-03, -5.0086e-03], device='cuda:0')
+Gains: kp_att=20.00, kd_att=3.00
+Robot mass: 1.622 kg, weight: 15.908 N
+
+[DIAGNOSTIC - Isaac Lab API]:
+  Applied force: tensor([ 0.2146, -0.2823,  0.0044], device='cuda:0')
+  Applied torque: tensor([ 5.0000e+00, -2.9862e-03, -5.0086e-03], device='cuda:0')
+  has_external_wrench: True
+  _external_force_b shape: torch.Size([2, 8, 3])
+  _external_force_b[0, 0]: tensor([ 0.2146, -0.2823,  0.0044], device='cuda:0')
+  _external_torque_b[0, 0]: tensor([ 5.0000e+00, -2.9862e-03, -5.0086e-03], device='cuda:0')
+
+[GIMBAL CONTROL]:
+  Action gimbal commands: yaw=0.76, pitch=0.12
+  Gimbal targets (rad): yaw=2.39, pitch=0.20, roll_stab=-0.02
+  Gimbal current (rad): yaw=2.32, pitch=0.30
+
+=== Step 50 ===
+Actions (cmd): tensor([1.0000, 0.0000, 0.0000, 0.0000, 0.7608, 0.1247], device='cuda:0')
+Attitude (r,p,y): [0.2, 1.2, 0.0] deg
+Current quat: tensor([ 9.9994e-01,  2.0988e-03,  1.0815e-02, -2.0624e-05], device='cuda:0')
+Ang Vel (body): tensor([1.4410e+00, 2.3765e-03, 3.0803e-04], device='cuda:0')
+Lin Vel (world): tensor([ 1.0109e+00,  2.2260e-03, -4.8236e-05], device='cuda:0')
+Force (body): tensor([ 0.2058, -0.1004,  0.0103], device='cuda:0')
+Moment (body): tensor([-5.0000e+00, -5.8353e-03, -2.4642e-03], device='cuda:0')
+Gains: kp_att=20.00, kd_att=3.00
+Robot mass: 1.622 kg, weight: 15.908 N
+
+[DIAGNOSTIC - Isaac Lab API]:
+  Applied force: tensor([ 0.2058, -0.1004,  0.0103], device='cuda:0')
+  Applied torque: tensor([-5.0000e+00, -5.8353e-03, -2.4642e-03], device='cuda:0')
+  has_external_wrench: True
+  _external_force_b shape: torch.Size([2, 8, 3])
+  _external_force_b[0, 0]: tensor([ 0.2058, -0.1004,  0.0103], device='cuda:0')
+  _external_torque_b[0, 0]: tensor([-5.0000e+00, -5.8353e-03, -2.4642e-03], device='cuda:0')
+
+[GIMBAL CONTROL]:
+  Action gimbal commands: yaw=0.76, pitch=0.12
+  Gimbal targets (rad): yaw=2.39, pitch=0.20, roll_stab=-0.01
+  Gimbal current (rad): yaw=2.33, pitch=0.28
+
+=== Step 50/500 ===
+Base Body State:
+  Attitude (r,p,y): [0.24, 1.24, 360.03] deg
+  Velocity (world): [1.012, -0.001, 0.000] m/s
+  Angular velocity: 0.001 rad/s
+Tracking Errors:
+  Roll error: 0.24°
+  Pitch error: 1.24°
+  Velocity error: 0.012 m/s
+Gimbal State:
+  Yaw: 134.2°, Pitch: 15.3°
+
+=== Step 100 ===
+Actions (cmd): tensor([ 1.0000,  0.0000,  0.0000,  0.0000,  0.4702, -0.5967], device='cuda:0')
+Attitude (r,p,y): [359.4, 1.3, 0.0] deg
+Current quat: tensor([ 9.9992e-01, -5.2788e-03,  1.1181e-02,  6.9060e-05], device='cuda:0')
+Ang Vel (body): tensor([-0.0002,  0.0033,  0.0006], device='cuda:0')
+Lin Vel (world): tensor([ 1.0439e+00,  1.1809e-03, -2.5990e-05], device='cuda:0')
+Force (body): tensor([-4.2376e-03, -2.7940e-01, -1.2932e-05], device='cuda:0')
+Moment (body): tensor([ 5.0000e+00, -5.6852e-03, -4.5046e-03], device='cuda:0')
+Gains: kp_att=20.00, kd_att=3.00
+Robot mass: 1.622 kg, weight: 15.908 N
+
+[DIAGNOSTIC - Isaac Lab API]:
+  Applied force: tensor([-4.2376e-03, -2.7940e-01, -1.2932e-05], device='cuda:0')
+  Applied torque: tensor([ 5.0000e+00, -5.6852e-03, -4.5046e-03], device='cuda:0')
+  has_external_wrench: True
+  _external_force_b shape: torch.Size([2, 8, 3])
+  _external_force_b[0, 0]: tensor([-4.2376e-03, -2.7940e-01, -1.2932e-05], device='cuda:0')
+  _external_torque_b[0, 0]: tensor([ 5.0000e+00, -5.6852e-03, -4.5046e-03], device='cuda:0')
+
+[GIMBAL CONTROL]:
+  Action gimbal commands: yaw=0.47, pitch=-0.60
+  Gimbal targets (rad): yaw=1.48, pitch=-0.94, roll_stab=-0.01
+  Gimbal current (rad): yaw=1.63, pitch=-0.94
+
+=== Step 100 ===
+Actions (cmd): tensor([ 1.0000,  0.0000,  0.0000,  0.0000,  0.4702, -0.5967], device='cuda:0')
+Attitude (r,p,y): [0.2, 1.3, 0.0] deg
+Current quat: tensor([ 9.9994e-01,  1.9129e-03,  1.1199e-02, -9.3665e-06], device='cuda:0')
+Ang Vel (body): tensor([1.4385e+00, 3.6374e-03, 4.0245e-04], device='cuda:0')
+Lin Vel (world): tensor([ 1.0439e+00,  2.2424e-03, -4.8213e-05], device='cuda:0')
+Force (body): tensor([-0.0051, -0.1028,  0.0057], device='cuda:0')
+Moment (body): tensor([-5.0000e+00, -1.0324e-02, -3.2196e-03], device='cuda:0')
+Gains: kp_att=20.00, kd_att=3.00
+Robot mass: 1.622 kg, weight: 15.908 N
+
+[DIAGNOSTIC - Isaac Lab API]:
+  Applied force: tensor([-0.0051, -0.1028,  0.0057], device='cuda:0')
+  Applied torque: tensor([-5.0000e+00, -1.0324e-02, -3.2196e-03], device='cuda:0')
+  has_external_wrench: True
+  _external_force_b shape: torch.Size([2, 8, 3])
+  _external_force_b[0, 0]: tensor([-0.0051, -0.1028,  0.0057], device='cuda:0')
+  _external_torque_b[0, 0]: tensor([-5.0000e+00, -1.0324e-02, -3.2196e-03], device='cuda:0')
+
+[GIMBAL CONTROL]:
+  Action gimbal commands: yaw=0.47, pitch=-0.60
+  Gimbal targets (rad): yaw=1.48, pitch=-0.94, roll_stab=-0.01
+  Gimbal current (rad): yaw=1.60, pitch=-0.94
+
+=== Step 100/500 ===
+Base Body State:
+  Attitude (r,p,y): [0.22, 1.28, 0.00] deg
+  Velocity (world): [1.044, -0.001, 0.000] m/s
+  Angular velocity: 0.002 rad/s
+Tracking Errors:
+  Roll error: 0.22°
+  Pitch error: 1.28°
+  Velocity error: 0.044 m/s
+Gimbal State:
+  Yaw: 90.5°, Pitch: -53.7°
+
+=== RESET DIAGNOSTIC - Env IDs: tensor([1], device='cuda:0') ===
+Reset 1 environments
+Root velocity after reset: tensor([0., 0., 0.], device='cuda:0')
+Root ang velocity after reset: tensor([0., 0., 0.], device='cuda:0')
+Acceleration (world) after reset: tensor([0., 0., 0.], device='cuda:0')
+Acceleration (body) after reset: tensor([0., 0., 0.], device='cuda:0')
+
+=== Step 150 ===
+Actions (cmd): tensor([ 1.0000,  0.0000,  0.0000,  0.0000, -0.4702,  0.2440], device='cuda:0')
+Attitude (r,p,y): [359.4, 1.3, 0.0] deg
+Current quat: tensor([ 9.9992e-01, -5.4368e-03,  1.1611e-02,  7.1745e-05], device='cuda:0')
+Ang Vel (body): tensor([0.0005, 0.0054, 0.0003], device='cuda:0')
+Lin Vel (world): tensor([ 1.0375e+00,  1.1709e-03, -2.9684e-05], device='cuda:0')
+Force (body): tensor([-0.0096, -0.2830,  0.0010], device='cuda:0')
+Moment (body): tensor([ 5.0000e+00, -1.1813e-02, -2.6067e-03], device='cuda:0')
+Gains: kp_att=20.00, kd_att=3.00
+Robot mass: 1.622 kg, weight: 15.908 N
+
+[DIAGNOSTIC - Isaac Lab API]:
+  Applied force: tensor([-0.0096, -0.2830,  0.0010], device='cuda:0')
+  Applied torque: tensor([ 5.0000e+00, -1.1813e-02, -2.6067e-03], device='cuda:0')
+  has_external_wrench: True
+  _external_force_b shape: torch.Size([2, 8, 3])
+  _external_force_b[0, 0]: tensor([-0.0096, -0.2830,  0.0010], device='cuda:0')
+  _external_torque_b[0, 0]: tensor([ 5.0000e+00, -1.1813e-02, -2.6067e-03], device='cuda:0')
+
+[GIMBAL CONTROL]:
+  Action gimbal commands: yaw=-0.47, pitch=0.24
+  Gimbal targets (rad): yaw=-1.48, pitch=0.38, roll_stab=0.02
+  Gimbal current (rad): yaw=-1.31, pitch=0.28
+
+=== Step 150 ===
+Actions (cmd): tensor([ 1.0000,  0.0000,  0.0000,  0.0000, -0.4702,  0.2440], device='cuda:0')
+Attitude (r,p,y): [0.2, 1.3, 0.0] deg
+Current quat: tensor([ 9.9993e-01,  1.7566e-03,  1.1640e-02, -1.0658e-05], device='cuda:0')
+Ang Vel (body): tensor([1.4388e+00, 5.9392e-03, 2.4483e-04], device='cuda:0')
+Lin Vel (world): tensor([ 1.0375e+00,  2.1870e-03, -6.4423e-05], device='cuda:0')
+Force (body): tensor([-0.0126, -0.0987,  0.0064], device='cuda:0')
+Moment (body): tensor([-5.0000e+00, -1.7149e-02, -1.9586e-03], device='cuda:0')
+Gains: kp_att=20.00, kd_att=3.00
+Robot mass: 1.622 kg, weight: 15.908 N
+
+[DIAGNOSTIC - Isaac Lab API]:
+  Applied force: tensor([-0.0126, -0.0987,  0.0064], device='cuda:0')
+  Applied torque: tensor([-5.0000e+00, -1.7149e-02, -1.9586e-03], device='cuda:0')
+  has_external_wrench: True
+  _external_force_b shape: torch.Size([2, 8, 3])
+  _external_force_b[0, 0]: tensor([-0.0126, -0.0987,  0.0064], device='cuda:0')
+  _external_torque_b[0, 0]: tensor([-5.0000e+00, -1.7149e-02, -1.9586e-03], device='cuda:0')
+
+[GIMBAL CONTROL]:
+  Action gimbal commands: yaw=-0.47, pitch=0.24
+  Gimbal targets (rad): yaw=-1.48, pitch=0.38, roll_stab=0.02
+  Gimbal current (rad): yaw=-1.34, pitch=0.30
+
+=== Step 150/500 ===
+Base Body State:
+  Attitude (r,p,y): [0.20, 1.33, 0.00] deg
+  Velocity (world): [1.037, -0.001, 0.000] m/s
+  Angular velocity: 0.004 rad/s
+Tracking Errors:
+  Roll error: 0.20°
+  Pitch error: 1.33°
+  Velocity error: 0.037 m/s
+Gimbal State:
+  Yaw: -78.3°, Pitch: 17.9°
+
+=== Step 200 ===
+Actions (cmd): tensor([ 1.0000,  0.0000,  0.0000,  0.0000, -0.7608,  0.4459], device='cuda:0')
+Attitude (r,p,y): [359.4, 1.4, 0.0] deg
+Current quat: tensor([ 9.9991e-01, -5.5076e-03,  1.2046e-02,  6.7512e-05], device='cuda:0')
+Ang Vel (body): tensor([0.0001, 0.0089, 0.0004], device='cuda:0')
+Lin Vel (world): tensor([ 1.0308e+00,  1.1823e-03, -5.5490e-05], device='cuda:0')
+Force (body): tensor([-0.0073, -0.2802,  0.0072], device='cuda:0')
+Moment (body): tensor([ 5.0000e+00, -2.2382e-02, -3.4226e-03], device='cuda:0')
+Gains: kp_att=20.00, kd_att=3.00
+Robot mass: 1.622 kg, weight: 15.908 N
+
+[DIAGNOSTIC - Isaac Lab API]:
+  Applied force: tensor([-0.0073, -0.2802,  0.0072], device='cuda:0')
+  Applied torque: tensor([ 5.0000e+00, -2.2382e-02, -3.4226e-03], device='cuda:0')
+  has_external_wrench: True
+  _external_force_b shape: torch.Size([2, 8, 3])
+  _external_force_b[0, 0]: tensor([-0.0073, -0.2802,  0.0072], device='cuda:0')
+  _external_torque_b[0, 0]: tensor([ 5.0000e+00, -2.2382e-02, -3.4226e-03], device='cuda:0')
+
+[GIMBAL CONTROL]:
+  Action gimbal commands: yaw=-0.76, pitch=0.45
+  Gimbal targets (rad): yaw=-2.39, pitch=0.70, roll_stab=0.01
+  Gimbal current (rad): yaw=-2.44, pitch=0.77
+
+=== Step 200 ===
+Actions (cmd): tensor([ 1.0000,  0.0000,  0.0000,  0.0000, -0.7608,  0.4459], device='cuda:0')
+Attitude (r,p,y): [0.2, 1.4, 0.0] deg
+Current quat: tensor([ 9.9993e-01,  1.6653e-03,  1.2095e-02, -1.8229e-05], device='cuda:0')
+Ang Vel (body): tensor([1.4347e+00, 9.7568e-03, 1.9549e-04], device='cuda:0')
+Lin Vel (world): tensor([ 1.0308e+00,  2.2236e-03, -1.1194e-04], device='cuda:0')
+Force (body): tensor([-0.0115, -0.1009,  0.0086], device='cuda:0')
+Moment (body): tensor([-5.0000e+00, -2.8126e-02, -1.5640e-03], device='cuda:0')
+Gains: kp_att=20.00, kd_att=3.00
+Robot mass: 1.622 kg, weight: 15.908 N
+
+[DIAGNOSTIC - Isaac Lab API]:
+  Applied force: tensor([-0.0115, -0.1009,  0.0086], device='cuda:0')
+  Applied torque: tensor([-5.0000e+00, -2.8126e-02, -1.5640e-03], device='cuda:0')
+  has_external_wrench: True
+  _external_force_b shape: torch.Size([2, 8, 3])
+  _external_force_b[0, 0]: tensor([-0.0115, -0.1009,  0.0086], device='cuda:0')
+  _external_torque_b[0, 0]: tensor([-5.0000e+00, -2.8126e-02, -1.5640e-03], device='cuda:0')
+
+[GIMBAL CONTROL]:
+  Action gimbal commands: yaw=-0.76, pitch=0.45
+  Gimbal targets (rad): yaw=-2.39, pitch=0.70, roll_stab=0.01
+  Gimbal current (rad): yaw=-2.43, pitch=0.75
+
+=== Step 200/500 ===
+Base Body State:
+  Attitude (r,p,y): [0.19, 1.38, 0.00] deg
+  Velocity (world): [1.031, -0.001, 0.000] m/s
+  Angular velocity: 0.007 rad/s
+Tracking Errors:
+  Roll error: 0.19°
+  Pitch error: 1.38°
+  Velocity error: 0.031 m/s
+Gimbal State:
+  Yaw: -138.8°, Pitch: 42.7°
+
+=== Step 250 ===
+Actions (cmd): tensor([ 1.0000e+00,  0.0000e+00,  0.0000e+00,  0.0000e+00, -1.9594e-16,
+        -5.1962e-01], device='cuda:0')
+Attitude (r,p,y): [359.4, 1.4, 360.0] deg
+Current quat: tensor([ 9.9991e-01, -5.7700e-03,  1.2498e-02,  5.5828e-05], device='cuda:0')
+Ang Vel (body): tensor([0.0001, 0.0048, 0.0004], device='cuda:0')
+Lin Vel (world): tensor([ 1.0252e+00,  1.1624e-03, -4.3301e-05], device='cuda:0')
+Force (body): tensor([-0.0092, -0.2796,  0.0040], device='cuda:0')
+Moment (body): tensor([ 5.0000e+00, -1.0763e-02, -3.5700e-03], device='cuda:0')
+Gains: kp_att=20.00, kd_att=3.00
+Robot mass: 1.622 kg, weight: 15.908 N
+
+[DIAGNOSTIC - Isaac Lab API]:
+  Applied force: tensor([-0.0092, -0.2796,  0.0040], device='cuda:0')
+  Applied torque: tensor([ 5.0000e+00, -1.0763e-02, -3.5700e-03], device='cuda:0')
+  has_external_wrench: True
+  _external_force_b shape: torch.Size([2, 8, 3])
+  _external_force_b[0, 0]: tensor([-0.0092, -0.2796,  0.0040], device='cuda:0')
+  _external_torque_b[0, 0]: tensor([ 5.0000e+00, -1.0763e-02, -3.5700e-03], device='cuda:0')
+
+[GIMBAL CONTROL]:
+  Action gimbal commands: yaw=-0.00, pitch=-0.52
+  Gimbal targets (rad): yaw=-0.00, pitch=-0.82, roll_stab=0.01
+  Gimbal current (rad): yaw=-0.19, pitch=-0.75
+
+=== Step 250 ===
+Actions (cmd): tensor([ 1.0000e+00,  0.0000e+00,  0.0000e+00,  0.0000e+00, -1.9594e-16,
+        -5.1962e-01], device='cuda:0')
+Attitude (r,p,y): [0.2, 1.4, 360.0] deg
+Current quat: tensor([ 9.9992e-01,  1.3992e-03,  1.2523e-02, -3.2643e-05], device='cuda:0')
+Ang Vel (body): tensor([1.4341e+00, 4.9815e-03, 2.5868e-04], device='cuda:0')
+Lin Vel (world): tensor([ 1.0252e+00,  2.2032e-03, -8.2346e-05], device='cuda:0')
+Force (body): tensor([-0.0061, -0.1009,  0.0071], device='cuda:0')
+Moment (body): tensor([-5.0000e+00, -1.2895e-02, -2.0695e-03], device='cuda:0')
+Gains: kp_att=20.00, kd_att=3.00
+Robot mass: 1.622 kg, weight: 15.908 N
+
+[DIAGNOSTIC - Isaac Lab API]:
+  Applied force: tensor([-0.0061, -0.1009,  0.0071], device='cuda:0')
+  Applied torque: tensor([-5.0000e+00, -1.2895e-02, -2.0695e-03], device='cuda:0')
+  has_external_wrench: True
+  _external_force_b shape: torch.Size([2, 8, 3])
+  _external_force_b[0, 0]: tensor([-0.0061, -0.1009,  0.0071], device='cuda:0')
+  _external_torque_b[0, 0]: tensor([-5.0000e+00, -1.2895e-02, -2.0695e-03], device='cuda:0')
+
+[GIMBAL CONTROL]:
+  Action gimbal commands: yaw=-0.00, pitch=-0.52
+  Gimbal targets (rad): yaw=-0.00, pitch=-0.82, roll_stab=0.00
+  Gimbal current (rad): yaw=-0.16, pitch=-0.76
+
+=== Step 250/500 ===
+Base Body State:
+  Attitude (r,p,y): [0.16, 1.43, 360.02] deg
+  Velocity (world): [1.025, -0.001, 0.000] m/s
+  Angular velocity: 0.003 rad/s
+Tracking Errors:
+  Roll error: 0.16°
+  Pitch error: 1.43°
+  Velocity error: 0.025 m/s
+Gimbal State:
+  Yaw: -7.5°, Pitch: -44.3°
+
+=== Step 300 ===
+Actions (cmd): tensor([ 1.0000,  0.0000,  0.0000,  0.0000,  0.7608, -0.1247], device='cuda:0')
+Attitude (r,p,y): [359.4, 1.5, 360.0] deg
+Current quat: tensor([ 9.9990e-01, -5.7236e-03,  1.2963e-02,  5.6310e-05], device='cuda:0')
+Ang Vel (body): tensor([0.0004, 0.0014, 0.0006], device='cuda:0')
+Lin Vel (world): tensor([ 1.0207e+00,  1.1938e-03, -5.2170e-05], device='cuda:0')
+Force (body): tensor([-0.0059, -0.2815,  0.0058], device='cuda:0')
+Moment (body): tensor([ 5.0000e+00, -6.6734e-04, -4.8940e-03], device='cuda:0')
+Gains: kp_att=20.00, kd_att=3.00
+Robot mass: 1.622 kg, weight: 15.908 N
+
+[DIAGNOSTIC - Isaac Lab API]:
+  Applied force: tensor([-0.0059, -0.2815,  0.0058], device='cuda:0')
+  Applied torque: tensor([ 5.0000e+00, -6.6734e-04, -4.8940e-03], device='cuda:0')
+  has_external_wrench: True
+  _external_force_b shape: torch.Size([2, 8, 3])
+  _external_force_b[0, 0]: tensor([-0.0059, -0.2815,  0.0058], device='cuda:0')
+  _external_torque_b[0, 0]: tensor([ 5.0000e+00, -6.6734e-04, -4.8940e-03], device='cuda:0')
+
+[GIMBAL CONTROL]:
+  Action gimbal commands: yaw=0.76, pitch=-0.12
+  Gimbal targets (rad): yaw=2.39, pitch=-0.20, roll_stab=-0.03
+  Gimbal current (rad): yaw=2.32, pitch=-0.30
+
+=== Step 300 ===
+Actions (cmd): tensor([ 1.0000,  0.0000,  0.0000,  0.0000,  0.7608, -0.1247], device='cuda:0')
+Attitude (r,p,y): [0.2, 1.5, 360.0] deg
+Current quat: tensor([ 9.9991e-01,  1.4575e-03,  1.2971e-02, -3.5342e-05], device='cuda:0')
+Ang Vel (body): tensor([1.4363e+00, 1.6097e-03, 3.0921e-04], device='cuda:0')
+Lin Vel (world): tensor([ 1.0207e+00,  2.2238e-03, -9.6166e-05], device='cuda:0')
+Force (body): tensor([-0.0072, -0.1000,  0.0076], device='cuda:0')
+Moment (body): tensor([-5.0000e+00, -2.6106e-03, -2.4737e-03], device='cuda:0')
+Gains: kp_att=20.00, kd_att=3.00
+Robot mass: 1.622 kg, weight: 15.908 N
+
+[DIAGNOSTIC - Isaac Lab API]:
+  Applied force: tensor([-0.0072, -0.1000,  0.0076], device='cuda:0')
+  Applied torque: tensor([-5.0000e+00, -2.6106e-03, -2.4737e-03], device='cuda:0')
+  has_external_wrench: True
+  _external_force_b shape: torch.Size([2, 8, 3])
+  _external_force_b[0, 0]: tensor([-0.0072, -0.1000,  0.0076], device='cuda:0')
+  _external_torque_b[0, 0]: tensor([-5.0000e+00, -2.6106e-03, -2.4737e-03], device='cuda:0')
+
+[GIMBAL CONTROL]:
+  Action gimbal commands: yaw=0.76, pitch=-0.12
+  Gimbal targets (rad): yaw=2.39, pitch=-0.20, roll_stab=-0.02
+  Gimbal current (rad): yaw=2.33, pitch=-0.28
+
+=== Step 300/500 ===
+Base Body State:
+  Attitude (r,p,y): [0.17, 1.49, 360.02] deg
+  Velocity (world): [1.021, -0.001, 0.000] m/s
+  Angular velocity: 0.001 rad/s
+Tracking Errors:
+  Roll error: 0.17°
+  Pitch error: 1.49°
+  Velocity error: 0.021 m/s
+Gimbal State:
+  Yaw: 134.2°, Pitch: -15.3°
+
+=== Step 350 ===
+Actions (cmd): tensor([1.0000, 0.0000, 0.0000, 0.0000, 0.4702, 0.5967], device='cuda:0')
+Attitude (r,p,y): [359.4, 1.5, 360.0] deg
+Current quat: tensor([ 9.9989e-01, -5.8102e-03,  1.3437e-02,  7.0364e-05], device='cuda:0')
+Ang Vel (body): tensor([0.0001, 0.0014, 0.0006], device='cuda:0')
+Lin Vel (world): tensor([ 1.0170e+00,  1.1769e-03, -2.2885e-05], device='cuda:0')
+Force (body): tensor([-0.0057, -0.2792, -0.0013], device='cuda:0')
+Moment (body): tensor([ 5.0000e+00,  9.7374e-05, -4.5619e-03], device='cuda:0')
+Gains: kp_att=20.00, kd_att=3.00
+Robot mass: 1.622 kg, weight: 15.908 N
+
+[DIAGNOSTIC - Isaac Lab API]:
+  Applied force: tensor([-0.0057, -0.2792, -0.0013], device='cuda:0')
+  Applied torque: tensor([ 5.0000e+00,  9.7374e-05, -4.5619e-03], device='cuda:0')
+  has_external_wrench: True
+  _external_force_b shape: torch.Size([2, 8, 3])
+  _external_force_b[0, 0]: tensor([-0.0057, -0.2792, -0.0013], device='cuda:0')
+  _external_torque_b[0, 0]: tensor([ 5.0000e+00,  9.7374e-05, -4.5619e-03], device='cuda:0')
+
+[GIMBAL CONTROL]:
+  Action gimbal commands: yaw=0.47, pitch=0.60
+  Gimbal targets (rad): yaw=1.48, pitch=0.94, roll_stab=-0.02
+  Gimbal current (rad): yaw=1.63, pitch=0.94
+
+=== Step 350 ===
+Actions (cmd): tensor([1.0000, 0.0000, 0.0000, 0.0000, 0.4702, 0.5967], device='cuda:0')
+Attitude (r,p,y): [0.2, 1.5, 360.0] deg
+Current quat: tensor([ 9.9991e-01,  1.3777e-03,  1.3445e-02, -2.4184e-05], device='cuda:0')
+Ang Vel (body): tensor([1.4378e+00, 1.5810e-03, 4.0303e-04], device='cuda:0')
+Lin Vel (world): tensor([ 1.0169e+00,  2.2381e-03, -3.7265e-05], device='cuda:0')
+Force (body): tensor([-0.0054, -0.1028,  0.0050], device='cuda:0')
+Moment (body): tensor([-5.0000e+00, -3.2248e-03, -3.2243e-03], device='cuda:0')
+Gains: kp_att=20.00, kd_att=3.00
+Robot mass: 1.622 kg, weight: 15.908 N
+
+[DIAGNOSTIC - Isaac Lab API]:
+  Applied force: tensor([-0.0054, -0.1028,  0.0050], device='cuda:0')
+  Applied torque: tensor([-5.0000e+00, -3.2248e-03, -3.2243e-03], device='cuda:0')
+  has_external_wrench: True
+  _external_force_b shape: torch.Size([2, 8, 3])
+  _external_force_b[0, 0]: tensor([-0.0054, -0.1028,  0.0050], device='cuda:0')
+  _external_torque_b[0, 0]: tensor([-5.0000e+00, -3.2248e-03, -3.2243e-03], device='cuda:0')
+
+[GIMBAL CONTROL]:
+  Action gimbal commands: yaw=0.47, pitch=0.60
+  Gimbal targets (rad): yaw=1.48, pitch=0.94, roll_stab=-0.02
+  Gimbal current (rad): yaw=1.60, pitch=0.94
+
+=== Step 350/500 ===
+Base Body State:
+  Attitude (r,p,y): [0.16, 1.54, 360.03] deg
