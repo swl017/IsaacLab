@@ -1072,7 +1072,7 @@ class MultiAgentDelaySystemV2:
 
         # CRITICAL: Push initial GT states to delay pipelines
         # This ensures the delay systems have data available for get_delayed_* calls
-        self._initialize_pipelines_from_gt_states()
+        self._initialize_pipelines_from_gt_states(env_ids)
 
         return sampled_noise
 
@@ -1206,12 +1206,17 @@ class MultiAgentDelaySystemV2:
         self._delay_clean_ego.set_all_dropout_rates(0.0)
         self._delay_clean_other.set_all_dropout_rates(0.0)
 
-    def _initialize_pipelines_from_gt_states(self):
+    def _initialize_pipelines_from_gt_states(self, env_ids: torch.Tensor | None = None):
         """Initialize delay pipelines with current GT states.
 
         This is called during reset to ensure the delay systems have data
         available for immediate retrieval. Without this, the first call to
         get_delayed_* would fail with KeyError.
+
+        Args:
+            env_ids: Environment indices that were reset. If provided, seeds the
+                dropout held data for noisy pipelines so that hold-last-value
+                dropout returns the initial GT state rather than zeros after reset.
         """
         for agent_id in self._possible_agents:
             gt_state = self._gt_states[agent_id]
@@ -1261,6 +1266,14 @@ class MultiAgentDelaySystemV2:
         self._delay_clean_other.step(dt)
         self._delay_noisy_ego.step(dt)
         self._delay_noisy_other.step(dt)
+
+        # Seed dropout held data with GT initial state for the reset environments.
+        # Without this, dropout_held_data stays at 0.0 after reset (set by pipeline.reset()),
+        # causing hold-last-value dropout to return zeros instead of a valid initial snapshot.
+        # Only affects envs whose dropout_held_data was already initialized (episode 2+).
+        if env_ids is not None:
+            self._delay_noisy_ego.seed_dropout_held_data(env_ids)
+            self._delay_noisy_other.seed_dropout_held_data(env_ids)
 
 
 class GTStatesAccessor:

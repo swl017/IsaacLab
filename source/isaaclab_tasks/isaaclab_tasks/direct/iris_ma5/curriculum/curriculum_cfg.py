@@ -32,7 +32,6 @@ class CurriculumCfg:
     Tracking:[────────────ramp────────────]full───────────────────
     Target:        [────────────ramp────────────]full─────────────
     Coord:                      [────ramp────]full───────────────
-    Anneal:                     [────────very slow ramp─────────]
     Noise:                              [─ramp─]full─────────────
     FixDelay:                                   [───ramp───]full─
     RndDelay:                                         [──ramp──]f

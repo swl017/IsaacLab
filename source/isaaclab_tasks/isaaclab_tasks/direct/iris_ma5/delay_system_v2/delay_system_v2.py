@@ -386,6 +386,26 @@ class DelaySystemV2:
                     self._observation_buffer, self.cfg.observation_delay, batch_ids
                 )
 
+    def seed_dropout_held_data(self, env_ids: torch.Tensor):
+        """Seed dropout held data for all noisy pipelines from current DataBus contents.
+
+        Called after reset() + store() to ensure dropout holds valid initial GT state
+        rather than zeros. Only updates envs whose dropout_held_data has already been
+        initialized (i.e., have run at least one process() call). Envs still at None
+        are left alone — their first process() call will initialize them correctly.
+
+        Args:
+            env_ids: Environment indices to seed.
+        """
+        if not self.cfg.use_enhanced_mode or not self.data_bus:
+            return
+        for field_name, pipeline in self._noisy_pipelines.items():
+            if pipeline.dropout_held_data is None:
+                # Not yet initialized — first process() call will handle it
+                continue
+            data = self.data_bus.get_noisy(field_name)
+            pipeline.dropout_held_data[env_ids] = data[env_ids]
+
     def _randomize_delays(
         self,
         buffer: DelayBuffer,

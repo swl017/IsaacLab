@@ -1,0 +1,33 @@
+
+Device: cuda
+
+================================================================================
+Group 1: DelayPipeline dropout lifecycle
+================================================================================
+  ✓ dropout_held_data is None at construction
+  ✓ First process() returns fresh data, initializes dropout_held_data
+  ✓ 100% dropout freezes output at step-1 data
+  ✓ reset() sets dropout_held_data to 0.0 (not None)
+  ✓ Post-reset 100% dropout returns zeros [bug confirmed]
+
+================================================================================
+Group 2: DelaySystemV2.seed_dropout_held_data()
+================================================================================
+  ✓ seed_dropout_held_data() skips None pipelines (no-op)
+  ✓ seed_dropout_held_data() updates dropout_held_data from DataBus
+  ✓ Post-reset + seed: 100% dropout returns GT data, not zeros [fix verified]
+  ✓ seed_dropout_held_data() only affects specified env_ids
+
+================================================================================
+Group 3: MultiAgentDelaySystemV2 multi-episode integration
+================================================================================
+  ✓ Episode 2 other-agent position is non-zero after reset (fix verified)
+  ✓ Regression: seed prevents zeros, holds GT data across episode reset
+
+================================================================================
+TEST SUMMARY
+================================================================================
+Total:  11
+Passed: 11
+Failed: 0
+================================================================================
