@@ -6,3 +6,4 @@
 """Metrics collection for the 7 IROS 2026 paper metrics."""
 
 from .metric_tracker import MetricTracker
+from .timeseries_tracker import TimeseriesTracker

@@ -348,7 +348,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
         'image_only'   - Bbox center + size only (no triangulation component)
     """
 
-    use_noisy_rewards: bool = False
+    use_noisy_rewards: bool = True
     """If True, compute rewards using the noisy delayed pipeline instead of
     the clean pipeline. Used for A3 dual-path ablation."""
 
@@ -380,6 +380,9 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
 
     play_sim_at_step: int = 200000
     """Training step at which to enable rendering for debugging."""
+
+    eval_mode: bool = False
+    """Whether to use evaluation mode"""
 
     def __post_init__(self):
         """Populate agent-specific fields from num_agents.

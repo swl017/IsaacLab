@@ -210,6 +210,7 @@ register_experiment(ExperimentCfg(
         "agent.sequence_length": 1,
         "agent.learning_rate": 1e-4,
         "agent.grad_norm_clip": 1.0,
+        "use_noisy_rewards": False,
     },
 ))
 
@@ -258,6 +259,7 @@ register_experiment(ExperimentCfg(
         "reward_mode": "angular_only",
         "pos_std": 0.001,
         "intrinsics_std": 0.001,
+        "triangulation_reward_scale": 5.0/7.0,
     },
 ))
 
@@ -340,6 +342,17 @@ register_experiment(ExperimentCfg(
 for _n_agents in [2, 3, 4]:
     _agent_ids = [f"drone_{i}" for i in range(_n_agents)]
     _obs_dim = _compute_obs_dim(_n_agents)
+    # Scale network for larger observation spaces (n>=3: obs 62+, shared_obs 186+)
+    _agent_ovr = (
+        {
+            "models.policy.hidden_size": 64,
+            "models.policy.gru_hidden_size": 64,
+            "models.value.hidden_size": 64,
+            "models.value.gru_hidden_size": 64,
+        }
+        if _n_agents >= 3
+        else {}
+    )
     register_experiment(ExperimentCfg(
         name=f"sweep_agents_n{_n_agents}",
         description=f"Agent count sweep: N={_n_agents}, full system (AoI + delay + analytical covariance)",
@@ -351,6 +364,27 @@ for _n_agents in [2, 3, 4]:
             "observation_spaces": {aid: _obs_dim for aid in _agent_ids},
             # bbox_raycaster must match number of agents
             "bbox_raycaster.num_cameras_per_env": _n_agents,
+            "use_noisy_rewards": True,
+        },
+        agent_overrides=_agent_ovr,
+    ))
+
+
+# ===========================================================================
+# SHOULD: Delay Sweep (training-friendly, full curriculum)
+# ===========================================================================
+
+for _delay_ms in [200, 400, 600, 800]:
+    _delay_s = _delay_ms / 1000.0
+    register_experiment(ExperimentCfg(
+        name=f"sweep_delay_{_delay_ms}ms",
+        description=f"Delay sweep: {_delay_ms}ms mean latency, full curriculum",
+        group="delay_sweep",
+        env_overrides={
+            # "detection_mean_latency": _delay_s,
+            # "detection_std_latency": max(0.001, _delay_s * 0.1),
+            "comm_mean_latency": _delay_s,
+            "comm_std_latency": max(0.001, _delay_s * 0.1),
         },
     ))
 
@@ -389,15 +423,21 @@ register_suite(ExperimentSuiteCfg(
 register_suite(ExperimentSuiteCfg(
     name="iros2026_should",
     experiments=[
-        "sweep_agents_n1", "sweep_agents_n2", "sweep_agents_n3", "sweep_agents_n4",
+        "sweep_agents_n2", "sweep_agents_n3", "sweep_agents_n4",
+        "sweep_delay_200ms", "sweep_delay_400ms", "sweep_delay_600ms", "sweep_delay_800ms",
         "sweep_noise_sigma0px", "sweep_noise_sigma1px", "sweep_noise_sigma2px",
         "sweep_noise_sigma4px",
     ],
 ))
 
 register_suite(ExperimentSuiteCfg(
+    name="delay_sweep",
+    experiments=[f"sweep_delay_{d}ms" for d in [200, 400, 600, 800]],
+))
+
+register_suite(ExperimentSuiteCfg(
     name="a1_delay_sweep",
-    experiments=[f"a1_delay_sweep_{d}ms" for d in [0, 50, 100, 150, 200]],
+    experiments=[f"a1_delay_sweep_{d}ms" for d in [200, 400, 600, 800]],
 ))
 
 register_suite(ExperimentSuiteCfg(
@@ -406,6 +446,6 @@ register_suite(ExperimentSuiteCfg(
         list_experiments("A1") + list_experiments("A1_sweep")
         + list_experiments("A2") + list_experiments("A3") + list_experiments("A4")
         + list_experiments("baseline") + list_experiments("agent_sweep")
-        + list_experiments("noise_sweep")
+        + list_experiments("delay_sweep") + list_experiments("noise_sweep")
     ),
 ))

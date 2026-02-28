@@ -283,7 +283,7 @@ class IrisMAEnvV5(DirectMARLEnv):
         )
 
         # Curriculum parameters
-        current_step = self.cfg.play_sim_at_step if DEBUG_DRAW else self.common_step_counter
+        current_step = self.cfg.play_sim_at_step if DEBUG_DRAW or self.cfg.eval_mode else self.common_step_counter
         curr = self.cfg.curriculum
         self.progress_all = self._linear_progress(0, curr.all_end_step, current_step)
         self.progress_delay = self._linear_progress(curr.delay_start_step, curr.delay_end_step, current_step)
@@ -412,7 +412,7 @@ class IrisMAEnvV5(DirectMARLEnv):
 
     def _pre_physics_step(self, actions: Dict[str, torch.Tensor]):
         """Pre-process actions for all agents before physics step. Runs at decimated rate."""
-        current_step = self.cfg.play_sim_at_step if DEBUG_DRAW else self.common_step_counter
+        current_step = self.cfg.play_sim_at_step if DEBUG_DRAW or self.cfg.eval_mode else self.common_step_counter
         curr = self.cfg.curriculum
         self.progress_all = self._linear_progress(0, curr.all_end_step, current_step)
         self.progress_delay = self._linear_progress(curr.delay_start_step, curr.delay_end_step, current_step)
@@ -616,7 +616,7 @@ class IrisMAEnvV5(DirectMARLEnv):
 
         # Update noise curriculum scaling (Phase 2: noise ramps from 80k-100k)
         noise_progress = self.cfg.curriculum.get_noise_progress(
-            self.cfg.play_sim_at_step if DEBUG_DRAW else self.common_step_counter
+            self.cfg.play_sim_at_step if DEBUG_DRAW or self.cfg.eval_mode else self.common_step_counter
         )
         self.delay_system.set_noise_progress_scale(noise_progress)
 

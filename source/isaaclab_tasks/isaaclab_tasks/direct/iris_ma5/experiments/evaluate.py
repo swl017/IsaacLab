@@ -55,6 +55,8 @@ parser.add_argument("--detection-dropout-override", type=float, default=None,
                     help="Override detection failure rate (0-1)")
 parser.add_argument("--comm-dropout-override", type=float, default=None,
                     help="Override communication dropout rate (0-1)")
+parser.add_argument("--no-timeseries", action="store_true", default=False,
+                    help="Disable per-timestep timeseries collection")
 args_cli, hydra_args = parser.parse_known_args()
 
 # Clear sys.argv so Hydra only sees its own arguments
@@ -83,7 +85,7 @@ from isaaclab_tasks.direct.iris_ma5.experiments import (
     apply_env_overrides,
     apply_agent_overrides,
 )
-from isaaclab_tasks.direct.iris_ma5.experiments.metrics import MetricTracker
+from isaaclab_tasks.direct.iris_ma5.experiments.metrics import MetricTracker, TimeseriesTracker
 
 # Add skrl scripts dir to path for mappo_rnn imports
 _skrl_scripts_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..", "..",
@@ -92,7 +94,12 @@ _skrl_scripts_dir = os.path.normpath(_skrl_scripts_dir)
 sys.path.insert(0, _skrl_scripts_dir)
 
 
-def _collect_step_metrics(tracker: MetricTracker, env) -> None:
+def _collect_step_metrics(
+    tracker: MetricTracker,
+    env,
+    ts_tracker: "TimeseriesTracker | None" = None,
+    done_mask: "torch.Tensor | None" = None,
+) -> None:
     """Extract per-step metrics from environment internals.
 
     Uses the noisy-path triangulation for position estimate and trace, since
@@ -101,6 +108,13 @@ def _collect_step_metrics(tracker: MetricTracker, env) -> None:
 
     The rewards-path ``triangulation_results`` stores ``X_w_gt`` (ground truth)
     at index 0, not an estimate, so it cannot be used for RMSE.
+
+    Args:
+        tracker: Episode-level metric tracker.
+        env: Unwrapped environment instance.
+        ts_tracker: Optional timeseries tracker for per-timestep stats.
+        done_mask: Optional [N, 1] bool tensor — True for envs that just
+            finished (post-reset). Used to exclude them from timeseries.
     """
     first_agent = env.cfg.possible_agents[0]
 
@@ -143,6 +157,37 @@ def _collect_step_metrics(tracker: MetricTracker, env) -> None:
         collision_flags=collision_flags,
         tri_valid=is_valid,
     )
+
+    # Feed timeseries tracker with derived per-env metrics
+    if ts_tracker is not None:
+        rmse = torch.norm(tri_pos[:, :3] - gt_target_pos[:, :3], dim=-1)  # [N]
+        sqrt_trace = torch.sqrt(trace_cov.squeeze(-1).clamp(min=0))  # [N]
+        visibility = bbox_valid_mask.float().mean(dim=-1)  # [N]
+        tri_valid_float = is_valid.squeeze(-1).float()  # [N]
+
+        # Mean agent-to-target distance
+        agent_dists = []
+        for aid in env.cfg.possible_agents:
+            agent_pos = env._robots[aid].data.root_pos_w[:, :3]
+            dist = torch.norm(agent_pos - gt_target_pos[:, :3], dim=-1)
+            agent_dists.append(dist)
+        distance = torch.stack(agent_dists, dim=-1).mean(dim=-1)  # [N]
+
+        # Target ground-truth speed
+        target_vel = env.target.data.root_lin_vel_w[:, :3]  # [N, 3]
+        tgt_speed = torch.norm(target_vel, dim=-1)  # [N]
+
+        active_mask = ~done_mask.squeeze(-1) if done_mask is not None else None
+        ts_tracker.step(
+            rmse=rmse,
+            sqrt_trace=sqrt_trace,
+            visibility=visibility,
+            tri_valid=tri_valid_float,
+            distance=distance,
+            target_speed=tgt_speed,
+            active_mask=active_mask,
+            tri_valid_mask=is_valid.squeeze(-1),
+        )
 
 
 def _load_rnn_policy(checkpoint_path, env, agent_cfg, possible_agents):
@@ -456,6 +501,7 @@ def main(env_cfg, agent_cfg: dict):
     env_cfg.curriculum.random_delay_end_step = 0
     env_cfg.curriculum.dropout_start_step = 0
     env_cfg.curriculum.dropout_end_step = 0
+    env_cfg.eval_mode = True
 
     # Create environment
     env = gym.make(args_cli.task, cfg=env_cfg)
@@ -480,6 +526,16 @@ def main(env_cfg, agent_cfg: dict):
         num_agents=num_agents,
         device=unwrapped.device,
     )
+
+    # Timeseries tracker for per-timestep statistics
+    if not args_cli.no_timeseries:
+        ts_tracker = TimeseriesTracker(
+            max_episode_steps=unwrapped.max_episode_length,
+            num_envs=args_cli.num_envs,
+            device=unwrapped.device,
+        )
+    else:
+        ts_tracker = None
 
     # Load policy — route based on experiment type
     is_greedy = (args_cli.experiment == "baseline_greedy")
@@ -525,24 +581,33 @@ def main(env_cfg, agent_cfg: dict):
 
         obs, rewards, terminated, truncated, info = env_wrapped.step(actions)
 
-        # Collect metrics from env internals
-        _collect_step_metrics(tracker, unwrapped)
-
-        # Check for episode completions
+        # Detect done envs before collecting metrics (so timeseries can
+        # exclude post-reset environments from the completed episode's data)
         first_agent = possible_agents[0]
         if isinstance(terminated, dict):
             done_mask = terminated[first_agent] | truncated[first_agent]
         else:
             done_mask = terminated | truncated
+
+        # Collect metrics from env internals
+        _collect_step_metrics(tracker, unwrapped, ts_tracker, done_mask)
+
+        # Handle episode completions
         done_envs = torch.where(done_mask.squeeze(-1) if done_mask.dim() > 1 else done_mask)[0]
         if done_envs.numel() > 0:
             tracker.record_episode_end(done_envs)
+            if ts_tracker is not None:
+                ts_tracker.record_episode_end(done_envs)
             completed += done_envs.numel()
             if completed % max(total_target // 10, 1) == 0 or completed >= total_target:
                 print(f"[EVAL] Completed {completed}/{total_target} episodes")
 
     # Compute final metrics
     results = tracker.compute_final_metrics()
+    if ts_tracker is not None:
+        ts_data = ts_tracker.compute_timeseries()
+        ts_data["step_dt_seconds"] = float(unwrapped.step_dt)
+        results["timeseries"] = ts_data
     results["experiment"] = exp_cfg.name
     results["checkpoint"] = args_cli.checkpoint or "greedy"
     results["eval_params"] = {
