@@ -348,7 +348,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
         'image_only'   - Bbox center + size only (no triangulation component)
     """
 
-    use_noisy_rewards: bool = True
+    use_noisy_rewards: bool = False
     """If True, compute rewards using the noisy delayed pipeline instead of
     the clean pipeline. Used for A3 dual-path ablation."""
 

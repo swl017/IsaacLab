@@ -4,28 +4,75 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Evaluate a trained checkpoint and compute the 8 IROS 2026 paper metrics.
+"""Evaluate a trained checkpoint and compute IROS 2026 paper metrics.
 
-Usage:
-    # Evaluate a trained policy
-    ./isaaclab.sh -p .../experiments/evaluate.py \\
-        --experiment a1_stochastic_delay \\
-        --checkpoint /path/to/agent_drone_0_final.pt \\
-        --num_episodes 100 --output results.json
+Modes of operation:
+    1. Standard evaluation      -- compute 8 paper metrics + timeseries
+    2. Parameter sweep          -- override runtime params (delay, speed, noise, etc.)
+    3. Trajectory recording     -- record agent/target XYZ paths for visualization
+
+Usage examples:
+
+    # Standard evaluation of a trained policy
+    ./isaaclab.sh -p .../evaluate.py \\
+        --experiment a3_noisy_reward \\
+        --checkpoint /path/to/best_agent.pt \\
+        --num_episodes 1 --num_envs 4096 \\
+        --output results.json
 
     # Evaluate greedy baseline (no checkpoint needed)
-    ./isaaclab.sh -p .../experiments/evaluate.py \\
-        --experiment baseline_greedy --num_episodes 100
+    ./isaaclab.sh -p .../evaluate.py \\
+        --experiment baseline_greedy \\
+        --num_episodes 1 --num_envs 4096
 
-    # Evaluation with runtime parameter sweep (delay override)
-    ./isaaclab.sh -p .../experiments/evaluate.py \\
-        --experiment a1_with_aoi \\
+    # Parameter sweep: override detection delay
+    ./isaaclab.sh -p .../evaluate.py \\
+        --experiment a3_noisy_reward \\
         --checkpoint /path/to/best_agent.pt \\
         --delay-override 0.1 --output results_100ms.json
 
-Supports two checkpoint formats:
-    - agent_drone_0_final.pt: {policy_state_dict, value_state_dict}
+    # Parameter sweep: override target speed
+    ./isaaclab.sh -p .../evaluate.py \\
+        --experiment a3_noisy_reward \\
+        --checkpoint /path/to/best_agent.pt \\
+        --target-speed 8.0 --output results_8mps.json
+
+    # Record trajectories for bird's-eye view visualization
+    ./isaaclab.sh -p .../evaluate.py \\
+        --experiment a3_noisy_reward \\
+        --checkpoint /path/to/best_agent.pt \\
+        --num_episodes 1 --num_envs 4096 \\
+        --record-trajectory --trajectory-envs 8 \\
+        --target-trajectory-mode linear \\
+        --no-timeseries --output traj_linear.json
+
+Core arguments:
+    --experiment NAME       Experiment name from registry (required)
+    --checkpoint PATH       Path to trained checkpoint .pt file
+    --num_episodes N        Episodes per env (total = N * num_envs)
+    --num_envs N            Number of parallel eval environments (default: 4096)
+    --output PATH           Output JSON path for results
+    --headless              Run without GUI (default: True)
+    --no-timeseries         Disable per-timestep timeseries collection
+    --verbose               Log per-step obs/action diagnostics
+
+Runtime parameter overrides (for sweep evaluations):
+    --delay-override SEC    Detection latency (e.g., 0.1 for 100ms)
+    --comm-delay-override S Communication latency
+    --target-speed M/S      Target max speed
+    --noise-override PIX    Pixel noise std
+    --accel-override M/S2   Target max acceleration
+    --detection-dropout-override RATE   Detection failure rate (0-1)
+    --comm-dropout-override RATE        Comm dropout rate (0-1)
+
+Trajectory recording (for visualization):
+    --record-trajectory         Enable per-step position recording
+    --trajectory-envs N         Number of sample envs to record (default: 8)
+    --target-trajectory-mode    Force target mode: 'linear' or 'circular'
+
+Checkpoint formats supported:
     - best_agent.pt (SKRL): {drone_0: {policy, value, ...}, ...}
+    - agent_drone_0_final.pt: {policy_state_dict, value_state_dict}
 """
 
 import argparse
@@ -59,6 +106,14 @@ parser.add_argument("--no-timeseries", action="store_true", default=False,
                     help="Disable per-timestep timeseries collection")
 parser.add_argument("--verbose", action="store_true", default=False,
                     help="Log per-step action/obs diagnostics for first N steps (debugging)")
+# Trajectory recording for visualization
+parser.add_argument("--record-trajectory", action="store_true", default=False,
+                    help="Record per-step agent/target trajectories for visualization")
+parser.add_argument("--trajectory-envs", type=int, default=8,
+                    help="Number of sample environments to record trajectories for (default: 8)")
+parser.add_argument("--target-trajectory-mode", type=str, default=None,
+                    choices=["linear", "circular"],
+                    help="Force target trajectory mode: 'linear' (straight-line) or 'circular' (orbit)")
 args_cli, hydra_args = parser.parse_known_args()
 
 # Clear sys.argv so Hydra only sees its own arguments
@@ -518,9 +573,28 @@ def main(env_cfg, agent_cfg: dict):
         env_cfg.comm_dropout_rate = args_cli.comm_dropout_override
         print(f"[EVAL] Comm dropout override: {args_cli.comm_dropout_override:.2f}")
 
+    # Force target trajectory mode for trajectory visualization
+    if args_cli.target_trajectory_mode is not None:
+        tm = env_cfg.target_movement
+        # Disable velocity re-randomization and mode switching
+        tm.allow_mode_switching = False
+        tm.use_timer_based_updates = False
+        tm.direction_change_prob = 0.0
+        # Expand geofence and altitude bounds so the target never bounces
+        tm.geofence_min_size = 10000.0
+        tm.geofence_max_size = 10000.0
+        tm.min_altitude = 1.0
+        tm.max_altitude = 10000.0
+        if args_cli.target_trajectory_mode == "linear":
+            tm.linear_weight = 1.0
+            print("[EVAL] Target trajectory mode: all LINEAR (no direction changes, no geofence)")
+        elif args_cli.target_trajectory_mode == "circular":
+            tm.linear_weight = 0.0
+            print("[EVAL] Target trajectory mode: all CIRCULAR (no direction changes, no geofence)")
+
     # Set eval params
     env_cfg.scene.num_envs = args_cli.num_envs
-    env_cfg.episode_length_s = 100.0
+    env_cfg.episode_length_s = 20.0
 
     # For evaluation, set all curriculum to full difficulty
     env_cfg.curriculum.tracking_start_step = 0
@@ -575,6 +649,20 @@ def main(env_cfg, agent_cfg: dict):
     else:
         ts_tracker = None
 
+    # Trajectory recorder for visualization
+    if args_cli.record_trajectory:
+        from isaaclab_tasks.direct.iris_ma5.experiments.metrics import TrajectoryRecorder
+        traj_recorder = TrajectoryRecorder(
+            num_sample_envs=args_cli.trajectory_envs,
+            num_total_envs=args_cli.num_envs,
+            agent_ids=list(possible_agents),
+            max_steps=unwrapped.max_episode_length,
+        )
+        print(f"[EVAL] Trajectory recording: {args_cli.trajectory_envs} sample envs, "
+              f"sample_ids={traj_recorder.sample_env_ids[:4]}...")
+    else:
+        traj_recorder = None
+
     # Load policy — route based on experiment type
     is_greedy = (args_cli.experiment == "baseline_greedy")
     if is_greedy:
@@ -604,12 +692,13 @@ def main(env_cfg, agent_cfg: dict):
     verbose_steps = 5  # Number of initial steps to log diagnostics
     episodes_done = False  # True once per-episode target is met
 
-    # When timeseries collection is active, keep running until the full episode
-    # length so that successful (long-running) episodes contribute data at all
-    # timesteps.  Without this, the loop exits as soon as enough episodes have
-    # completed — which can happen well before step 2500 when many envs fail
-    # early and auto-reset.
-    max_steps_for_ts = unwrapped.max_episode_length if ts_tracker is not None else 0
+    # When timeseries or trajectory collection is active, keep running until the
+    # full episode length so that successful (long-running) episodes contribute
+    # data at all timesteps.  Without this, the loop exits as soon as enough
+    # episodes have completed — which can happen well before step 2500 when many
+    # envs fail early and auto-reset.
+    needs_full_episode = ts_tracker is not None or traj_recorder is not None
+    max_steps_for_ts = unwrapped.max_episode_length if needs_full_episode else 0
 
     while completed < total_target or step_count < max_steps_for_ts:
         # Compute actions
@@ -669,6 +758,46 @@ def main(env_cfg, agent_cfg: dict):
         elif ts_tracker is not None:
             _collect_step_metrics(tracker=None, env=unwrapped, ts_tracker=ts_tracker, done_mask=done_mask)
 
+        # Record trajectories for visualization
+        if traj_recorder is not None and not traj_recorder.is_done():
+            _traj_agent_pos = {
+                aid: unwrapped._robots[aid].data.root_pos_w[:, :3]
+                for aid in possible_agents
+            }
+            _traj_target_pos = unwrapped.target.data.root_pos_w[:, :3]
+
+            # Triangulated position and validity from noisy path
+            _traj_first = possible_agents[0]
+            if hasattr(unwrapped, "triangulation_results_noisy") and _traj_first in unwrapped.triangulation_results_noisy:
+                _X_w_tri, _, _, _, _is_valid = unwrapped.triangulation_results_noisy[_traj_first]
+                _traj_tri_pos = _X_w_tri.squeeze(1)[:, :3] if _X_w_tri.dim() == 3 else _X_w_tri[:, :3]
+                _traj_tri_valid = _is_valid.squeeze(-1) if _is_valid.dim() > 1 else _is_valid
+            else:
+                _traj_tri_pos = torch.zeros(args_cli.num_envs, 3, device=unwrapped.device)
+                _traj_tri_valid = torch.zeros(args_cli.num_envs, device=unwrapped.device, dtype=torch.bool)
+
+            # Mean pairwise viewing angle
+            _ray_dirs = []
+            for aid in possible_agents:
+                _ap = unwrapped._robots[aid].data.root_pos_w[:, :3]
+                _to_tgt = _traj_target_pos - _ap
+                _ray_dirs.append(_to_tgt / (_to_tgt.norm(dim=-1, keepdim=True) + 1e-6))
+            _cos_angles = []
+            for _k in range(len(_ray_dirs)):
+                for _j in range(_k + 1, len(_ray_dirs)):
+                    _cos_angles.append((_ray_dirs[_k] * _ray_dirs[_j]).sum(dim=-1))
+            _cos_mean = torch.stack(_cos_angles, dim=1).mean(dim=1)
+            _traj_viewing_angle = torch.acos(_cos_mean.clamp(-1, 1)) * (180.0 / torch.pi)
+
+            traj_recorder.step(
+                agent_positions=_traj_agent_pos,
+                target_pos=_traj_target_pos,
+                tri_pos=_traj_tri_pos,
+                tri_valid=_traj_tri_valid,
+                viewing_angle=_traj_viewing_angle,
+                env_origins=unwrapped._terrain.env_origins,
+            )
+
         # Handle episode completions
         done_envs = torch.where(done_mask.squeeze(-1) if done_mask.dim() > 1 else done_mask)[0]
         if done_envs.numel() > 0:
@@ -684,6 +813,8 @@ def main(env_cfg, agent_cfg: dict):
                     print(f"[EVAL] Completed {completed}/{total_target} episodes")
             if ts_tracker is not None:
                 ts_tracker.record_episode_end(done_envs)
+            if traj_recorder is not None:
+                traj_recorder.record_episode_end(done_envs)
 
     # Compute final metrics
     results = tracker.compute_final_metrics()
@@ -691,6 +822,11 @@ def main(env_cfg, agent_cfg: dict):
         ts_data = ts_tracker.compute_timeseries()
         ts_data["step_dt_seconds"] = float(unwrapped.step_dt)
         results["timeseries"] = ts_data
+    if traj_recorder is not None:
+        traj_data = traj_recorder.to_dict()
+        traj_data["step_dt_seconds"] = float(unwrapped.step_dt)
+        traj_data["target_trajectory_mode"] = args_cli.target_trajectory_mode or "mixed"
+        results["trajectories"] = traj_data
     results["experiment"] = exp_cfg.name
     results["checkpoint"] = args_cli.checkpoint or "greedy"
     results["eval_params"] = {
