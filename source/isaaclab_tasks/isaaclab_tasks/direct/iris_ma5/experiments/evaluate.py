@@ -57,6 +57,8 @@ parser.add_argument("--comm-dropout-override", type=float, default=None,
                     help="Override communication dropout rate (0-1)")
 parser.add_argument("--no-timeseries", action="store_true", default=False,
                     help="Disable per-timestep timeseries collection")
+parser.add_argument("--verbose", action="store_true", default=False,
+                    help="Log per-step action/obs diagnostics for first N steps (debugging)")
 args_cli, hydra_args = parser.parse_known_args()
 
 # Clear sys.argv so Hydra only sees its own arguments
@@ -95,7 +97,7 @@ sys.path.insert(0, _skrl_scripts_dir)
 
 
 def _collect_step_metrics(
-    tracker: MetricTracker,
+    tracker: "MetricTracker | None",
     env,
     ts_tracker: "TimeseriesTracker | None" = None,
     done_mask: "torch.Tensor | None" = None,
@@ -110,7 +112,7 @@ def _collect_step_metrics(
     at index 0, not an estimate, so it cannot be used for RMSE.
 
     Args:
-        tracker: Episode-level metric tracker.
+        tracker: Episode-level metric tracker (None to skip episode-level recording).
         env: Unwrapped environment instance.
         ts_tracker: Optional timeseries tracker for per-timestep stats.
         done_mask: Optional [N, 1] bool tensor — True for envs that just
@@ -149,14 +151,15 @@ def _collect_step_metrics(
     else:
         collision_flags = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
 
-    tracker.step(
-        trace_sigma=trace_cov,
-        triangulated_pos=tri_pos,
-        gt_target_pos=gt_target_pos,
-        bbox_valid_mask=bbox_valid_mask,
-        collision_flags=collision_flags,
-        tri_valid=is_valid,
-    )
+    if tracker is not None:
+        tracker.step(
+            trace_sigma=trace_cov,
+            triangulated_pos=tri_pos,
+            gt_target_pos=gt_target_pos,
+            bbox_valid_mask=bbox_valid_mask,
+            collision_flags=collision_flags,
+            tri_valid=is_valid,
+        )
 
     # Feed timeseries tracker with derived per-env metrics
     if ts_tracker is not None:
@@ -177,6 +180,21 @@ def _collect_step_metrics(
         target_vel = env.target.data.root_lin_vel_w[:, :3]  # [N, 3]
         tgt_speed = torch.norm(target_vel, dim=-1)  # [N]
 
+        # Mean pairwise viewing angle (degrees)
+        ray_dirs = []
+        for aid in env.cfg.possible_agents:
+            agent_pos = env._robots[aid].data.root_pos_w[:, :3]
+            to_target = gt_target_pos[:, :3] - agent_pos
+            ray_dir = to_target / (to_target.norm(dim=-1, keepdim=True) + 1e-6)
+            ray_dirs.append(ray_dir)
+        cos_angles = []
+        for k in range(len(ray_dirs)):
+            for j in range(k + 1, len(ray_dirs)):
+                cos_angle = (ray_dirs[k] * ray_dirs[j]).sum(dim=-1)
+                cos_angles.append(cos_angle)
+        cos_mean = torch.stack(cos_angles, dim=1).mean(dim=1)
+        viewing_angle = torch.acos(cos_mean.clamp(-1, 1)) * (180.0 / torch.pi)  # [N]
+
         active_mask = ~done_mask.squeeze(-1) if done_mask is not None else None
         ts_tracker.step(
             rmse=rmse,
@@ -185,6 +203,7 @@ def _collect_step_metrics(
             tri_valid=tri_valid_float,
             distance=distance,
             target_speed=tgt_speed,
+            viewing_angle=viewing_angle,
             active_mask=active_mask,
             tri_valid_mask=is_valid.squeeze(-1),
         )
@@ -316,6 +335,15 @@ def _load_rnn_policy(checkpoint_path, env, agent_cfg, possible_agents):
         raise ValueError(f"Unknown checkpoint format. Keys: {list(ckpt.keys())}")
 
     agent.set_mode("eval")
+
+    # Freeze preprocessors so running stats don't update during eval
+    for uid in possible_agents:
+        for key in ("_state_preprocessor", "_shared_state_preprocessor", "_value_preprocessor"):
+            pp = getattr(agent, key, None)
+            if isinstance(pp, dict) and uid in pp and hasattr(pp[uid], "eval"):
+                pp[uid].eval()
+    print("[EVAL] Preprocessors frozen for evaluation")
+
     return agent
 
 
@@ -441,6 +469,15 @@ def _load_mlp_policy(checkpoint_path, env, agent_cfg, possible_agents):
         raise ValueError(f"Unknown checkpoint format. Keys: {list(ckpt.keys())}")
 
     agent.set_mode("eval")
+
+    # Freeze preprocessors so running stats don't update during eval
+    for uid in possible_agents:
+        for key in ("_state_preprocessor", "_shared_state_preprocessor", "_value_preprocessor"):
+            pp = getattr(agent, key, None)
+            if isinstance(pp, dict) and uid in pp and hasattr(pp[uid], "eval"):
+                pp[uid].eval()
+    print("[EVAL] Preprocessors frozen for evaluation")
+
     return agent
 
 
@@ -483,6 +520,7 @@ def main(env_cfg, agent_cfg: dict):
 
     # Set eval params
     env_cfg.scene.num_envs = args_cli.num_envs
+    env_cfg.episode_length_s = 100.0
 
     # For evaluation, set all curriculum to full difficulty
     env_cfg.curriculum.tracking_start_step = 0
@@ -562,7 +600,18 @@ def main(env_cfg, agent_cfg: dict):
 
     print(f"[EVAL] Starting evaluation: {args_cli.num_episodes} ep/env × {args_cli.num_envs} envs = {total_target} total episodes")
 
-    while completed < total_target:
+    step_count = 0
+    verbose_steps = 5  # Number of initial steps to log diagnostics
+    episodes_done = False  # True once per-episode target is met
+
+    # When timeseries collection is active, keep running until the full episode
+    # length so that successful (long-running) episodes contribute data at all
+    # timesteps.  Without this, the loop exits as soon as enough episodes have
+    # completed — which can happen well before step 2500 when many envs fail
+    # early and auto-reset.
+    max_steps_for_ts = unwrapped.max_episode_length if ts_tracker is not None else 0
+
+    while completed < total_target or step_count < max_steps_for_ts:
         # Compute actions
         if is_greedy:
             agent_positions = {
@@ -579,6 +628,29 @@ def main(env_cfg, agent_cfg: dict):
             with torch.no_grad():
                 actions, _, _ = policy.act(obs, 0, 0)
 
+        # Diagnostic logging for first N steps (guarded by --verbose)
+        if args_cli.verbose and step_count < verbose_steps:
+            for uid in possible_agents:
+                o = obs[uid]
+                a = actions[uid]
+                print(f"[DIAG] step={step_count} {uid} obs:  shape={list(o.shape)} "
+                      f"mean={o.mean():.4f} std={o.std():.4f} min={o.min():.4f} max={o.max():.4f}")
+                print(f"[DIAG] step={step_count} {uid} act:  shape={list(a.shape)} "
+                      f"mean={a.mean():.4f} std={a.std():.4f} min={a.min():.4f} max={a.max():.4f}")
+            if step_count == 0:
+                # Log preprocessor state on first step
+                if not is_greedy and hasattr(policy, '_state_preprocessor'):
+                    uid0 = possible_agents[0]
+                    pp = policy._state_preprocessor.get(uid0) if isinstance(policy._state_preprocessor, dict) else None
+                    if pp is not None and hasattr(pp, 'running_mean'):
+                        print(f"[DIAG] preprocessor running_mean: shape={list(pp.running_mean.shape)} "
+                              f"mean={pp.running_mean.mean():.4f} std={pp.running_mean.std():.4f}")
+                        print(f"[DIAG] preprocessor running_variance: mean={pp.running_variance.mean():.4f}")
+                        print(f"[DIAG] preprocessor current_count: {pp.current_count.item():.0f}")
+                        print(f"[DIAG] preprocessor training: {pp.training}")
+
+        step_count += 1
+
         obs, rewards, terminated, truncated, info = env_wrapped.step(actions)
 
         # Detect done envs before collecting metrics (so timeseries can
@@ -589,18 +661,29 @@ def main(env_cfg, agent_cfg: dict):
         else:
             done_mask = terminated | truncated
 
-        # Collect metrics from env internals
-        _collect_step_metrics(tracker, unwrapped, ts_tracker, done_mask)
+        # Collect metrics from env internals.
+        # After the per-episode target is met, only feed the timeseries tracker
+        # (the per-episode tracker already has all episodes it needs).
+        if not episodes_done:
+            _collect_step_metrics(tracker, unwrapped, ts_tracker, done_mask)
+        elif ts_tracker is not None:
+            _collect_step_metrics(tracker=None, env=unwrapped, ts_tracker=ts_tracker, done_mask=done_mask)
 
         # Handle episode completions
         done_envs = torch.where(done_mask.squeeze(-1) if done_mask.dim() > 1 else done_mask)[0]
         if done_envs.numel() > 0:
-            tracker.record_episode_end(done_envs)
+            if not episodes_done:
+                tracker.record_episode_end(done_envs)
+                completed += done_envs.numel()
+                if completed >= total_target:
+                    episodes_done = True
+                    print(f"[EVAL] Completed {completed}/{total_target} episodes"
+                          f" at step {step_count}; continuing for timeseries..."
+                          if ts_tracker is not None else "")
+                elif completed % max(total_target // 10, 1) == 0:
+                    print(f"[EVAL] Completed {completed}/{total_target} episodes")
             if ts_tracker is not None:
                 ts_tracker.record_episode_end(done_envs)
-            completed += done_envs.numel()
-            if completed % max(total_target // 10, 1) == 0 or completed >= total_target:
-                print(f"[EVAL] Completed {completed}/{total_target} episodes")
 
     # Compute final metrics
     results = tracker.compute_final_metrics()
@@ -622,15 +705,15 @@ def main(env_cfg, agent_cfg: dict):
         "comm_dropout_override": args_cli.comm_dropout_override,
     }
 
-    print(f"\n{'='*80}")
-    print("EVALUATION RESULTS")
-    print(f"{'='*80}")
-    for key, value in results.items():
-        if isinstance(value, float):
-            print(f"  {key:30s}: {value:.4f}")
-        else:
-            print(f"  {key:30s}: {value}")
-    print(f"{'='*80}")
+    # print(f"\n{'='*80}")
+    # print("EVALUATION RESULTS")
+    # print(f"{'='*80}")
+    # for key, value in results.items():
+    #     if isinstance(value, float):
+    #         print(f"  {key:30s}: {value:.4f}")
+    #     else:
+    #         print(f"  {key:30s}: {value}")
+    # print(f"{'='*80}")
 
     # Save results
     if args_cli.output:

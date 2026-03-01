@@ -20,6 +20,7 @@ Metrics tracked:
     - ``tri_valid`` — binary triangulation validity (0 or 1)
     - ``distance_to_target`` — mean agent-to-target Euclidean distance
     - ``target_speed`` — target ground-truth speed (m/s)
+    - ``viewing_angle`` — mean pairwise viewing angle between agents (degrees)
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ import torch
 
 
 # Metrics recorded at every step (all environments)
-_ALWAYS_METRICS = ["visibility", "tri_valid", "distance_to_target", "target_speed"]
+_ALWAYS_METRICS = ["visibility", "tri_valid", "distance_to_target", "target_speed", "viewing_angle"]
 
 # Metrics recorded only when triangulation is valid
 _VALID_ONLY_METRICS = ["triangulation_rmse", "sqrt_trace_sigma"]
@@ -57,6 +58,7 @@ class TimeseriesTracker:
                 tri_valid=tri_valid_float,   # [N]
                 distance=mean_agent_dist,    # [N]
                 target_speed=tgt_speed,      # [N]
+                viewing_angle=angle_deg,     # [N]
                 active_mask=~done_mask,      # [N] — exclude post-reset envs
                 tri_valid_mask=is_valid,     # [N] bool — for RMSE/trace gating
             )
@@ -99,6 +101,7 @@ class TimeseriesTracker:
         tri_valid: torch.Tensor,
         distance: torch.Tensor,
         target_speed: torch.Tensor,
+        viewing_angle: torch.Tensor,
         active_mask: Optional[torch.Tensor] = None,
         tri_valid_mask: Optional[torch.Tensor] = None,
     ) -> None:
@@ -111,6 +114,7 @@ class TimeseriesTracker:
             tri_valid: Binary tri validity per env [N] (float 0/1).
             distance: Mean agent-target distance per env [N].
             target_speed: Target ground-truth speed per env [N] (m/s).
+            viewing_angle: Mean pairwise viewing angle per env [N] (degrees).
             active_mask: Boolean [N] — True for envs in an active episode
                 (False for envs that just terminated/truncated and were reset).
                 If None, all envs are considered active.
@@ -139,6 +143,7 @@ class TimeseriesTracker:
             "tri_valid": tri_valid.float().cpu()[active],
             "distance_to_target": distance.float().cpu()[active],
             "target_speed": target_speed.float().cpu()[active],
+            "viewing_angle": viewing_angle.float().cpu()[active],
         }
         for name in _ALWAYS_METRICS:
             v = vals_cpu[name].double()
