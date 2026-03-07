@@ -167,7 +167,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
 
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=4096,
-        env_spacing=25.0,
+        env_spacing=125.0,
         replicate_physics=True,
     )
 

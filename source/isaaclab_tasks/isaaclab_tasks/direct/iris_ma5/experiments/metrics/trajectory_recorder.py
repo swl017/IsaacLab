@@ -93,6 +93,7 @@ class TrajectoryRecorder:
                 "target": {"x": [], "y": [], "z": []},
                 "tri_estimate": {"x": [], "y": [], "z": []},
                 "tri_valid": [],
+                "rmse": [],
                 "viewing_angle": [],
             }
 
@@ -102,6 +103,7 @@ class TrajectoryRecorder:
         target_pos: torch.Tensor,
         tri_pos: torch.Tensor,
         tri_valid: torch.Tensor,
+        rmse: torch.Tensor,
         viewing_angle: torch.Tensor,
         env_origins: torch.Tensor,
     ) -> None:
@@ -112,6 +114,7 @@ class TrajectoryRecorder:
             target_pos: ``[N, 3]`` target world-frame position.
             tri_pos: ``[N, 3]`` triangulated position estimate.
             tri_valid: ``[N]`` or ``[N, 1]`` boolean validity mask.
+            rmse: ``[N]`` per-env triangulation RMSE in meters.
             viewing_angle: ``[N]`` mean pairwise viewing angle in degrees.
             env_origins: ``[N, 3]`` terrain environment origins.
         """
@@ -142,6 +145,7 @@ class TrajectoryRecorder:
             # Triangulated estimate (local, None if invalid)
             valid = bool(tri_valid[eid])
             d["tri_valid"].append(valid)
+            d["rmse"].append(float(rmse[eid]) if valid else None)
             if valid:
                 tri_local = tri_pos[eid] - origin
                 d["tri_estimate"]["x"].append(float(tri_local[0]))
@@ -200,6 +204,7 @@ class TrajectoryRecorder:
                 "target": d["target"],
                 "tri_estimate": d["tri_estimate"],
                 "tri_valid": d["tri_valid"],
+                "rmse": d["rmse"],
                 "viewing_angle": d["viewing_angle"],
             }
 

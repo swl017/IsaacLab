@@ -17,6 +17,8 @@ Tracks IROS 2026 paper metrics during evaluation:
     9. Track loss count — valid-to-invalid transitions (fragmentation)
    10. Max track gap — longest consecutive invalid sequence (steps)
    11. Track maintenance rate — fraction of episodes meeting tri_valid threshold
+   12. Ego AoI — mean age of each agent's own detection (seconds)
+   13. Other AoI — mean age of detections received from other agents (seconds)
 
 Legacy metric (backward compatibility):
     - task_success_rate_legacy — old flat RMSE-only success definition
@@ -113,6 +115,12 @@ class MetricTracker:
         self._current_gap_length = torch.zeros(num_envs, device=device, dtype=torch.long)
         self._max_track_gap = torch.zeros(num_envs, device=device, dtype=torch.long)
 
+        # Age of Information (AoI) accumulators
+        self._ego_aoi_sum = torch.zeros(num_envs, device=device)
+        self._ego_aoi_sq_sum = torch.zeros(num_envs, device=device)
+        self._other_aoi_sum = torch.zeros(num_envs, device=device)
+        self._other_aoi_sq_sum = torch.zeros(num_envs, device=device)
+
         # Completed episode stats
         self._completed_episodes: List[Dict[str, float]] = []
 
@@ -135,6 +143,10 @@ class MetricTracker:
         self._track_loss_count[env_ids] = 0
         self._current_gap_length[env_ids] = 0
         self._max_track_gap[env_ids] = 0
+        self._ego_aoi_sum[env_ids] = 0.0
+        self._ego_aoi_sq_sum[env_ids] = 0.0
+        self._other_aoi_sum[env_ids] = 0.0
+        self._other_aoi_sq_sum[env_ids] = 0.0
 
     def step(
         self,
@@ -144,6 +156,8 @@ class MetricTracker:
         bbox_valid_mask: torch.Tensor,
         collision_flags: torch.Tensor,
         tri_valid: torch.Tensor,
+        ego_aoi: torch.Tensor | None = None,
+        other_aoi: torch.Tensor | None = None,
     ) -> None:
         """Record one step of metrics.
 
@@ -154,6 +168,8 @@ class MetricTracker:
             bbox_valid_mask: [N, C] boolean, valid detections per agent.
             collision_flags: [N] boolean, inter-agent collision this step.
             tri_valid: [N, 1] boolean, triangulation valid this step.
+            ego_aoi: [N] mean age of ego detections across agents (seconds).
+            other_aoi: [N] mean age of other agents' detections (seconds).
         """
         self._step_count += 1
 
@@ -212,6 +228,14 @@ class MetricTracker:
         )
         self._max_track_gap = torch.max(self._max_track_gap, self._current_gap_length)
 
+        # Age of Information
+        if ego_aoi is not None:
+            self._ego_aoi_sum += ego_aoi
+            self._ego_aoi_sq_sum += ego_aoi ** 2
+        if other_aoi is not None:
+            self._other_aoi_sum += other_aoi
+            self._other_aoi_sq_sum += other_aoi ** 2
+
         self._prev_tri_valid = valid.clone()
 
     def record_episode_end(self, env_ids: torch.Tensor) -> None:
@@ -265,6 +289,10 @@ class MetricTracker:
                 "max_track_gap": self._max_track_gap[i].item(),
                 "episode_length": steps,
                 "tri_valid_ratio": tri_valid_ratio,
+                "ego_aoi_sum": self._ego_aoi_sum[i].item(),
+                "ego_aoi_sq_sum": self._ego_aoi_sq_sum[i].item(),
+                "other_aoi_sum": self._other_aoi_sum[i].item(),
+                "other_aoi_sq_sum": self._other_aoi_sq_sum[i].item(),
             })
         self.reset(env_ids)
 
@@ -339,6 +367,10 @@ class MetricTracker:
             "rmse_sum", "rmse_sq_sum", "rmse_valid_count")
         vis_m, vis_s = _pooled_mean_std(
             "visibility_sum", "visibility_sq_sum", "episode_length")
+        ego_aoi_m, ego_aoi_s = _pooled_mean_std(
+            "ego_aoi_sum", "ego_aoi_sq_sum", "episode_length")
+        other_aoi_m, other_aoi_s = _pooled_mean_std(
+            "other_aoi_sum", "other_aoi_sq_sum", "episode_length")
         # Episode-level metrics: std across episodes
         coll_m, coll_s = _mean_std([e["collision_count"] for e in eps])
         conv_m, conv_s = _mean_std_positive([e["convergence_step"] for e in eps])
@@ -357,6 +389,10 @@ class MetricTracker:
             [e["visibility_ratio"] for e in eps])
         triv_med, triv_p5, triv_p95, triv_cm, triv_cs = _robust_stats(
             [e["tri_valid_ratio"] for e in eps])
+        ego_aoi_med, ego_aoi_p5, ego_aoi_p95, ego_aoi_cm, ego_aoi_cs = _robust_stats(
+            [e["ego_aoi_sum"] / max(e["episode_length"], 1) for e in eps])
+        other_aoi_med, other_aoi_p5, other_aoi_p95, other_aoi_cm, other_aoi_cs = _robust_stats(
+            [e["other_aoi_sum"] / max(e["episode_length"], 1) for e in eps])
         # Median-only for secondary metrics
         coll_med, _, _, _, _ = _robust_stats([e["collision_count"] for e in eps])
         conv_med, _, _, _, _ = _robust_stats_positive([e["convergence_step"] for e in eps])
@@ -381,6 +417,10 @@ class MetricTracker:
             "accuracy_rate": accuracy_rate,
             "visibility_mean": vis_m,
             "visibility_std": vis_s,
+            "ego_aoi_mean": ego_aoi_m,
+            "ego_aoi_std": ego_aoi_s,
+            "other_aoi_mean": other_aoi_m,
+            "other_aoi_std": other_aoi_s,
             "collision_rate_mean": coll_m,
             "collision_rate_std": coll_s,
             "convergence_speed_mean": conv_m,
@@ -397,6 +437,8 @@ class MetricTracker:
             "trace_sigma_median": trace_med,
             "triangulation_rmse_median": rmse_med,
             "visibility_median": vis_med,
+            "ego_aoi_median": ego_aoi_med,
+            "other_aoi_median": other_aoi_med,
             "collision_rate_median": coll_med,
             "convergence_speed_median": conv_med,
             "time_to_first_lock_median": lock_med,
@@ -410,6 +452,10 @@ class MetricTracker:
             "triangulation_rmse_p95": rmse_p95,
             "visibility_p5": vis_p5,
             "visibility_p95": vis_p95,
+            "ego_aoi_p5": ego_aoi_p5,
+            "ego_aoi_p95": ego_aoi_p95,
+            "other_aoi_p5": other_aoi_p5,
+            "other_aoi_p95": other_aoi_p95,
             "tri_valid_ratio_p5": triv_p5,
             "tri_valid_ratio_p95": triv_p95,
             # --- Clipped mean/std (5th–95th percentile) ---
@@ -419,6 +465,10 @@ class MetricTracker:
             "triangulation_rmse_clipped_std": rmse_cs,
             "visibility_clipped_mean": vis_cm,
             "visibility_clipped_std": vis_cs,
+            "ego_aoi_clipped_mean": ego_aoi_cm,
+            "ego_aoi_clipped_std": ego_aoi_cs,
+            "other_aoi_clipped_mean": other_aoi_cm,
+            "other_aoi_clipped_std": other_aoi_cs,
             "tri_valid_ratio_clipped_mean": triv_cm,
             "tri_valid_ratio_clipped_std": triv_cs,
             # --- Metadata ---

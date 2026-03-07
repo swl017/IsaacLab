@@ -21,6 +21,8 @@ Metrics tracked:
     - ``distance_to_target`` — mean agent-to-target Euclidean distance
     - ``target_speed`` — target ground-truth speed (m/s)
     - ``viewing_angle`` — mean pairwise viewing angle between agents (degrees)
+    - ``ego_aoi`` — mean age of each agent's own detection (seconds)
+    - ``other_aoi`` — mean age of detections received from other agents (seconds)
 """
 
 from __future__ import annotations
@@ -32,7 +34,8 @@ import torch
 
 
 # Metrics recorded at every step (all environments)
-_ALWAYS_METRICS = ["visibility", "tri_valid", "distance_to_target", "target_speed", "viewing_angle"]
+_ALWAYS_METRICS = ["visibility", "tri_valid", "distance_to_target", "target_speed", "viewing_angle",
+                    "ego_aoi", "other_aoi"]
 
 # Metrics recorded only when triangulation is valid
 _VALID_ONLY_METRICS = ["triangulation_rmse", "sqrt_trace_sigma"]
@@ -104,6 +107,8 @@ class TimeseriesTracker:
         viewing_angle: torch.Tensor,
         active_mask: Optional[torch.Tensor] = None,
         tri_valid_mask: Optional[torch.Tensor] = None,
+        ego_aoi: Optional[torch.Tensor] = None,
+        other_aoi: Optional[torch.Tensor] = None,
     ) -> None:
         """Record one simulation step.
 
@@ -120,6 +125,8 @@ class TimeseriesTracker:
                 If None, all envs are considered active.
             tri_valid_mask: Boolean [N] — True where triangulation is valid.
                 Used to gate RMSE and sqrt_trace accumulation.
+            ego_aoi: Mean ego detection age per env [N] (seconds).
+            other_aoi: Mean other detection age per env [N] (seconds).
         """
         t = self.env_step.cpu()  # [N]
 
@@ -144,6 +151,8 @@ class TimeseriesTracker:
             "distance_to_target": distance.float().cpu()[active],
             "target_speed": target_speed.float().cpu()[active],
             "viewing_angle": viewing_angle.float().cpu()[active],
+            "ego_aoi": ego_aoi.float().cpu()[active] if ego_aoi is not None else torch.zeros(n_active),
+            "other_aoi": other_aoi.float().cpu()[active] if other_aoi is not None else torch.zeros(n_active),
         }
         for name in _ALWAYS_METRICS:
             v = vals_cpu[name].double()

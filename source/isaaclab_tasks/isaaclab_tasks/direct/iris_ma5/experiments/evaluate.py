@@ -85,8 +85,12 @@ parser.add_argument("--checkpoint", type=str, default=None, help="Path to traine
 parser.add_argument("--num_episodes", type=int, default=1, help="Episodes per env (total = num_episodes * num_envs)")
 parser.add_argument("--num_envs", type=int, default=4096, help="Number of parallel eval envs")
 parser.add_argument("--task", type=str, default="Isaac-Iris-MA5-Direct-v0")
-parser.add_argument("--output", type=str, default=None, help="Output JSON path for results")
-parser.add_argument("--headless", action="store_true", default=True)
+parser.add_argument("--output", type=str, default=None,
+                    help="Output JSON path for results. If not specified, saves to ./eval_{experiment}_{timestamp}.json")
+parser.add_argument("--headless", action="store_true", default=False,
+                    help="Run in headless mode (no GUI). Video recording works in both modes.")
+parser.add_argument("--enable_cameras", action="store_true", default=False,
+                    help="Enable camera rendering (required for headless video recording)")
 # Runtime parameter overrides for evaluation sweeps
 parser.add_argument("--delay-override", type=float, default=None,
                     help="Override detection latency in seconds (e.g., 0.1 for 100ms)")
@@ -107,13 +111,25 @@ parser.add_argument("--no-timeseries", action="store_true", default=False,
 parser.add_argument("--verbose", action="store_true", default=False,
                     help="Log per-step action/obs diagnostics for first N steps (debugging)")
 # Trajectory recording for visualization
-parser.add_argument("--record-trajectory", action="store_true", default=False,
+parser.add_argument("--record-trajectory", action="store_true", default=True,
                     help="Record per-step agent/target trajectories for visualization")
 parser.add_argument("--trajectory-envs", type=int, default=8,
                     help="Number of sample environments to record trajectories for (default: 8)")
 parser.add_argument("--target-trajectory-mode", type=str, default=None,
                     choices=["linear", "circular"],
                     help="Force target trajectory mode: 'linear' (straight-line) or 'circular' (orbit)")
+# Video recording options
+parser.add_argument("--record-video", type=str, default=None,
+                    help="Output path for video recording (e.g., demo.mp4)")
+parser.add_argument("--camera-mode", type=str, default="overhead",
+                    choices=["overhead", "chase", "side", "orbit", "formation", "closeup", "wide", "isometric"],
+                    help="Camera mode for video recording (default: overhead)")
+parser.add_argument("--camera-smoothing", type=float, default=0.08,
+                    help="Camera smoothing factor (0-1, lower=smoother, default: 0.08)")
+parser.add_argument("--video-fps", type=int, default=30,
+                    help="Video frame rate (default: 30)")
+parser.add_argument("--video-resolution", type=int, nargs=2, default=[1920, 1080],
+                    help="Video resolution width height (default: 1920 1080)")
 args_cli, hydra_args = parser.parse_known_args()
 
 # Clear sys.argv so Hydra only sees its own arguments
@@ -121,7 +137,28 @@ sys.argv = [sys.argv[0]] + hydra_args
 
 from isaaclab.app import AppLauncher
 
-app_args = argparse.Namespace(headless=args_cli.headless, device="cuda:0", experience="")
+# Video recording: can run headless with offscreen camera rendering
+headless = args_cli.headless
+_headless_video = args_cli.record_video is not None and args_cli.headless
+
+# Enable cameras automatically for headless video recording
+enable_cameras = args_cli.enable_cameras
+if _headless_video and not enable_cameras:
+    enable_cameras = True
+    print("[EVAL] Auto-enabling cameras for headless video recording")
+
+if args_cli.record_video is not None:
+    if _headless_video:
+        print("[EVAL] Video recording: using offscreen camera (headless mode)")
+    else:
+        print("[EVAL] Video recording: using viewport capture (GUI mode)")
+
+app_args = argparse.Namespace(
+    headless=headless,
+    device="cuda:0",
+    experience="",
+    enable_cameras=enable_cameras,
+)
 app_launcher = AppLauncher(app_args)
 simulation_app = app_launcher.app
 
@@ -143,6 +180,13 @@ from isaaclab_tasks.direct.iris_ma5.experiments import (
     apply_agent_overrides,
 )
 from isaaclab_tasks.direct.iris_ma5.experiments.metrics import MetricTracker, TimeseriesTracker
+from isaaclab_tasks.direct.iris_ma5.video_recording import (
+    SmoothCameraController,
+    SmoothCameraCfg,
+    VideoRecorder,
+    VideoRecorderCfg,
+    get_preset,
+)
 
 # Add skrl scripts dir to path for mappo_rnn imports
 _skrl_scripts_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..", "..",
@@ -190,14 +234,41 @@ def _collect_step_metrics(
     # Triangulated position estimate (from noisy path midpoint method)
     tri_pos = X_w_tri.squeeze(1) if X_w_tri.dim() == 3 else X_w_tri
 
-    # Bbox validity for all agents (from current observation states)
+    # Bbox validity and AoI for all agents (from current observation states)
     bbox_valid_list = []
+    ego_aoi_list = []
+    other_aoi_list = []
+    current_time = env.delay_system.current_time  # [N]
     for aid in env.cfg.possible_agents:
         states = env.delay_system.get_all_states_for_observations(aid)
-        bbox = states[aid].data.bboxes_2d[:, 0, :]
+        # Ego detection validity and AoI
+        ego_state = states[aid]
+        bbox = ego_state.data.bboxes_2d[:, 0, :]
         valid = env.bbox_raycaster.validate_bbox(bbox).squeeze(-1)
         bbox_valid_list.append(valid)
+        ego_aoi_this = current_time - ego_state.data.timestamp_detection
+        ego_aoi_list.append(ego_aoi_this)
+
+        # DEBUG: Print AoI calculation for first env after warmup
+        if current_time[0].item() > 1.0 and current_time[0].item() < 1.5 and aid == "drone_0":
+            print(f"[DEBUG AoI CALC] t={current_time[0].item():.4f}, "
+                  f"ts_detection={ego_state.data.timestamp_detection[0].item():.4f}, "
+                  f"AoI={ego_aoi_this[0].item():.4f}s")
+
+        # Other agents' detection AoI (as seen by this ego agent)
+        other_aois_for_agent = []
+        for other_aid in env.cfg.possible_agents:
+            if other_aid == aid:
+                continue
+            other_state = states[other_aid]
+            other_aois_for_agent.append(current_time - other_state.data.timestamp_detection)
+        other_aoi_list.append(torch.stack(other_aois_for_agent, dim=-1).mean(dim=-1))
+
     bbox_valid_mask = torch.stack(bbox_valid_list, dim=1)
+    # Mean ego AoI across all agents [N]
+    ego_aoi = torch.stack(ego_aoi_list, dim=-1).mean(dim=-1)
+    # Mean other AoI across all agents [N]
+    other_aoi = torch.stack(other_aoi_list, dim=-1).mean(dim=-1)
 
     # Collision detection — any pair in collision → per-env flag [N]
     coll_mat = env.safety_manager.get_collision_matrix()
@@ -214,6 +285,8 @@ def _collect_step_metrics(
             bbox_valid_mask=bbox_valid_mask,
             collision_flags=collision_flags,
             tri_valid=is_valid,
+            ego_aoi=ego_aoi,
+            other_aoi=other_aoi,
         )
 
     # Feed timeseries tracker with derived per-env metrics
@@ -261,6 +334,8 @@ def _collect_step_metrics(
             viewing_angle=viewing_angle,
             active_mask=active_mask,
             tri_valid_mask=is_valid.squeeze(-1),
+            ego_aoi=ego_aoi,
+            other_aoi=other_aoi,
         )
 
 
@@ -542,6 +617,13 @@ def main(env_cfg, agent_cfg: dict):
     exp_cfg = get_experiment(args_cli.experiment)
     print(f"[EVAL] Experiment: {exp_cfg.name} — {exp_cfg.description}")
 
+    # Generate default output path if not specified (save to current working directory)
+    if args_cli.output is None:
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        args_cli.output = f"./eval_{args_cli.experiment}_{timestamp}.json"
+        print(f"[EVAL] Output path (auto): {args_cli.output}")
+
     # Apply experiment overrides
     if exp_cfg.env_overrides:
         apply_env_overrides(env_cfg, exp_cfg.env_overrides)
@@ -663,6 +745,60 @@ def main(env_cfg, agent_cfg: dict):
     else:
         traj_recorder = None
 
+    # Video recording setup
+    if args_cli.record_video is not None:
+        # Get camera preset and override smoothing
+        camera_cfg = get_preset(args_cli.camera_mode)
+        camera_cfg.smoothing_factor = args_cli.camera_smoothing
+
+        # Determine if running headless video recording
+        _using_headless_video = _headless_video
+
+        # Initialize smooth camera controller
+        # In headless mode: pass None as viewport_controller (camera pose only)
+        # In GUI mode: use viewport_camera_controller if available
+        if _using_headless_video:
+            # Headless mode: smooth camera calculates pose, video recorder uses offscreen camera
+            smooth_camera = SmoothCameraController(
+                viewport_controller=None,  # No viewport in headless
+                cfg=camera_cfg,
+                env_index=0,
+            )
+            print(f"[EVAL] Smooth camera (headless): mode={args_cli.camera_mode}, smoothing={args_cli.camera_smoothing}")
+        elif hasattr(env.unwrapped, "viewport_camera_controller"):
+            smooth_camera = SmoothCameraController(
+                viewport_controller=env.unwrapped.viewport_camera_controller,
+                cfg=camera_cfg,
+                env_index=0,
+            )
+            print(f"[EVAL] Smooth camera: mode={args_cli.camera_mode}, smoothing={args_cli.camera_smoothing}")
+        else:
+            smooth_camera = None
+            print("[EVAL] WARNING: No viewport camera controller — smooth camera disabled")
+
+        # Initialize video recorder
+        video_recorder = VideoRecorder(
+            cfg=VideoRecorderCfg(
+                output_path=args_cli.record_video,
+                fps=args_cli.video_fps,
+                resolution=tuple(args_cli.video_resolution),
+                headless=_using_headless_video,
+            )
+        )
+        video_recorder.start()
+
+        # Set up offscreen camera for headless mode
+        if _using_headless_video:
+            video_recorder.setup_offscreen_camera(unwrapped)
+
+        print(f"[EVAL] Video recording: {args_cli.record_video} "
+              f"({args_cli.video_resolution[0]}x{args_cli.video_resolution[1]} @ {args_cli.video_fps}fps)"
+              f"{' [headless]' if _using_headless_video else ''}")
+    else:
+        smooth_camera = None
+        video_recorder = None
+        _using_headless_video = False
+
     # Load policy — route based on experiment type
     is_greedy = (args_cli.experiment == "baseline_greedy")
     if is_greedy:
@@ -742,6 +878,31 @@ def main(env_cfg, agent_cfg: dict):
 
         obs, rewards, terminated, truncated, info = env_wrapped.step(actions)
 
+        # Update smooth camera and record video frame
+        if smooth_camera is not None or video_recorder is not None:
+            # Get agent and target positions for camera tracking
+            _agents_pos_list = [
+                unwrapped._robots[aid].data.root_pos_w[0, :3]  # env 0
+                for aid in possible_agents
+            ]
+            _agents_pos = torch.stack(_agents_pos_list, dim=0)  # [num_agents, 3]
+            _target_pos = unwrapped.target.data.root_pos_w[0, :3]  # env 0
+
+            if smooth_camera is not None:
+                smooth_camera.update(
+                    agents_pos=_agents_pos,
+                    target_pos=_target_pos,
+                    dt=unwrapped.step_dt,
+                )
+
+                # In headless mode, pass camera pose to video recorder for offscreen camera
+                if _using_headless_video and video_recorder is not None:
+                    _eye, _lookat = smooth_camera.get_current_pose()
+                    video_recorder.set_camera_pose(_eye, _lookat)
+
+            if video_recorder is not None:
+                video_recorder.capture_frame(unwrapped)
+
         # Detect done envs before collecting metrics (so timeseries can
         # exclude post-reset environments from the completed episode's data)
         first_agent = possible_agents[0]
@@ -757,6 +918,16 @@ def main(env_cfg, agent_cfg: dict):
             _collect_step_metrics(tracker, unwrapped, ts_tracker, done_mask)
         elif ts_tracker is not None:
             _collect_step_metrics(tracker=None, env=unwrapped, ts_tracker=ts_tracker, done_mask=done_mask)
+
+        # DEBUG: Print AoI values for first 5 steps
+        if step_count <= 5:
+            current_time = unwrapped.delay_system.current_time
+            for aid in possible_agents:
+                states = unwrapped.delay_system.get_all_states_for_observations(aid)
+                ego_state = states[aid]
+                ego_ts = ego_state.data.timestamp_detection
+                print(f"[DEBUG AoI] step={step_count}, {aid}: current_time[0]={current_time[0].item():.4f}, "
+                      f"timestamp_detection[0]={ego_ts[0].item():.4f}, AoI={current_time[0].item() - ego_ts[0].item():.4f}s")
 
         # Record trajectories for visualization
         if traj_recorder is not None and not traj_recorder.is_done():
@@ -789,11 +960,15 @@ def main(env_cfg, agent_cfg: dict):
             _cos_mean = torch.stack(_cos_angles, dim=1).mean(dim=1)
             _traj_viewing_angle = torch.acos(_cos_mean.clamp(-1, 1)) * (180.0 / torch.pi)
 
+            # Per-env RMSE: distance between triangulated estimate and ground truth
+            _traj_rmse = torch.norm(_traj_tri_pos - _traj_target_pos, dim=-1)  # [N]
+
             traj_recorder.step(
                 agent_positions=_traj_agent_pos,
                 target_pos=_traj_target_pos,
                 tri_pos=_traj_tri_pos,
                 tri_valid=_traj_tri_valid,
+                rmse=_traj_rmse,
                 viewing_angle=_traj_viewing_angle,
                 env_origins=unwrapped._terrain.env_origins,
             )
@@ -851,14 +1026,25 @@ def main(env_cfg, agent_cfg: dict):
     #         print(f"  {key:30s}: {value}")
     # print(f"{'='*80}")
 
-    # Save results
+    # Save results (always saves since we generate default path if not specified)
     if args_cli.output:
-        os.makedirs(os.path.dirname(os.path.abspath(args_cli.output)), exist_ok=True)
-        with open(args_cli.output, "w") as f:
+        output_path = os.path.abspath(args_cli.output)
+        output_dir = os.path.dirname(output_path)
+        if output_dir:  # Only create directory if there's a parent directory
+            os.makedirs(output_dir, exist_ok=True)
+        with open(output_path, "w") as f:
             json.dump(results, f, indent=2)
-        print(f"\nResults saved to: {args_cli.output}")
+        print(f"\nResults saved to: {output_path}")
+
+    # Stop video recording
+    if video_recorder is not None:
+        video_recorder.stop()
+        print(f"Video saved to: {args_cli.record_video}")
 
     env.close()
+
+    # Properly close the simulation app
+    simulation_app.close()
 
 
 if __name__ == "__main__":
