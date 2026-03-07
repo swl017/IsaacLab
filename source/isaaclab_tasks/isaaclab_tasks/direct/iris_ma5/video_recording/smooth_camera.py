@@ -47,6 +47,25 @@ class SmoothCameraCfg:
     fixed_lookat: tuple[float, float, float] = (0.0, 0.0, 10.0)
     """Fixed look-at point for fixed mode."""
 
+    # Dynamic zoom settings
+    dynamic_zoom: bool = True
+    """Enable dynamic zoom based on agent spread."""
+
+    zoom_margin: float = 1.5
+    """Margin multiplier for zoom (1.5 = 50% extra space around agents)."""
+
+    min_zoom_distance: float = 15.0
+    """Minimum camera distance (maximum zoom in), in meters."""
+
+    max_zoom_distance: float = 80.0
+    """Maximum camera distance (maximum zoom out / initial state), in meters."""
+
+    zoom_smoothing: float = 0.05
+    """Smoothing factor for zoom transitions (lower = smoother zoom)."""
+
+    fov_degrees: float = 60.0
+    """Camera field of view in degrees (used for zoom calculation)."""
+
 
 class SmoothCameraController:
     """Smooth interpolated camera controller for professional video recording.
@@ -106,6 +125,9 @@ class SmoothCameraController:
 
         # Orbit state
         self._orbit_angle: float = 0.0
+
+        # Dynamic zoom state - start at max zoom out (initial state)
+        self._current_zoom_distance: float = self.cfg.max_zoom_distance
 
         # Update counter for debug output
         self._update_count: int = 0
@@ -208,6 +230,52 @@ class SmoothCameraController:
 
         self._update_count += 1
 
+    def _compute_required_zoom_distance(
+        self,
+        agents_pos: np.ndarray,
+        target_pos: np.ndarray,
+    ) -> float:
+        """Compute required camera distance to fit all agents in frame.
+
+        Args:
+            agents_pos: Agent positions [num_agents, 3].
+            target_pos: Target position [3].
+
+        Returns:
+            Required camera distance in meters.
+        """
+        # Combine all points we need to see
+        all_points = np.vstack([agents_pos, target_pos.reshape(1, 3)])
+
+        # Calculate the maximum spread in XY plane (horizontal)
+        min_xy = np.min(all_points[:, :2], axis=0)
+        max_xy = np.max(all_points[:, :2], axis=0)
+        spread_xy = np.linalg.norm(max_xy - min_xy)
+
+        # Also consider Z spread for non-overhead cameras
+        z_spread = np.max(all_points[:, 2]) - np.min(all_points[:, 2])
+
+        # Use the larger of XY spread or Z spread
+        max_spread = max(spread_xy, z_spread)
+
+        # Apply margin multiplier
+        required_spread = max_spread * self.cfg.zoom_margin
+
+        # Calculate required distance based on FOV
+        # For overhead camera: distance = spread / (2 * tan(fov/2))
+        fov_rad = math.radians(self.cfg.fov_degrees)
+        half_fov_tan = math.tan(fov_rad / 2)
+
+        # Account for both horizontal and vertical FOV (assume 16:9 aspect)
+        # Use the more constraining dimension
+        required_distance = required_spread / (2 * half_fov_tan)
+
+        # Clamp to min/max zoom limits
+        required_distance = max(self.cfg.min_zoom_distance,
+                               min(self.cfg.max_zoom_distance, required_distance))
+
+        return required_distance
+
     def _compute_target_pose(
         self,
         agents_pos: np.ndarray,
@@ -227,17 +295,40 @@ class SmoothCameraController:
         mode = self.cfg.mode
         offset = np.array(self.cfg.offset)
 
+        # Compute dynamic zoom distance if enabled
+        if self.cfg.dynamic_zoom and mode != "fixed":
+            target_zoom_distance = self._compute_required_zoom_distance(agents_pos, target_pos)
+
+            # Smooth zoom transition
+            alpha = self.cfg.zoom_smoothing
+            self._current_zoom_distance = (
+                self._current_zoom_distance + alpha * (target_zoom_distance - self._current_zoom_distance)
+            )
+
+            # Scale the offset to achieve the zoom distance
+            # The offset direction determines camera positioning, magnitude determines zoom
+            offset_magnitude = np.linalg.norm(offset)
+            if offset_magnitude > 0.001:
+                # Scale offset to match zoom distance
+                zoom_scale = self._current_zoom_distance / offset_magnitude
+                dynamic_offset = offset * zoom_scale
+            else:
+                # For zero XY offset (overhead view), adjust Z height
+                dynamic_offset = np.array([0.0, 0.0, self._current_zoom_distance])
+        else:
+            dynamic_offset = offset
+
         if mode == "follow_target":
             # Camera follows the target
             lookat = target_pos
-            eye = target_pos + offset
+            eye = target_pos + dynamic_offset
 
         elif mode == "follow_centroid":
             # Camera follows centroid of all agents and target
             all_points = np.vstack([agents_pos, target_pos.reshape(1, 3)])
             centroid = np.mean(all_points, axis=0)
             lookat = centroid
-            eye = centroid + offset
+            eye = centroid + dynamic_offset
 
         elif mode == "orbit":
             # Camera orbits around the centroid
@@ -247,10 +338,18 @@ class SmoothCameraController:
             # Update orbit angle
             self._orbit_angle += self.cfg.orbit_speed * dt
 
+            # Use dynamic zoom for orbit radius and height
+            if self.cfg.dynamic_zoom:
+                orbit_radius = self._current_zoom_distance * 0.8  # Slightly closer for orbit
+                orbit_height = self._current_zoom_distance * 0.5
+            else:
+                orbit_radius = self.cfg.orbit_radius
+                orbit_height = self.cfg.orbit_height
+
             # Compute camera position on orbit
-            x = centroid[0] + self.cfg.orbit_radius * math.cos(self._orbit_angle)
-            y = centroid[1] + self.cfg.orbit_radius * math.sin(self._orbit_angle)
-            z = centroid[2] + self.cfg.orbit_height
+            x = centroid[0] + orbit_radius * math.cos(self._orbit_angle)
+            y = centroid[1] + orbit_radius * math.sin(self._orbit_angle)
+            z = centroid[2] + orbit_height
 
             eye = np.array([x, y, z])
             lookat = centroid

@@ -85,6 +85,15 @@ class DelayPipeline:
         # === Latency state (using Isaac Lab's DelayBuffer) ===
         self._latency_buffer: DelayBuffer | None = None
         self._latency_delays: torch.Tensor | None = None
+        # Track number of unique data points stored per environment.
+        # CircularBuffer fills all slots with first data, so we need to track
+        # how many unique entries exist to limit effective delay.
+        self._latency_step_count: torch.Tensor = torch.zeros(num_envs, dtype=torch.long, device=self.device)
+        # Track last time we appended to the latency buffer to avoid duplicates
+        # when _apply_latency is called multiple times per simulation step
+        self._latency_last_process_time: torch.Tensor = torch.full((num_envs,), -1.0, device=self.device)
+        # Cache the latency output to avoid duplicate compute() calls
+        self._latency_cached_output: torch.Tensor | None = None
         if cfg.latency_enabled:
             # Estimate max delay steps needed
             max_latency = self._get_max_latency()
@@ -96,8 +105,10 @@ class DelayPipeline:
             )
             # Sample initial latencies
             self._latency_delays = self._sample_latency()
-            # Initialize buffer with zeros
-            self._latency_buffer.compute(torch.zeros(num_envs, field_dim, device=self.device))
+            # NOTE: Don't initialize buffer with compute(zeros) - this triggers
+            # CircularBuffer warmup which fills ALL slots with first data.
+            # Let the buffer initialize naturally with real data, and our
+            # step_count tracking handles the warmup period correctly.
 
         # === Dropout state ===
         # Track previous data for dropout (keep stale data when dropout occurs)
@@ -142,7 +153,7 @@ class DelayPipeline:
 
         # Stage 3: Random latency (transport delay via history buffer)
         if self.cfg.latency_enabled:
-            result = self._apply_latency(result)
+            result = self._apply_latency(result, t_current)
 
         # Stage 4: Dropout (only if allowed)
         if self.cfg.dropout_enabled and allow_dropout:
@@ -218,11 +229,12 @@ class DelayPipeline:
 
         return self.held_data.clone()
 
-    def _apply_latency(self, data: torch.Tensor) -> torch.Tensor:
+    def _apply_latency(self, data: torch.Tensor, t_current: torch.Tensor) -> torch.Tensor:
         """Apply transport delay using history buffer.
 
         Args:
             data: Input data of shape (num_envs, field_dim).
+            t_current: Current simulation time per environment of shape (num_envs,).
 
         Returns:
             Delayed data of shape (num_envs, field_dim).
@@ -230,13 +242,42 @@ class DelayPipeline:
         if self._latency_buffer is None:
             return data
 
-        # Update delays periodically (convert latency seconds to steps)
-        delay_steps = (self._latency_delays / self.dt).to(torch.int)
-        delay_steps = torch.clamp(delay_steps, min=0, max=self._latency_buffer.history_length)
-        self._latency_buffer.set_time_lag(delay_steps)
+        # Check if this is a NEW time step (to avoid double-counting when called multiple times per step)
+        # Only increment step count and call compute() if ALL envs have new time
+        # This prevents buffer corruption from duplicate appends
+        is_new_step = (t_current != self._latency_last_process_time).all()
 
-        # Compute delayed output
-        return self._latency_buffer.compute(data)
+        if not is_new_step:
+            # Return cached output if we've already processed this step
+            if self._latency_cached_output is not None:
+                return self._latency_cached_output
+
+        # Update tracking for new step
+        self._latency_step_count += 1
+        self._latency_last_process_time[:] = t_current
+
+        # Update delays periodically (convert latency seconds to steps)
+        # Use round() instead of truncation to avoid systematic underestimation
+        # e.g., 0.0634s / 0.04s = 1.585 should become 2 steps, not 1
+        delay_steps = torch.round(self._latency_delays / self.dt).to(torch.int)
+        delay_steps = torch.clamp(delay_steps, min=0, max=self._latency_buffer.history_length)
+
+        # CRITICAL FIX: Limit effective delay to available unique data.
+        # CircularBuffer fills all slots with first data on first append, so we can only
+        # reliably delay up to (step_count - 1) unique entries. Without this, the buffer
+        # returns the same data regardless of delay_steps during warmup phase.
+        max_available_delay = torch.clamp(self._latency_step_count - 1, min=0)
+        effective_delay_steps = torch.minimum(delay_steps, max_available_delay.to(torch.int))
+
+        self._latency_buffer.set_time_lag(effective_delay_steps)
+
+        # Compute delayed output (ONLY called once per step due to caching above)
+        delayed_data = self._latency_buffer.compute(data)
+
+        # Cache the output for repeat calls within this step
+        self._latency_cached_output = delayed_data
+
+        return delayed_data
 
     def _apply_dropout(self, data: torch.Tensor) -> torch.Tensor:
         """Apply dropout (randomly keep stale data).
@@ -348,6 +389,13 @@ class DelayPipeline:
             new_periods = self._sample_period()
             self.next_sample_period[env_ids] = new_periods[env_ids]
 
+        # Reset latency step count for warmup tracking
+        self._latency_step_count[env_ids] = 0
+        # Reset last process time to allow fresh processing after reset
+        self._latency_last_process_time[env_ids] = -1.0
+        # Invalidate cached output (will be recomputed on next call)
+        self._latency_cached_output = None
+
         # Reset latency buffer with curriculum-aware delay mode
         if self._latency_buffer is not None:
             self._latency_buffer.reset(env_ids.tolist())
@@ -365,9 +413,13 @@ class DelayPipeline:
                 effective_mean = self._get_effective_latency_mean()
                 effective_std = self._get_effective_latency_std()
                 if effective_std > 0:
-                    # Sample and ensure non-negative
+                    # Sample and clamp to ensure at least TWO steps of delay when latency is enabled.
+                    # CircularBuffer fills all slots with first data, so 1-step delay returns the
+                    # same data (slot[pointer-1] contains identical initial fill value).
+                    # With 2+ steps, we ensure we retrieve genuinely older data.
                     sampled = torch.randn(len(env_ids), device=self.device) * effective_std + effective_mean
-                    self._latency_delays[env_ids] = torch.clamp(sampled, min=0.0)
+                    min_latency = 2 * self.dt if effective_mean > 0 else 0.0
+                    self._latency_delays[env_ids] = torch.clamp(sampled, min=min_latency)
                 else:
                     self._latency_delays[env_ids] = effective_mean
 

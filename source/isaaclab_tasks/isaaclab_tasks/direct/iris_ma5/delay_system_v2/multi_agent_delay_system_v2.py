@@ -1259,13 +1259,10 @@ class MultiAgentDelaySystemV2:
                 delay_clean.store(full_name, concat_data)
                 delay_noisy.store(full_name, concat_data)
 
-        # Step delay systems to process the initial data
-        # This ensures data is available for immediate retrieval
-        dt = self.cfg.dt
-        self._delay_clean_ego.step(dt)
-        self._delay_clean_other.step(dt)
-        self._delay_noisy_ego.step(dt)
-        self._delay_noisy_other.step(dt)
+        # NOTE: We intentionally do NOT call step() here.
+        # The step() call was causing a time mismatch: data stored with timestamp=0
+        # but data_bus.t_current incremented to 0.04, resulting in incorrect AoI.
+        # Data is available for immediate retrieval after store() - no step needed.
 
         # Seed dropout held data with GT initial state for the reset environments.
         # Without this, dropout_held_data stays at 0.0 after reset (set by pipeline.reset()),

@@ -28,6 +28,7 @@ class CameraPreset:
 
 
 # Pre-defined camera presets for common use cases
+# All presets include dynamic zoom to keep agents in frame
 CAMERA_PRESETS: dict[str, CameraPreset] = {
     # Bird's eye view - good for tactical overview
     "overhead": CameraPreset(
@@ -38,6 +39,10 @@ CAMERA_PRESETS: dict[str, CameraPreset] = {
             offset=(0.0, 0.0, 60.0),  # 60m above centroid
             look_down=True,
             smoothing_factor=0.08,
+            dynamic_zoom=True,
+            min_zoom_distance=20.0,
+            max_zoom_distance=100.0,
+            zoom_margin=1.8,  # Extra margin for overhead view
         ),
     ),
     # Chase camera - follows target from behind
@@ -49,6 +54,10 @@ CAMERA_PRESETS: dict[str, CameraPreset] = {
             offset=(-25.0, 0.0, 12.0),  # 25m behind, 12m up
             look_down=False,
             smoothing_factor=0.06,
+            dynamic_zoom=True,
+            min_zoom_distance=20.0,
+            max_zoom_distance=80.0,
+            zoom_margin=1.5,
         ),
     ),
     # Side view - lateral perspective
@@ -60,6 +69,7 @@ CAMERA_PRESETS: dict[str, CameraPreset] = {
             fixed_eye=(60.0, 0.0, 25.0),
             fixed_lookat=(0.0, 0.0, 15.0),
             smoothing_factor=0.1,
+            dynamic_zoom=False,  # Fixed mode doesn't use dynamic zoom
         ),
     ),
     # Orbit - cinematic circular motion
@@ -72,6 +82,9 @@ CAMERA_PRESETS: dict[str, CameraPreset] = {
             orbit_height=20.0,
             orbit_speed=0.03,  # ~2 degrees per second
             smoothing_factor=0.1,
+            dynamic_zoom=True,
+            min_zoom_distance=25.0,
+            max_zoom_distance=80.0,
         ),
     ),
     # Formation view - optimized for multi-agent observation
@@ -83,6 +96,10 @@ CAMERA_PRESETS: dict[str, CameraPreset] = {
             offset=(0.0, -30.0, 40.0),  # Behind and above
             look_down=False,
             smoothing_factor=0.05,
+            dynamic_zoom=True,
+            min_zoom_distance=25.0,
+            max_zoom_distance=100.0,
+            zoom_margin=1.6,
         ),
     ),
     # Close-up - tight follow on target
@@ -94,6 +111,10 @@ CAMERA_PRESETS: dict[str, CameraPreset] = {
             offset=(-10.0, 5.0, 5.0),  # Close behind and slightly to side
             look_down=False,
             smoothing_factor=0.12,  # More responsive
+            dynamic_zoom=True,
+            min_zoom_distance=10.0,
+            max_zoom_distance=40.0,  # Limited max zoom for closeup
+            zoom_margin=1.3,  # Tighter framing
         ),
     ),
     # Wide shot - distant overview
@@ -105,6 +126,10 @@ CAMERA_PRESETS: dict[str, CameraPreset] = {
             offset=(0.0, -80.0, 50.0),  # Far back and high
             look_down=False,
             smoothing_factor=0.03,  # Very smooth
+            dynamic_zoom=True,
+            min_zoom_distance=40.0,  # Stays wide
+            max_zoom_distance=120.0,
+            zoom_margin=2.0,  # Lots of margin
         ),
     ),
     # Isometric - classic game-style view
@@ -116,6 +141,10 @@ CAMERA_PRESETS: dict[str, CameraPreset] = {
             offset=(35.0, -35.0, 35.0),  # Equal offset in all axes
             look_down=False,
             smoothing_factor=0.07,
+            dynamic_zoom=True,
+            min_zoom_distance=30.0,
+            max_zoom_distance=90.0,
+            zoom_margin=1.5,
         ),
     ),
 }

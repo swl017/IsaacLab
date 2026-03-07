@@ -1,7 +1,7 @@
-# iris_ma5 Technical Report (Environment V4)
+# iris_ma5 Technical Report (Environment V5)
 
 This document is a technical report for the `iris_ma5` multi-agent environment implemented in `source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma5/iris_ma_env5.py`.
-It focuses on the mathematical formulation and the interactions between the environment’s submodules:
+It focuses on the mathematical formulation and the interactions between the environment's submodules:
 
 - Multi-agent environment and dataflow
 - Action → command mapping, controllers, and gimbal stabilization
@@ -10,7 +10,8 @@ It focuses on the mathematical formulation and the interactions between the envi
 - Triangulation and triangulation covariance
 - Safety penalties (collision + TTC)
 - Curriculum, randomization, and moving target dynamics
-- Training interface assumptions (MAPPO-RNN config)
+- Training interface assumptions (MAPPO-RNN/MLP config)
+- Experiments system and evaluation metrics
 
 ---
 
@@ -50,9 +51,9 @@ Training typically optimizes expected discounted return:
 
 ## 2) Environment Structure and Dataflow
 
-### 2.1 Core loop anatomy (V4)
+### 2.1 Core loop anatomy (V5)
 
-In `IrisMAEnvV4` (`iris_ma_env5.py`), the core loop is organized as:
+In `IrisMAEnvV5` (`iris_ma_env5.py`), the core loop is organized as:
 
 1. `_pre_physics_step(actions)`: curriculum progress + action preprocessing (decimated rate)
 2. `_apply_action()`: applies forces/torques + gimbal targets at physics stepping
@@ -245,7 +246,7 @@ then clamps to roll limits.
 
 ## 6) Delay System V2 (MultiAgentDelaySystemV2)
 
-V4 uses `MultiAgentDelaySystemV2` (`delay_system_v2/multi_agent_delay_system_v2.py`) built on a per-field delay pipeline (`delay_system_v2/delay_pipeline.py`).
+V5 uses `MultiAgentDelaySystemV2` (`delay_system_v2/multi_agent_delay_system_v2.py`) built on a per-field delay pipeline (`delay_system_v2/delay_pipeline.py`).
 
 ### 6.1 Dual pipeline: clean vs noisy
 
@@ -382,7 +383,7 @@ The raycaster validates detections using:
   (w,h)\in [w_{\min},w_{\max}]\times[h_{\min},h_{\max}]
   \]
 - minimum bbox area (pixels),
-- optional occlusion checks (disabled in default config for V4).
+- optional occlusion checks (disabled in default config for V5).
 
 In the environment, a simpler validity check `validate_bbox` is also used to guard observation/reward terms.
 
@@ -418,7 +419,7 @@ When a bbox is invalid, the derived ray direction is set to zero to avoid contam
 
 ## 9) Triangulation (Midpoint Method) and Covariance
 
-V4 uses two triangulation notions:
+V5 uses two triangulation notions:
 - **Position estimate** from multiple rays for observations (`midpoint_method_batched`)
 - **Uncertainty estimate** (covariance) for both rewards and observations (`triangulation_covariance_multi_camera` via `_compute_triangulation_covariance`)
 
@@ -580,17 +581,63 @@ r_{\text{size}} = s_{\text{size}}\ \Delta t\ \exp(-|A - 0.2|)\ v
 
 ### 11.3 Triangulation quality reward
 
-With trace covariance `tr = trace_cov` and validity `v_tri`:
+The triangulation reward varies based on `cfg.reward_mode`. Let `tr = trace_cov` and validity `v_tri`:
+
+#### 11.3.1 Analytical Mode (Default)
+
+Uses full covariance matrix including pixel, pose, gimbal, and intrinsics noise:
 \[
 q_{\text{tri}} =
 \begin{cases}
-\frac{1}{1 + \frac{tr}{7}}, & v_{\text{tri}}=1 \\
+\mathrm{clip}\left(\sqrt{\frac{10}{\max(tr, 10^{-6})}},\ 0,\ 100\right), & v_{\text{tri}}=1 \\
 0, & \text{otherwise}
 \end{cases}
 \]
 \[
 r_{\text{tri}} = s_{\text{tri}}\ \Delta t\ q_{\text{tri}}\ \cdot \text{progress}_{\text{coord}}
 \]
+
+#### 11.3.2 Angular-Only Mode
+
+Same formula as analytical, but covariance only includes pixel measurement noise (comparable to Gavin2024).
+
+#### 11.3.3 Heuristic Mode
+
+Avoids covariance computation entirely, using geometric heuristics:
+
+**Proximity term** (rewards ~20m distance):
+\[
+r_{\text{prox}} = \exp\left(-0.01 \cdot (d - 20)^2\right)
+\]
+
+**Angle diversity term** (rewards perpendicular viewing angles):
+\[
+r_{\text{angle}} = 1 - |\cos(\theta_{\text{view}})|
+\]
+
+**Combined**:
+\[
+q_{\text{tri}} = (r_{\text{prox}} + r_{\text{angle}}) \cdot \mathbb{1}[\text{num\_valid} \geq 2]
+\]
+
+#### 11.3.4 Image-Only Mode
+
+Returns zeros for triangulation reward; only `bbox_center` and `bbox_size` rewards are active.
+
+#### 11.3.5 Gavin2024 Mode
+
+Conditional reward with safety gating:
+\[
+q_{\text{tri}} =
+\begin{cases}
+\frac{1}{\sqrt{tr}}, & \text{all\_safe} = 1 \\
+-r_{\text{penalty}}, & \text{otherwise}
+\end{cases}
+\]
+where `all_safe` requires:
+- distance to target > threshold,
+- distance to ground > threshold,
+- inter-agent distance > threshold.
 
 ### 11.4 Safety penalties (curriculum gated)
 
@@ -605,42 +652,89 @@ Total reward is the sum of terms above.
 
 ---
 
-## 12) Observation Vector (Per-Agent, 47D in default cfg)
+## 12) Observation Vector (Per-Agent)
 
 Observations are constructed from **noisy delayed states** (`get_all_states_for_observations`).
 
-For a 2-agent setup (`C=2`) the observation concatenates:
+**Dimension formula**: `26 + 15*(N-1) + 6` where `N = num_agents`
+- 2 agents: 26 + 15×1 + 6 = **47D**
+- 3 agents (default): 26 + 15×2 + 6 = **62D**
 
-### 12.1 Ego features
-- position \(p^w\) (3)
-- yaw \(\psi\) from quaternion (1)
-- linear velocity \(v^w\) (3)
-- yaw rate \(\dot\psi\) from angular velocity z (1)
-- linear acceleration (3)
-- gimbal pitch, yaw (2)
-- combined angular velocity (3)
-- bbox normalized `(cx, cy, w, h)` (4)
-- bbox valid (1)
-- detection age (1)
-- zoom level (1)
-- ray direction (3)
+### 12.1 Ego features (26D)
 
-### 12.2 Other-agent features (delayed via “other” perspective)
-- other position (3)
-- other linear velocity (3)
-- other combined angular velocity (3)
-- other bbox validity (1)
-- other ray direction (3)
-- other detection age (1) and data age (1) (duplicated in the current implementation)
+| Feature | Dims | Description |
+|---------|------|-------------|
+| position \(p^w\) | 3 | World-frame position |
+| yaw \(\psi\) | 1 | Yaw from quaternion |
+| linear velocity \(v^w\) | 3 | World-frame velocity |
+| yaw rate \(\dot\psi\) | 1 | Z-component of angular velocity |
+| linear acceleration | 3 | World-frame acceleration |
+| gimbal pitch | 1 | Camera gimbal pitch angle |
+| gimbal yaw | 1 | Camera gimbal yaw angle |
+| combined angular velocity | 3 | Body angular velocity |
+| bbox `(cx, cy, w, h)` | 4 | Normalized bounding box |
+| bbox valid | 1 | Detection validity flag |
+| time since detection | 1 | Age of detection (AoI) |
+| zoom level | 1 | Camera zoom factor |
+| ray direction | 3 | Unit ray to target in world frame |
 
-### 12.3 Triangulation estimate + uncertainty
-- triangulated target position (3), masked to ego position if invalid
-- per-axis std dev from covariance (3)
+**Total**: 3+1+3+1+3+1+1+3+4+1+1+1+3 = **26D**
 
-This yields:
-\[
-16\ (\text{ego motion/att}) + 10\ (\text{ego vision}) + 15\ (\text{other}) + 6\ (\text{tri}) = 47
-\]
+### 12.2 Per other-agent features (15D each)
+
+For each of the `(N-1)` other agents (delayed via "other" perspective):
+
+| Feature | Dims | Description |
+|---------|------|-------------|
+| position | 3 | Other agent's position |
+| linear velocity | 3 | Other agent's velocity |
+| combined angular velocity | 3 | Other agent's angular velocity |
+| bbox valid | 1 | Other agent's detection validity |
+| ray direction | 3 | Other agent's ray to target |
+| data age | 1 | Age of communicated data |
+| detection age | 1 | Other agent's detection age |
+
+**Total per agent**: 3+3+3+1+3+1+1 = **15D**
+
+### 12.3 Triangulation estimate + uncertainty (6D)
+
+| Feature | Dims | Description |
+|---------|------|-------------|
+| triangulated position | 3 | Midpoint-method estimate (masked to ego position if invalid) |
+| per-axis std dev | 3 | \(\sqrt{\mathrm{diag}(\Sigma_X)}\) from covariance |
+
+**Total**: 3+3 = **6D**
+
+### 12.4 Observation concatenation order
+
+```
+obs = [
+    pos,                           # 3D
+    yaw,                           # 1D
+    lin_vel,                       # 3D
+    yaw_rate,                      # 1D
+    lin_acc,                       # 3D
+    gimbal_pitch,                  # 1D
+    gimbal_yaw,                    # 1D
+    combined_ang_vel,              # 3D
+    bbox,                          # 4D
+    bbox_valid,                    # 1D
+    time_since_detection,          # 1D
+    zoom,                          # 1D
+    ray_dir,                       # 3D
+    *other_positions,              # 3D × (N-1)
+    *other_lin_vels,               # 3D × (N-1)
+    *other_combined_ang_vels,      # 3D × (N-1)
+    *other_bbox_valids,            # 1D × (N-1)
+    *other_ray_dirs,               # 3D × (N-1)
+    *other_data_age,               # 1D × (N-1)
+    *other_detection_age,          # 1D × (N-1)
+    X_w_tri_masked,                # 3D (triangulation position)
+    std_tri,                       # 3D (triangulation std dev)
+]
+```
+
+**Note**: AoI fields (`time_since_detection`, `data_age`, `detection_age`) can be masked via `cfg.mask_aoi_in_obs=True`.
 
 ---
 
@@ -708,11 +802,56 @@ and is enforced by reflecting/steering the velocity back into a bounded region a
 
 ---
 
-## 16) Training Configuration Notes (SKRL MAPPO-RNN)
+## 16) Training Configuration Notes
 
-The included config `agents/skrl_mappo_rnn_cfg.yaml` suggests training under partial observability using a recurrent policy with sequence length 32.
+The environment supports two neural network architectures for MAPPO training.
 
-MAPPO/PPO-style updates optimize the clipped objective (conceptually):
+### 16.1 MAPPO-RNN (Default)
+
+The config `agents/skrl_mappo_rnn_cfg.yaml` trains under partial observability using a recurrent policy.
+
+**Architecture**:
+- Policy: `Obs → Linear(hidden) → GRU(gru_hidden, num_layers) → Linear(action_dim)`
+- Value: `Shared-obs → Linear(hidden) → GRU(gru_hidden, num_layers) → Linear(1)`
+
+**Typical hyperparameters**:
+- `hidden_size`: 64-256
+- `gru_hidden_size`: 64-256
+- `gru_num_layers`: 1-2
+- `sequence_length`: 32 steps for BPTT
+
+### 16.2 MAPPO-MLP (Feedforward Alternative)
+
+For comparison experiments, a feedforward architecture with frame stacking is available.
+
+**Architecture** (`experiments/models/mappo_mlp.py`):
+- Policy: `Obs → Linear(hidden) → ReLU → [Linear → ReLU]×(num_layers-1) → Linear(action_dim)`
+- Value: Same structure, outputs scalar value
+
+**Key differences from RNN**:
+- No recurrent state (`sequence_length=1`)
+- Frame stacking provides temporal context instead of recurrence
+- Larger hidden layers to compensate (typically 256)
+
+**Frame stacking parameters**:
+- `frame_stack`: Number of observations to stack (e.g., 4)
+- `frame_skip`: Timestep gap between stacked frames (e.g., 10)
+- Effective temporal horizon: `frame_stack × frame_skip × step_dt`
+
+Example A2_mlp configuration:
+```yaml
+frame_stack: 4
+frame_skip: 10
+# Temporal horizon: 4 frames × 10 steps × 40ms = 1.6s effective history
+
+hidden_size: 256
+num_hidden_layers: 3
+learning_rate: 1e-4
+```
+
+### 16.3 MAPPO Objective
+
+Both architectures optimize the clipped objective:
 \[
 \mathcal{L}^{\text{CLIP}}(\theta) = \mathbb{E}\left[\min\left(r(\theta)\hat A,\ \mathrm{clip}(r(\theta),1-\epsilon,1+\epsilon)\hat A\right)\right]
 \]
@@ -722,7 +861,7 @@ r(\theta) = \frac{\pi_\theta(a|o)}{\pi_{\theta_{\text{old}}}(a|o)}
 \]
 and advantage estimates \(\hat A\) from GAE(\(\lambda\)).
 
-The config also includes `episode_start_mask_steps`, which is commonly used to reduce loss impact in the first few steps of an episode (useful when the delay system makes early observations less informative).
+The config includes `episode_start_mask_steps`, which reduces loss impact in the first few steps of an episode (useful when the delay system makes early observations less informative).
 
 ---
 
@@ -737,13 +876,239 @@ The config also includes `episode_start_mask_steps`, which is commonly used to r
 
 ## 18) Pointers to Source-of-Truth Code
 
-- Core env: `source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma5/iris_ma_env5.py`
-- Config: `source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma5/iris_ma_env5_cfg.py`
-- Delay system: `source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma5/delay_system_v2/multi_agent_delay_system_v2.py`
-- Per-field delay pipeline: `source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma5/delay_system_v2/delay_pipeline.py`
-- Derived camera + rays: `source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma5/delay_system_v2/derived_field_computers.py`
-- Detection: `source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma5/bbox_raycaster/bbox_raycaster.py`
-- Triangulation + covariance: `source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma5/triangulation/triang_cov_reward_torch.py`
-- Safety manager: `source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma5/safety/safety_manager.py`
-- TTC: `source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma5/safety/ttc_computer.py`
-- Target motion: `source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma5/target_movement/target_movement.py`
+### Core Environment
+- Core env: `iris_ma5/iris_ma_env5.py`
+- Config: `iris_ma5/iris_ma_env5_cfg.py`
+
+### Controllers
+- Point mass controller: `iris_ma5/controller/point_mass.py`
+- Gimbal stabilizer: `iris_ma5/controller/gimbal_stabilizer.py`
+
+### Delay System
+- Delay system: `iris_ma5/delay_system_v2/multi_agent_delay_system_v2.py`
+- Per-field delay pipeline: `iris_ma5/delay_system_v2/delay_pipeline.py`
+- Derived camera + rays: `iris_ma5/delay_system_v2/derived_field_computers.py`
+
+### Detection & Triangulation
+- Detection: `iris_ma5/bbox_raycaster/bbox_raycaster.py`
+- Triangulation + covariance: `iris_ma5/triangulation/triang_cov_reward_torch.py`
+
+### Safety
+- Safety manager: `iris_ma5/safety/safety_manager.py`
+- Collision detector: `iris_ma5/safety/collision_detector.py`
+- TTC computer: `iris_ma5/safety/ttc_computer.py`
+
+### Target & Curriculum
+- Target motion: `iris_ma5/target_movement/target_movement.py`
+- Curriculum config: `iris_ma5/curriculum/curriculum_cfg.py`
+
+### Experiments & Evaluation
+- Experiment registry: `iris_ma5/experiments/experiment_registry.py`
+- Experiment config: `iris_ma5/experiments/experiment_cfg.py`
+- Evaluation script: `iris_ma5/experiments/evaluate.py`
+- Metric tracker: `iris_ma5/experiments/metrics/metric_tracker.py`
+- Timeseries tracker: `iris_ma5/experiments/metrics/timeseries_tracker.py`
+- Trajectory recorder: `iris_ma5/experiments/metrics/trajectory_recorder.py`
+
+### Models
+- MAPPO-MLP models: `iris_ma5/experiments/models/mappo_mlp.py`
+- Frame stack wrapper: `iris_ma5/experiments/frame_stack_wrapper.py`
+
+### Randomization
+- Randomizer: `iris_ma5/randomization/randomizer.py`
+- Formation generator: `iris_ma5/randomization/distance_based_generator.py`
+
+*Note: All paths relative to `source/isaaclab_tasks/isaaclab_tasks/direct/`*
+
+---
+
+## 19) Experiments System
+
+The iris_ma5 environment includes a comprehensive experiments system for ablation studies and reproducible research.
+
+### 19.1 ExperimentCfg Dataclass
+
+Each experiment is defined via `ExperimentCfg`:
+
+```python
+@configclass
+class ExperimentCfg:
+    name: str                          # Unique ID (e.g., "a1_no_delay")
+    description: str                   # Human-readable description
+    group: str                         # Ablation group (e.g., "A1", "A2")
+
+    env_overrides: Dict[str, Any]     # Dotted-path overrides to IrisMAEnvCfg
+    agent_overrides: Dict[str, Any]   # Dotted-path overrides to agent YAML dict
+
+    seeds: List[int] = [42, 123, 456] # Multi-seed runs
+    num_envs: int = 4096              # Training parallel envs
+    total_timesteps: int = 200000     # Training length
+
+    use_mlp_model: bool = False       # Architecture selection
+    frame_stack: int = 1              # MLP temporal stacking
+    frame_skip: int = 1               # Gap between stacked frames
+
+    eval_num_envs: int = 256          # Evaluation parallel envs
+    eval_episodes: int = 100          # Evaluation rollouts
+```
+
+### 19.2 Ablation Study Groups
+
+| Group | Focus | Variants |
+|-------|-------|----------|
+| **A1** | Delay Modeling | `a1_no_delay`, `a1_stochastic_delay`, `a1_with_aoi`, `a1_without_aoi`, `a1_curriculum_no_delay` |
+| **A1_sweep** | Fixed Delay Values | `a1_delay_sweep_0ms`, `a1_delay_sweep_50ms`, `a1_delay_sweep_100ms`, `a1_delay_sweep_150ms`, `a1_delay_sweep_200ms` |
+| **A2** | Architecture | `a2_rnn` (MAPPO-RNN), `a2_mlp` (MAPPO-MLP with frame stacking) |
+| **A3** | Reward Path | `a3_clean_reward`, `a3_noisy_reward` |
+| **A4** | Covariance Reward | `a4_analytical`, `a4_angular_only`, `a4_heuristic`, `a4_image_only` |
+| **Baselines** | Comparison | `baseline_gavin2024`, `baseline_greedy` |
+
+### 19.3 Sweep Experiments
+
+| Category | Experiments | Parameter Range |
+|----------|-------------|-----------------|
+| **Agent Count** | `sweep_agents_n2`, `sweep_agents_n3`, `sweep_agents_n4` | N = 2, 3, 4 |
+| **Delay** | `sweep_delay_200ms`, `sweep_delay_400ms`, `sweep_delay_600ms`, `sweep_delay_800ms` | 200-800ms |
+| **Noise** | `sweep_noise_sigma0px`, `sweep_noise_sigma1px`, `sweep_noise_sigma2px`, `sweep_noise_sigma4px` | σ = 0, 1, 2, 4 pixels |
+
+### 19.4 Experiment Suites
+
+```python
+# Core ablation studies (required for paper)
+register_suite("iros2026_must", [
+    "a1_no_delay", "a1_stochastic_delay", "a1_with_aoi", "a1_without_aoi",
+    "a2_rnn", "a2_mlp",
+    "a3_clean_reward", "a3_noisy_reward",
+    "a4_analytical", "a4_angular_only", "a4_heuristic", "a4_image_only",
+    "baseline_gavin2024",
+])
+
+# Extended parameter sweeps
+register_suite("iros2026_should", [
+    "sweep_agents_n2", "sweep_agents_n3", "sweep_agents_n4",
+    "sweep_delay_200ms", "sweep_delay_400ms", "sweep_delay_600ms", "sweep_delay_800ms",
+    "sweep_noise_sigma0px", "sweep_noise_sigma1px", "sweep_noise_sigma2px", "sweep_noise_sigma4px",
+])
+```
+
+---
+
+## 20) Evaluation Metrics
+
+The evaluation pipeline computes 8 paper metrics from rollouts.
+
+### 20.1 Core Metrics
+
+| # | Metric | Description | Formula |
+|---|--------|-------------|---------|
+| 1 | **Triangulation Uncertainty** | Mean trace of covariance matrix | \(\mathbb{E}[\mathrm{tr}(\Sigma_X)]\) over valid steps |
+| 2 | **Localization RMSE** | Euclidean distance: estimate vs ground truth | \(\sqrt{(x - x_{gt})^2 + (y - y_{gt})^2 + (z - z_{gt})^2}\) |
+| 3 | **Task Success Rate** | Hierarchical success (see below) | Episodes passing both Level 0 and Level 1 |
+| 4 | **Visibility Ratio** | Fraction of agents with valid detections | \(\frac{\text{agents\_detecting}}{\text{total\_agents}}\) per step |
+| 5 | **Collision Rate** | Inter-agent collisions per episode | Count of pairwise collisions |
+| 6 | **Convergence Speed** | Steps to reach trace < 10.0 | First step where valid ∧ trace < 10.0 |
+| 7 | **Time-to-First-Lock** | Steps to reach trace < 50.0 | First step where valid ∧ trace < 50.0 |
+| 8 | **Tri Valid Ratio** | Fraction of valid triangulation steps | \(\frac{\text{valid\_count}}{\text{total\_steps}}\) |
+
+### 20.2 Hierarchical Task Success
+
+Success is evaluated in two levels:
+
+**Level 0 (Track Maintenance)**:
+\[
+\text{pass}_0 = \left(\frac{\text{tri\_valid\_count}}{\text{total\_steps}} \geq 0.5\right)
+\]
+
+**Level 1 (Accuracy)** — only evaluated if Level 0 passes:
+\[
+\text{success\_steps} = \sum_{t} \mathbb{1}[\text{valid}_t \land \text{RMSE}_t < 2.0\text{m}]
+\]
+\[
+\text{pass}_1 = \left(\frac{\text{success\_steps}}{\text{tri\_valid\_count}} \geq 0.8\right)
+\]
+
+**Overall Success**:
+\[
+\text{success} = \text{pass}_0 \land \text{pass}_1
+\]
+
+### 20.3 Metric Trackers
+
+**MetricTracker** (`metric_tracker.py`):
+- Episode-level accumulation and aggregation
+- Computes mean, std, median, percentiles (5th, 95th)
+- Handles per-environment resets
+
+**TimeseriesTracker** (`timeseries_tracker.py`):
+- Per-timestep statistics for convergence visualization
+- Tracks: `visibility`, `tri_valid`, `triangulation_rmse`, `sqrt_trace_sigma`, `distance_to_target`, `target_speed`, `viewing_angle`
+- Uses vectorized scatter_add_ for efficiency
+
+**TrajectoryRecorder** (`trajectory_recorder.py`):
+- Records agent/target/triangulation positions for visualization
+- Stores in local coordinates (relative to env_origins)
+- One trajectory per sampled environment
+
+### 20.4 Example Evaluation Commands
+
+```bash
+# Standard evaluation
+./isaaclab.sh -p .../evaluate.py \
+    --experiment a3_noisy_reward \
+    --checkpoint /path/to/best_agent.pt \
+    --num_episodes 100 --num_envs 4096 \
+    --output results.json
+
+# Delay sweep (runtime override)
+for delay in 0.0 0.05 0.1 0.15 0.2; do
+    ./isaaclab.sh -p .../evaluate.py \
+        --experiment a1_with_aoi \
+        --checkpoint /path/to/best_agent.pt \
+        --delay-override $delay \
+        --output eval_delay_${delay}.json
+done
+
+# Trajectory recording for visualization
+./isaaclab.sh -p .../evaluate.py \
+    --experiment a3_noisy_reward \
+    --checkpoint /path/to/best_agent.pt \
+    --record-trajectory --trajectory-envs 8 \
+    --output traj.json
+
+# Greedy baseline (no checkpoint needed)
+./isaaclab.sh -p .../evaluate.py \
+    --experiment baseline_greedy \
+    --num_episodes 100 \
+    --output results_greedy.json
+```
+
+### 20.5 Output JSON Structure
+
+```json
+{
+  "experiment": "a3_noisy_reward",
+  "num_episodes": 100,
+  "trace_sigma_mean": 8.5,
+  "trace_sigma_std": 3.2,
+  "triangulation_rmse_mean": 1.2,
+  "triangulation_rmse_std": 0.8,
+  "task_success_rate": 0.85,
+  "visibility_mean": 0.92,
+  "collision_rate_mean": 0.1,
+  "convergence_speed_mean": 45.3,
+  "time_to_first_lock_mean": 12.1,
+  "tri_valid_ratio_mean": 0.88,
+  "timeseries": {
+    "timesteps": [0, 1, 2, ...],
+    "visibility": {"mean": [...], "std": [...]},
+    "sqrt_trace_sigma": {"mean": [...], "std": [...]}
+  },
+  "trajectories": {
+    "env_0": {
+      "agents": {"drone_0": {"x": [...], "y": [...], "z": [...]}},
+      "target": {"x": [...], "y": [...], "z": [...]},
+      "tri_estimate": {"x": [...], "y": [...], "z": [...]}
+    }
+  }
+}
+```

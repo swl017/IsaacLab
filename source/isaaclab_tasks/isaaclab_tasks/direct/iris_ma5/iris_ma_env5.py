@@ -560,6 +560,10 @@ class IrisMAEnvV5(DirectMARLEnv):
         """
         curr = self.cfg.curriculum
 
+        # DEBUG: Print when delay mode is applied
+        print(f"[DEBUG _apply_delay_mode] mode={mode}, current_step={current_step}, "
+              f"fixed_delay_start={curr.fixed_delay_start_step}, random_delay_start={curr.random_delay_start_step}")
+
         if mode == "none":
             # Pre-Phase 3: No delay applied
             self.delay_system.set_delay_mode("none", progress=0.0)
