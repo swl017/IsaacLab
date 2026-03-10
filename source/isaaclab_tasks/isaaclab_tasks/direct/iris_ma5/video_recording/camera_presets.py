@@ -41,8 +41,8 @@ CAMERA_PRESETS: dict[str, CameraPreset] = {
             smoothing_factor=0.08,
             dynamic_zoom=True,
             min_zoom_distance=20.0,
-            max_zoom_distance=100.0,
-            zoom_margin=1.8,  # Extra margin for overhead view
+            max_zoom_distance=120.0,
+            zoom_margin=2.0,  # Extra margin to ensure all agents/target visible
         ),
     ),
     # Chase camera - follows target from behind
@@ -56,8 +56,8 @@ CAMERA_PRESETS: dict[str, CameraPreset] = {
             smoothing_factor=0.06,
             dynamic_zoom=True,
             min_zoom_distance=20.0,
-            max_zoom_distance=80.0,
-            zoom_margin=1.5,
+            max_zoom_distance=100.0,
+            zoom_margin=1.8,  # Increased to fit all agents and target
         ),
     ),
     # Side view - lateral perspective
@@ -98,8 +98,8 @@ CAMERA_PRESETS: dict[str, CameraPreset] = {
             smoothing_factor=0.05,
             dynamic_zoom=True,
             min_zoom_distance=25.0,
-            max_zoom_distance=100.0,
-            zoom_margin=1.6,
+            max_zoom_distance=120.0,
+            zoom_margin=1.9,  # Generous margin for multi-agent scenarios
         ),
     ),
     # Close-up - tight follow on target
@@ -143,8 +143,8 @@ CAMERA_PRESETS: dict[str, CameraPreset] = {
             smoothing_factor=0.07,
             dynamic_zoom=True,
             min_zoom_distance=30.0,
-            max_zoom_distance=90.0,
-            zoom_margin=1.5,
+            max_zoom_distance=120.0,
+            zoom_margin=1.8,  # Ensures all agents and target visible
         ),
     ),
 }

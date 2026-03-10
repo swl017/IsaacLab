@@ -13,6 +13,7 @@
 #
 # Usage:
 #   ./generate_demo_video.sh --sim-video raw_demo.mp4 --json metrics.json --output final.mp4
+#   ./generate_demo_video.sh --sim-video raw_demo.mp4 --json metrics.json --output final.mp4 --save-plot
 #
 # Options:
 #   --sim-video PATH      Input simulation video
@@ -23,6 +24,7 @@
 #   --metrics M1 M2 ...   Metrics to show (default: viewing_angle triangulation_rmse visibility)
 #   --overlay M1 M2       Overlay metrics on same axes (can be used multiple times)
 #   --preset PRESET       Use preset configuration: default, delay (default: none)
+#   --save-plot           Save plot video alongside output (e.g., final_plot.mp4)
 
 set -e
 
@@ -33,6 +35,7 @@ METRICS="viewing_angle triangulation_rmse visibility"
 FPS=30
 OVERLAY_ARGS=""
 PRESET=""
+SAVE_PLOT=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -84,6 +87,10 @@ while [[ $# -gt 0 ]]; do
             PRESET="$2"
             shift 2
             ;;
+        --save-plot)
+            SAVE_PLOT=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 --sim-video VIDEO --json JSON --output OUTPUT [options]"
             echo ""
@@ -99,6 +106,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --overlay M1 M2       Overlay metrics on same axes (can be used multiple times)"
             echo "  --preset PRESET       Use preset: default, delay (overrides metrics and overlay)"
             echo "  --fps FPS             Output FPS (default: 30)"
+            echo "  --save-plot           Save plot video alongside output (e.g., output_plot.mp4)"
             echo "  -h, --help            Show this help message"
             echo ""
             echo "Presets:"
@@ -168,7 +176,13 @@ if [[ -n "$OVERLAY_ARGS" ]]; then
 echo "  Overlay:          $OVERLAY_ARGS"
 fi
 echo "  FPS:              $FPS"
+echo "  Save plot:        $SAVE_PLOT"
 echo ""
+
+# Compute plot video output path (for --save-plot option)
+OUTPUT_DIR=$(dirname "$OUTPUT")
+OUTPUT_BASE=$(basename "$OUTPUT" .mp4)
+SAVED_PLOT_PATH="${OUTPUT_DIR}/${OUTPUT_BASE}_plot.mp4"
 
 # Handle different layouts
 case $LAYOUT in
@@ -218,6 +232,12 @@ case $LAYOUT in
             --sync-video "$SIM_VIDEO" \
             $OVERLAY_ARGS
 
+        # Save plot video if requested
+        if [[ "$SAVE_PLOT" == true ]]; then
+            cp "$PLOT_VIDEO" "$SAVED_PLOT_PATH"
+            echo "  Plot video saved to: $SAVED_PLOT_PATH"
+        fi
+
         echo ""
         echo "Step 2/2: Combining videos side-by-side..."
         python "$SCRIPT_DIR/combine_videos.py" \
@@ -246,6 +266,12 @@ case $LAYOUT in
             --fps $FPS \
             --sync-video "$SIM_VIDEO" \
             $OVERLAY_ARGS
+
+        # Save plot video if requested
+        if [[ "$SAVE_PLOT" == true ]]; then
+            cp "$PLOT_VIDEO" "$SAVED_PLOT_PATH"
+            echo "  Plot video saved to: $SAVED_PLOT_PATH"
+        fi
 
         echo ""
         echo "Step 2/2: Combining videos stacked..."
@@ -276,6 +302,12 @@ case $LAYOUT in
             --resolution 960 540 \
             $OVERLAY_ARGS
 
+        # Save plot video if requested
+        if [[ "$SAVE_PLOT" == true ]]; then
+            cp "$PLOT_VIDEO" "$SAVED_PLOT_PATH"
+            echo "  Plot video saved to: $SAVED_PLOT_PATH"
+        fi
+
         echo ""
         echo "Step 2/2: Combining as picture-in-picture..."
         python "$SCRIPT_DIR/combine_videos.py" \
@@ -297,4 +329,7 @@ esac
 echo ""
 echo "=============================================="
 echo "Done! Output saved to: $OUTPUT"
+if [[ "$SAVE_PLOT" == true ]] && [[ -f "$SAVED_PLOT_PATH" ]]; then
+echo "Plot video saved to:  $SAVED_PLOT_PATH"
+fi
 echo "=============================================="

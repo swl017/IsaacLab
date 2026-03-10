@@ -173,7 +173,7 @@ METRIC_CONFIG = {
         "y_label": "Delay (s)",
     },
     "other_aoi": {
-        "display_name": "Comm Detection Delay",
+        "display_name": "Comm Delay",
         "unit": "s",
         "aux_lines": [],
         "invert": False,  # Lower is better
@@ -210,7 +210,7 @@ class PlotVideoGenerator:
         resolution: tuple[int, int] = (1920, 1080),
         show_std: bool = True,
         show_thresholds: bool = True,
-        title: str = "Tracking Performance Metrics",
+        title: str = "Performance Metrics",
         overlay_groups: list[list[str]] | None = None,
     ):
         """Initialize the plot video generator.
@@ -660,7 +660,7 @@ def parse_args():
         help="Don't show good/bad threshold regions"
     )
     parser.add_argument(
-        "--title", type=str, default="Tracking Performance Metrics",
+        "--title", type=str, default="Performance Metrics",
         help="Video title text"
     )
     parser.add_argument(

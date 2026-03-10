@@ -314,7 +314,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     detection_mean_latency: float = 0.1
     """Mean detection latency (s)."""
 
-    detection_std_latency: float = 0.08
+    detection_std_latency: float = 0.04
     """Standard deviation of detection latency (s)."""
 
     detection_failure_rate: float = 0.05
@@ -324,7 +324,7 @@ class IrisMAEnvCfg(DirectMARLEnvCfg):
     comm_mean_latency: float = 0.1
     """Mean inter-agent communication latency (s)."""
 
-    comm_std_latency: float = 0.08
+    comm_std_latency: float = 0.04
     """Standard deviation of communication latency (s)."""
 
     comm_dropout_rate: float = 0.05

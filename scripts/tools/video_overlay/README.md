@@ -370,6 +370,24 @@ python combine_videos.py \
 | `stacked` | Simulation top, plots bottom |
 | `pip` | Plots overlaid on simulation corner |
 
+### Reuse a Saved Plot Video
+
+Skip plot generation by combining directly with a previously saved plot video:
+
+```bash
+python combine_videos.py \
+    --simulation-video raw_demo.mp4 \
+    --plot-video delay_analysis_plot.mp4 \
+    --output-video final_combined.mp4 \
+    --layout side_by_side \
+    --sim-weight 0.55
+```
+
+This is useful when:
+- Re-combining with a different simulation video
+- Testing different layout options without regenerating plots
+- The plot video was saved using `--save-plot` in generate_demo_video.sh
+
 ---
 
 ## One-Command Pipeline (generate_demo_video.sh)
@@ -448,6 +466,24 @@ Overlay specific metrics on the same axes:
     --overlay ego_aoi other_aoi
 ```
 
+### Save Plot Video for Reuse
+
+Save the intermediate plot video for later reuse:
+
+```bash
+./generate_demo_video.sh \
+    --sim-video raw_demo.mp4 \
+    --json metrics.json \
+    --output delay_analysis.mp4 \
+    --preset delay \
+    --layout side_by_side \
+    --save-plot
+```
+
+This creates:
+- `delay_analysis.mp4` - Combined final video
+- `delay_analysis_plot.mp4` - Reusable plot video
+
 ### Arguments
 
 - `--sim-video`: Input simulation video
@@ -459,6 +495,7 @@ Overlay specific metrics on the same axes:
 - `--overlay M1 M2`: Overlay metrics on same axes (can be used multiple times)
 - `--preset`: Use preset configuration (`default`, `delay`)
 - `--fps`: Output FPS
+- `--save-plot`: Save intermediate plot video as `{output}_plot.mp4`
 
 ### Available Presets
 
@@ -483,33 +520,69 @@ Overlay specific metrics on the same axes:
     --record-video raw_demo.mp4 \
     --camera-mode overhead \
     --camera-smoothing 0.08 \
+    --video-fps 25 \
     --output metrics.json
 ```
 
-### Step 2: Generate Professional Demo Video
+**Note:** Use `--video-fps 25` to match the simulation step rate (25 Hz) for real-time playback.
+
+### Step 2: Generate Demo Video with Saved Plot
 
 ```bash
-# Option A: Side-by-side layout (best for presentations)
+# Generate combined video and save the plot video for reuse
 ./scripts/tools/video_overlay/generate_demo_video.sh \
     --sim-video raw_demo.mp4 \
     --json metrics.json \
-    --output final_demo.mp4 \
+    --output delay_analysis.mp4 \
+    --preset delay \
     --layout side_by_side \
-    --style dark
+    --style dark \
+    --save-plot
+```
 
-# Option B: Overlay on video (simpler)
-./scripts/tools/video_overlay/generate_demo_video.sh \
-    --sim-video raw_demo.mp4 \
-    --json metrics.json \
-    --output final_demo.mp4 \
-    --layout overlay
+### Step 3 (Optional): Reuse Plot Video with Different Layout
+
+```bash
+# Combine saved plot video with different settings (no regeneration)
+python scripts/tools/video_overlay/combine_videos.py \
+    --simulation-video raw_demo.mp4 \
+    --plot-video delay_analysis_plot.mp4 \
+    --output-video delay_analysis_pip.mp4 \
+    --layout pip \
+    --pip-position bottom_right \
+    --pip-scale 0.4
 ```
 
 ### Output Files
 
-- `raw_demo.mp4` - Raw video with smooth camera motion
-- `metrics.json` - Metrics data for overlay
-- `final_demo.mp4` - Professional video with metrics visualization
+| File | Description |
+|------|-------------|
+| `raw_demo.mp4` | Raw simulation video with smooth camera |
+| `metrics.json` | Metrics data (timeseries + trajectory) |
+| `delay_analysis.mp4` | Final combined video |
+| `delay_analysis_plot.mp4` | Reusable plot video (if `--save-plot` used) |
+
+### Quick Reference: Common Pipelines
+
+```bash
+# Full pipeline with evaluate.sh helper script
+bash scripts/tools/video_overlay/evaluate.sh && \
+./scripts/tools/video_overlay/generate_demo_video.sh \
+    --sim-video raw_demo.mp4 \
+    --json metrics.json \
+    --output delay_analysis.mp4 \
+    --preset delay \
+    --layout side_by_side \
+    --save-plot
+
+# Reuse saved plot with new simulation video
+python scripts/tools/video_overlay/combine_videos.py \
+    --simulation-video new_demo.mp4 \
+    --plot-video delay_analysis_plot.mp4 \
+    --output-video new_combined.mp4 \
+    --layout side_by_side \
+    --sim-weight 0.55
+```
 
 ---
 

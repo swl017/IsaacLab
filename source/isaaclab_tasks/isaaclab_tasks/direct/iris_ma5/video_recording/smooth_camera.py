@@ -235,7 +235,7 @@ class SmoothCameraController:
         agents_pos: np.ndarray,
         target_pos: np.ndarray,
     ) -> float:
-        """Compute required camera distance to fit all agents in frame.
+        """Compute required camera distance to fit all agents and target in frame.
 
         Args:
             agents_pos: Agent positions [num_agents, 3].
@@ -247,28 +247,45 @@ class SmoothCameraController:
         # Combine all points we need to see
         all_points = np.vstack([agents_pos, target_pos.reshape(1, 3)])
 
-        # Calculate the maximum spread in XY plane (horizontal)
-        min_xy = np.min(all_points[:, :2], axis=0)
-        max_xy = np.max(all_points[:, :2], axis=0)
-        spread_xy = np.linalg.norm(max_xy - min_xy)
+        # Calculate bounding box of all points
+        min_xyz = np.min(all_points, axis=0)
+        max_xyz = np.max(all_points, axis=0)
 
-        # Also consider Z spread for non-overhead cameras
-        z_spread = np.max(all_points[:, 2]) - np.min(all_points[:, 2])
+        # Calculate spread in each dimension
+        spread_x = max_xyz[0] - min_xyz[0]
+        spread_y = max_xyz[1] - min_xyz[1]
+        spread_z = max_xyz[2] - min_xyz[2]
 
-        # Use the larger of XY spread or Z spread
-        max_spread = max(spread_xy, z_spread)
+        # For horizontal spread (what the camera sees laterally)
+        spread_horizontal = math.sqrt(spread_x**2 + spread_y**2)
 
-        # Apply margin multiplier
-        required_spread = max_spread * self.cfg.zoom_margin
+        # Calculate required distance based on FOV and aspect ratio
+        # Assume 16:9 aspect ratio (1920x1080)
+        aspect_ratio = 16.0 / 9.0  # width / height
 
-        # Calculate required distance based on FOV
-        # For overhead camera: distance = spread / (2 * tan(fov/2))
-        fov_rad = math.radians(self.cfg.fov_degrees)
-        half_fov_tan = math.tan(fov_rad / 2)
+        # Horizontal FOV is the configured value
+        fov_h_rad = math.radians(self.cfg.fov_degrees)
+        # Vertical FOV is narrower due to aspect ratio
+        fov_v_rad = 2.0 * math.atan(math.tan(fov_h_rad / 2.0) / aspect_ratio)
 
-        # Account for both horizontal and vertical FOV (assume 16:9 aspect)
-        # Use the more constraining dimension
-        required_distance = required_spread / (2 * half_fov_tan)
+        half_fov_h_tan = math.tan(fov_h_rad / 2.0)
+        half_fov_v_tan = math.tan(fov_v_rad / 2.0)
+
+        # Apply margin multiplier to both spreads
+        spread_horizontal_margin = spread_horizontal * self.cfg.zoom_margin
+        spread_vertical_margin = spread_z * self.cfg.zoom_margin
+
+        # Calculate required distance for each dimension
+        # Distance = (spread/2) / tan(fov/2)
+        dist_for_horizontal = spread_horizontal_margin / (2.0 * half_fov_h_tan)
+        dist_for_vertical = spread_vertical_margin / (2.0 * half_fov_v_tan)
+
+        # Use the larger distance to ensure both dimensions fit
+        # This is the key fix - we need to satisfy BOTH constraints
+        required_distance = max(dist_for_horizontal, dist_for_vertical)
+
+        # Add a small safety margin (5%) to account for edge cases
+        required_distance *= 1.05
 
         # Clamp to min/max zoom limits
         required_distance = max(self.cfg.min_zoom_distance,
