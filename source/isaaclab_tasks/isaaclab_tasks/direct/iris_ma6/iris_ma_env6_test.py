@@ -142,8 +142,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self._camera_offset_position_b = torch.tensor(
             self.cfg.camera.offset.pos, dtype=torch.float32, device=self.device
         ).expand(self.num_envs, -1)
+        # Use camera offset rotation from config to ensure visualization matches actual camera
         self._camera_offset_rotation_b = torch.tensor(
-            [0.5, -0.5, 0.5, -0.5], dtype=torch.float32, device=self.device
+            self.cfg.camera.offset.rot, dtype=torch.float32, device=self.device
         ).expand(self.num_envs, -1)
         camera_cfg_batch = torch.tensor(
             [
@@ -169,15 +170,18 @@ class IrisMA6TestEnv(DirectMARLEnv):
             agent_ids=self.cfg.possible_agents,
         )
 
-        # Initialize visualization (only active when debug_vis is enabled)
+        # Visualization is created lazily via _set_debug_vis_impl when debug_vis is enabled
         self._visualization: CustomVisualization | None = None
+
+        # Cache for visualization data (updated each step, used by debug callback)
+        self._vis_camera_poses: Dict[str, tuple] = {}
+        self._vis_target_pos: torch.Tensor | None = None
+        self._vis_bbox_empty: Dict[str, torch.Tensor] = {}
+        self._vis_zoom_levels: Dict[str, torch.Tensor] = {}
+
+        # Enable debug visualization if configured
         if self.cfg.debug_vis:
-            self._visualization = CustomVisualization(
-                num_envs=self.num_envs,
-                possible_agents=self.cfg.possible_agents,
-                camera_cfg=self.cfg.camera,
-                device=self.device,
-            )
+            self.set_debug_vis(True)
 
     def _setup_scene(self):
         """Setup the scene with multiple robots and shared target."""
@@ -362,27 +366,17 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 dim=-1,
             )
 
-        # Update visualization if enabled
-        if self._visualization is not None:
-            self._visualization.step()
-
-            # Prepare visualization data
-            target_pos_flat = self.target.data.root_pos_w  # (N, 3)
-            bbox_empty_dict = {
-                agent_id: self.bbox_raycaster_v2.data.bbox_empty[:, idx, 0]
-                for idx, agent_id in enumerate(self.cfg.possible_agents)
-            }
-            zoom_levels_dict = {
-                agent_id: self.zoom_level[:, idx]
-                for idx, agent_id in enumerate(self.cfg.possible_agents)
-            }
-
-            self._visualization.update(
-                camera_poses=camera_poses,
-                target_pos=target_pos_flat,
-                bbox_empty=bbox_empty_dict,
-                zoom_levels=zoom_levels_dict,
-            )
+        # Cache data for debug visualization callback
+        self._vis_camera_poses = camera_poses
+        self._vis_target_pos = self.target.data.root_pos_w
+        self._vis_bbox_empty = {
+            agent_id: self.bbox_raycaster_v2.data.bbox_empty[:, idx, 0]
+            for idx, agent_id in enumerate(self.cfg.possible_agents)
+        }
+        self._vis_zoom_levels = {
+            agent_id: self.zoom_level[:, idx]
+            for idx, agent_id in enumerate(self.cfg.possible_agents)
+        }
 
         return obs
 
@@ -484,3 +478,61 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self.zoom_level[env_ids] = 1.0
         self.cmd_gimbal_yaw[env_ids] = 0.0
         self.cmd_gimbal_pitch[env_ids] = 0.0
+
+    # ==================================================================================
+    # Debug Visualization
+    # ==================================================================================
+
+    def _set_debug_vis_impl(self, debug_vis: bool):
+        """Set debug visualization into visualization objects.
+
+        This function creates or destroys the visualization objects based on the
+        debug_vis flag. Called by set_debug_vis() from DirectMARLEnv.
+
+        Args:
+            debug_vis: Whether to enable debug visualization.
+        """
+        if debug_vis:
+            # Create visualization if not exists
+            if self._visualization is None:
+                self._visualization = CustomVisualization(
+                    num_envs=self.num_envs,
+                    possible_agents=self.cfg.possible_agents,
+                    camera_cfg=self.cfg.camera,
+                    device=self.device,
+                )
+        else:
+            # Destroy visualization
+            if self._visualization is not None:
+                # Clear any drawn lines before destroying
+                for agent_id in self.cfg.possible_agents:
+                    self._visualization.camera_frustum[agent_id].clear()
+                self._visualization = None
+
+    def _debug_vis_callback(self, event):
+        """Debug visualization callback called each frame.
+
+        This draws camera frustums and detection indicators for all agents.
+        Called automatically via the post-update event subscription when
+        debug visualization is enabled.
+
+        Args:
+            event: Event data from the simulation app (unused).
+        """
+        if self._visualization is None:
+            return
+
+        # Skip if visualization data not yet populated
+        if not self._vis_camera_poses or self._vis_target_pos is None:
+            return
+
+        # Update frame counter for warmup (prevents GPU crashes)
+        self._visualization.step()
+
+        # Draw visualizations
+        self._visualization.update(
+            camera_poses=self._vis_camera_poses,
+            target_pos=self._vis_target_pos,
+            bbox_empty=self._vis_bbox_empty,
+            zoom_levels=self._vis_zoom_levels,
+        )

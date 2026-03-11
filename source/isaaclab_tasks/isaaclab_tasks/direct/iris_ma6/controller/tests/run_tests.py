@@ -549,18 +549,20 @@ def run_gimbal_tests(results: TestResults, device: torch.device, verbose: bool =
     except Exception as e:
         results.add_fail("Joint limits", traceback.format_exc())
 
-    # Test 4: First-order dynamics
+    # Test 4: First-order dynamics (world-frame stabilization)
     try:
         gimbal.reset()
-        gimbal._yaw_target = torch.full((num_envs,), 1.0, device=device)  # Target 1 rad
         dt = 0.01
         q_body = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device).expand(num_envs, 4)
 
-        # After one tau, should reach ~63%
+        # Set world-frame target directly (simulating accumulated rate commands)
+        gimbal._azimuth_world = torch.full((num_envs,), 1.0, device=device)  # Target 1 rad
+
+        # After one tau, should reach ~63% of target
         steps_per_tau = int(cfg.tau_gimbal / dt)
         for _ in range(steps_per_tau):
             gimbal.compute_control(
-                torch.zeros(num_envs, device=device),
+                torch.zeros(num_envs, device=device),  # No rate command
                 torch.zeros(num_envs, device=device),
                 q_body,
                 dt,
@@ -580,9 +582,69 @@ def run_gimbal_tests(results: TestResults, device: torch.device, verbose: bool =
     except Exception as e:
         results.add_fail("First-order dynamics", traceback.format_exc())
 
+    # Test 5: World-frame stabilization (gimbal compensates for drone tilt)
+    try:
+        gimbal.reset()
+        dt = 0.01
+
+        # Start with drone level, gimbal pointing forward (+X world)
+        q_level = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device).expand(num_envs, 4)
+
+        # Run a few steps to stabilize at forward direction
+        for _ in range(50):
+            gimbal.compute_control(
+                torch.zeros(num_envs, device=device),
+                torch.zeros(num_envs, device=device),
+                q_level,
+                dt,
+            )
+
+        # Record initial body-frame yaw
+        yaw_level = gimbal.yaw[0].item()
+
+        # Now tilt the drone 30 degrees in yaw (rotate around Z)
+        angle = math.radians(30)
+        q_tilted = torch.tensor(
+            [[math.cos(angle / 2), 0.0, 0.0, math.sin(angle / 2)]], device=device
+        ).expand(num_envs, 4)
+
+        # Run more steps - gimbal should compensate to maintain world-frame direction
+        for _ in range(100):
+            gimbal.compute_control(
+                torch.zeros(num_envs, device=device),
+                torch.zeros(num_envs, device=device),
+                q_tilted,
+                dt,
+            )
+
+        # After compensation, body-frame yaw should have changed by ~30 deg
+        yaw_tilted = gimbal.yaw[0].item()
+        yaw_change = abs(yaw_tilted - yaw_level)
+
+        # The gimbal should have counter-rotated to compensate
+        assert yaw_change > math.radians(20), (
+            f"Gimbal should compensate for drone rotation, "
+            f"got only {math.degrees(yaw_change):.1f} deg change"
+        )
+
+        if verbose:
+            print(f"    Yaw level: {math.degrees(yaw_level):.1f} deg")
+            print(f"    Yaw tilted: {math.degrees(yaw_tilted):.1f} deg")
+            print(f"    Compensation: {math.degrees(yaw_change):.1f} deg")
+
+        results.add_pass("World-frame stabilization")
+    except AssertionError as e:
+        results.add_fail("World-frame stabilization", str(e))
+    except Exception as e:
+        results.add_fail("World-frame stabilization", traceback.format_exc())
+
 
 def run_attitude_controller_tests(results: TestResults, device: torch.device, verbose: bool = False):
-    """Run attitude controller tests."""
+    """Run attitude controller tests.
+
+    The AttitudeController (4-loop architecture) is P-only and outputs rate setpoints,
+    not torques. The rate setpoint is then fed to the RateController.
+    """
     print("\n" + "=" * 80)
     print("Testing AttitudeController")
     print("=" * 80)
@@ -590,53 +652,36 @@ def run_attitude_controller_tests(results: TestResults, device: torch.device, ve
     from isaaclab_tasks.direct.iris_ma6.controller import (
         AttitudeController,
         AttitudeControllerCfg,
-        MixerMatrix,
-        MotorDynamicsCfg,
     )
 
     num_envs = 16
     cfg = AttitudeControllerCfg()
-    motor_cfg = MotorDynamicsCfg()
 
-    # Create mixer (required by attitude controller)
-    mixer = MixerMatrix(
-        arm_length=motor_cfg.arm_length,
-        k_f=motor_cfg.k_f,
-        k_m=motor_cfg.k_m,
-        device=device,
-    )
-
-    # Test 1: Initialization
+    # Test 1: Initialization (4-loop architecture: no mixer required)
     try:
-        att = AttitudeController(cfg=cfg, mixer=mixer, num_envs=num_envs, device=device)
+        att = AttitudeController(cfg=cfg, num_envs=num_envs, device=device)
         results.add_pass("Initialization")
     except Exception as e:
         results.add_fail("Initialization", traceback.format_exc())
         return
 
-    # Test 2: Identity quaternion (no error)
+    # Test 2: Identity quaternion (no error) -> zero rate setpoint
     try:
         q_des = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device).expand(num_envs, 4)
         q_current = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device).expand(num_envs, 4)
-        omega_current = torch.zeros((num_envs, 3), device=device)
-        thrust = torch.full((num_envs,), 15.0, device=device)
 
-        omega_cmd, tau_cmd = att.compute_control(
+        rate_setpoint = att.compute_control(
             q_des=q_des,
             yaw_rate_des=torch.zeros(num_envs, device=device),
             q_current=q_current,
-            omega_current=omega_current,
-            thrust_cmd=thrust,
         )
 
-        assert omega_cmd.shape == (num_envs, 4)
-        # At identity, moments should be near zero, so omega should be similar across rotors
-        omega_spread = omega_cmd.std(dim=-1).mean().item()
-        assert omega_spread < 50, f"Omega spread should be small at identity, got {omega_spread}"
+        assert rate_setpoint.shape == (num_envs, 3)
+        # At identity, rate setpoint should be near zero
+        assert torch.allclose(rate_setpoint, torch.zeros_like(rate_setpoint), atol=1e-5)
 
         if verbose:
-            print(f"    Omega cmd: {omega_cmd[0].tolist()}")
-            print(f"    Omega spread: {omega_spread:.2f}")
+            print(f"    Rate setpoint at identity: {rate_setpoint[0].tolist()}")
 
         results.add_pass("Identity quaternion (no error)")
     except AssertionError as e:
@@ -644,7 +689,7 @@ def run_attitude_controller_tests(results: TestResults, device: torch.device, ve
     except Exception as e:
         results.add_fail("Identity quaternion (no error)", traceback.format_exc())
 
-    # Test 3: Roll error generates corrective moment
+    # Test 3: Roll error generates corrective rate setpoint
     try:
         # 10 degree roll error
         angle = math.radians(10)
@@ -652,30 +697,25 @@ def run_attitude_controller_tests(results: TestResults, device: torch.device, ve
         q_current = torch.tensor(
             [[math.cos(angle / 2), math.sin(angle / 2), 0.0, 0.0]], device=device
         ).expand(num_envs, 4)
-        omega_current = torch.zeros((num_envs, 3), device=device)
-        thrust = torch.full((num_envs,), 15.0, device=device)
 
-        omega_cmd, tau_cmd = att.compute_control(
+        rate_setpoint = att.compute_control(
             q_des=q_des,
             yaw_rate_des=torch.zeros(num_envs, device=device),
             q_current=q_current,
-            omega_current=omega_current,
-            thrust_cmd=thrust,
         )
 
-        # There should be some asymmetry to correct the roll
-        left_avg = (omega_cmd[:, 1] + omega_cmd[:, 2]).mean().item()  # M2, M3 (left)
-        right_avg = (omega_cmd[:, 0] + omega_cmd[:, 3]).mean().item()  # M1, M4 (right)
-        assert left_avg != right_avg, "Should have asymmetric commands to correct roll"
+        # Rate setpoint should have non-zero roll rate to correct the error
+        roll_rate = rate_setpoint[:, 0].mean().item()
+        assert abs(roll_rate) > 0.1, f"Should have roll rate correction, got {roll_rate}"
 
         if verbose:
-            print(f"    Left motors avg: {left_avg:.1f}, Right motors avg: {right_avg:.1f}")
+            print(f"    Roll rate setpoint for 10° error: {math.degrees(roll_rate):.1f} deg/s")
 
-        results.add_pass("Roll error generates corrective moment")
+        results.add_pass("Roll error generates corrective rate setpoint")
     except AssertionError as e:
-        results.add_fail("Roll error generates corrective moment", str(e))
+        results.add_fail("Roll error generates corrective rate setpoint", str(e))
     except Exception as e:
-        results.add_fail("Roll error generates corrective moment", traceback.format_exc())
+        results.add_fail("Roll error generates corrective rate setpoint", traceback.format_exc())
 
     # Test 4: Attitude error computation
     try:

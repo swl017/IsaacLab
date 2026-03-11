@@ -23,7 +23,7 @@ from isaaclab_assets import IRIS_GIMBAL2_CFG
 
 from .bbox_raycaster_v2 import BBoxRayCasterV2Cfg
 from .controller import DroneControllerCfg
-from .controller.tuning.tuning_results.best_config_20260312_025633 import TUNED_CONTROLLER_CFG
+from .controller.tuning import TUNED_CONTROLLER_CFG
 
 
 def _create_robot_cfg() -> ArticulationCfg:

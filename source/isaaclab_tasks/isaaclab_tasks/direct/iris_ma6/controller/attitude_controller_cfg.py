@@ -3,45 +3,58 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Configuration for attitude controller."""
+"""Configuration for attitude controller.
+
+This middle-loop controller converts attitude errors to rate setpoints,
+following the PX4 control architecture (mc_att_control).
+"""
 
 from __future__ import annotations
 
+import math
+
 from isaaclab.utils import configclass
-
-from .motor_dynamics_cfg import MotorDynamicsCfg
-
-# Compute thrust limits from motor dynamics (single source of truth)
-_motor_cfg = MotorDynamicsCfg()
-_THRUST_MIN = _motor_cfg.k_f * _motor_cfg.omega_min**2
-_THRUST_MAX = _motor_cfg.k_f * _motor_cfg.omega_max**2
 
 
 @configclass
 class AttitudeControllerCfg:
-    """Configuration for quaternion-based PD attitude controller.
+    """Configuration for quaternion-based P attitude controller.
 
-    Control law:
-        tau_cmd = -Kp_att * attitude_error - Kd_att * (omega - omega_des)
+    Control law (P-only, outputs rate setpoint):
+        rate_setpoint = -Kp_att * attitude_error + yaw_rate_feedforward
 
     Where attitude_error = 2 * sign(q_err.w) * q_err.xyz
+
+    The rate setpoint is then fed to the inner rate controller (PID)
+    which computes the actual torque commands.
+
+    Based on PX4 mc_att_control gains:
+        MC_ROLL_P = 6.5 (rad/s per rad)
+        MC_PITCH_P = 6.5
+        MC_YAW_P = 2.8 (lower for yaw)
     """
 
-    Kp_att: tuple[float, float, float] = (8.9308, 8.9308, 7.3526)
-    """Proportional gains [roll, pitch, yaw] [Nm/rad]. Auto-tuned 2026-03-12, score=5.3831."""
+    Kp_att: tuple[float, float, float] = (6.5, 6.5, 2.8)
+    """Proportional gains [roll, pitch, yaw] [(rad/s)/rad].
 
-    Kd_att: tuple[float, float, float] = (1.1283, 1.1283, 1.4365)
-    """Derivative gains [roll, pitch, yaw] [Nm/(rad/s)]. Auto-tuned 2026-03-12, score=5.3831."""
-
-    tau_max: tuple[float, float, float] = (20.0, 20.0, 8.0)
-    """Maximum moment output [roll, pitch, yaw] [Nm].
-
-    Conservative limit based on motor capabilities. Theoretical max during
-    full differential thrust is much higher, but this prevents overshoot.
+    Converts attitude error to desired angular rate.
+    Yaw gain is lower to deprioritize yaw tracking.
     """
 
-    thrust_min: float = _THRUST_MIN
-    """Minimum thrust per rotor [N]. Auto-computed from k_f * omega_min^2."""
+    rate_limit: tuple[float, float, float] = (
+        math.radians(360.0),
+        math.radians(360.0),
+        math.radians(360.0),
+    )
+    """Maximum rate setpoint output [roll, pitch, yaw] [rad/s].
 
-    thrust_max: float = _THRUST_MAX
-    """Maximum thrust per rotor [N]. Auto-computed from k_f * omega_max^2."""
+    Prevents excessive rate commands that could destabilize the drone.
+    Matches PX4 MC_*RATE_MAX defaults.
+    """
+
+    yaw_weight: float = 0.4
+    """Yaw control weight for mixing with roll/pitch [0-1].
+
+    When roll/pitch error is large, yaw tracking is reduced.
+    Matches PX4 MC_YAW_WEIGHT default.
+    """

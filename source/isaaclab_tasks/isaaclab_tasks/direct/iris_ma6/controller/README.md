@@ -6,6 +6,7 @@ A realistic quadcopter control system with rotor-level physics, cascaded control
 
 - [Overview](#overview)
 - [Architecture](#architecture)
+  - [Control Loop Rates: PX4 vs iris_ma6](#control-loop-rates-px4-vs-iris_ma6)
 - [Components](#components)
 - [Configuration](#configuration)
 - [Usage](#usage)
@@ -19,7 +20,7 @@ The iris_ma6 controller module provides a high-fidelity quadcopter control syste
 
 - **Rotor-level physics**: Thrust computed as `T = k_f * omega^2`
 - **First-order motor dynamics**: Realistic motor response with configurable time constants
-- **Cascaded control**: Velocity → Attitude → Motor → Physics pipeline
+- **Cascaded control**: Velocity → Attitude → Rate → Motor → Physics pipeline (PX4-style 4-loop)
 - **Gimbal control**: World-frame line-of-sight stabilization with auto-roll
 - **Optical zoom control**: First-order zoom dynamics with FOV computation
 - **Configurable aerodynamics**: 4 fidelity levels from disabled to full rotor effects
@@ -32,23 +33,30 @@ The iris_ma6 controller module provides a high-fidelity quadcopter control syste
 | Motor dynamics | None | First-order lag (tau=0.02s) |
 | Gimbal dynamics | None | First-order lag (tau=0.05s) |
 | Zoom control | None | First-order lag (tau=0.1s) |
-| Control cascade | Velocity → Force | Velocity → Attitude → Motor |
+| Control cascade | Velocity → Force | Velocity → Attitude → Rate → Motor (4-loop) |
 | Aerodynamics | None | 4 fidelity levels |
 
 ## Architecture
 
-### Control Cascade
+### Control Cascade (PX4-style 4-loop)
 
 ```
 Policy (25 Hz)
     │
-    ├─► VelocityController ─► AttitudeController ─► MotorDynamics ─► Physics
-    │   (outer loop)          (inner loop)          (100 Hz)
+    ├─► VelocityController ─► AttitudeController ─► RateController ─► MotorDynamics ─► Physics
+    │   (outer loop, PI)      (middle loop, P)      (inner loop, PID)  (100 Hz)
+    │   25 Hz                 100 Hz                100 Hz
     │
     ├─► GimbalController ─► Joint Targets
     │
     └─► ZoomController ─► Zoom Level
 ```
+
+**Key Architecture Points:**
+- Velocity Controller (PI): Converts velocity error → desired attitude + thrust
+- Attitude Controller (P-only): Converts attitude error → rate setpoint (NOT torque)
+- Rate Controller (PID): Converts rate error → torque commands
+- This matches PX4's cascaded architecture for improved stability
 
 ### Data Flow
 
@@ -63,6 +71,46 @@ Inputs:                          Outputs:
   v_body (velocity)         ─┤
   omega_body (angular vel)  ─┘
 ```
+
+### Control Loop Rates: PX4 vs iris_ma6
+
+The iris_ma6 controller architecture is inspired by PX4, but operates at different loop rates due to simulation constraints.
+
+| Loop Level | PX4 Rate | iris_ma6 Rate | Ratio |
+|------------|----------|---------------|-------|
+| **Rate Controller** | ~400 Hz (IMU-triggered) | 100 Hz | 4x slower |
+| **Attitude Controller** | ~400 Hz | 100 Hz | 4x slower |
+| **Velocity Controller** | ~50 Hz | 25 Hz | 2x slower |
+
+#### PX4 Architecture
+
+**Rate/Attitude Controllers (~400 Hz):**
+- Triggered by IMU gyroscope callbacks
+- Run in `rate_ctrl` work queue (priority 0, highest)
+- dt constraints: Rate=0.125-20ms, Attitude=0.2-20ms
+- Configurable via `IMU_GYRO_RATEMAX` parameter
+
+**Position/Velocity Controller (~50 Hz):**
+- Runs in `nav_and_controllers` work queue (priority -13)
+- dt constraints: 2-40ms
+- Lower priority than inner loops
+
+#### iris_ma6 Implementation
+
+- `control_dt = 0.01s` → **100 Hz** for attitude and rate controllers
+- Velocity controller runs at policy rate → **25 Hz** (decimation=4 at 100 Hz sim)
+
+**Constraint:** The simulation physics runs at 100 Hz (`sim.dt = 1/100`), which limits the inner loop to 100 Hz maximum.
+
+#### Implications
+
+1. **Reduced Phase Margin:** Inner loops run 4x slower than PX4, which may reduce stability margins for aggressive maneuvers.
+
+2. **Gain Adjustment:** PX4 gains were tuned for 400 Hz. Running at 100 Hz may require:
+   - Scaled integral gains (slower accumulation)
+   - Adjusted derivative gains (larger dt = more noise sensitivity)
+
+3. **To Match PX4 Rates:** Increase `sim.dt` from `1/100` to `1/400` (4x more physics computation).
 
 ### Module Structure
 
@@ -468,13 +516,16 @@ class DroneController:
 
 ### Time Constants Summary
 
-| Component | Time Constant | Frequency |
-|-----------|---------------|-----------|
-| Drone motors | 0.02s (20ms) | Fast brushless DC |
-| Gimbal motors | 0.05s (50ms) | Servo motors |
-| Zoom mechanism | 0.1s (100ms) | Mechanical/optical |
-| Inner control loop | 0.01s (10ms) | 100 Hz |
-| Policy loop | 0.04s (40ms) | 25 Hz |
+| Component | Time Constant | Frequency | Notes |
+|-----------|---------------|-----------|-------|
+| Drone motors | 0.02s (20ms) | - | Fast brushless DC |
+| Gimbal motors | 0.05s (50ms) | - | Servo motors |
+| Zoom mechanism | 0.1s (100ms) | - | Mechanical/optical |
+| **Control Loops** | | | |
+| Rate controller | 0.01s (10ms) | 100 Hz | PX4: ~400 Hz |
+| Attitude controller | 0.01s (10ms) | 100 Hz | PX4: ~400 Hz |
+| Velocity controller | 0.04s (40ms) | 25 Hz | PX4: ~50 Hz |
+| Policy loop | 0.04s (40ms) | 25 Hz | RL agent decision rate |
 
 ## References
 

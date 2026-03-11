@@ -5,10 +5,15 @@
 
 """Drone controller orchestrator that combines all control subsystems.
 
-Control Architecture:
-    Policy (25Hz) -> Velocity Controller -> Attitude Controller -> Motor Dynamics -> Physics
+Control Architecture (PX4-style cascaded loops):
+    Policy (25Hz) -> Velocity Controller -> Attitude Controller -> Rate Controller -> Motor Dynamics -> Physics
                   -> Gimbal Controller -> Joint Targets
                   -> Zoom Controller -> Zoom Level
+
+Cascaded Loop Hierarchy:
+    1. Velocity Controller (outer): v_cmd -> q_des, thrust_cmd
+    2. Attitude Controller (middle): q_des -> rate_setpoint (P-only)
+    3. Rate Controller (inner): rate_setpoint -> tau_cmd -> motor_cmd (PID)
 
 Frame Convention:
 - World: ENU (East-North-Up)
@@ -26,6 +31,7 @@ from .controller_cfg import DroneControllerCfg
 from .gimbal_controller import GimbalController
 from .mixer import MixerMatrix
 from .motor_dynamics import MotorDynamics
+from .rate_controller import RateController
 from .velocity_controller import VelocityController
 from .zoom_controller import ZoomController
 
@@ -33,11 +39,12 @@ from .zoom_controller import ZoomController
 class DroneController:
     """Orchestrator for complete drone control system.
 
-    Manages the cascaded control loop:
+    Manages the cascaded control loop following PX4 architecture:
     1. Velocity controller: v_cmd -> attitude_cmd, thrust_cmd
-    2. Attitude controller: attitude_cmd -> omega_cmd (rotor speeds)
-    3. Motor dynamics: omega_cmd -> F_body, tau_body
-    4. Aerodynamics: Additional forces/moments (optional)
+    2. Attitude controller: attitude_cmd -> rate_setpoint (P-only)
+    3. Rate controller: rate_setpoint -> omega_cmd (PID with mixer)
+    4. Motor dynamics: omega_cmd -> F_body, tau_body
+    5. Aerodynamics: Additional forces/moments (optional)
 
     Plus parallel subsystems:
     - Gimbal controller: gimbal rate commands -> joint targets
@@ -67,7 +74,7 @@ class DroneController:
         self.num_envs = num_envs
         self.device = torch.device(device)
 
-        # Create mixer (shared between components)
+        # Create mixer (shared between rate controller and motor dynamics)
         self._mixer = MixerMatrix(
             arm_length=cfg.motor.arm_length,
             k_f=cfg.motor.k_f,
@@ -75,20 +82,29 @@ class DroneController:
             device=self.device,
         )
 
-        # Create sub-controllers
+        # Create sub-controllers in order from inner to outer
         self._motor = MotorDynamics(
             cfg=cfg.motor,
             num_envs=num_envs,
             device=self.device,
         )
 
-        self._attitude = AttitudeController(
-            cfg=cfg.attitude,
+        # Rate controller (innermost loop - PID)
+        self._rate = RateController(
+            cfg=cfg.rate,
             mixer=self._mixer,
             num_envs=num_envs,
             device=self.device,
         )
 
+        # Attitude controller (middle loop - P-only, outputs rate setpoint)
+        self._attitude = AttitudeController(
+            cfg=cfg.attitude,
+            num_envs=num_envs,
+            device=self.device,
+        )
+
+        # Velocity controller (outer loop)
         self._velocity = VelocityController(
             cfg=cfg.velocity,
             mass=mass,
@@ -119,6 +135,11 @@ class DroneController:
     def motor_dynamics(self) -> MotorDynamics:
         """Get motor dynamics component."""
         return self._motor
+
+    @property
+    def rate_controller(self) -> RateController:
+        """Get rate controller component."""
+        return self._rate
 
     @property
     def attitude_controller(self) -> AttitudeController:
@@ -185,7 +206,10 @@ class DroneController:
         num_substeps = max(1, int(sim_dt / self.cfg.control_dt))
         inner_dt = sim_dt / num_substeps
 
-        # Run velocity controller (outer loop, runs at policy rate)
+        # =====================================================================
+        # OUTER LOOP: Velocity Controller (runs at policy rate)
+        # Converts velocity command to desired attitude + thrust
+        # =====================================================================
         q_des, thrust_cmd, yaw_rate = self._velocity.compute_control(
             v_des=v_cmd,
             yaw_rate_des=yaw_rate_cmd,
@@ -194,16 +218,31 @@ class DroneController:
             dt=sim_dt,
         )
 
-        # Run inner loop at higher rate
+        # =====================================================================
+        # INNER LOOPS: Run at higher rate for stability
+        # =====================================================================
         for _ in range(num_substeps):
-            # Attitude controller
-            omega_cmd, tau_cmd = self._attitude.compute_control(
+            # -----------------------------------------------------------------
+            # MIDDLE LOOP: Attitude Controller (P-only)
+            # Converts attitude error to rate setpoint
+            # -----------------------------------------------------------------
+            rate_setpoint = self._attitude.compute_control(
                 q_des=q_des,
                 yaw_rate_des=yaw_rate,
                 q_current=q_body,
+            )
+
+            # -----------------------------------------------------------------
+            # INNER LOOP: Rate Controller (PID with mixer)
+            # Converts rate error to motor commands
+            # -----------------------------------------------------------------
+            omega_cmd, tau_cmd, _ = self._rate.compute_control(
+                rate_setpoint=rate_setpoint,
                 omega_current=omega_body,
                 thrust_cmd=thrust_cmd,
+                dt=inner_dt,
             )
+            # Note: saturation status returned but not yet used for velocity anti-windup
 
             # Motor dynamics
             self._motor.step(omega_cmd, inner_dt)
@@ -247,6 +286,7 @@ class DroneController:
             env_ids: Environment indices to reset. If None, reset all.
         """
         self._motor.reset(env_ids)
+        self._rate.reset(env_ids)
         self._attitude.reset(env_ids)
         self._velocity.reset(env_ids)
         self._gimbal.reset(env_ids)

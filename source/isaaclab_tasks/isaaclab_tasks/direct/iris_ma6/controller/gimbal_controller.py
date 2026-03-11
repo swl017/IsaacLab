@@ -10,6 +10,11 @@ Frame Convention:
 - Body: FLU (Forward-Left-Up)
 - Gimbal Base: FLU, attached to drone body
 - Joint Order: Yaw (outer) -> Roll (middle) -> Pitch (inner)
+
+World-Frame Stabilization:
+- Rate commands adjust world-frame pointing direction (azimuth, elevation)
+- Body-frame joint angles are computed from world-frame targets + drone attitude
+- Camera pointing direction is preserved in world frame when drone tilts
 """
 
 from __future__ import annotations
@@ -21,12 +26,13 @@ from .gimbal_controller_cfg import GimbalControllerCfg
 
 
 class GimbalController:
-    """Gimbal controller with first-order dynamics and auto roll stabilization.
+    """Gimbal controller with world-frame LOS stabilization.
 
     Provides world-frame line-of-sight (LOS) tracking by:
-    1. Integrating rate commands to update target angles
-    2. Computing stabilizing roll to keep horizon level
+    1. Storing target pointing direction in WORLD frame (azimuth, elevation)
+    2. Computing body-frame joint angles that achieve world-frame pointing
     3. Applying first-order lag dynamics to smooth joint motion
+    4. Auto-stabilizing roll to keep horizon level
     """
 
     def __init__(
@@ -46,14 +52,16 @@ class GimbalController:
         self.num_envs = num_envs
         self.device = torch.device(device)
 
-        # State: current joint angles (after dynamics)
+        # State: current joint angles (after dynamics) in BODY frame
         self._yaw = torch.zeros(num_envs, dtype=torch.float32, device=self.device)
         self._roll = torch.zeros(num_envs, dtype=torch.float32, device=self.device)
         self._pitch = torch.zeros(num_envs, dtype=torch.float32, device=self.device)
 
-        # Target angles (before dynamics)
-        self._yaw_target = torch.zeros(num_envs, dtype=torch.float32, device=self.device)
-        self._pitch_target = torch.zeros(num_envs, dtype=torch.float32, device=self.device)
+        # World-frame target angles (rate-integrated pointing direction)
+        # Azimuth: yaw angle in world frame (0 = +X/East, positive CCW)
+        # Elevation: pitch from horizon (0 = horizontal, negative = looking down)
+        self._azimuth_world = torch.zeros(num_envs, dtype=torch.float32, device=self.device)
+        self._elevation_world = torch.zeros(num_envs, dtype=torch.float32, device=self.device)
 
         # Convert limits to tensors
         self._yaw_limits = cfg.yaw_limits
@@ -75,6 +83,16 @@ class GimbalController:
         """Current gimbal pitch angle (N,) [rad]."""
         return self._pitch
 
+    @property
+    def azimuth_world(self) -> torch.Tensor:
+        """World-frame azimuth angle (N,) [rad]."""
+        return self._azimuth_world
+
+    @property
+    def elevation_world(self) -> torch.Tensor:
+        """World-frame elevation angle (N,) [rad]."""
+        return self._elevation_world
+
     def compute_control(
         self,
         gimbal_yaw_rate_cmd: torch.Tensor,
@@ -82,7 +100,11 @@ class GimbalController:
         q_body: torch.Tensor,
         dt: float,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Compute gimbal joint position targets.
+        """Compute gimbal joint position targets for world-frame stabilization.
+
+        Rate commands adjust WORLD-frame pointing direction (azimuth, elevation).
+        Body-frame joint angles are then computed to achieve this world-frame
+        orientation given the current drone attitude.
 
         Args:
             gimbal_yaw_rate_cmd: (N,) yaw rate command, normalized [-1, 1].
@@ -95,33 +117,42 @@ class GimbalController:
             roll_target: (N,) roll joint target [rad] (stabilizing).
             pitch_target: (N,) pitch joint target [rad].
         """
-        # Integrate rate commands to get target angles
-        yaw_rate = gimbal_yaw_rate_cmd * self.cfg.max_gimbal_rate
-        pitch_rate = gimbal_pitch_rate_cmd * self.cfg.max_gimbal_rate
+        # Integrate rate commands to update WORLD-frame pointing direction
+        azimuth_rate = gimbal_yaw_rate_cmd * self.cfg.max_gimbal_rate
+        elevation_rate = gimbal_pitch_rate_cmd * self.cfg.max_gimbal_rate
 
-        self._yaw_target = self._yaw_target + yaw_rate * dt
-        self._pitch_target = self._pitch_target + pitch_rate * dt
+        self._azimuth_world = self._azimuth_world + azimuth_rate * dt
+        self._elevation_world = self._elevation_world + elevation_rate * dt
 
-        # Clamp to limits
-        self._yaw_target = torch.clamp(
-            self._yaw_target, self._yaw_limits[0], self._yaw_limits[1]
+        # Clamp world-frame angles to reasonable limits
+        # Azimuth: wrap to [-pi, pi]
+        self._azimuth_world = torch.atan2(
+            torch.sin(self._azimuth_world), torch.cos(self._azimuth_world)
         )
-        self._pitch_target = torch.clamp(
-            self._pitch_target, self._pitch_limits[0], self._pitch_limits[1]
+        # Elevation: clamp to [-90°, +45°] (can't look straight up much)
+        self._elevation_world = torch.clamp(
+            self._elevation_world, self._pitch_limits[0], self._pitch_limits[1]
         )
+
+        # Compute body-frame joint targets from world-frame pointing + drone attitude
+        yaw_target, pitch_target = self._world_to_body_angles(
+            self._azimuth_world, self._elevation_world, q_body
+        )
+
+        # Clamp to joint limits
+        yaw_target = torch.clamp(yaw_target, self._yaw_limits[0], self._yaw_limits[1])
+        pitch_target = torch.clamp(pitch_target, self._pitch_limits[0], self._pitch_limits[1])
 
         # Compute stabilizing roll
         if self.cfg.auto_stabilize_roll:
-            roll_target = self._compute_stabilizing_roll(
-                self._yaw_target, self._pitch_target, q_body
-            )
+            roll_target = self._compute_stabilizing_roll(yaw_target, pitch_target, q_body)
         else:
-            roll_target = torch.zeros_like(self._yaw_target)
+            roll_target = torch.zeros_like(yaw_target)
 
         # Apply first-order lag dynamics with exact discretization
         alpha = 1.0 - torch.exp(torch.tensor(-dt / self.cfg.tau_gimbal, device=self.device))
-        self._yaw = self._yaw + alpha * (self._yaw_target - self._yaw)
-        self._pitch = self._pitch + alpha * (self._pitch_target - self._pitch)
+        self._yaw = self._yaw + alpha * (yaw_target - self._yaw)
+        self._pitch = self._pitch + alpha * (pitch_target - self._pitch)
         self._roll = self._roll + alpha * (roll_target - self._roll)
 
         # Clamp final outputs
@@ -130,6 +161,51 @@ class GimbalController:
         self._roll = torch.clamp(self._roll, self._roll_limits[0], self._roll_limits[1])
 
         return self._yaw, self._roll, self._pitch
+
+    def _world_to_body_angles(
+        self,
+        azimuth_world: torch.Tensor,
+        elevation_world: torch.Tensor,
+        q_body: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convert world-frame pointing direction to body-frame gimbal angles.
+
+        Args:
+            azimuth_world: (N,) world-frame azimuth [rad].
+            elevation_world: (N,) world-frame elevation [rad].
+            q_body: (N, 4) body quaternion (wxyz).
+
+        Returns:
+            yaw_body: (N,) gimbal yaw in body frame [rad].
+            pitch_body: (N,) gimbal pitch in body frame [rad].
+        """
+        # Compute desired pointing direction in world frame
+        cos_az = torch.cos(azimuth_world)
+        sin_az = torch.sin(azimuth_world)
+        cos_el = torch.cos(elevation_world)
+        sin_el = torch.sin(elevation_world)
+
+        # World-frame pointing direction (ENU)
+        # Azimuth 0 = +X (East), Elevation 0 = horizontal
+        dir_world = torch.stack([
+            cos_el * cos_az,  # X
+            cos_el * sin_az,  # Y
+            sin_el,           # Z
+        ], dim=-1)
+
+        # Transform to body frame
+        dir_body = quat_rotate_inverse(q_body, dir_world)
+
+        # Extract body-frame gimbal angles (yaw, pitch)
+        # Yaw: rotation around body Z axis
+        yaw_body = torch.atan2(dir_body[:, 1], dir_body[:, 0])
+
+        # Pitch: rotation around body Y axis (after yaw)
+        # Project onto XZ plane in yawed frame
+        xy_dist = torch.sqrt(dir_body[:, 0] ** 2 + dir_body[:, 1] ** 2)
+        pitch_body = torch.atan2(dir_body[:, 2], xy_dist)
+
+        return yaw_body, pitch_body
 
     def _compute_stabilizing_roll(
         self,
@@ -242,14 +318,14 @@ class GimbalController:
             self._yaw.zero_()
             self._roll.zero_()
             self._pitch.zero_()
-            self._yaw_target.zero_()
-            self._pitch_target.zero_()
+            self._azimuth_world.zero_()
+            self._elevation_world.zero_()
         else:
             self._yaw[env_ids] = 0.0
             self._roll[env_ids] = 0.0
             self._pitch[env_ids] = 0.0
-            self._yaw_target[env_ids] = 0.0
-            self._pitch_target[env_ids] = 0.0
+            self._azimuth_world[env_ids] = 0.0
+            self._elevation_world[env_ids] = 0.0
 
     def set_tau_gimbal(self, tau_gimbal: torch.Tensor | float):
         """Set gimbal time constant (for randomization).

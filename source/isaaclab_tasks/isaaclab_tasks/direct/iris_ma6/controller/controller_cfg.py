@@ -13,6 +13,7 @@ from .aerodynamics_cfg import AerodynamicsCfg
 from .attitude_controller_cfg import AttitudeControllerCfg
 from .gimbal_controller_cfg import GimbalControllerCfg
 from .motor_dynamics_cfg import MotorDynamicsCfg
+from .rate_controller_cfg import RateControllerCfg
 from .velocity_controller_cfg import VelocityControllerCfg
 from .zoom_controller_cfg import ZoomControllerCfg
 
@@ -29,7 +30,10 @@ class DroneControllerCfg:
     """Velocity controller configuration (outer loop)."""
 
     attitude: AttitudeControllerCfg = AttitudeControllerCfg()
-    """Attitude controller configuration (inner loop)."""
+    """Attitude controller configuration (middle loop - outputs rate setpoint)."""
+
+    rate: RateControllerCfg = RateControllerCfg()
+    """Rate controller configuration (inner loop - outputs torque)."""
 
     motor: MotorDynamicsCfg = MotorDynamicsCfg()
     """Motor dynamics configuration."""

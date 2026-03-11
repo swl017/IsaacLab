@@ -20,6 +20,7 @@ from .attitude_controller_cfg import AttitudeControllerCfg
 from .controller_cfg import DroneControllerCfg
 from .gimbal_controller_cfg import GimbalControllerCfg
 from .motor_dynamics_cfg import MotorDynamicsCfg
+from .rate_controller_cfg import RateControllerCfg
 from .velocity_controller_cfg import VelocityControllerCfg
 from .zoom_controller_cfg import ZoomControllerCfg
 
@@ -30,6 +31,7 @@ from .drone_controller import DroneController
 from .gimbal_controller import GimbalController
 from .mixer import MixerMatrix
 from .motor_dynamics import MotorDynamics
+from .rate_controller import RateController
 from .velocity_controller import VelocityController
 from .zoom_controller import ZoomController
 
@@ -43,6 +45,7 @@ __all__ = [
     "DroneControllerCfg",
     "GimbalControllerCfg",
     "MotorDynamicsCfg",
+    "RateControllerCfg",
     "VelocityControllerCfg",
     "ZoomControllerCfg",
     # Core classes
@@ -52,6 +55,7 @@ __all__ = [
     "GimbalController",
     "MixerMatrix",
     "MotorDynamics",
+    "RateController",
     "VelocityController",
     "ZoomController",
     # Tuned configurations

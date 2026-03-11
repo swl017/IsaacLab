@@ -49,15 +49,31 @@ from isaaclab_tasks.utils import parse_env_cfg
 
 @dataclass
 class ParameterSet:
-    """Controller parameter set."""
+    """Controller parameter set.
+
+    4-Loop Architecture (PX4-style):
+    - Velocity Controller (PI): v_cmd -> attitude_cmd + thrust
+    - Attitude Controller (P-only): attitude_error -> rate_setpoint
+    - Rate Controller (PID): rate_error -> torque
+    - Mixer: torque -> motor commands
+    """
+    # Velocity controller (PI)
     Kp_vel_xy: float = 3.0
     Kp_vel_z: float = 2.0
     Ki_vel_xy: float = 0.5
     Ki_vel_z: float = 0.3
-    Kp_att_rp: float = 8.0
-    Kp_att_y: float = 4.0
-    Kd_att_rp: float = 2.5
-    Kd_att_y: float = 1.0
+
+    # Attitude controller (P-only, outputs rate setpoint in rad/s per rad error)
+    Kp_att_rp: float = 6.5  # Roll/pitch P-gain (PX4: MC_ROLL_P = 6.5)
+    Kp_att_y: float = 2.8   # Yaw P-gain (PX4: MC_YAW_P = 2.8)
+
+    # Rate controller (PID, outputs torque)
+    Kp_rate_rp: float = 0.15  # Roll/pitch P-gain (PX4: MC_ROLLRATE_P = 0.15)
+    Kp_rate_y: float = 0.2    # Yaw P-gain (PX4: MC_YAWRATE_P = 0.2)
+    Ki_rate_rp: float = 0.2   # Roll/pitch I-gain (PX4: MC_ROLLRATE_I = 0.2)
+    Ki_rate_y: float = 0.1    # Yaw I-gain (PX4: MC_YAWRATE_I = 0.1)
+    Kd_rate_rp: float = 0.003 # Roll/pitch D-gain (PX4: MC_ROLLRATE_D = 0.003)
+    Kd_rate_y: float = 0.0    # Yaw D-gain (typically 0)
 
 
 @dataclass
@@ -79,13 +95,19 @@ class TuningMetrics:
 
 @dataclass
 class AttitudeTestConfig:
-    """Configuration for attitude perturbation test."""
-    max_roll_deg: float = 45.0  # Max initial roll perturbation
-    max_pitch_deg: float = 45.0  # Max initial pitch perturbation
-    max_yaw_deg: float = 30.0  # Max initial yaw perturbation
-    max_roll_rate: float = 2.0  # rad/s
-    max_pitch_rate: float = 2.0  # rad/s
-    max_yaw_rate: float = 1.0  # rad/s
+    """Configuration for deterministic attitude step response test.
+
+    Uses fixed extreme attitudes for consistent, reproducible characterization
+    of step response across different parameter sets.
+    """
+    # Fixed initial attitudes for step response (deterministic)
+    roll_deg: float = 45.0   # Initial roll perturbation
+    pitch_deg: float = 45.0  # Initial pitch perturbation
+    yaw_deg: float = 30.0    # Initial yaw perturbation
+    # Initial angular rates (zero for clean step response)
+    roll_rate: float = 0.0   # rad/s
+    pitch_rate: float = 0.0  # rad/s
+    yaw_rate: float = 0.0    # rad/s
     test_duration: float = 3.0  # seconds
     recovery_threshold_deg: float = 5.0  # Attitude considered recovered when error < this
 
@@ -128,17 +150,22 @@ class ParallelTuner:
         print(f"Environment: {num_envs} envs, dt={self.dt:.3f}s, mass={self.mass:.2f}kg", flush=True)
 
         # Per-env parameters (set by _setup_batch)
-        self.Kp_vel = None  # (N, 3)
-        self.Ki_vel = None  # (N, 3)
-        self.Kp_att = None  # (N, 3)
-        self.Kd_att = None  # (N, 3)
-        self.integral = None  # (N, 3)
+        self.Kp_vel = None  # (N, 3) Velocity P-gain
+        self.Ki_vel = None  # (N, 3) Velocity I-gain
+        self.Kp_att = None  # (N, 3) Attitude P-gain (outputs rate setpoint)
+        self.Kp_rate = None  # (N, 3) Rate P-gain
+        self.Ki_rate = None  # (N, 3) Rate I-gain
+        self.Kd_rate = None  # (N, 3) Rate D-gain
+        self.vel_integral = None  # (N, 3) Velocity integral state
+        self.rate_integral = None  # (N, 3) Rate integral state
+        self.prev_omega = None  # (N, 3) Previous omega for angular accel
         self.batch_size = 0
 
     def _setup_batch(self, params_list: list):
-        """Setup per-environment parameter tensors."""
+        """Setup per-environment parameter tensors for 4-loop architecture."""
         self.batch_size = len(params_list)
 
+        # Velocity controller gains (PI)
         self.Kp_vel = torch.stack([
             torch.tensor([p.Kp_vel_xy, p.Kp_vel_xy, p.Kp_vel_z], dtype=torch.float32)
             for p in params_list
@@ -149,20 +176,38 @@ class ParallelTuner:
             for p in params_list
         ]).to(self.device)
 
+        # Attitude controller gains (P-only, outputs rate setpoint)
         self.Kp_att = torch.stack([
             torch.tensor([p.Kp_att_rp, p.Kp_att_rp, p.Kp_att_y], dtype=torch.float32)
             for p in params_list
         ]).to(self.device)
 
-        self.Kd_att = torch.stack([
-            torch.tensor([p.Kd_att_rp, p.Kd_att_rp, p.Kd_att_y], dtype=torch.float32)
+        # Rate controller gains (PID)
+        self.Kp_rate = torch.stack([
+            torch.tensor([p.Kp_rate_rp, p.Kp_rate_rp, p.Kp_rate_y], dtype=torch.float32)
             for p in params_list
         ]).to(self.device)
 
-        self.integral = torch.zeros(self.batch_size, 3, device=self.device)
+        self.Ki_rate = torch.stack([
+            torch.tensor([p.Ki_rate_rp, p.Ki_rate_rp, p.Ki_rate_y], dtype=torch.float32)
+            for p in params_list
+        ]).to(self.device)
+
+        self.Kd_rate = torch.stack([
+            torch.tensor([p.Kd_rate_rp, p.Kd_rate_rp, p.Kd_rate_y], dtype=torch.float32)
+            for p in params_list
+        ]).to(self.device)
+
+        # State variables
+        self.vel_integral = torch.zeros(self.batch_size, 3, device=self.device)
+        self.rate_integral = torch.zeros(self.batch_size, 3, device=self.device)
+        self.prev_omega = torch.zeros(self.batch_size, 3, device=self.device)
 
     def _compute_control(self, v_des: torch.Tensor) -> tuple:
-        """Compute control with per-environment parameters.
+        """Compute control with per-environment parameters using 4-loop cascade.
+
+        Architecture:
+            Velocity (PI) -> Attitude (P) -> Rate (PID) -> Torque
 
         Args:
             v_des: Desired velocity (N, 3)
@@ -178,12 +223,14 @@ class ParallelTuner:
         quat = self.robot.data.root_quat_w[:N]
         omega = self.robot.data.root_ang_vel_b[:N]
 
-        # === Velocity Control (PI) ===
+        # =====================================================================
+        # LOOP 1: Velocity Control (PI) -> desired acceleration -> q_des + thrust
+        # =====================================================================
         vel_error = v_des - vel
-        self.integral = torch.clamp(self.integral + vel_error * self.dt, -2.0, 2.0)
+        self.vel_integral = torch.clamp(self.vel_integral + vel_error * self.dt, -2.0, 2.0)
 
         # Per-env gains: (N,3) * (N,3) = (N,3)
-        a_des = self.Kp_vel * vel_error + self.Ki_vel * self.integral
+        a_des = self.Kp_vel * vel_error + self.Ki_vel * self.vel_integral
         a_des[:, 2] += 9.81  # Gravity compensation
 
         # Clamp desired acceleration magnitude to prevent runaway
@@ -196,16 +243,51 @@ class ParallelTuner:
         thrust = torch.clamp(thrust, 0, self.mass * 30.0)  # Max 3g thrust
 
         # Ensure a_des points somewhat upward for attitude computation
-        # If pointing downward, use hover attitude
         a_des_safe = a_des.clone()
         a_des_safe[:, 2] = torch.clamp(a_des[:, 2], min=1.0)  # At least 1 m/s^2 upward
 
         # Desired attitude from safe acceleration direction
         q_des = self._accel_to_quat(a_des_safe)
 
-        # === Attitude Control (PD) ===
+        # =====================================================================
+        # LOOP 2: Attitude Control (P-only) -> rate setpoint
+        # =====================================================================
         att_error = self._quat_error(q_des, quat)
-        tau = -self.Kp_att * att_error - self.Kd_att * omega
+
+        # P-only attitude control outputs angular rate setpoint
+        rate_setpoint = -self.Kp_att * att_error
+
+        # Clamp rate setpoint to reasonable limits (360 deg/s)
+        rate_limit = 6.28  # ~360 deg/s
+        rate_setpoint = torch.clamp(rate_setpoint, -rate_limit, rate_limit)
+
+        # =====================================================================
+        # LOOP 3: Rate Control (PID) -> torque
+        # =====================================================================
+        rate_error = rate_setpoint - omega
+
+        # Angular acceleration (backward difference)
+        angular_accel = (omega - self.prev_omega) / self.dt
+        self.prev_omega = omega.clone()
+
+        # Update rate integral with clamping
+        self.rate_integral = torch.clamp(
+            self.rate_integral + rate_error * self.dt,
+            -0.3, 0.3  # Integral limit
+        )
+
+        # PID control: tau = Kp * error + Ki * integral - Kd * accel
+        tau = (
+            self.Kp_rate * rate_error
+            + self.Ki_rate * self.rate_integral
+            - self.Kd_rate * angular_accel
+        )
+
+        # Apply yaw weight (deprioritize yaw)
+        yaw_weight = 0.4
+        tau[:, 2] = tau[:, 2] * yaw_weight
+
+        # Clamp torque output
         tau = torch.clamp(tau, -5.0, 5.0)
 
         # Force in body frame
@@ -362,36 +444,38 @@ class ParallelTuner:
         angle_rad = 2.0 * torch.acos(torch.clamp(q_err[:, 0], -1.0, 1.0))
         return torch.rad2deg(angle_rad)
 
-    def _generate_random_initial_conditions(self, att_cfg: AttitudeTestConfig) -> tuple:
-        """Generate random initial attitude and angular rate.
+    def _generate_step_response_initial_conditions(self, att_cfg: AttitudeTestConfig) -> tuple:
+        """Generate deterministic initial conditions for step response characterization.
+
+        All environments receive the SAME extreme initial attitude. This ensures
+        consistent, reproducible step response metrics across different parameter sets.
 
         Args:
-            att_cfg: Attitude test configuration
+            att_cfg: Attitude test configuration with fixed initial values
 
         Returns:
-            quat: Random quaternion (N, 4) in wxyz format
-            ang_vel: Random angular velocity (N, 3) in body frame (rad/s)
+            quat: Quaternion (N, 4) in wxyz format - same for all envs
+            ang_vel: Angular velocity (N, 3) in body frame (rad/s) - same for all envs
         """
         N = self.batch_size
 
-        # Random Euler angles (uniform in range)
-        roll = torch.deg2rad(torch.empty(N, device=self.device).uniform_(
-            -att_cfg.max_roll_deg, att_cfg.max_roll_deg))
-        pitch = torch.deg2rad(torch.empty(N, device=self.device).uniform_(
-            -att_cfg.max_pitch_deg, att_cfg.max_pitch_deg))
-        yaw = torch.deg2rad(torch.empty(N, device=self.device).uniform_(
-            -att_cfg.max_yaw_deg, att_cfg.max_yaw_deg))
+        # Fixed Euler angles (same extreme attitude for all environments)
+        roll = torch.full((N,), att_cfg.roll_deg, device=self.device)
+        pitch = torch.full((N,), att_cfg.pitch_deg, device=self.device)
+        yaw = torch.full((N,), att_cfg.yaw_deg, device=self.device)
+
+        # Convert to radians
+        roll = torch.deg2rad(roll)
+        pitch = torch.deg2rad(pitch)
+        yaw = torch.deg2rad(yaw)
 
         quat = self._euler_to_quat(roll, pitch, yaw)
 
-        # Random angular velocity (uniform in range)
+        # Fixed angular velocity (typically zero for clean step response)
         ang_vel = torch.zeros(N, 3, device=self.device)
-        ang_vel[:, 0] = torch.empty(N, device=self.device).uniform_(
-            -att_cfg.max_roll_rate, att_cfg.max_roll_rate)
-        ang_vel[:, 1] = torch.empty(N, device=self.device).uniform_(
-            -att_cfg.max_pitch_rate, att_cfg.max_pitch_rate)
-        ang_vel[:, 2] = torch.empty(N, device=self.device).uniform_(
-            -att_cfg.max_yaw_rate, att_cfg.max_yaw_rate)
+        ang_vel[:, 0] = att_cfg.roll_rate
+        ang_vel[:, 1] = att_cfg.pitch_rate
+        ang_vel[:, 2] = att_cfg.yaw_rate
 
         return quat, ang_vel
 
@@ -450,6 +534,12 @@ class ParallelTuner:
         # Render once per policy step
         self.sim.render()
 
+    def _reset_controller_state(self):
+        """Reset all controller state variables."""
+        self.vel_integral.zero_()
+        self.rate_integral.zero_()
+        self.prev_omega.zero_()
+
     def evaluate_batch(self, params_list: list) -> list:
         """Evaluate multiple parameter sets in parallel.
 
@@ -464,7 +554,7 @@ class ParallelTuner:
 
         # === Hover Test (3 seconds) ===
         self.env.reset()
-        self.integral.zero_()
+        self._reset_controller_state()
         self.robot.update(self.physics_dt)
 
         initial_pos = self.robot.data.root_pos_w[:N].clone()
@@ -490,7 +580,7 @@ class ParallelTuner:
 
         # === Velocity Test (2 seconds) ===
         self.env.reset()
-        self.integral.zero_()
+        self._reset_controller_state()
         self.robot.update(self.physics_dt)
         vel_history = []
 
@@ -510,13 +600,15 @@ class ParallelTuner:
 
         vel_history = torch.stack(vel_history)  # (T, N)
 
-        # === Attitude Recovery Test (3 seconds) ===
+        # === Attitude Step Response Test (3 seconds) ===
+        # All envs start from same extreme attitude (45° roll, 45° pitch, 30° yaw)
+        # This provides consistent step response characterization across parameter sets
         att_cfg = AttitudeTestConfig()
         self.env.reset()
-        self.integral.zero_()
+        self._reset_controller_state()
 
-        # Generate and set random initial conditions
-        init_quat, init_ang_vel = self._generate_random_initial_conditions(att_cfg)
+        # Generate deterministic step response initial conditions (same for all envs)
+        init_quat, init_ang_vel = self._generate_step_response_initial_conditions(att_cfg)
         self._set_initial_conditions(init_quat, init_ang_vel)
 
         att_errors = []  # (T, N) attitude error in degrees
@@ -620,26 +712,44 @@ class ParallelTuner:
 
 
 def generate_grid_params() -> list:
-    """Generate parameter sets for grid search."""
-    Kp_vel_xy_range = [2.0, 3.0, 4.0, 5.0]
-    Kp_vel_z_range = [1.5, 2.0, 3.0]
-    Ki_vel_xy_range = [0.3, 0.5, 0.8]
-    Kp_att_rp_range = [6.0, 8.0, 10.0, 12.0]
-    Kd_att_rp_range = [1.5, 2.5, 3.5]
+    """Generate parameter sets for grid search (4-loop architecture).
+
+    Search space based on PX4 default ranges:
+    - Velocity: Kp=1.8-5.0, Ki=0.2-0.8
+    - Attitude: Kp=4.0-10.0 (P-only, outputs rate setpoint)
+    - Rate: Kp=0.1-0.3, Ki=0.1-0.4, Kd=0.001-0.01
+    """
+    # Velocity controller (PI)
+    Kp_vel_xy_range = [2.0, 3.0, 4.0]
+    Ki_vel_xy_range = [0.3, 0.5]
+
+    # Attitude controller (P-only, outputs rate setpoint)
+    Kp_att_rp_range = [5.0, 6.5, 8.0]
+
+    # Rate controller (PID)
+    Kp_rate_rp_range = [0.10, 0.15, 0.20]
+    Ki_rate_rp_range = [0.15, 0.25]
 
     params_list = []
-    for Kp_vel_xy, Kp_vel_z, Ki_vel_xy, Kp_att_rp, Kd_att_rp in itertools.product(
-        Kp_vel_xy_range, Kp_vel_z_range, Ki_vel_xy_range, Kp_att_rp_range, Kd_att_rp_range
+    for Kp_vel_xy, Ki_vel_xy, Kp_att_rp, Kp_rate_rp, Ki_rate_rp in itertools.product(
+        Kp_vel_xy_range, Ki_vel_xy_range, Kp_att_rp_range, Kp_rate_rp_range, Ki_rate_rp_range
     ):
         params = ParameterSet(
+            # Velocity controller
             Kp_vel_xy=Kp_vel_xy,
-            Kp_vel_z=Kp_vel_z,
+            Kp_vel_z=Kp_vel_xy * 0.7,  # Z typically lower
             Ki_vel_xy=Ki_vel_xy,
             Ki_vel_z=Ki_vel_xy * 0.6,
+            # Attitude controller (P-only)
             Kp_att_rp=Kp_att_rp,
-            Kp_att_y=Kp_att_rp * 0.5,
-            Kd_att_rp=Kd_att_rp,
-            Kd_att_y=Kd_att_rp * 0.4,
+            Kp_att_y=Kp_att_rp * 0.43,  # PX4: 2.8/6.5 ≈ 0.43
+            # Rate controller (PID)
+            Kp_rate_rp=Kp_rate_rp,
+            Kp_rate_y=Kp_rate_rp * 1.33,  # PX4: 0.2/0.15 ≈ 1.33
+            Ki_rate_rp=Ki_rate_rp,
+            Ki_rate_y=Ki_rate_rp * 0.5,  # PX4: 0.1/0.2 = 0.5
+            Kd_rate_rp=0.003,  # PX4 default
+            Kd_rate_y=0.0,  # Typically 0 for yaw
         )
         params_list.append(params)
 
@@ -647,18 +757,33 @@ def generate_grid_params() -> list:
 
 
 def generate_random_params(num_trials: int) -> list:
-    """Generate parameter sets for random search."""
+    """Generate parameter sets for random search (4-loop architecture)."""
     params_list = []
     for _ in range(num_trials):
+        # Sample base values
+        Kp_vel_xy = np.random.uniform(1.5, 5.0)
+        Ki_vel_xy = np.random.uniform(0.2, 0.8)
+        Kp_att_rp = np.random.uniform(4.0, 10.0)
+        Kp_rate_rp = np.random.uniform(0.08, 0.25)
+        Ki_rate_rp = np.random.uniform(0.1, 0.35)
+        Kd_rate_rp = np.random.uniform(0.001, 0.008)
+
         params = ParameterSet(
-            Kp_vel_xy=np.random.uniform(1.5, 6.0),
-            Kp_vel_z=np.random.uniform(1.0, 4.0),
-            Ki_vel_xy=np.random.uniform(0.1, 1.0),
-            Ki_vel_z=np.random.uniform(0.1, 0.6),
-            Kp_att_rp=np.random.uniform(4.0, 15.0),
-            Kp_att_y=np.random.uniform(2.0, 8.0),
-            Kd_att_rp=np.random.uniform(1.0, 5.0),
-            Kd_att_y=np.random.uniform(0.5, 2.5),
+            # Velocity controller (PI)
+            Kp_vel_xy=Kp_vel_xy,
+            Kp_vel_z=Kp_vel_xy * np.random.uniform(0.6, 0.8),
+            Ki_vel_xy=Ki_vel_xy,
+            Ki_vel_z=Ki_vel_xy * np.random.uniform(0.5, 0.7),
+            # Attitude controller (P-only)
+            Kp_att_rp=Kp_att_rp,
+            Kp_att_y=Kp_att_rp * np.random.uniform(0.35, 0.5),
+            # Rate controller (PID)
+            Kp_rate_rp=Kp_rate_rp,
+            Kp_rate_y=Kp_rate_rp * np.random.uniform(1.0, 1.5),
+            Ki_rate_rp=Ki_rate_rp,
+            Ki_rate_y=Ki_rate_rp * np.random.uniform(0.4, 0.6),
+            Kd_rate_rp=Kd_rate_rp,
+            Kd_rate_y=0.0,  # Typically 0 for yaw
         )
         params_list.append(params)
     return params_list
@@ -733,10 +858,15 @@ def main():
 
     if best_params:
         print(f"\nBest configuration (score: {best_score:.4f}):")
-        print(f"  Kp_vel: ({best_params.Kp_vel_xy:.2f}, {best_params.Kp_vel_xy:.2f}, {best_params.Kp_vel_z:.2f})")
-        print(f"  Ki_vel: ({best_params.Ki_vel_xy:.2f}, {best_params.Ki_vel_xy:.2f}, {best_params.Ki_vel_z:.2f})")
-        print(f"  Kp_att: ({best_params.Kp_att_rp:.2f}, {best_params.Kp_att_rp:.2f}, {best_params.Kp_att_y:.2f})")
-        print(f"  Kd_att: ({best_params.Kd_att_rp:.2f}, {best_params.Kd_att_rp:.2f}, {best_params.Kd_att_y:.2f})")
+        print(f"  [Velocity PI]")
+        print(f"    Kp_vel: ({best_params.Kp_vel_xy:.2f}, {best_params.Kp_vel_xy:.2f}, {best_params.Kp_vel_z:.2f})")
+        print(f"    Ki_vel: ({best_params.Ki_vel_xy:.2f}, {best_params.Ki_vel_xy:.2f}, {best_params.Ki_vel_z:.2f})")
+        print(f"  [Attitude P]")
+        print(f"    Kp_att: ({best_params.Kp_att_rp:.2f}, {best_params.Kp_att_rp:.2f}, {best_params.Kp_att_y:.2f})")
+        print(f"  [Rate PID]")
+        print(f"    Kp_rate: ({best_params.Kp_rate_rp:.3f}, {best_params.Kp_rate_rp:.3f}, {best_params.Kp_rate_y:.3f})")
+        print(f"    Ki_rate: ({best_params.Ki_rate_rp:.3f}, {best_params.Ki_rate_rp:.3f}, {best_params.Ki_rate_y:.3f})")
+        print(f"    Kd_rate: ({best_params.Kd_rate_rp:.4f}, {best_params.Kd_rate_rp:.4f}, {best_params.Kd_rate_y:.4f})")
         print(f"\n  Hover drift: {best_metrics.hover_drift_mean:.4f}m (max: {best_metrics.hover_drift_max:.4f}m)")
         print(f"  Velocity settling: {best_metrics.vel_settling_time:.3f}s")
         print(f"  Velocity overshoot: {best_metrics.vel_overshoot:.1f}%")
@@ -768,12 +898,15 @@ def main():
     if best_params:
         config_file = output_dir / f"best_config_{timestamp}.py"
         with open(config_file, "w") as f:
-            f.write(f"# Auto-tuned DroneController configuration\n")
+            f.write(f"# Auto-tuned DroneController configuration (4-loop architecture)\n")
             f.write(f"# Generated: {timestamp}\n")
-            f.write(f"# Score: {best_score:.4f}\n\n")
+            f.write(f"# Score: {best_score:.4f}\n")
+            f.write(f"#\n")
+            f.write(f"# Architecture: Velocity (PI) -> Attitude (P) -> Rate (PID) -> Motor\n\n")
             f.write("from isaaclab_tasks.direct.iris_ma6.controller import DroneControllerCfg\n")
             f.write("from isaaclab_tasks.direct.iris_ma6.controller.velocity_controller_cfg import VelocityControllerCfg\n")
-            f.write("from isaaclab_tasks.direct.iris_ma6.controller.attitude_controller_cfg import AttitudeControllerCfg\n\n")
+            f.write("from isaaclab_tasks.direct.iris_ma6.controller.attitude_controller_cfg import AttitudeControllerCfg\n")
+            f.write("from isaaclab_tasks.direct.iris_ma6.controller.rate_controller_cfg import RateControllerCfg\n\n")
             f.write("TUNED_CONTROLLER_CFG = DroneControllerCfg(\n")
             f.write("    velocity=VelocityControllerCfg(\n")
             f.write(f"        Kp_vel=({best_params.Kp_vel_xy:.4f}, {best_params.Kp_vel_xy:.4f}, {best_params.Kp_vel_z:.4f}),\n")
@@ -781,7 +914,11 @@ def main():
             f.write("    ),\n")
             f.write("    attitude=AttitudeControllerCfg(\n")
             f.write(f"        Kp_att=({best_params.Kp_att_rp:.4f}, {best_params.Kp_att_rp:.4f}, {best_params.Kp_att_y:.4f}),\n")
-            f.write(f"        Kd_att=({best_params.Kd_att_rp:.4f}, {best_params.Kd_att_rp:.4f}, {best_params.Kd_att_y:.4f}),\n")
+            f.write("    ),\n")
+            f.write("    rate=RateControllerCfg(\n")
+            f.write(f"        Kp_rate=({best_params.Kp_rate_rp:.4f}, {best_params.Kp_rate_rp:.4f}, {best_params.Kp_rate_y:.4f}),\n")
+            f.write(f"        Ki_rate=({best_params.Ki_rate_rp:.4f}, {best_params.Ki_rate_rp:.4f}, {best_params.Ki_rate_y:.4f}),\n")
+            f.write(f"        Kd_rate=({best_params.Kd_rate_rp:.5f}, {best_params.Kd_rate_rp:.5f}, {best_params.Kd_rate_y:.5f}),\n")
             f.write("    ),\n")
             f.write(")\n")
         print(f"Best config saved to: {config_file}")
