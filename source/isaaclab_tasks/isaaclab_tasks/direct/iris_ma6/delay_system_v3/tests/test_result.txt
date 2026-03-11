@@ -1,0 +1,77 @@
+================================================================================
+DELAY SYSTEM V3 TEST SUITE
+================================================================================
+Output file: /home/usrg/IsaacPX4/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/delay_system_v3/tests/test_result.txt
+Device:        cuda
+Torch version: 2.5.1+cu118
+CUDA version:  11.8
+GPU name:      NVIDIA GeForce RTX 3090
+Started:       2026-03-09 16:27:14
+
+================================================================================
+Configuration Tests
+================================================================================
+  [PASS] DistributionCfg defaults
+  [PASS] SamplingCfg defaults
+  [PASS] LatencyCfg defaults
+  [PASS] DelayPipelineCfgV3 construction
+  [PASS] Preset configurations
+
+================================================================================
+Sampling Strategy Tests
+================================================================================
+  [PASS] Constant distribution sampling
+  [PASS] Normal distribution sampling
+  [PASS] Uniform distribution sampling
+  [PASS] Per-episode parameter sampling
+  [PASS] Per-step parameter sampling
+  [PASS] Latency sampler step conversion
+  [PASS] Latency sampler min_steps enforcement
+  [PASS] Staleness sampler FPS to period
+  [PASS] Dropout sampler probability
+
+================================================================================
+Field Storage Tests
+================================================================================
+  [PASS] Basic field storage
+  [PASS] Noise injection
+  [PASS] Timestamp storage
+  [PASS] Custom timestamp
+  [PASS] Multi-field storage
+
+================================================================================
+Pipeline Tests
+================================================================================
+  [PASS] Pipeline initialization
+  [PASS] Latency-only pipeline
+  [PASS] Warmup handling first step
+  [PASS] Dropout holds data and timestamp
+  [PASS] Staleness holds data and timestamp
+
+================================================================================
+Timestamp Synchronization Tests
+================================================================================
+  [PASS] AoI correctness with latency
+  [PASS] AoI non-negative and timestamp valid
+  [PASS] Timestamp matches data through pipeline
+  [PASS] Combined staleness and latency AoI
+
+================================================================================
+Curriculum Mode Tests
+================================================================================
+  [PASS] Mode 'none' minimal delay
+  [PASS] Mode 'fixed' deterministic delay
+  [PASS] Mode 'random' enables staleness
+  [PASS] Progress scales delay
+  [PASS] Dropout rate curriculum control
+
+================================================================================
+TEST SUMMARY
+================================================================================
+Total Tests: 33
+Passed:      33 (100.0%)
+Failed:      0 (0.0%)
+Errors:      0 (0.0%)
+================================================================================
+
+Results written to: /home/usrg/IsaacPX4/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/delay_system_v3/tests/test_result.txt
