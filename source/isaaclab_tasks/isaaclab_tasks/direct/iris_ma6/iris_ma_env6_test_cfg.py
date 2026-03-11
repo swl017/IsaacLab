@@ -172,7 +172,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
         ),
         offset=TiledCameraCfg.OffsetCfg(
             pos=(0.0, 0.0, 0.1),
-            rot=(0.7071068, 0.0, 0.0, -0.7071068),
+            rot=(0.5, -0.5, 0.5, -0.5),
             convention="world",
         ),
     )

@@ -197,13 +197,16 @@ class GimbalController:
         dir_body = quat_rotate_inverse(q_body, dir_world)
 
         # Extract body-frame gimbal angles (yaw, pitch)
-        # Yaw: rotation around body Z axis
+        # Yaw: rotation around body Z axis (positive = CCW = left)
         yaw_body = torch.atan2(dir_body[:, 1], dir_body[:, 0])
 
         # Pitch: rotation around body Y axis (after yaw)
         # Project onto XZ plane in yawed frame
         xy_dist = torch.sqrt(dir_body[:, 0] ** 2 + dir_body[:, 1] ** 2)
-        pitch_body = torch.atan2(dir_body[:, 2], xy_dist)
+        # Note: atan2 gives positive when target is above +X, but R_y(pitch) convention
+        # expects negative pitch to rotate +X toward +Z (camera points up).
+        # Negate to match the quaternion rotation convention used in visualization.
+        pitch_body = -torch.atan2(dir_body[:, 2], xy_dist)
 
         return yaw_body, pitch_body
 

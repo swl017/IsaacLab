@@ -24,7 +24,7 @@ class GimbalControllerCfg:
     - Roll: Left side up positive
     """
 
-    tau_gimbal: float = 0.05
+    tau_gimbal: float = 0.005
     """Gimbal motor time constant [s]. Default 50ms for servo motors."""
 
     max_gimbal_rate: float = 2 * math.pi
