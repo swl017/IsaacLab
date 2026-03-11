@@ -1,0 +1,32 @@
+# Copyright (c) 2022-2025, The Isaac Lab Project Developers.
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+"""
+Multi-agent Iris drone environment V6 with rotor-level DroneController.
+
+This module provides realistic quadcopter control with:
+- Rotor-level physics (T = k_f * omega^2)
+- First-order motor dynamics (tau=0.02s)
+- Cascaded velocity -> attitude -> motor control
+- Integrated gimbal control (tau=0.05s)
+- Optical zoom control (tau=0.1s)
+- Configurable aerodynamic effects
+"""
+
+import gymnasium as gym
+
+##
+# Register Gym environments.
+##
+
+# Test environment for validating DroneController integration
+gym.register(
+    id="Isaac-Iris-MA6-Direct-Test-v0",
+    entry_point=f"{__name__}.iris_ma_env6_test:IrisMA6TestEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.iris_ma_env6_test_cfg:IrisMA6TestEnvCfg",
+    },
+)
