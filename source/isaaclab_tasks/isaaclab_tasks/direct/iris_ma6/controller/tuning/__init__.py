@@ -15,3 +15,8 @@ initialization during package import.
 
 # Don't import from auto_tune.py - it starts AppLauncher
 # Use lazy import or run auto_tune.py directly as a script
+
+# Import tuned configs (safe - no AppLauncher)
+from .tuning_results import TUNED_CONTROLLER_CFG
+
+__all__ = ["TUNED_CONTROLLER_CFG"]

@@ -33,11 +33,12 @@ class GimbalControllerCfg:
     yaw_limits: tuple[float, float] = (-math.pi, math.pi)
     """Yaw joint limits [min, max] [rad]. Default +-180 deg."""
 
-    pitch_limits: tuple[float, float] = (0.0, math.pi / 2)
-    """Pitch joint limits [min, max] [rad]. Default 0 to 90 deg (looking horizontal to down)."""
+    pitch_limits: tuple[float, float] = (-math.radians(45), math.radians(45))
+    """Pitch joint limits [min, max] [rad]. Default -45 to 45 deg.
+    Limited to stay away from 90 deg gimbal lock singularity."""
 
-    roll_limits: tuple[float, float] = (-math.pi / 6, math.pi / 6)
-    """Roll joint limits [min, max] [rad]. Default +-30 deg."""
+    roll_limits: tuple[float, float] = (-math.pi / 4, math.pi / 4)
+    """Roll joint limits [min, max] [rad]. Default +-45 deg for better stabilization."""
 
     auto_stabilize_roll: bool = True
     """Whether to automatically compute roll to keep horizon level."""

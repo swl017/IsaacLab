@@ -22,8 +22,8 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="Auto-tune DroneController parameters")
 AppLauncher.add_app_launcher_args(parser)
-parser.add_argument("--num-envs", type=int, default=64, help="Number of parallel environments")
-parser.add_argument("--search-mode", type=str, default="grid", choices=["grid", "random"])
+parser.add_argument("--num-envs", type=int, default=1024, help="Number of parallel environments")
+parser.add_argument("--search-mode", type=str, default="random", choices=["grid", "random"])
 parser.add_argument("--num-trials", type=int, default=100, help="Number of trials (random mode)")
 parser.add_argument("--output-dir", type=str, default="tuning_results", help="Output directory")
 parser.set_defaults(headless=True)
@@ -68,8 +68,26 @@ class TuningMetrics:
     vel_settling_time: float = 0.0
     vel_overshoot: float = 0.0
     vel_ss_error: float = 0.0
+    # Attitude recovery metrics
+    att_recovery_time: float = 0.0
+    att_max_error: float = 0.0
+    att_final_error: float = 0.0
+    att_recovered: bool = True
     is_stable: bool = True
     score: float = 0.0
+
+
+@dataclass
+class AttitudeTestConfig:
+    """Configuration for attitude perturbation test."""
+    max_roll_deg: float = 45.0  # Max initial roll perturbation
+    max_pitch_deg: float = 45.0  # Max initial pitch perturbation
+    max_yaw_deg: float = 30.0  # Max initial yaw perturbation
+    max_roll_rate: float = 2.0  # rad/s
+    max_pitch_rate: float = 2.0  # rad/s
+    max_yaw_rate: float = 1.0  # rad/s
+    test_duration: float = 3.0  # seconds
+    recovery_threshold_deg: float = 5.0  # Attitude considered recovered when error < this
 
 
 class ParallelTuner:
@@ -268,6 +286,144 @@ class ParallelTuner:
             w1*z2 + x1*y2 - y1*x2 + z1*w2,
         ], dim=-1)
 
+    def _euler_to_quat(self, roll: torch.Tensor, pitch: torch.Tensor, yaw: torch.Tensor) -> torch.Tensor:
+        """Convert Euler angles (radians) to quaternion (wxyz convention).
+
+        Args:
+            roll, pitch, yaw: (N,) tensors of angles in radians
+
+        Returns:
+            Quaternion (N, 4) in wxyz format
+        """
+        cr = torch.cos(roll * 0.5)
+        sr = torch.sin(roll * 0.5)
+        cp = torch.cos(pitch * 0.5)
+        sp = torch.sin(pitch * 0.5)
+        cy = torch.cos(yaw * 0.5)
+        sy = torch.sin(yaw * 0.5)
+
+        w = cr * cp * cy + sr * sp * sy
+        x = sr * cp * cy - cr * sp * sy
+        y = cr * sp * cy + sr * cp * sy
+        z = cr * cp * sy - sr * sp * cy
+
+        return torch.stack([w, x, y, z], dim=-1)
+
+    def _quat_to_euler(self, q: torch.Tensor) -> tuple:
+        """Convert quaternion (wxyz) to Euler angles (roll, pitch, yaw) in radians.
+
+        Args:
+            q: Quaternion (N, 4) in wxyz format
+
+        Returns:
+            roll, pitch, yaw: (N,) tensors in radians
+        """
+        w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+
+        # Roll (x-axis rotation)
+        sinr_cosp = 2.0 * (w * x + y * z)
+        cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+        roll = torch.atan2(sinr_cosp, cosr_cosp)
+
+        # Pitch (y-axis rotation)
+        sinp = 2.0 * (w * y - z * x)
+        sinp = torch.clamp(sinp, -1.0, 1.0)
+        pitch = torch.asin(sinp)
+
+        # Yaw (z-axis rotation)
+        siny_cosp = 2.0 * (w * z + x * y)
+        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+        yaw = torch.atan2(siny_cosp, cosy_cosp)
+
+        return roll, pitch, yaw
+
+    def _compute_attitude_error_deg(self, quat: torch.Tensor) -> torch.Tensor:
+        """Compute attitude error from level (degrees).
+
+        Args:
+            quat: Current quaternion (N, 4) in wxyz format
+
+        Returns:
+            Attitude error in degrees (N,) - angle from level attitude
+        """
+        # Level attitude quaternion (identity rotation)
+        q_level = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).expand(quat.shape[0], 4)
+
+        # Compute error quaternion
+        q_level_inv = q_level * torch.tensor([1, -1, -1, -1], device=self.device)
+        q_err = self._quat_multiply(q_level_inv, quat)
+
+        # Ensure shortest path
+        sign = torch.sign(q_err[:, 0:1])
+        sign = torch.where(sign == 0, torch.ones_like(sign), sign)
+        q_err = q_err * sign
+
+        # Angle from quaternion: 2 * acos(w)
+        angle_rad = 2.0 * torch.acos(torch.clamp(q_err[:, 0], -1.0, 1.0))
+        return torch.rad2deg(angle_rad)
+
+    def _generate_random_initial_conditions(self, att_cfg: AttitudeTestConfig) -> tuple:
+        """Generate random initial attitude and angular rate.
+
+        Args:
+            att_cfg: Attitude test configuration
+
+        Returns:
+            quat: Random quaternion (N, 4) in wxyz format
+            ang_vel: Random angular velocity (N, 3) in body frame (rad/s)
+        """
+        N = self.batch_size
+
+        # Random Euler angles (uniform in range)
+        roll = torch.deg2rad(torch.empty(N, device=self.device).uniform_(
+            -att_cfg.max_roll_deg, att_cfg.max_roll_deg))
+        pitch = torch.deg2rad(torch.empty(N, device=self.device).uniform_(
+            -att_cfg.max_pitch_deg, att_cfg.max_pitch_deg))
+        yaw = torch.deg2rad(torch.empty(N, device=self.device).uniform_(
+            -att_cfg.max_yaw_deg, att_cfg.max_yaw_deg))
+
+        quat = self._euler_to_quat(roll, pitch, yaw)
+
+        # Random angular velocity (uniform in range)
+        ang_vel = torch.zeros(N, 3, device=self.device)
+        ang_vel[:, 0] = torch.empty(N, device=self.device).uniform_(
+            -att_cfg.max_roll_rate, att_cfg.max_roll_rate)
+        ang_vel[:, 1] = torch.empty(N, device=self.device).uniform_(
+            -att_cfg.max_pitch_rate, att_cfg.max_pitch_rate)
+        ang_vel[:, 2] = torch.empty(N, device=self.device).uniform_(
+            -att_cfg.max_yaw_rate, att_cfg.max_yaw_rate)
+
+        return quat, ang_vel
+
+    def _set_initial_conditions(self, quat: torch.Tensor, ang_vel: torch.Tensor):
+        """Set initial attitude and angular velocity for the robot.
+
+        Args:
+            quat: Quaternion (N, 4) in wxyz format
+            ang_vel: Angular velocity (N, 3) in body frame
+        """
+        N = quat.shape[0]
+
+        # Get current root state
+        root_state = self.robot.data.default_root_state[:N].clone()
+
+        # Set orientation (quaternion in wxyz)
+        root_state[:, 3:7] = quat
+
+        # Set angular velocity (body frame)
+        root_state[:, 10:13] = ang_vel
+
+        # Set initial height to give room for recovery
+        root_state[:, 2] = 2.0  # 2m height
+
+        # Apply to simulation (need to expand to full env size)
+        full_root_state = self.robot.data.default_root_state.clone()
+        full_root_state[:N] = root_state
+
+        # Write root state
+        self.robot.write_root_state_to_sim(full_root_state)
+        self.robot.update(self.physics_dt)
+
     def _step_physics(self, F_body: torch.Tensor, tau_body: torch.Tensor):
         """Apply forces and step simulation for one policy timestep.
 
@@ -354,6 +510,45 @@ class ParallelTuner:
 
         vel_history = torch.stack(vel_history)  # (T, N)
 
+        # === Attitude Recovery Test (3 seconds) ===
+        att_cfg = AttitudeTestConfig()
+        self.env.reset()
+        self.integral.zero_()
+
+        # Generate and set random initial conditions
+        init_quat, init_ang_vel = self._generate_random_initial_conditions(att_cfg)
+        self._set_initial_conditions(init_quat, init_ang_vel)
+
+        att_errors = []  # (T, N) attitude error in degrees
+        recovery_times = torch.full((N,), att_cfg.test_duration, device=self.device)  # Default to max time
+        recovered_flags = torch.zeros(N, dtype=torch.bool, device=self.device)
+
+        num_att_steps = int(att_cfg.test_duration / self.dt)
+        for step in range(num_att_steps):
+            quat = self.robot.data.root_quat_w[:N]
+            pos = self.robot.data.root_pos_w[:N]
+
+            # Check for NaN or crashed (hit ground)
+            if torch.isnan(quat).any() or (pos[:, 2] < 0.1).any():
+                print(f"  NaN/crash detected at attitude test step {step}", flush=True)
+                return [TuningMetrics(is_stable=False, att_recovered=False, score=9999.0)] * N
+
+            # Compute attitude error from level
+            att_error_deg = self._compute_attitude_error_deg(quat)
+            att_errors.append(att_error_deg.clone())
+
+            # Check for recovery (first time error < threshold)
+            just_recovered = (att_error_deg < att_cfg.recovery_threshold_deg) & ~recovered_flags
+            recovery_times[just_recovered] = step * self.dt
+            recovered_flags = recovered_flags | just_recovered
+
+            # Control: try to stabilize to hover
+            v_des = torch.zeros(N, 3, device=self.device)
+            F, tau = self._compute_control(v_des)
+            self._step_physics(F, tau)
+
+        att_errors = torch.stack(att_errors)  # (T, N)
+
         # === Compute Metrics Per Environment ===
         results = []
         for i in range(N):
@@ -362,7 +557,6 @@ class ParallelTuner:
             # Hover metrics
             m.hover_drift_mean = hover_drifts[:, i].mean().item()
             m.hover_drift_max = hover_drifts[:, i].max().item()
-            m.is_stable = m.hover_drift_max < 2.0 and not np.isnan(m.hover_drift_mean)
 
             # Velocity metrics
             vt = vel_history[:, i]
@@ -384,14 +578,34 @@ class ParallelTuner:
             last_steps = max(1, int(0.5 / self.dt))
             m.vel_ss_error = abs(target - vt[-last_steps:].mean().item())
 
-            # Combined score
+            # Attitude recovery metrics
+            m.att_recovery_time = recovery_times[i].item()
+            m.att_max_error = att_errors[:, i].max().item()
+            m.att_final_error = att_errors[-1, i].item()
+            m.att_recovered = bool(recovered_flags[i].item())
+
+            # Stability check - must pass all tests
+            m.is_stable = (
+                m.hover_drift_max < 2.0 and
+                not np.isnan(m.hover_drift_mean) and
+                m.att_recovered and
+                m.att_final_error < 10.0  # Must stabilize to within 10 degrees
+            )
+
+            # Combined score (lower is better)
             if m.is_stable:
                 m.score = (
+                    # Hover performance
                     1.0 * m.hover_drift_mean +
                     0.5 * m.hover_drift_max +
+                    # Velocity tracking
                     2.0 * m.vel_settling_time +
                     0.1 * m.vel_overshoot +
-                    5.0 * m.vel_ss_error
+                    5.0 * m.vel_ss_error +
+                    # Attitude recovery (heavily weighted)
+                    3.0 * m.att_recovery_time +
+                    0.1 * m.att_max_error +
+                    2.0 * m.att_final_error
                 )
             else:
                 m.score = 9999.0
@@ -527,6 +741,9 @@ def main():
         print(f"  Velocity settling: {best_metrics.vel_settling_time:.3f}s")
         print(f"  Velocity overshoot: {best_metrics.vel_overshoot:.1f}%")
         print(f"  Steady-state error: {best_metrics.vel_ss_error:.4f}m/s")
+        print(f"\n  Attitude recovery: {best_metrics.att_recovery_time:.3f}s (recovered: {best_metrics.att_recovered})")
+        print(f"  Attitude max error: {best_metrics.att_max_error:.1f}deg")
+        print(f"  Attitude final error: {best_metrics.att_final_error:.1f}deg")
 
     # Save results
     output_file = output_dir / f"tuning_results_{timestamp}.json"

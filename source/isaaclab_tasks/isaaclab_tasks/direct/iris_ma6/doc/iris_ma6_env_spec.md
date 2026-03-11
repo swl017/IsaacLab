@@ -8,6 +8,7 @@
 **Related Documents**:
 - [frame_conventions.md](frame_conventions.md) — Coordinate frames, quaternion conventions, gimbal angles
 - [controller_spec.md](controller_spec.md) — Controller architecture and parameters
+- [bbox_spec.md](bbox_spec.md) — Object detection module, occlusion, and FP/FN modeling
 
 ---
 
@@ -132,7 +133,7 @@ For `T_max = 10`, `C = 6`: 28 + 75 + 120 + 4 = **227D**
 | gimbal pitch, yaw | 2 | V5 | |
 | body angular velocity | 3 | V5 | |
 | ego bbox (primary target) | 4 | V5 | Bbox of the currently observed target |
-| bbox valid | 1 | V5 | |
+| bbox empty | 1 | V6 | 1 = zero-filled / no detection, 0 = non-empty bbox |
 | time since detection | 1 | V5 | |
 | zoom level | 1 | V5 | |
 | ray direction | 3 | V5 | |
@@ -150,7 +151,7 @@ V5 other-agent observation repeated for `C-1 = 5` agents. Identical structure:
 | position | 3 |
 | linear velocity | 3 |
 | angular velocity | 3 |
-| bbox valid (primary target) | 1 |
+| bbox empty (primary target) | 1 |
 | ray direction | 3 |
 | data age (AoI) | 1 |
 | detection age | 1 |
@@ -293,7 +294,7 @@ for t in range(T_max):
     if alive[t]:
         # Select only OBSERVE-mode agents currently detecting this target
         valid_cameras = [i for i in range(C) 
-                        if role[i] == OBSERVE and bbox_valid[i][t]]
+                        if role[i] == OBSERVE and bbox_empty[i][t] == 0]
         
         X_tri[t], valid[t] = midpoint_method_batched(
             camera_pos[valid_cameras], ray_dirs[valid_cameras][t])
@@ -323,7 +324,7 @@ V5's BBoxRayCaster projects a single target's 8 corners. In the multi-target env
    - If IoU > $\tau_{\text{occlude}}$ (e.g., 0.3) and $d^{(c,t_1)} < d^{(c,t_2)}$, mark $t_2$ as occluded
 
 3. **Occlusion mask tensor**: `occluded[N_env, C, T_max]` — boolean mask indicating occluded targets
-   - Occluded targets: `bbox_valid = False`, `bbox = [0, 0, 0, 0]`
+   - Occluded targets: `bbox_empty = 1`, `bbox = [0, 0, 0, 0]`
    - Triangulation excludes occluded observations
 
 4. **Partial occlusion handling**: If IoU is moderate (0.1–0.3), reduce bbox confidence rather than full invalidation
@@ -332,8 +333,8 @@ V5's BBoxRayCaster projects a single target's 8 corners. In the multi-target env
 **Implementation location**: `bbox_raycaster/occlusion_handler.py`
 
 **Validation criteria**:
-- Near target fully occluding far target → far target bbox_valid = False
-- Camera repositioning reveals occluded target → bbox_valid restores
+- Near target fully occluding far target → far target `bbox_empty = 1`
+- Camera repositioning reveals occluded target → `bbox_empty` returns to 0
 - Triangulation covariance increases when observations are lost to occlusion
 
 ### 5.3 Detection-to-Target Association

@@ -1,0 +1,2536 @@
+{
+  "config": {
+    "search_mode": "random",
+    "num_envs": 1024,
+    "num_trials": 100,
+    "elapsed_time": 7.150956630706787
+  },
+  "best": {
+    "params": {
+      "Kp_vel_xy": 5.804610902526868,
+      "Kp_vel_z": 2.9083493130730127,
+      "Ki_vel_xy": 0.48879152180553354,
+      "Ki_vel_z": 0.5699618189262291,
+      "Kp_att_rp": 14.57674971508397,
+      "Kp_att_y": 3.548872808362122,
+      "Kd_att_rp": 1.2966620341192883,
+      "Kd_att_y": 1.0966432553327985
+    },
+    "metrics": {
+      "hover_drift_mean": 0.0,
+      "hover_drift_max": 0.0,
+      "vel_settling_time": 0.0,
+      "vel_overshoot": 0.0,
+      "vel_ss_error": 0.0,
+      "att_recovery_time": 0.0,
+      "att_max_error": 0.0,
+      "att_final_error": 0.0,
+      "att_recovered": false,
+      "is_stable": false,
+      "score": 9999.0
+    },
+    "score": 9999.0
+  },
+  "all_results": [
+    {
+      "params": {
+        "Kp_vel_xy": 5.804610902526868,
+        "Kp_vel_z": 2.9083493130730127,
+        "Ki_vel_xy": 0.48879152180553354,
+        "Ki_vel_z": 0.5699618189262291,
+        "Kp_att_rp": 14.57674971508397,
+        "Kp_att_y": 3.548872808362122,
+        "Kd_att_rp": 1.2966620341192883,
+        "Kd_att_y": 1.0966432553327985
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 1.5193923724067186,
+        "Kp_vel_z": 2.958096502625308,
+        "Ki_vel_xy": 0.5448515141358012,
+        "Ki_vel_z": 0.3340298417746611,
+        "Kp_att_rp": 8.437370440101517,
+        "Kp_att_y": 7.336686767653453,
+        "Kd_att_rp": 3.2073205326442418,
+        "Kd_att_y": 1.1899220414620917
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.556732437778122,
+        "Kp_vel_z": 1.5431986136780742,
+        "Ki_vel_xy": 0.9391192149431186,
+        "Ki_vel_z": 0.50433742944698,
+        "Kp_att_rp": 5.29521490703853,
+        "Kp_att_y": 5.159227356113452,
+        "Kd_att_rp": 3.575555889136005,
+        "Kd_att_y": 2.211359171792145
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 2.8236217171620392,
+        "Kp_vel_z": 3.648144371143942,
+        "Ki_vel_xy": 0.9239320245280099,
+        "Ki_vel_z": 0.45410211587224436,
+        "Kp_att_rp": 10.849168157060603,
+        "Kp_att_y": 6.254759902755821,
+        "Kd_att_rp": 2.1304717858966447,
+        "Kd_att_y": 1.910621430662532
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 3.9149202709438375,
+        "Kp_vel_z": 3.349292297370736,
+        "Ki_vel_xy": 0.4940996587675679,
+        "Ki_vel_z": 0.22340178025463167,
+        "Kp_att_rp": 5.186419542641404,
+        "Kp_att_y": 7.881811296581945,
+        "Kd_att_rp": 4.991436276612603,
+        "Kd_att_y": 1.6975863611907056
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.292357589012376,
+        "Kp_vel_z": 3.083468246338258,
+        "Ki_vel_xy": 0.9883062680756628,
+        "Ki_vel_z": 0.20753696326246776,
+        "Kp_att_rp": 4.972112051247944,
+        "Kp_att_y": 6.305190604661352,
+        "Kd_att_rp": 4.7334938777743645,
+        "Kd_att_y": 2.4484641788770376
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 2.730092717284517,
+        "Kp_vel_z": 1.6049920172925223,
+        "Ki_vel_xy": 0.6226776893279953,
+        "Ki_vel_z": 0.5028571543191028,
+        "Kp_att_rp": 6.091432761021558,
+        "Kp_att_y": 5.424203149458408,
+        "Kd_att_rp": 3.636143383647229,
+        "Kd_att_y": 1.3017866401701952
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 2.0989752062000497,
+        "Kp_vel_z": 1.705103379204124,
+        "Ki_vel_xy": 0.3331626064301961,
+        "Ki_vel_z": 0.4134721905077321,
+        "Kp_att_rp": 11.917750884265228,
+        "Kp_att_y": 3.438619493653498,
+        "Kd_att_rp": 2.494471921540234,
+        "Kd_att_y": 1.8210378498645023
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 3.7795242628009555,
+        "Kp_vel_z": 3.2149188069992043,
+        "Ki_vel_xy": 0.1899519114262906,
+        "Ki_vel_z": 0.5547201048171143,
+        "Kp_att_rp": 5.360553052632681,
+        "Kp_att_y": 2.2596798367132025,
+        "Kd_att_rp": 1.8748148857794442,
+        "Kd_att_y": 1.3454533804783455
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 3.354526153333336,
+        "Kp_vel_z": 1.4277976529752539,
+        "Ki_vel_xy": 0.19286894065544413,
+        "Ki_vel_z": 0.4758748077117727,
+        "Kp_att_rp": 9.703111488160715,
+        "Kp_att_y": 4.51396026533385,
+        "Kd_att_rp": 2.3123069303072423,
+        "Kd_att_y": 0.7401716766147339
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 3.8690128423484564,
+        "Kp_vel_z": 3.2102488263502176,
+        "Ki_vel_xy": 0.6153728621504815,
+        "Ki_vel_z": 0.21567348582858523,
+        "Kp_att_rp": 9.799245567960966,
+        "Kp_att_y": 3.0425254900759473,
+        "Kd_att_rp": 3.691907669549531,
+        "Kd_att_y": 0.5759513665879852
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 3.736796194911602,
+        "Kp_vel_z": 3.0428383706571442,
+        "Ki_vel_xy": 0.20656076261586204,
+        "Ki_vel_z": 0.47838143712807246,
+        "Kp_att_rp": 7.626456184122166,
+        "Kp_att_y": 3.4917603597533744,
+        "Kd_att_rp": 2.449304198284379,
+        "Kd_att_y": 1.3170950293976513
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 4.513399379187714,
+        "Kp_vel_z": 1.5752048881842027,
+        "Ki_vel_xy": 0.7301171692076976,
+        "Ki_vel_z": 0.2723124193111741,
+        "Kp_att_rp": 5.833648034006384,
+        "Kp_att_y": 2.089057355483333,
+        "Kd_att_rp": 2.0489501763120592,
+        "Kd_att_y": 2.4487649057363234
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 2.9335427449326357,
+        "Kp_vel_z": 2.605357150650472,
+        "Ki_vel_xy": 0.7551844157948443,
+        "Ki_vel_z": 0.36864209162366746,
+        "Kp_att_rp": 12.727514067905366,
+        "Kp_att_y": 5.490984759388202,
+        "Kd_att_rp": 4.523733648945228,
+        "Kd_att_y": 1.5976164635264365
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 3.4725214311026766,
+        "Kp_vel_z": 3.2965409387946654,
+        "Ki_vel_xy": 0.21119063367083551,
+        "Ki_vel_z": 0.25770732755998116,
+        "Kp_att_rp": 8.002565754412316,
+        "Kp_att_y": 7.5156463487322425,
+        "Kd_att_rp": 1.8275232431226467,
+        "Kd_att_y": 1.8490665063587959
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 4.008367239065546,
+        "Kp_vel_z": 2.0736586957900025,
+        "Ki_vel_xy": 0.43464565563137814,
+        "Ki_vel_z": 0.2588344391523788,
+        "Kp_att_rp": 5.508051065662227,
+        "Kp_att_y": 4.929782081667179,
+        "Kd_att_rp": 2.2655649167481586,
+        "Kd_att_y": 1.957025327853786
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 4.895600641711734,
+        "Kp_vel_z": 3.261399732052094,
+        "Ki_vel_xy": 0.14324612629447392,
+        "Ki_vel_z": 0.4876445832965943,
+        "Kp_att_rp": 13.078355861661976,
+        "Kp_att_y": 3.0875218769867763,
+        "Kd_att_rp": 2.6073281658237732,
+        "Kd_att_y": 2.0796730679172044
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 4.473317608927405,
+        "Kp_vel_z": 3.403776217254728,
+        "Ki_vel_xy": 0.7610311936525039,
+        "Ki_vel_z": 0.268618924141524,
+        "Kp_att_rp": 5.015841366225181,
+        "Kp_att_y": 5.30004642388042,
+        "Kd_att_rp": 4.201923356297552,
+        "Kd_att_y": 2.1183520568928644
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 3.043525089222815,
+        "Kp_vel_z": 2.9946938805916132,
+        "Ki_vel_xy": 0.17414544719625874,
+        "Ki_vel_z": 0.5872751801234477,
+        "Kp_att_rp": 13.580675958403994,
+        "Kp_att_y": 4.451240485304589,
+        "Kd_att_rp": 1.4306747998276794,
+        "Kd_att_y": 2.0744285410323293
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 3.132569408637704,
+        "Kp_vel_z": 3.5374653533456097,
+        "Ki_vel_xy": 0.9861778128163332,
+        "Ki_vel_z": 0.3322130282833199,
+        "Kp_att_rp": 10.05061939820174,
+        "Kp_att_y": 6.89827966850861,
+        "Kd_att_rp": 1.1066402313034458,
+        "Kd_att_y": 1.3932820575289901
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 3.996579975529899,
+        "Kp_vel_z": 2.7556844263529197,
+        "Ki_vel_xy": 0.5795849884844426,
+        "Ki_vel_z": 0.16897672030831626,
+        "Kp_att_rp": 8.810993265113556,
+        "Kp_att_y": 2.729731295721666,
+        "Kd_att_rp": 1.0088162815512276,
+        "Kd_att_y": 1.9893822497189035
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 3.6686612429774614,
+        "Kp_vel_z": 1.8334580070879105,
+        "Ki_vel_xy": 0.918637824601791,
+        "Ki_vel_z": 0.4539538443642088,
+        "Kp_att_rp": 14.230002813516219,
+        "Kp_att_y": 2.079874884136575,
+        "Kd_att_rp": 4.926413626808204,
+        "Kd_att_y": 0.78847943311839
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 1.8531197167801141,
+        "Kp_vel_z": 3.5956542162257845,
+        "Ki_vel_xy": 0.7233571769831494,
+        "Ki_vel_z": 0.32879901273126055,
+        "Kp_att_rp": 8.113766811259051,
+        "Kp_att_y": 7.691829707354141,
+        "Kd_att_rp": 1.1398858161228387,
+        "Kd_att_y": 1.892606069230298
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 1.717176479215986,
+        "Kp_vel_z": 3.3186240507464633,
+        "Ki_vel_xy": 0.8261294896768199,
+        "Ki_vel_z": 0.49891469146567635,
+        "Kp_att_rp": 9.709224427945003,
+        "Kp_att_y": 5.892576693689494,
+        "Kd_att_rp": 1.2557815673823765,
+        "Kd_att_y": 2.0035235472422777
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 1.624353512052863,
+        "Kp_vel_z": 2.123947080510571,
+        "Ki_vel_xy": 0.6578557135941088,
+        "Ki_vel_z": 0.15691984113229565,
+        "Kp_att_rp": 14.300123288550235,
+        "Kp_att_y": 4.25663108229333,
+        "Kd_att_rp": 4.548962282352427,
+        "Kd_att_y": 2.373180375292892
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 2.514788901531094,
+        "Kp_vel_z": 1.2937112384383422,
+        "Ki_vel_xy": 0.7867370197979032,
+        "Ki_vel_z": 0.4768405642485013,
+        "Kp_att_rp": 7.056509329500715,
+        "Kp_att_y": 7.356564877730875,
+        "Kd_att_rp": 3.9378908712771397,
+        "Kd_att_y": 1.9882866515992987
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.164172455916127,
+        "Kp_vel_z": 3.02469406368162,
+        "Ki_vel_xy": 0.2802695953882439,
+        "Ki_vel_z": 0.13649880968366454,
+        "Kp_att_rp": 8.518951252130371,
+        "Kp_att_y": 7.575632147411046,
+        "Kd_att_rp": 1.2109037755850678,
+        "Kd_att_y": 0.933237367581341
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 4.961242028654937,
+        "Kp_vel_z": 1.8104058979123097,
+        "Ki_vel_xy": 0.7755010509281611,
+        "Ki_vel_z": 0.15897070584091608,
+        "Kp_att_rp": 14.350632137530374,
+        "Kp_att_y": 7.604622649769773,
+        "Kd_att_rp": 1.3727748572156493,
+        "Kd_att_y": 1.685526839696411
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.954584431515941,
+        "Kp_vel_z": 3.772030226046794,
+        "Ki_vel_xy": 0.10652603709115864,
+        "Ki_vel_z": 0.5190408316198474,
+        "Kp_att_rp": 8.867022703963048,
+        "Kp_att_y": 6.283327937995241,
+        "Kd_att_rp": 4.209476296331831,
+        "Kd_att_y": 1.0663521368303048
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 3.8886269421139272,
+        "Kp_vel_z": 3.745842605318194,
+        "Ki_vel_xy": 0.5692072441560065,
+        "Ki_vel_z": 0.5908495191731566,
+        "Kp_att_rp": 14.935209237626049,
+        "Kp_att_y": 6.308951189895837,
+        "Kd_att_rp": 1.739846099151373,
+        "Kd_att_y": 2.2659393491761026
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 2.797976192936159,
+        "Kp_vel_z": 1.2872740581442654,
+        "Ki_vel_xy": 0.4998645066576096,
+        "Ki_vel_z": 0.5452219803909096,
+        "Kp_att_rp": 7.028956805836177,
+        "Kp_att_y": 7.819943237273436,
+        "Kd_att_rp": 4.44703676767316,
+        "Kd_att_y": 0.737642731305775
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 4.055996982960217,
+        "Kp_vel_z": 1.1757074766754687,
+        "Ki_vel_xy": 0.7303985733871661,
+        "Ki_vel_z": 0.5500967455916401,
+        "Kp_att_rp": 8.08550488760918,
+        "Kp_att_y": 4.601639468171594,
+        "Kd_att_rp": 1.7942432430394724,
+        "Kd_att_y": 1.7180025867679103
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.2013664557056085,
+        "Kp_vel_z": 3.853342571687547,
+        "Ki_vel_xy": 0.38200594527080556,
+        "Ki_vel_z": 0.1625743143029609,
+        "Kp_att_rp": 11.827129854594517,
+        "Kp_att_y": 7.422599344808343,
+        "Kd_att_rp": 4.945016291325594,
+        "Kd_att_y": 1.3024563933160052
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.2189051455484865,
+        "Kp_vel_z": 1.4624008290207178,
+        "Ki_vel_xy": 0.9536567708970662,
+        "Ki_vel_z": 0.3400664280177753,
+        "Kp_att_rp": 6.150613278648562,
+        "Kp_att_y": 2.620386431677402,
+        "Kd_att_rp": 4.181548817890496,
+        "Kd_att_y": 2.1211360764694307
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 1.9094068645474866,
+        "Kp_vel_z": 3.477221975754997,
+        "Ki_vel_xy": 0.5025603526223937,
+        "Ki_vel_z": 0.4174676522235583,
+        "Kp_att_rp": 14.521204387373942,
+        "Kp_att_y": 3.530581147375371,
+        "Kd_att_rp": 1.8730746843930457,
+        "Kd_att_y": 2.111659540425564
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 1.6879863812058153,
+        "Kp_vel_z": 3.481408125240562,
+        "Ki_vel_xy": 0.3177025316005916,
+        "Ki_vel_z": 0.15648711345452768,
+        "Kp_att_rp": 13.719764380133894,
+        "Kp_att_y": 5.506497471261818,
+        "Kd_att_rp": 4.631572241763429,
+        "Kd_att_y": 1.2924635108984315
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 3.6700510894785583,
+        "Kp_vel_z": 1.0216203072295036,
+        "Ki_vel_xy": 0.20764970605600674,
+        "Ki_vel_z": 0.16405854722449584,
+        "Kp_att_rp": 9.063848775254328,
+        "Kp_att_y": 3.0273687869438035,
+        "Kd_att_rp": 3.234969678606263,
+        "Kd_att_y": 2.3642090697043994
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.498806309513196,
+        "Kp_vel_z": 1.3936079143052296,
+        "Ki_vel_xy": 0.1963778482150521,
+        "Ki_vel_z": 0.48995680361439553,
+        "Kp_att_rp": 7.371424210745882,
+        "Kp_att_y": 6.258634053260779,
+        "Kd_att_rp": 4.63021351986052,
+        "Kd_att_y": 0.9346460209044765
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.022240084556376,
+        "Kp_vel_z": 3.002743263967168,
+        "Ki_vel_xy": 0.3143132422012635,
+        "Ki_vel_z": 0.2770698474050025,
+        "Kp_att_rp": 10.086146370419216,
+        "Kp_att_y": 3.985241147240558,
+        "Kd_att_rp": 1.9499931290037984,
+        "Kd_att_y": 1.084530287490388
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.838419518155488,
+        "Kp_vel_z": 3.1274507038594663,
+        "Ki_vel_xy": 0.6736213118487845,
+        "Ki_vel_z": 0.11664187454270417,
+        "Kp_att_rp": 11.24518090829942,
+        "Kp_att_y": 7.320159286476769,
+        "Kd_att_rp": 1.8727010656821848,
+        "Kd_att_y": 0.6652913416783737
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 4.998225170772348,
+        "Kp_vel_z": 1.5388263661210764,
+        "Ki_vel_xy": 0.36433965548237357,
+        "Ki_vel_z": 0.14918556913927802,
+        "Kp_att_rp": 8.824658484068364,
+        "Kp_att_y": 3.375618814706833,
+        "Kd_att_rp": 2.735261192829153,
+        "Kd_att_y": 0.7435259279325217
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 3.3321287515826246,
+        "Kp_vel_z": 1.2882012993685703,
+        "Ki_vel_xy": 0.13695514485908733,
+        "Ki_vel_z": 0.5734933572052577,
+        "Kp_att_rp": 5.039908694351613,
+        "Kp_att_y": 4.654049666594266,
+        "Kd_att_rp": 3.320125651399799,
+        "Kd_att_y": 1.2578979491914508
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 1.8675476320029019,
+        "Kp_vel_z": 2.085576934385707,
+        "Ki_vel_xy": 0.5921069246602068,
+        "Ki_vel_z": 0.21952707745524977,
+        "Kp_att_rp": 10.760356835543917,
+        "Kp_att_y": 7.995702642529294,
+        "Kd_att_rp": 3.2038537921381556,
+        "Kd_att_y": 0.6639072728550208
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.9923771342793515,
+        "Kp_vel_z": 2.1444575455725152,
+        "Ki_vel_xy": 0.9393817283661382,
+        "Ki_vel_z": 0.11220235296167544,
+        "Kp_att_rp": 10.835751700445993,
+        "Kp_att_y": 5.40089313190168,
+        "Kd_att_rp": 4.59605251251624,
+        "Kd_att_y": 0.9792905339860918
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.799848083451546,
+        "Kp_vel_z": 1.55381968200791,
+        "Ki_vel_xy": 0.41682315724876295,
+        "Ki_vel_z": 0.3759434289261796,
+        "Kp_att_rp": 6.584782555881871,
+        "Kp_att_y": 6.352748979247198,
+        "Kd_att_rp": 3.0043447389899383,
+        "Kd_att_y": 1.0474021098542885
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 2.6333418004094824,
+        "Kp_vel_z": 3.2883483817544916,
+        "Ki_vel_xy": 0.3861134649117355,
+        "Ki_vel_z": 0.3448947793097813,
+        "Kp_att_rp": 10.78213731537894,
+        "Kp_att_y": 4.3905573559144955,
+        "Kd_att_rp": 1.5491258810796027,
+        "Kd_att_y": 1.5178856975051627
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.94609291516043,
+        "Kp_vel_z": 1.3435655314629167,
+        "Ki_vel_xy": 0.22535660100116672,
+        "Ki_vel_z": 0.5837062012007989,
+        "Kp_att_rp": 14.100378784556177,
+        "Kp_att_y": 3.709697109900824,
+        "Kd_att_rp": 3.9525809157140075,
+        "Kd_att_y": 1.121428461177892
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 4.17686240338318,
+        "Kp_vel_z": 2.664513911436177,
+        "Ki_vel_xy": 0.2500031398381719,
+        "Ki_vel_z": 0.23229764979079828,
+        "Kp_att_rp": 13.278783332657332,
+        "Kp_att_y": 2.3895592167693245,
+        "Kd_att_rp": 2.086492090738409,
+        "Kd_att_y": 1.0015159660037332
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 4.272971058339073,
+        "Kp_vel_z": 1.5485508415471105,
+        "Ki_vel_xy": 0.6806474685849713,
+        "Ki_vel_z": 0.21935980487274756,
+        "Kp_att_rp": 9.069598854130147,
+        "Kp_att_y": 7.879258964456454,
+        "Kd_att_rp": 1.0320754095467497,
+        "Kd_att_y": 1.7684503948511632
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 2.620509816780934,
+        "Kp_vel_z": 3.2184676883485412,
+        "Ki_vel_xy": 0.8395115093233753,
+        "Ki_vel_z": 0.4157293991415584,
+        "Kp_att_rp": 10.326152945020278,
+        "Kp_att_y": 6.84046878761732,
+        "Kd_att_rp": 1.3288094717391221,
+        "Kd_att_y": 1.9678889927893088
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.265642143369346,
+        "Kp_vel_z": 2.276881191456246,
+        "Ki_vel_xy": 0.9080037809063917,
+        "Ki_vel_z": 0.290048454642546,
+        "Kp_att_rp": 13.341569761771376,
+        "Kp_att_y": 7.303837020208275,
+        "Kd_att_rp": 4.292279694464778,
+        "Kd_att_y": 2.2873544161389088
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 3.530438096499072,
+        "Kp_vel_z": 2.5986932566789718,
+        "Ki_vel_xy": 0.6051449871735256,
+        "Ki_vel_z": 0.40367184511599896,
+        "Kp_att_rp": 13.614902485279702,
+        "Kp_att_y": 5.547594297925238,
+        "Kd_att_rp": 1.4873780617931711,
+        "Kd_att_y": 0.5584407303226331
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 3.7277367797861043,
+        "Kp_vel_z": 2.8428304612076754,
+        "Ki_vel_xy": 0.3839616171795238,
+        "Ki_vel_z": 0.5802022351386696,
+        "Kp_att_rp": 6.320270385000528,
+        "Kp_att_y": 3.9867174398846004,
+        "Kd_att_rp": 2.9438593869498435,
+        "Kd_att_y": 2.464400045210865
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 4.374538744544404,
+        "Kp_vel_z": 2.218176538730886,
+        "Ki_vel_xy": 0.4374018237959476,
+        "Ki_vel_z": 0.5530136621551318,
+        "Kp_att_rp": 4.663254831719978,
+        "Kp_att_y": 7.974145279429531,
+        "Kd_att_rp": 4.863394481443219,
+        "Kd_att_y": 1.1907386094504897
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.792739048673,
+        "Kp_vel_z": 1.0351447558969393,
+        "Ki_vel_xy": 0.7731421090884749,
+        "Ki_vel_z": 0.25153173069914014,
+        "Kp_att_rp": 12.366951253531164,
+        "Kp_att_y": 4.869443954060486,
+        "Kd_att_rp": 2.8465626771528063,
+        "Kd_att_y": 0.8677394938700598
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 3.0642682169285496,
+        "Kp_vel_z": 3.6226043541102784,
+        "Ki_vel_xy": 0.9628977857558045,
+        "Ki_vel_z": 0.486244070340749,
+        "Kp_att_rp": 4.710098471943515,
+        "Kp_att_y": 6.7420022211553885,
+        "Kd_att_rp": 4.600135914683914,
+        "Kd_att_y": 0.8296800548624839
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 4.721567382336223,
+        "Kp_vel_z": 1.1692338186588578,
+        "Ki_vel_xy": 0.16725379193494777,
+        "Ki_vel_z": 0.4024210889039094,
+        "Kp_att_rp": 8.223225425971908,
+        "Kp_att_y": 6.990045446594669,
+        "Kd_att_rp": 2.8743269063410666,
+        "Kd_att_y": 0.7008747261713575
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 1.5750430818228165,
+        "Kp_vel_z": 1.5506851664139958,
+        "Ki_vel_xy": 0.3773389787882404,
+        "Ki_vel_z": 0.5879680045527654,
+        "Kp_att_rp": 6.980886717995219,
+        "Kp_att_y": 5.890935717268772,
+        "Kd_att_rp": 3.0538318710550207,
+        "Kd_att_y": 1.657305307751954
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 2.815717870706522,
+        "Kp_vel_z": 1.109224016429954,
+        "Ki_vel_xy": 0.8721243914678941,
+        "Ki_vel_z": 0.31772074585252963,
+        "Kp_att_rp": 5.560860550468368,
+        "Kp_att_y": 3.155615969300404,
+        "Kd_att_rp": 3.9744411735977074,
+        "Kd_att_y": 0.6291800535286538
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 4.829532721610846,
+        "Kp_vel_z": 1.859574612699652,
+        "Ki_vel_xy": 0.23533567659467622,
+        "Ki_vel_z": 0.2713214337516263,
+        "Kp_att_rp": 8.20301499173905,
+        "Kp_att_y": 3.1651831899592846,
+        "Kd_att_rp": 2.1844117569802335,
+        "Kd_att_y": 0.9627373454791259
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 3.642343130992476,
+        "Kp_vel_z": 1.3017802464947081,
+        "Ki_vel_xy": 0.2207860879866514,
+        "Ki_vel_z": 0.16492265805479797,
+        "Kp_att_rp": 12.565553471364904,
+        "Kp_att_y": 2.5626678154147857,
+        "Kd_att_rp": 2.3932075450559336,
+        "Kd_att_y": 1.7263472440177665
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.187936234392258,
+        "Kp_vel_z": 1.1148030992110651,
+        "Ki_vel_xy": 0.800681874947384,
+        "Ki_vel_z": 0.24886131923938407,
+        "Kp_att_rp": 9.23918617702229,
+        "Kp_att_y": 7.4877939859959275,
+        "Kd_att_rp": 3.1974715043605273,
+        "Kd_att_y": 1.1451676106194533
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.551374344915073,
+        "Kp_vel_z": 3.2332413083018725,
+        "Ki_vel_xy": 0.5552494944969235,
+        "Ki_vel_z": 0.2923797426528614,
+        "Kp_att_rp": 6.731396705320632,
+        "Kp_att_y": 5.388031404597926,
+        "Kd_att_rp": 1.3213584072391797,
+        "Kd_att_y": 2.1250977004765845
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.698911391139844,
+        "Kp_vel_z": 3.0096075395109336,
+        "Ki_vel_xy": 0.23329065888318212,
+        "Ki_vel_z": 0.4387221112233034,
+        "Kp_att_rp": 9.048353568996646,
+        "Kp_att_y": 2.8380785621031825,
+        "Kd_att_rp": 2.1970302181630434,
+        "Kd_att_y": 2.0463700962389
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.6988535752125555,
+        "Kp_vel_z": 2.82322476565602,
+        "Ki_vel_xy": 0.9293020380340757,
+        "Ki_vel_z": 0.2738284938644251,
+        "Kp_att_rp": 6.38090750651719,
+        "Kp_att_y": 7.991858238560145,
+        "Kd_att_rp": 2.603643651458664,
+        "Kd_att_y": 1.3149147204709835
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 4.209024526373957,
+        "Kp_vel_z": 2.372940541828671,
+        "Ki_vel_xy": 0.5057249277215307,
+        "Ki_vel_z": 0.2530724127391393,
+        "Kp_att_rp": 8.731054866412615,
+        "Kp_att_y": 3.349473617582528,
+        "Kd_att_rp": 2.7750934958596702,
+        "Kd_att_y": 0.6880678074571496
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 2.914189137456352,
+        "Kp_vel_z": 1.006800875013485,
+        "Ki_vel_xy": 0.4804358089450441,
+        "Ki_vel_z": 0.41807002748500643,
+        "Kp_att_rp": 13.9898167712283,
+        "Kp_att_y": 3.7117092034624775,
+        "Kd_att_rp": 2.0430440605341156,
+        "Kd_att_y": 1.209598772138218
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 1.67226540419116,
+        "Kp_vel_z": 2.236499496892278,
+        "Ki_vel_xy": 0.8953405892885922,
+        "Ki_vel_z": 0.4677527585300951,
+        "Kp_att_rp": 5.388253341741306,
+        "Kp_att_y": 6.503499956013277,
+        "Kd_att_rp": 3.248230218488739,
+        "Kd_att_y": 1.7074099912195464
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 2.8131311909478756,
+        "Kp_vel_z": 1.2525928807309745,
+        "Ki_vel_xy": 0.28101751590628865,
+        "Ki_vel_z": 0.23996815557115467,
+        "Kp_att_rp": 4.181453439510896,
+        "Kp_att_y": 7.04166091854629,
+        "Kd_att_rp": 2.4429949638993915,
+        "Kd_att_y": 2.1877831855643066
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 4.92531240813695,
+        "Kp_vel_z": 3.9546202801030703,
+        "Ki_vel_xy": 0.2128360710906564,
+        "Ki_vel_z": 0.26524361252325546,
+        "Kp_att_rp": 14.109353871378131,
+        "Kp_att_y": 2.5709701939252776,
+        "Kd_att_rp": 1.0385433978771816,
+        "Kd_att_y": 2.3819216980259084
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 1.607793680345555,
+        "Kp_vel_z": 1.3412816483851646,
+        "Ki_vel_xy": 0.7094930228245978,
+        "Ki_vel_z": 0.2231149405140905,
+        "Kp_att_rp": 7.605337775128421,
+        "Kp_att_y": 6.17023700085898,
+        "Kd_att_rp": 2.995924729596673,
+        "Kd_att_y": 2.2117103405211487
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 4.820774277464675,
+        "Kp_vel_z": 2.6132952588954277,
+        "Ki_vel_xy": 0.37754997825690595,
+        "Ki_vel_z": 0.5840260936810285,
+        "Kp_att_rp": 6.4764950692466945,
+        "Kp_att_y": 6.42047175384393,
+        "Kd_att_rp": 3.147451593841768,
+        "Kd_att_y": 1.3058297080903067
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 4.813357828890239,
+        "Kp_vel_z": 1.312047835033217,
+        "Ki_vel_xy": 0.9063704553836838,
+        "Ki_vel_z": 0.16160028221400033,
+        "Kp_att_rp": 6.311061245681385,
+        "Kp_att_y": 6.046644457374204,
+        "Kd_att_rp": 2.997682694484484,
+        "Kd_att_y": 2.3735475453591315
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 3.4407771368462656,
+        "Kp_vel_z": 3.041078408092699,
+        "Ki_vel_xy": 0.9792874694749685,
+        "Ki_vel_z": 0.10755940653580329,
+        "Kp_att_rp": 11.60429652301061,
+        "Kp_att_y": 3.2365204782335315,
+        "Kd_att_rp": 3.539156345218501,
+        "Kd_att_y": 0.837329146266184
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.564156053422314,
+        "Kp_vel_z": 2.204464486809018,
+        "Ki_vel_xy": 0.5228457508063152,
+        "Ki_vel_z": 0.4578654334486375,
+        "Kp_att_rp": 11.60310671293946,
+        "Kp_att_y": 3.3461385288736576,
+        "Kd_att_rp": 1.16122440962199,
+        "Kd_att_y": 0.7514668549646546
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 2.3235772194343802,
+        "Kp_vel_z": 1.4950836428547203,
+        "Ki_vel_xy": 0.7272776098971204,
+        "Ki_vel_z": 0.23383009157829213,
+        "Kp_att_rp": 5.181116270363268,
+        "Kp_att_y": 2.097809677488563,
+        "Kd_att_rp": 3.2304861052891574,
+        "Kd_att_y": 0.7804974336336361
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 1.6116908232107463,
+        "Kp_vel_z": 3.7302112476737923,
+        "Ki_vel_xy": 0.8478042330857345,
+        "Ki_vel_z": 0.33229008151431294,
+        "Kp_att_rp": 13.958285118566515,
+        "Kp_att_y": 5.841495461038101,
+        "Kd_att_rp": 1.1310435770930711,
+        "Kd_att_y": 0.6755833125500996
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.798026360106567,
+        "Kp_vel_z": 1.5665251216615932,
+        "Ki_vel_xy": 0.8798016766406507,
+        "Ki_vel_z": 0.23905779228979443,
+        "Kp_att_rp": 6.542629178303037,
+        "Kp_att_y": 5.324028577510389,
+        "Kd_att_rp": 4.353073714495029,
+        "Kd_att_y": 1.362057268483073
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 2.3865675432422258,
+        "Kp_vel_z": 1.020155337977271,
+        "Ki_vel_xy": 0.675837695720149,
+        "Ki_vel_z": 0.5119768241065045,
+        "Kp_att_rp": 12.082650181836794,
+        "Kp_att_y": 4.744934881514618,
+        "Kd_att_rp": 2.446649321283244,
+        "Kd_att_y": 2.0449169409612438
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.431374705579672,
+        "Kp_vel_z": 2.999014780683276,
+        "Ki_vel_xy": 0.1759271840157015,
+        "Ki_vel_z": 0.3359537808969163,
+        "Kp_att_rp": 11.926159335104524,
+        "Kp_att_y": 3.265236659509198,
+        "Kd_att_rp": 4.053615751494358,
+        "Kd_att_y": 2.329836026348095
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 3.255845880906802,
+        "Kp_vel_z": 1.7372759832592881,
+        "Ki_vel_xy": 0.5539087250238648,
+        "Ki_vel_z": 0.3873993987529709,
+        "Kp_att_rp": 9.70720349967467,
+        "Kp_att_y": 7.921468152388813,
+        "Kd_att_rp": 3.74694811582723,
+        "Kd_att_y": 1.8120479552555622
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 2.260937417375253,
+        "Kp_vel_z": 3.863013674133914,
+        "Ki_vel_xy": 0.624497847042766,
+        "Ki_vel_z": 0.3393850582722603,
+        "Kp_att_rp": 6.593800750102838,
+        "Kp_att_y": 2.327592110833894,
+        "Kd_att_rp": 1.7526449529758161,
+        "Kd_att_y": 1.5015812572011413
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 1.7772627900680593,
+        "Kp_vel_z": 1.2148954684009343,
+        "Ki_vel_xy": 0.13019866861274818,
+        "Ki_vel_z": 0.40988704154590505,
+        "Kp_att_rp": 8.879454038005326,
+        "Kp_att_y": 2.93861202925738,
+        "Kd_att_rp": 3.419788305405577,
+        "Kd_att_y": 2.250833105129122
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 4.8266119354029655,
+        "Kp_vel_z": 3.9123105606561346,
+        "Ki_vel_xy": 0.7532021414204189,
+        "Ki_vel_z": 0.3109256216118087,
+        "Kp_att_rp": 10.047640663252215,
+        "Kp_att_y": 5.085437460418639,
+        "Kd_att_rp": 2.7941514152667235,
+        "Kd_att_y": 0.7864003496138445
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 1.919330348611037,
+        "Kp_vel_z": 3.585067220556004,
+        "Ki_vel_xy": 0.10459328001885393,
+        "Ki_vel_z": 0.26419284823782707,
+        "Kp_att_rp": 11.138617082386606,
+        "Kp_att_y": 4.023862226388747,
+        "Kd_att_rp": 1.8853097404621946,
+        "Kd_att_y": 0.8633496256114377
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.100169324089906,
+        "Kp_vel_z": 2.1092517551966075,
+        "Ki_vel_xy": 0.48901632656754546,
+        "Ki_vel_z": 0.5329504699974386,
+        "Kp_att_rp": 4.717347116728794,
+        "Kp_att_y": 6.073231215917473,
+        "Kd_att_rp": 3.3569867236573665,
+        "Kd_att_y": 0.7885781287171565
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 2.425029951671945,
+        "Kp_vel_z": 3.6990429779944964,
+        "Ki_vel_xy": 0.5744282442716129,
+        "Ki_vel_z": 0.34869263924395966,
+        "Kp_att_rp": 4.464787291877054,
+        "Kp_att_y": 5.57676456877636,
+        "Kd_att_rp": 1.9769844220586301,
+        "Kd_att_y": 0.979095705301203
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 4.772371444583065,
+        "Kp_vel_z": 1.819453227820122,
+        "Ki_vel_xy": 0.10881330041779393,
+        "Ki_vel_z": 0.2191458050116691,
+        "Kp_att_rp": 10.075312179563076,
+        "Kp_att_y": 6.250816584306472,
+        "Kd_att_rp": 1.6801185963163237,
+        "Kd_att_y": 1.5405711968550877
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 2.200985548779555,
+        "Kp_vel_z": 3.427613954406683,
+        "Ki_vel_xy": 0.8510076750314154,
+        "Ki_vel_z": 0.24070332449198942,
+        "Kp_att_rp": 11.102113363089002,
+        "Kp_att_y": 3.4706177520576618,
+        "Kd_att_rp": 1.4341049375174744,
+        "Kd_att_y": 1.0108956580609405
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.366905436477058,
+        "Kp_vel_z": 2.6497502290209516,
+        "Ki_vel_xy": 0.45481170138697125,
+        "Ki_vel_z": 0.2601807805370143,
+        "Kp_att_rp": 10.404544063786368,
+        "Kp_att_y": 5.140817186694022,
+        "Kd_att_rp": 2.197673521371335,
+        "Kd_att_y": 0.936728180140151
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 4.740584080458383,
+        "Kp_vel_z": 1.2038785364745979,
+        "Ki_vel_xy": 0.179036493995406,
+        "Ki_vel_z": 0.5758377293486749,
+        "Kp_att_rp": 11.116799246463183,
+        "Kp_att_y": 3.8921476257582217,
+        "Kd_att_rp": 4.571131597336864,
+        "Kd_att_y": 2.3928224929005912
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 3.665804553612488,
+        "Kp_vel_z": 1.9874828289990458,
+        "Ki_vel_xy": 0.9388701337667652,
+        "Ki_vel_z": 0.501761861290781,
+        "Kp_att_rp": 11.969016289990423,
+        "Kp_att_y": 3.6458446170008645,
+        "Kd_att_rp": 2.9715502579008723,
+        "Kd_att_y": 1.5728419641819327
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.66059232618461,
+        "Kp_vel_z": 1.9436006257457494,
+        "Ki_vel_xy": 0.667968923386762,
+        "Ki_vel_z": 0.4364186442878889,
+        "Kp_att_rp": 4.272412731230407,
+        "Kp_att_y": 6.696010131945985,
+        "Kd_att_rp": 3.1912202498822353,
+        "Kd_att_y": 1.2719164241236227
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.33531789381945,
+        "Kp_vel_z": 2.1313793580936182,
+        "Ki_vel_xy": 0.8071481525620781,
+        "Ki_vel_z": 0.18528194207032836,
+        "Kp_att_rp": 12.269913988464312,
+        "Kp_att_y": 6.391269464133954,
+        "Kd_att_rp": 4.348985491121486,
+        "Kd_att_y": 2.3163264807599555
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 2.337126024014278,
+        "Kp_vel_z": 3.128258457504058,
+        "Ki_vel_xy": 0.8597663624913617,
+        "Ki_vel_z": 0.3422165130955501,
+        "Kp_att_rp": 13.235483240300564,
+        "Kp_att_y": 5.133898940906028,
+        "Kd_att_rp": 2.335312678139097,
+        "Kd_att_y": 1.5005191754700344
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 1.5809989196170975,
+        "Kp_vel_z": 1.7671327807124173,
+        "Ki_vel_xy": 0.864457225736377,
+        "Ki_vel_z": 0.4985574053816666,
+        "Kp_att_rp": 14.275704603383604,
+        "Kp_att_y": 7.230631928666739,
+        "Kd_att_rp": 2.6088097680696913,
+        "Kd_att_y": 1.810907676629452
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 2.686057722712471,
+        "Kp_vel_z": 2.5954033878336946,
+        "Ki_vel_xy": 0.5806002549550853,
+        "Ki_vel_z": 0.27380449715936483,
+        "Kp_att_rp": 7.7095778929663785,
+        "Kp_att_y": 4.893050269763965,
+        "Kd_att_rp": 3.299117316413647,
+        "Kd_att_y": 0.970918234716331
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 2.2207981125035787,
+        "Kp_vel_z": 3.360341572612724,
+        "Ki_vel_xy": 0.6226625567307349,
+        "Ki_vel_z": 0.3065985954660383,
+        "Kp_att_rp": 9.258478359235589,
+        "Kp_att_y": 4.275973074789167,
+        "Kd_att_rp": 3.5061484560340466,
+        "Kd_att_y": 0.9436884003203616
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 2.370334836492224,
+        "Kp_vel_z": 1.5365997281461623,
+        "Ki_vel_xy": 0.4103474851620168,
+        "Ki_vel_z": 0.17710710760380724,
+        "Kp_att_rp": 14.929032093632204,
+        "Kp_att_y": 2.641214484476123,
+        "Kd_att_rp": 2.982343958116262,
+        "Kd_att_y": 1.2917078909570385
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    },
+    {
+      "params": {
+        "Kp_vel_xy": 5.709744506505574,
+        "Kp_vel_z": 1.504236965449176,
+        "Ki_vel_xy": 0.2077961318955987,
+        "Ki_vel_z": 0.12437952078787348,
+        "Kp_att_rp": 12.771074005014466,
+        "Kp_att_y": 4.633249887767281,
+        "Kd_att_rp": 3.319086918586729,
+        "Kd_att_y": 1.4485450549758585
+      },
+      "metrics": {
+        "hover_drift_mean": 0.0,
+        "hover_drift_max": 0.0,
+        "vel_settling_time": 0.0,
+        "vel_overshoot": 0.0,
+        "vel_ss_error": 0.0,
+        "att_recovery_time": 0.0,
+        "att_max_error": 0.0,
+        "att_final_error": 0.0,
+        "att_recovered": false,
+        "is_stable": false,
+        "score": 9999.0
+      }
+    }
+  ]
+}

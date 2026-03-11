@@ -113,11 +113,27 @@ class VelocityController:
         # Total desired acceleration (gravity feedforward)
         a_des = a_des_p + a_des_i + self._g_vec
 
-        # Compute thrust magnitude
-        thrust_cmd = self.mass * torch.norm(a_des, dim=-1)
-
         # Compute desired attitude by aligning body z with a_des
-        q_des = self._compute_attitude_from_accel(a_des, q_current)
+        # This also clamps the attitude to max_tilt
+        q_des, tilt_angle = self._compute_attitude_from_accel(a_des, q_current)
+
+        # Compute thrust magnitude accounting for attitude clamping
+        # If attitude is clamped, we need to reduce thrust to avoid excess vertical component
+        # thrust * cos(tilt) = mass * g  ->  thrust = mass * g / cos(tilt)
+        # But we also want to track desired vertical accel, so:
+        # thrust = mass * a_des_z / cos(tilt), clamped to reasonable range
+        cos_tilt = torch.cos(tilt_angle)
+        cos_tilt = torch.clamp(cos_tilt, min=0.5)  # Avoid division by small values
+
+        # Vertical acceleration component (gravity + desired vertical motion)
+        a_vertical = a_des[:, 2]
+
+        # Thrust to achieve vertical acceleration given current tilt
+        thrust_cmd = self.mass * a_vertical / cos_tilt
+
+        # Clamp thrust to reasonable range (0.5 to 2x hover thrust)
+        hover_thrust = self.mass * self.gravity
+        thrust_cmd = torch.clamp(thrust_cmd, min=0.5 * hover_thrust, max=2.0 * hover_thrust)
 
         return q_des, thrust_cmd, yaw_rate_des
 
@@ -125,7 +141,7 @@ class VelocityController:
         self,
         a_des: torch.Tensor,
         q_current: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute desired attitude quaternion from desired acceleration.
 
         The desired attitude aligns the body z-axis with the desired
@@ -137,39 +153,54 @@ class VelocityController:
 
         Returns:
             q_des: (N, 4) desired attitude quaternion (wxyz).
+            tilt_angle: (N,) total tilt angle from vertical [rad].
         """
-        # Normalize desired acceleration to get body z direction
+        # Normalize desired acceleration to get body z direction (world frame)
         a_mag = torch.norm(a_des, dim=-1, keepdim=True)
-        z_des = a_des / (a_mag + 1e-6)  # Avoid division by zero
+        z_des_world = a_des / (a_mag + 1e-6)  # Avoid division by zero
 
         # Extract current yaw from quaternion
         yaw_current = self._extract_yaw(q_current)
 
-        # Compute roll and pitch from z_des
-        # In ENU/FLU: z_des = [sin(pitch)*cos(roll), -sin(roll), cos(pitch)*cos(roll)] approximately
-        # For small angles:
-        #   pitch ≈ asin(z_des_x)
-        #   roll ≈ -asin(z_des_y / cos(pitch))
+        # CRITICAL FIX: Rotate z_des into yaw-aligned frame before computing roll/pitch
+        # This ensures roll/pitch are computed relative to the drone's heading
+        cos_yaw = torch.cos(yaw_current)
+        sin_yaw = torch.sin(yaw_current)
 
-        # More robust: use atan2 for the conversion
-        # z_des_x = cos(roll)*sin(pitch)
-        # z_des_y = -sin(roll)
-        # z_des_z = cos(roll)*cos(pitch)
+        # Rotate z_des by -yaw around Z axis to get yaw-aligned frame
+        # R(-yaw) = [[cos(yaw), sin(yaw), 0], [-sin(yaw), cos(yaw), 0], [0, 0, 1]]
+        z_des_yaw_aligned = torch.stack([
+            cos_yaw * z_des_world[:, 0] + sin_yaw * z_des_world[:, 1],
+            -sin_yaw * z_des_world[:, 0] + cos_yaw * z_des_world[:, 1],
+            z_des_world[:, 2],
+        ], dim=-1)
+
+        # Now compute roll and pitch in yaw-aligned frame
+        # In FLU with yaw=0:
+        # z_body_x = cos(roll)*sin(pitch)
+        # z_body_y = -sin(roll)
+        # z_body_z = cos(roll)*cos(pitch)
 
         # Roll from z_des_y (clamped to avoid asin domain issues)
-        roll_des = -torch.asin(torch.clamp(z_des[:, 1], -1.0, 1.0))
+        roll_des = -torch.asin(torch.clamp(z_des_yaw_aligned[:, 1], -1.0, 1.0))
 
         # Pitch from z_des_x and z_des_z
-        pitch_des = torch.atan2(z_des[:, 0], z_des[:, 2])
+        pitch_des = torch.atan2(z_des_yaw_aligned[:, 0], z_des_yaw_aligned[:, 2])
 
         # Apply tilt limits
         roll_des = torch.clamp(roll_des, -self._max_tilt_rad, self._max_tilt_rad)
         pitch_des = torch.clamp(pitch_des, -self._max_tilt_rad, self._max_tilt_rad)
 
+        # Compute total tilt angle (angle from vertical)
+        # tilt = acos(cos(roll) * cos(pitch))
+        tilt_angle = torch.acos(torch.clamp(
+            torch.cos(roll_des) * torch.cos(pitch_des), -1.0, 1.0
+        ))
+
         # Construct desired quaternion with current yaw
         q_des = quat_from_euler_xyz(roll_des, pitch_des, yaw_current)
 
-        return q_des
+        return q_des, tilt_angle
 
     def _extract_yaw(self, q: torch.Tensor) -> torch.Tensor:
         """Extract yaw angle from quaternion (wxyz format).

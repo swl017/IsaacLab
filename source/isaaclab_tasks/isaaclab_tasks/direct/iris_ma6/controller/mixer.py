@@ -143,6 +143,10 @@ class MixerMatrix:
 
         Inverse direction: [F, tau_x, tau_y, tau_z] -> [T1, T2, T3, T4]
 
+        Uses thrust-preserving clamping: after clamping to limits, scales
+        non-clamped rotors to maintain commanded total thrust (prioritizes
+        thrust over moment tracking).
+
         Args:
             thrust_cmd: (N,) total thrust command [N].
             moment_cmd: (N, 3) moment commands [tau_x, tau_y, tau_z] [Nm].
@@ -160,12 +164,38 @@ class MixerMatrix:
         # thrusts = M^(-1) @ wrench
         thrusts = torch.matmul(wrench, self._mixer_matrix_inv.T)  # (N, 4)
 
-        # Clamp to physical limits
-        thrusts = torch.clamp(thrusts, min=thrust_min)
+        # Thrust-preserving clamping algorithm:
+        # 1. Clamp to limits
+        # 2. If total thrust changed, redistribute the difference
+        thrusts_clamped = torch.clamp(thrusts, min=thrust_min)
         if thrust_max is not None:
-            thrusts = torch.clamp(thrusts, max=thrust_max)
+            thrusts_clamped = torch.clamp(thrusts_clamped, max=thrust_max)
 
-        return thrusts
+        # Compute thrust change from clamping
+        thrust_actual = thrusts_clamped.sum(dim=-1)  # (N,)
+        thrust_excess = thrust_actual - thrust_cmd  # (N,) positive = too much thrust
+
+        # Scale down rotors that weren't clamped to maintain total thrust
+        # Find how much each rotor can be reduced
+        headroom = thrusts_clamped - thrust_min  # (N, 4) how much can be reduced
+
+        # Total available headroom
+        total_headroom = headroom.sum(dim=-1, keepdim=True)  # (N, 1)
+        total_headroom = torch.clamp(total_headroom, min=1e-6)  # Avoid division by zero
+
+        # Distribute reduction proportionally to headroom
+        reduction = torch.clamp(thrust_excess, min=0.0).unsqueeze(-1)  # (N, 1)
+        reduction_per_rotor = reduction * headroom / total_headroom  # (N, 4)
+
+        # Apply reduction
+        thrusts_final = thrusts_clamped - reduction_per_rotor
+
+        # Final clamp to ensure limits
+        thrusts_final = torch.clamp(thrusts_final, min=thrust_min)
+        if thrust_max is not None:
+            thrusts_final = torch.clamp(thrusts_final, max=thrust_max)
+
+        return thrusts_final
 
     def thrust_to_omega(self, thrusts: torch.Tensor) -> torch.Tensor:
         """Convert rotor thrusts to angular velocities.

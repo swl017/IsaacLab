@@ -14,13 +14,16 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, RigidObjectCfg
 from isaaclab.envs import DirectMARLEnvCfg, ViewerCfg
 from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import TiledCameraCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 
 from isaaclab_assets import IRIS_GIMBAL2_CFG
 
+from .bbox_raycaster_v2 import BBoxRayCasterV2Cfg
 from .controller import DroneControllerCfg
+from .controller.tuning.tuning_results.best_config_20260312_025633 import TUNED_CONTROLLER_CFG
 
 
 def _create_robot_cfg() -> ArticulationCfg:
@@ -32,7 +35,7 @@ def _create_robot_cfg() -> ArticulationCfg:
     cfg.spawn.rigid_props = sim_utils.RigidBodyPropertiesCfg(  # type: ignore[union-attr]
         disable_gravity=False,  # Enable gravity for realistic testing
         max_depenetration_velocity=10.0,
-        enable_gyroscopic_forces=True,  # Enable gyroscopic forces
+        enable_gyroscopic_forces=False,  # Disabled - no gyroscopic coupling needed
     )
     return cfg
 
@@ -48,7 +51,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     This is a simplified test environment to validate the DroneController
     integration with 3 agents.
 
-    Observation space per agent: 13D (pos, vel, quat, gimbal_yaw, gimbal_pitch, zoom)
+    Observation space per agent: 18D (pos, vel, quat, gimbal_yaw, gimbal_pitch, zoom, bbox, bbox_empty)
     Action space per agent: 7D (vx, vy, vz, yaw_rate, gimbal_yaw_rate, gimbal_pitch_rate, zoom_rate)
     """
 
@@ -72,8 +75,8 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     action_spaces: dict = {"drone_0": 7, "drone_1": 7, "drone_2": 7}
     """Action space dimensions per agent (auto-populated from num_agents)."""
 
-    observation_spaces: dict = {"drone_0": 13, "drone_1": 13, "drone_2": 13}
-    """Observation space dimensions per agent (13D: pos, vel, quat, gimbal_yaw, gimbal_pitch, zoom)."""
+    observation_spaces: dict = {"drone_0": 18, "drone_1": 18, "drone_2": 18}
+    """Observation space dimensions per agent (18D: pos, vel, quat, gimbal_yaw, gimbal_pitch, zoom, bbox, bbox_empty)."""
 
     state_space: int = -1
     """State space dimension. -1 means concatenate all observations."""
@@ -139,8 +142,11 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     """Target rigid body configuration."""
 
     viewer: ViewerCfg = ViewerCfg(
-        eye=(30.0, 30.0, 30.0),
+        eye=(10.0, 7.0, 6.0),
         lookat=(0.0, 0.0, 0.0),
+        origin_type="asset_root",
+        asset_name="Robot_0",
+        env_index=0,
     )
 
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
@@ -152,27 +158,69 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     robot: ArticulationCfg = IRIS_GIMBAL2_TEST_CFG
     """Robot articulation configuration template with gravity and gyroscopic forces enabled."""
 
+    camera: TiledCameraCfg = TiledCameraCfg(
+        prim_path="/World/envs/env_.*/{robot_name}/pitch_link/camera",
+        update_period=0.1,
+        height=480,
+        width=640,
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=24.0,
+            focus_distance=400.0,
+            horizontal_aperture=20.955,
+            clipping_range=(0.1, 1.0e5),
+        ),
+        offset=TiledCameraCfg.OffsetCfg(
+            pos=(0.0, 0.0, 0.1),
+            rot=(0.7071068, 0.0, 0.0, -0.7071068),
+            convention="world",
+        ),
+    )
+    """Reference camera parameters used to build zoom-aware intrinsics for bbox_raycaster_v2."""
+
+    bbox_raycaster_v2: BBoxRayCasterV2Cfg = BBoxRayCasterV2Cfg(
+        target_prim_paths=["/World/envs/env_.*/target"],
+        mesh_prim_paths=["/World/ground"],
+        num_cameras_per_env=3,
+        num_cameras_per_agent=1,
+        load_agent_meshes=False,  # Disabled - causes shape bug with multi-env occlusion
+        min_bbox_size=(0.01, 0.01),
+        max_bbox_size=(0.95, 0.95),
+        partial_detection_allowed=False,
+        min_bbox_area_pixels=4.0,
+        enable_occlusion_check=False,  # Disabled - shape bug with multi-env
+        enable_self_occlusion=False,
+        enable_inter_target_occlusion=False,
+        occlusion_ray_pattern="center_only",
+        occlusion_visibility_threshold=0.5,
+        occlusion_ray_tolerance=1.1,
+        max_distance=100.0,
+        debug_vis=False,
+        debug_memory=False,
+    )
+    """BBox raycaster V2 configuration used for camera/zoom/detection validation."""
+
     # ==========================================================================
     # Controller Config
     # ==========================================================================
 
-    drone_controller: DroneControllerCfg = DroneControllerCfg()
-    """Drone controller configuration."""
+    drone_controller: DroneControllerCfg = TUNED_CONTROLLER_CFG
+    """Drone controller configuration. Loaded from auto-tuning results."""
 
     # ==========================================================================
     # Motion Limits
     # ==========================================================================
 
-    max_lin_vel: float = 10.0
-    """Maximum linear velocity (m/s)."""
+    max_lin_vel: float = 2.0
+    """Maximum linear velocity (m/s). Kept low to avoid saturating attitude controller."""
 
-    max_yaw_rate: float = math.radians(90.0)
+    max_yaw_rate: float = math.radians(45.0)
     """Maximum yaw rate (rad/s)."""
 
-    max_gimbal_rate: float = math.radians(360.0)
+    max_gimbal_rate: float = math.radians(180.0)
     """Maximum gimbal rate (rad/s)."""
 
-    max_zoom_rate: float = 2.0
+    max_zoom_rate: float = 1.0
     """Maximum zoom rate (zoom levels per second)."""
 
     def __post_init__(self):
@@ -182,5 +230,5 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
 
         self.possible_agents = [f"drone_{i}" for i in range(self.num_agents)]
         self.action_spaces = {a: 7 for a in self.possible_agents}
-        # Simplified observation: pos(3) + vel(3) + quat(4) + gimbal_yaw(1) + gimbal_pitch(1) + zoom(1) = 13D
-        self.observation_spaces = {a: 13 for a in self.possible_agents}
+        self.bbox_raycaster_v2.num_cameras_per_env = self.num_agents
+        self.observation_spaces = {a: 18 for a in self.possible_agents}

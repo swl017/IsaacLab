@@ -33,6 +33,9 @@ from .motor_dynamics import MotorDynamics
 from .velocity_controller import VelocityController
 from .zoom_controller import ZoomController
 
+# Tuned configurations
+from .tuning import TUNED_CONTROLLER_CFG
+
 __all__ = [
     # Configurations
     "AerodynamicsCfg",
@@ -51,4 +54,6 @@ __all__ = [
     "MotorDynamics",
     "VelocityController",
     "ZoomController",
+    # Tuned configurations
+    "TUNED_CONTROLLER_CFG",
 ]

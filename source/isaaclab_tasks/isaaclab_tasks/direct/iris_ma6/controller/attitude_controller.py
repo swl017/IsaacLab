@@ -59,6 +59,10 @@ class AttitudeController:
         self._Kd_att = torch.tensor(cfg.Kd_att, dtype=torch.float32, device=self.device)
         self._tau_max = torch.tensor(cfg.tau_max, dtype=torch.float32, device=self.device)
 
+        # Thrust limits for mixer allocation (prevents yaw commands from causing climb)
+        self._thrust_min = cfg.thrust_min
+        self._thrust_max = cfg.thrust_max
+
     def compute_attitude_error(
         self,
         q_des: torch.Tensor,
@@ -132,8 +136,11 @@ class AttitudeController:
         # Saturate moments
         tau_cmd = torch.clamp(tau_cmd, -self._tau_max, self._tau_max)
 
-        # Allocate to rotor thrusts via mixer
-        thrusts = self._mixer.allocate(thrust_cmd, tau_cmd)
+        # Allocate to rotor thrusts via mixer with proper limits
+        # Using thrust_min > 0 prevents yaw commands from causing thrust imbalance
+        thrusts = self._mixer.allocate(
+            thrust_cmd, tau_cmd, thrust_min=self._thrust_min, thrust_max=self._thrust_max
+        )
 
         # Convert thrusts to rotor speeds
         omega_cmd = self._mixer.thrust_to_omega(thrusts)
