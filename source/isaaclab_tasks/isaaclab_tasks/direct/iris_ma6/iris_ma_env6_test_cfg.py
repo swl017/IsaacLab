@@ -171,8 +171,8 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
             clipping_range=(0.1, 1.0e5),
         ),
         offset=TiledCameraCfg.OffsetCfg(
-            pos=(0.0, 0.0, 0.1),
-            rot=(0.5, -0.5, 0.5, -0.5),
+            pos=(0.0, 0.0, 0.0),
+            rot=(0.7071068, 0, 0, -0.7071068),  # -90° yaw to align camera forward with gimbal pointing direction
             convention="world",
         ),
     )

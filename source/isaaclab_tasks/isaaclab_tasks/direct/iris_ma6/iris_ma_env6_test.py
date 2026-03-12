@@ -22,6 +22,7 @@ from typing import Dict
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectMARLEnv
+from isaaclab.sensors import TiledCamera
 
 from .bbox_raycaster_v2 import BBoxRayCasterV2
 from .bbox_raycaster_v2.utils.projection import create_intrinsic_matrix_tensor
@@ -70,15 +71,23 @@ class IrisMA6TestEnv(DirectMARLEnv):
             render_mode: Render mode for visualization.
             **kwargs: Additional arguments passed to DirectMARLEnv.
         """
-        # Dynamically generate agent-specific robot configs BEFORE super().__init__
+        # Dynamically generate agent-specific robot and camera configs BEFORE super().__init__
         # This is required because the scene setup needs the configs
         self.agent_robot_cfgs: Dict[str, object] = {}
+        self.agent_camera_cfgs: Dict[str, object] = {}
         for agent_id in cfg.possible_agents:
             robot_index = agent_id.split("_")[-1]
             robot_name = f"Robot_{robot_index}"
+
+            # Create and store robot config
             robot_cfg = copy.deepcopy(cfg.robot)
             robot_cfg.prim_path = robot_cfg.prim_path.format(robot_name=robot_name)
             self.agent_robot_cfgs[agent_id] = robot_cfg
+
+            # Create and store camera config (attached to pitch_link/gimbal tip)
+            camera_cfg = copy.deepcopy(cfg.camera)
+            camera_cfg.prim_path = camera_cfg.prim_path.format(robot_name=robot_name)
+            self.agent_camera_cfgs[agent_id] = camera_cfg
 
         # Call parent constructor
         super().__init__(cfg, render_mode, **kwargs)
@@ -184,12 +193,18 @@ class IrisMA6TestEnv(DirectMARLEnv):
             self.set_debug_vis(True)
 
     def _setup_scene(self):
-        """Setup the scene with multiple robots and shared target."""
+        """Setup the scene with multiple robots, cameras, and shared target."""
         # Create robots for each agent from the dynamically generated configs
         for agent_id, robot_cfg in self.agent_robot_cfgs.items():
             robot = Articulation(robot_cfg)
             robot_index = agent_id.split("_")[-1]
             self.scene.articulations[f"Robot_{robot_index}"] = robot
+
+        # Create TiledCamera sensors for each agent (attached to gimbal tip/pitch_link)
+        # These cameras are aligned with the frustum visualization direction
+        self._cameras: Dict[str, TiledCamera] = {}
+        for agent_id, camera_cfg in self.agent_camera_cfgs.items():
+            self._cameras[agent_id] = TiledCamera(camera_cfg)
 
         # Create terrain
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
@@ -206,6 +221,11 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         # Register rigid objects
         self.scene.rigid_objects["target"] = self.target
+
+        # Register TiledCamera sensors in scene
+        for agent_id, camera in self._cameras.items():
+            robot_index = agent_id.split("_")[-1]
+            self.scene.sensors[f"camera_{robot_index}"] = camera
 
         # Add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
@@ -305,6 +325,10 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         for idx, agent_id in enumerate(self.cfg.possible_agents):
             robot = self._robots[agent_id]
+
+            # Use computed camera pose (like iris_ma5) for consistent frustum visualization
+            # This ensures gimbal stabilization is properly reflected in frustum orientation
+            # The computed orientation is in world convention with +Z forward
             gimbal_joint_pos = torch.stack(
                 [
                     robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["pitch"]],
@@ -325,12 +349,20 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     self._camera_offset_rotation_b,
                 ),
             )
+
             intrinsic = self._camera_intrinsics_base.clone()
             intrinsic[:, 0, 0] *= self.zoom_level[:, idx]
             intrinsic[:, 1, 1] *= self.zoom_level[:, idx]
             camera_intrinsics[agent_id] = intrinsic
             image_shapes[agent_id] = self._camera_image_shape
             agent_poses[agent_id] = (robot.data.root_pos_w, robot.data.root_quat_w)
+
+            # Update TiledCamera intrinsics based on zoom level (runs at policy frequency)
+            if agent_id in self._cameras:
+                self._cameras[agent_id].set_intrinsic_matrices_batched(
+                    intrinsic,
+                    self.cfg.camera.spawn.focal_length * self.zoom_level[:, idx],
+                )
 
         self.bbox_raycaster_v2.update(
             camera_poses=camera_poses,

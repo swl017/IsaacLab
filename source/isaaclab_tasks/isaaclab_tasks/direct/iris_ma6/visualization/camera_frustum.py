@@ -184,6 +184,8 @@ class CameraFrustum:
 
         # Frustum corners at far plane (in camera coordinates)
         # Shape: (N, 4, 3) - N environments, 4 corners, 3 coordinates (x, y, z)
+        # Camera looks along +Z axis in world/body frame convention (matching iris_ma5)
+        # The camera orientation quaternion already encodes the correct look direction
         far_corners = torch.stack(
             [
                 torch.stack(
