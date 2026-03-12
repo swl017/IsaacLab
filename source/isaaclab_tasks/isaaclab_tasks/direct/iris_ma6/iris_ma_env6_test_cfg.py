@@ -19,7 +19,7 @@ from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 
-from isaaclab_assets import IRIS_GIMBAL2_CFG
+from isaaclab_assets import IRIS_GIMBAL3_CFG
 
 from .bbox_raycaster_v2 import BBoxRayCasterV2Cfg
 from .controller import DroneControllerCfg
@@ -28,7 +28,7 @@ from .controller.tuning import TUNED_CONTROLLER_CFG
 
 def _create_robot_cfg() -> ArticulationCfg:
     """Create robot config with gravity and gyroscopic forces enabled."""
-    cfg = copy.deepcopy(IRIS_GIMBAL2_CFG)
+    cfg = copy.deepcopy(IRIS_GIMBAL3_CFG)
     cfg.prim_path = "/World/envs/env_.*/{robot_name}"
     # Override rigid body properties to enable gravity and gyroscopic forces
     # Type ignore: spawn is UsdFileCfg at runtime which has rigid_props

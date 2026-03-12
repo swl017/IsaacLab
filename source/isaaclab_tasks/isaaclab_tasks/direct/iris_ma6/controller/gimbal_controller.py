@@ -20,21 +20,22 @@ World-Frame Stabilization:
 Yaw Offset:
 - The body mesh has xformOp:orient = R_z(90°), so visual forward = body +Y.
 - The controller works in body +X forward convention internally.
-- The env code adds YAW_JOINT_OFFSET (π/2) when setting joint targets,
-  so yaw_joint=0 in physics corresponds to visual forward (body +Y).
+- The env code adds YAW_JOINT_OFFSET (-π/2) when setting joint targets.
+- At controller yaw=0, the physical joint = -π/2, and camera points along
+  body +X (physics forward), consistent with the controller's convention.
 """
 
 from __future__ import annotations
 
 import math
 import torch
-from isaaclab.utils.math import quat_rotate_inverse
+from isaaclab.utils.math import quat_rotate, quat_rotate_inverse
 
 from .gimbal_controller_cfg import GimbalControllerCfg
 
 # Body mesh is rotated 90° CCW from physics frame (visual forward = body +Y).
-# This offset is added to yaw joint targets in the env code to align gimbal
-# yaw=0 with visual forward. Exported for use by the env.
+# This offset is added to yaw joint targets in the env code so that controller
+# yaw=0 maps to body +X (physics forward). Exported for use by the env.
 YAW_JOINT_OFFSET = -math.pi / 2
 
 
@@ -152,9 +153,21 @@ class GimbalController:
             self._azimuth_world, self._elevation_world, q_body
         )
 
-        # Clamp to joint limits
-        yaw_target = torch.clamp(yaw_target, self._yaw_limits[0], self._yaw_limits[1])
-        pitch_target = torch.clamp(pitch_target, self._pitch_limits[0], self._pitch_limits[1])
+        # Clamp to joint limits (body-relative)
+        yaw_clamped = torch.clamp(yaw_target, self._yaw_limits[0], self._yaw_limits[1])
+        pitch_clamped = torch.clamp(pitch_target, self._pitch_limits[0], self._pitch_limits[1])
+
+        # Back-propagate clamped body-frame angles to world-frame targets.
+        # Without this, _azimuth_world drifts beyond what the joints can reach,
+        # causing the gimbal to snap when the body rotates.
+        needs_backprop = (yaw_clamped != yaw_target) | (pitch_clamped != pitch_target)
+        if needs_backprop.any():
+            az_new, el_new = self._body_to_world_angles(yaw_clamped, pitch_clamped, q_body)
+            self._azimuth_world = torch.where(needs_backprop, az_new, self._azimuth_world)
+            self._elevation_world = torch.where(needs_backprop, el_new, self._elevation_world)
+
+        yaw_target = yaw_clamped
+        pitch_target = pitch_clamped
 
         # Compute stabilizing roll
         if self.cfg.auto_stabilize_roll:
@@ -225,6 +238,45 @@ class GimbalController:
 
         return yaw_body, pitch_body
 
+    def _body_to_world_angles(
+        self,
+        yaw_body: torch.Tensor,
+        pitch_body: torch.Tensor,
+        q_body: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convert body-frame gimbal angles back to world-frame pointing direction.
+
+        Inverse of _world_to_body_angles. Used to back-propagate clamped body-frame
+        limits into the world-frame target, preventing wind-up.
+
+        Args:
+            yaw_body: (N,) gimbal yaw in body frame [rad].
+            pitch_body: (N,) gimbal pitch in body frame [rad].
+            q_body: (N, 4) body quaternion (wxyz).
+
+        Returns:
+            azimuth_world: (N,) world-frame azimuth [rad].
+            elevation_world: (N,) world-frame elevation [rad].
+        """
+        # Reconstruct body-frame direction from gimbal angles
+        # (inverse of the extraction in _world_to_body_angles)
+        cos_p = torch.cos(pitch_body)
+        dir_body = torch.stack([
+            cos_p * torch.cos(yaw_body),
+            cos_p * torch.sin(yaw_body),
+            -torch.sin(pitch_body),
+        ], dim=-1)
+
+        # Transform to world frame
+        dir_world = quat_rotate(q_body, dir_body)
+
+        # Extract world-frame angles
+        azimuth_world = torch.atan2(dir_world[:, 1], dir_world[:, 0])
+        xy_dist = torch.sqrt(dir_world[:, 0] ** 2 + dir_world[:, 1] ** 2)
+        elevation_world = torch.atan2(dir_world[:, 2], xy_dist)
+
+        return azimuth_world, elevation_world
+
     def _compute_stabilizing_roll(
         self,
         gimbal_yaw: torch.Tensor,
@@ -291,7 +343,6 @@ class GimbalController:
         direction = self._apply_gimbal_rotation(forward)
 
         # Transform from body frame to world frame
-        from isaaclab.utils.math import quat_rotate
         direction_world = quat_rotate(q_body, direction)
 
         return direction_world
@@ -331,20 +382,24 @@ class GimbalController:
     def reset(self, env_ids: torch.Tensor | None = None):
         """Reset gimbal state.
 
+        Resets yaw to cfg.initial_yaw (default -90 deg). Assumes body is at
+        identity quaternion (heading 0) so _azimuth_world = initial_yaw.
+
         Args:
             env_ids: Environment indices to reset. If None, reset all.
         """
+        init_yaw = self.cfg.initial_yaw
         if env_ids is None:
-            self._yaw.zero_()
+            self._yaw.fill_(init_yaw)
             self._roll.zero_()
             self._pitch.zero_()
-            self._azimuth_world.zero_()
+            self._azimuth_world.fill_(init_yaw)
             self._elevation_world.zero_()
         else:
-            self._yaw[env_ids] = 0.0
+            self._yaw[env_ids] = init_yaw
             self._roll[env_ids] = 0.0
             self._pitch[env_ids] = 0.0
-            self._azimuth_world[env_ids] = 0.0
+            self._azimuth_world[env_ids] = init_yaw
             self._elevation_world[env_ids] = 0.0
 
     def set_tau_gimbal(self, tau_gimbal: torch.Tensor | float):

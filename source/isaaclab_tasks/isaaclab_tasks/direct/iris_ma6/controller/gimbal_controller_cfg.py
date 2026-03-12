@@ -42,3 +42,6 @@ class GimbalControllerCfg:
 
     auto_stabilize_roll: bool = True
     """Whether to automatically compute roll to keep horizon level."""
+
+    initial_yaw: float = 0.0 #-math.radians(90)
+    """Initial gimbal yaw angle [rad]. Default -90 deg."""
