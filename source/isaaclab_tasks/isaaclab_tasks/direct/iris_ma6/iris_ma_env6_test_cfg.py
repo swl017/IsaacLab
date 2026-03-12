@@ -142,10 +142,9 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     """Target rigid body configuration."""
 
     viewer: ViewerCfg = ViewerCfg(
-        eye=(2.0, 1.0, 0.6),
+        eye=(18.0, 15.0, 16.0),
         lookat=(0.0, 0.0, 0.0),
-        origin_type="asset_root",
-        asset_name="Robot_0",
+        origin_type="env",
         env_index=0,
     )
 

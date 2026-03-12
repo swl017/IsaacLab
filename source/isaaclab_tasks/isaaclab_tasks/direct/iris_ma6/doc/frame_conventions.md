@@ -118,8 +118,9 @@ Top-down view:
     (left)                   (visual right → physics fwd)
 ```
 
-All gimbal and camera offsets must account for this 90° difference between
-physics forward (+X) and visual forward (+Y). See §4.5 and §5.3.
+The gimbal controller and camera work in the physics frame (+X forward).
+The `YAW_JOINT_OFFSET` (§4.5) bridges the physical joint mechanism to
+match the controller's +X forward convention. See §4.5 and §5.3.
 
 ### 2.3 Transformations
 
@@ -249,8 +250,9 @@ Joint positions are stored as `[pitch, yaw, roll]` (indices 0, 1, 2).
 
 ### 4.5 Yaw Joint Offset (Software-Only)
 
-Because the body mesh is rotated 90° CCW (see §2.2), gimbal yaw=0 must align
-with visual forward (body +Y), not physics forward (body +X).
+The camera offset `R_x(-90°)` alone (without gimbal rotation) maps frustum +Z → body +Y.
+The `YAW_JOINT_OFFSET` adds a -90° yaw joint rotation so the combined chain
+maps frustum +Z → body +X (physics forward) at controller yaw=0.
 
 **Approach:** The gimbal controller works internally in body +X forward convention.
 The offset is applied **only in env code** when setting joint targets:
@@ -271,13 +273,24 @@ robot.set_joint_position_target(
 
 ```
 Controller output (body +X fwd)     Env code adds offset        Physics joint
-   gimbal_yaw = 0            →    yaw_joint = -π/2        →   joint settles to -π/2
-   gimbal_yaw = +π/2 (left)  →    yaw_joint = 0           →   joint settles to 0
+   gimbal_yaw = 0            →    yaw_joint = -π/2        →   camera → body +X (physics fwd)
+   gimbal_yaw = +π/2 (left)  →    yaw_joint = 0           →   camera → body +Y (visual fwd)
 ```
+
+**Why body +X, not +Y?** The controller computes yaw via `atan2(dir_body.y, dir_body.x)`,
+so yaw=0 means the target is along body +X. Without the joint offset, the camera
+offset alone would point the camera along body +Y. The -π/2 joint rotation corrects
+this so yaw=0 in the controller corresponds to body +X — consistent with the
+controller's internal +X forward convention.
 
 **Consequence for derived fields:** When reading `robot.data.joint_pos`, the yaw
 value already includes the offset. `compute_camera_orientation_from_gimbal()`
 uses joint positions as-is — no additional offset needed.
+
+**Initial joint positions at reset:**
+- Controller angles (yaw, roll, pitch): all 0
+- World-frame angles (azimuth, elevation): all 0
+- Physical joint: yaw = -π/2 (offset), roll = 0, pitch = 0
 
 ---
 
@@ -347,41 +360,53 @@ offset=TiledCameraCfg.OffsetCfg(
 Isaac Lab internally converts this to OpenGL convention for rendering.
 
 This quaternion was determined empirically via frame visualization to ensure the
-TiledCamera image matches the expected view direction (body +Y = visual forward).
+TiledCamera image matches the expected view direction (body +X = physics forward).
 
 ### 5.4 Frustum Visualization Offset
 
 The frustum visualization uses a **separate** offset rotation (`_camera_offset_rotation_b`)
 that is composed with the gimbal quaternion in `compute_camera_orientation_from_gimbal()`.
 
-The frustum geometry uses +Z as forward. Combined with the gimbal yaw joint
-(which includes `YAW_JOINT_OFFSET = -π/2`), the offset must map frustum +Z
-to body +Y (visual forward) at gimbal-zero:
+**Critical:** Before computing the frustum orientation, `YAW_JOINT_OFFSET` is
+**subtracted** from the yaw joint position. This gives the controller's logical
+yaw (0 = physics forward). The camera offset then encodes the full yaw correction:
 
 ```python
 # iris_ma_env6_test.py
+# 1. Strip YAW_JOINT_OFFSET from yaw
+gimbal_joint_pos_frustum = gimbal_joint_pos.clone()
+gimbal_joint_pos_frustum[:, 1] -= YAW_JOINT_OFFSET
+
+# 2. Camera offset = R_z(-90°) * R_x(-90°) — same value as TiledCamera ROS offset
 self._camera_offset_rotation_b = torch.tensor(
-    [0.7071, 0.0, -0.7071, 0.0],  # R_y(-90°), wxyz
+    [0.5, -0.5, 0.5, -0.5],  # wxyz
     ...
 )
 ```
 
-**Derivation:**
+**Why strip the offset?** The offset maps frustum +Z → +X via the Y axis.
+If the gimbal yaw includes `-π/2`, then `R_y(pitch)` rotates around the Y
+axis — but the offset had already mapped +Z to +Y (the pitch axis itself),
+making pitch rotations invisible. By stripping the offset from yaw and
+encoding it in the camera quaternion instead, the frustum correctly responds
+to pitch changes.
+
+**Derivation (with offset stripped, gimbal yaw=0 at rest):**
 
 ```
-At gimbal-zero, physics yaw joint = YAW_JOINT_OFFSET = -π/2
+Camera offset: R_z(-90°) * R_x(-90°)
+  Maps: +Z → +X,  +Y → +Z  (forward along +X, up along +Z)
 
-Chain: gimbal_quat * camera_offset
-     = R_z(-90°) * R_y(-90°)
+Gimbal R_y(pitch) at yaw=0:
+  Rotates +X in X-Z plane: +X → cos(θ)X + sin(θ)Z
 
-Verification:
-  R_y(-90°) maps  +Z → -X
-  R_z(-90°) maps  -X → +Y  ✓  (visual forward)
+At pitch=0:  frustum +Z → body +X (physics forward) ✓
+At pitch=30°: frustum +Z → [0.866, 0, -0.5] (tilts down) ✓
 ```
 
-**Why different from TiledCamera offset?** The TiledCamera uses ROS convention
-(Isaac Lab applies additional internal transforms). The frustum offset is used
-directly as a quaternion in `quat_mul()` without convention conversion.
+**Same quaternion as TiledCamera offset.** Both use `[0.5, -0.5, 0.5, -0.5]`.
+The TiledCamera specifies this with `convention="ros"` (Isaac Lab converts
+internally). The frustum uses it directly in `quat_mul()`.
 
 ---
 
