@@ -84,6 +84,9 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     debug_vis: bool = True
     """Enable debug visualization."""
 
+    debug_frame_vis: bool = False
+    """Enable visualization of coordinate frames for debugging."""
+
     # ==========================================================================
     # Simulation
     # ==========================================================================

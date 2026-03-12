@@ -385,12 +385,13 @@ class IrisMA6TestEnv(DirectMARLEnv):
             # so the gimbal quaternion must use the controller's logical yaw (offset-free).
             gimbal_joint_pos_frustum = self._gimbal_joint_pos[agent_id].clone()
             gimbal_joint_pos_frustum[:, 1] -= YAW_JOINT_OFFSET
+            # Use pitch_link body position (actual camera mount point) instead of
+            # root_pos + zero offset. This matches TiledCamera which is attached to pitch_link.
+            robot = self._robots[agent_id]
+            pitch_link_idx = self._frame_link_ids[agent_id]["pitch_link"]
+            camera_pos_w = robot.data.body_pos_w[:, pitch_link_idx]  # (N, 3)
             camera_poses[agent_id] = (
-                compute_camera_position(
-                    root_pos,
-                    root_quat,
-                    self._camera_offset_position_b,
-                ),
+                camera_pos_w,
                 compute_camera_orientation_from_gimbal(
                     root_quat,
                     gimbal_joint_pos_frustum,
@@ -630,4 +631,5 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 torch.cat(all_pos, dim=0),
                 torch.cat(all_quat, dim=0),
             )
-        self._visualization.update_frames(link_poses)
+        if self.cfg.debug_frame_vis:
+            self._visualization.update_frames(link_poses)

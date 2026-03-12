@@ -331,12 +331,29 @@ Camera Frame (OpenGL) - looking INTO the camera (from scene toward lens):
 
 ### 5.1 Camera Position in World Frame
 
-$$p_{\text{cam}}^w = p_{\text{body}}^w + R(q_{\text{body}}) \cdot p_{\text{cam\_offset}}^b$$
+The TiledCamera is physically attached to `pitch_link`, which sits at the end of
+the gimbal kinematic chain. The USDA defines pitch_link at a local translate of
+`(0.10, 0, 0.12)` relative to the body origin — approximately **10 cm forward
+and 12 cm above** body center.
 
-Where:
-- $p_{\text{body}}^w$: Body position in world frame
-- $q_{\text{body}}$: Body orientation (wxyz)
-- $p_{\text{cam\_offset}}^b$: Camera offset in body frame
+**Correct camera position** (used by TiledCamera and bbox raycaster):
+
+$$p_{\text{cam}}^w = \text{robot.data.body\_pos\_w}[:, \text{pitch\_link\_idx}]$$
+
+This reads the pitch_link world position directly from the articulation, which
+accounts for gimbal rotation (the camera mount moves as the gimbal pitches/yaws).
+
+**Approximation** (only valid when gimbal angles are small):
+
+$$p_{\text{cam}}^w \approx p_{\text{body}}^w + R(q_{\text{body}}) \cdot p_{\text{cam\_offset}}^b$$
+
+Where $p_{\text{cam\_offset}}^b \approx (0.10, 0, 0.12)$ in the body frame.
+
+**Historical bug (fixed 2026-03-13):** The raycaster previously used
+`compute_camera_position(root_pos, root_quat, [0,0,0])`, projecting from body
+center instead of pitch_link. This caused a constant vertical bbox offset of
+~1 bbox height because the camera is 12 cm above body center. Fixed by passing
+`robot.data.body_pos_w[:, pitch_link_idx]` directly to the raycaster.
 
 ### 5.2 Camera Orientation in World Frame
 
@@ -434,10 +451,38 @@ $$K = \begin{bmatrix} f_x & 0 & c_x \\ 0 & f_y & c_y \\ 0 & 0 & 1 \end{bmatrix}$
 | $f_x, f_y$ | Focal lengths in pixels (zoom-dependent) |
 | $c_x, c_y$ | Principal point (image center, typically W/2, H/2) |
 
+**Square pixels assumption (CRITICAL):**
+
+TiledCamera computes vertical aperture automatically to ensure square pixels:
+
+$$a_v = a_h \times \frac{H}{W}$$
+
+Focal lengths in pixels are then:
+
+$$f_x = \frac{f}{a_h} \times W, \qquad f_y = \frac{f}{a_v} \times H = f_x$$
+
+where $f$ = focal length (mm), $a_h$ = horizontal aperture (mm), $a_v$ = vertical aperture (mm).
+
+With the current config ($f=24.0$ mm, $a_h=20.955$ mm, $640 \times 480$):
+
+$$a_v = 20.955 \times \frac{480}{640} = 15.716 \text{ mm}$$
+$$f_x = f_y = \frac{24.0}{20.955} \times 640 = 732.8 \text{ px}$$
+
+**Historical bug (fixed 2026-03-13):** `create_intrinsic_matrix_tensor` in
+`bbox_raycaster_v2/utils/projection.py` previously used `horizontal_aperture`
+for both $f_x$ and $f_y$, giving $f_y = (24.0/20.955) \times 480 = 549.6$ — a
+25% vertical compression error. Fixed by computing `vertical_aperture =
+horizontal_aperture * height / width` and using it for $f_y$.
+
 **Zoom scaling:**
 $$f_{\text{zoomed}} = f_{\text{base}} \times \text{zoom\_level}$$
 
 Principal point $(c_x, c_y)$ is unchanged by zoom.
+
+**Zoom and TiledCamera intrinsics:** `set_intrinsic_matrices_batched` is called
+each frame with zoom-adjusted intrinsics, so `camera.data.intrinsic_matrices`
+already reflects the current zoom level. Do not apply zoom scaling again when
+reading from TiledCamera data.
 
 ### 6.3 Projection Formula
 
@@ -733,8 +778,14 @@ The 2D cross-section above, when rotated 360° around the vertical Z-axis, forms
 
 ### Offsets and Mounting
 - `controller/gimbal_controller.py`: `YAW_JOINT_OFFSET = -π/2` constant definition
-- `iris_ma_env6_test.py`: Joint offset application, TiledCamera offset, frustum offset
+- `iris_ma_env6_test.py`: Joint offset application, TiledCamera offset, frustum offset, pitch_link camera position for raycaster
 - `iris_ma_env6_test_cfg.py`: TiledCamera config with ROS convention offset
+- `iris_gimbal2.usda`: `pitch_link xformOp:translate = (0.10, 0, 0.12)` — physical camera mount offset from body center
+
+### Intrinsics and Projection
+- `bbox_raycaster_v2/utils/projection.py`: `create_intrinsic_matrix_tensor` — square-pixel intrinsics with vertical aperture derivation
+- `isaaclab/sensors/camera/camera.py:659-688`: TiledCamera `_update_intrinsic_matrices` — reference intrinsics computation using both apertures
+- `isaaclab/sensors/camera/camera.py:129-130`: Automatic vertical aperture = horizontal_aperture × height / width
 
 ### Transformations
 - `derived_field_computers.py`: Camera position/orientation, ray directions

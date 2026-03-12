@@ -60,6 +60,8 @@ parser.add_argument(
 parser.add_argument("--sensitivity", type=float, default=1.0, help="Control sensitivity factor.")
 parser.add_argument("--agent_idx", type=int, default=0, help="Index of agent to control (0-2).")
 parser.add_argument("--debug", action="store_true", help="Print debug values for teleop inputs.")
+parser.add_argument("--show_camera", action="store_true", default=True, help="Show camera view with bbox overlay.")
+parser.add_argument("--no_show_camera", dest="show_camera", action="store_false", help="Disable camera view.")
 
 # Append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -71,17 +73,116 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
+import cv2
+import numpy as np
 import torch
 import gymnasium as gym
+import matplotlib.pyplot as plt
 
 import carb.input
 import omni.appwindow
 
 from isaaclab.devices import Se3Keyboard, Se3Gamepad
+from isaaclab.utils.math import quat_apply, quat_inv, quat_mul
 
 # Import the iris_ma6 environment
 import isaaclab_tasks.direct.iris_ma6  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
+
+
+def project_point_to_image(
+    point_w: torch.Tensor,
+    camera_pos_w: torch.Tensor,
+    camera_quat_w_ros: torch.Tensor,
+    intrinsic: torch.Tensor,
+) -> tuple[int, int, bool]:
+    """Project a 3D world point to 2D image pixel using pinhole model.
+
+    Args:
+        point_w: (3,) world position of the point.
+        camera_pos_w: (3,) camera world position.
+        camera_quat_w_ros: (4,) camera orientation in ROS convention (wxyz).
+            ROS: +Z forward, +X right, +Y down.
+        intrinsic: (3, 3) camera intrinsic matrix.
+
+    Returns:
+        (u, v, valid): pixel coordinates and validity flag.
+    """
+    # Transform point to camera frame
+    point_rel = point_w - camera_pos_w
+    point_cam = quat_apply(quat_inv(camera_quat_w_ros.unsqueeze(0)), point_rel.unsqueeze(0)).squeeze(0)
+
+    x, y, z = point_cam[0].item(), point_cam[1].item(), point_cam[2].item()
+
+    if z <= 0.01:
+        return 0, 0, False
+
+    fx = intrinsic[0, 0].item()
+    fy = intrinsic[1, 1].item()
+    cx = intrinsic[0, 2].item()
+    cy = intrinsic[1, 2].item()
+
+    u = int(fx * x / z + cx)
+    v = int(fy * y / z + cy)
+
+    return u, v, True
+
+
+def draw_bbox_overlay(
+    image: np.ndarray,
+    bbox_xyxy: tuple[int, int, int, int],
+    bbox_empty: bool,
+    agent_idx: int,
+    zoom_level: float = 1.0,
+    target_pixel: tuple[int, int, bool] | None = None,
+) -> np.ndarray:
+    """Draw bounding box overlay on camera image.
+
+    Args:
+        image: RGB image (H, W, 3), uint8.
+        bbox_xyxy: (x_min, y_min, x_max, y_max) in pixel coords from raycaster.
+        bbox_empty: True if no target detected by raycaster.
+        agent_idx: Index of the controlled agent.
+        zoom_level: Current zoom level for display.
+        target_pixel: (u, v, valid) from TiledCamera re-projection. Blue crosshair.
+
+    Returns:
+        Annotated image (H, W, 3), uint8.
+    """
+    vis = image.copy()
+    h_img, w_img = vis.shape[:2]
+    x_min, y_min, x_max, y_max = bbox_xyxy
+
+    # Raycaster bbox (green)
+    if not bbox_empty:
+        color = (0, 255, 0)
+        label = "Target DETECTED"
+        cv2.rectangle(vis, (x_min, y_min), (x_max, y_max), color, 2)
+        w = x_max - x_min
+        h = y_max - y_min
+        cv2.putText(vis, f"{w}x{h}px", (x_min, max(y_min - 5, 15)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+    else:
+        color = (255, 0, 0)
+        label = "Target NOT detected"
+
+    # TiledCamera re-projection crosshair (blue)
+    if target_pixel is not None:
+        tu, tv, tvalid = target_pixel
+        if tvalid and 0 <= tu < w_img and 0 <= tv < h_img:
+            cross_color = (0, 120, 255)
+            size = 12
+            cv2.line(vis, (tu - size, tv), (tu + size, tv), cross_color, 2)
+            cv2.line(vis, (tu, tv - size), (tu, tv + size), cross_color, 2)
+
+    cv2.putText(vis, label, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+    cv2.putText(vis, f"Agent {agent_idx} | Zoom: {zoom_level:.2f}x", (10, 50),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    # Legend
+    cv2.putText(vis, "green=raycaster  blue=camera", (10, h_img - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+
+    return vis
 
 
 class IrisMA6TeleopController:
@@ -365,6 +466,18 @@ def main():
     env.reset()
     teleop_interface.reset()
 
+    # Camera visualization setup
+    show_camera = args_cli.show_camera
+    image_display = None
+    fig = None
+    ax = None
+
+    if show_camera:
+        plt.ion()
+        fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+        ax.set_title(f"Camera - drone_{controlled_agent_idx}")
+        ax.axis("off")
+
     print("[INFO] Starting teleoperation loop...")
 
     # Main loop
@@ -379,6 +492,77 @@ def main():
 
             # Step environment
             obs, rewards, terminated, truncated, info = env.step(actions)
+
+            # Update camera visualization
+            if show_camera:
+                agent_id = f"drone_{controlled_agent_idx}"
+                camera = env._cameras[agent_id]
+                camera_rgb = camera.data.output["rgb"][0].cpu().numpy()
+
+                # Handle RGBA -> RGB
+                if camera_rgb.ndim == 3 and camera_rgb.shape[2] == 4:
+                    camera_rgb = camera_rgb[:, :, :3]
+
+                # Handle float [0,1] -> uint8 [0,255]
+                if camera_rgb.dtype != np.uint8:
+                    camera_rgb = (camera_rgb * 255).clip(0, 255).astype(np.uint8)
+
+                # Get bbox data from raycaster (projected from body center)
+                bbox_xyxy_t = env.bbox_raycaster_v2.data.bboxes_xyxy[0, controlled_agent_idx, 0, :]
+                bbox_empty_val = env.bbox_raycaster_v2.data.bbox_empty[0, controlled_agent_idx, 0].item()
+                bbox_xyxy = (
+                    int(bbox_xyxy_t[0].item()),
+                    int(bbox_xyxy_t[1].item()),
+                    int(bbox_xyxy_t[2].item()),
+                    int(bbox_xyxy_t[3].item()),
+                )
+                zoom = env.zoom_level[0, controlled_agent_idx].item()
+
+                # Re-project target using pitch_link body pose (fresh each frame)
+                # TiledCamera.data.pos_w / quat_w_world are stale (only set at init),
+                # so we read the pitch_link pose directly from the robot articulation.
+                target_pixel = None
+                robot = env._robots[agent_id]
+                pitch_link_idx = env._frame_link_ids[agent_id]["pitch_link"]
+                cam_pos = robot.data.body_pos_w[0, pitch_link_idx]
+                pitch_link_quat = robot.data.body_quat_w[0, pitch_link_idx]
+
+                # Apply camera offset rotation (same as TiledCamera config: ROS convention)
+                # This maps from pitch_link frame to camera optical frame
+                cam_offset_quat = torch.tensor(
+                    [0.5, -0.5, 0.5, -0.5], dtype=torch.float32, device=env.device
+                )
+                cam_quat_world = quat_mul(
+                    pitch_link_quat.unsqueeze(0), cam_offset_quat.unsqueeze(0)
+                ).squeeze(0)
+
+                # Use TiledCamera's actual intrinsic matrix (already zoom-adjusted
+                # by set_intrinsic_matrices_batched each frame — no extra scaling needed)
+                cam_intrinsic = camera.data.intrinsic_matrices[0]
+
+                target_pos = env.target.data.root_pos_w[0]
+
+                # cam_quat_world already describes the camera in ROS convention
+                # (Z-forward, X-right, Y-down) because the offset [0.5,-0.5,0.5,-0.5]
+                # maps body frame directly to ROS camera frame. No further conversion needed.
+                tu, tv, tvalid = project_point_to_image(
+                    target_pos, cam_pos, cam_quat_world, cam_intrinsic
+                )
+                target_pixel = (tu, tv, tvalid)
+
+                vis_image = draw_bbox_overlay(
+                    camera_rgb, bbox_xyxy, bbox_empty_val, controlled_agent_idx, zoom,
+                    target_pixel=target_pixel,
+                )
+
+                if image_display is None:
+                    image_display = ax.imshow(vis_image)
+                    plt.show(block=False)
+                else:
+                    image_display.set_data(vis_image)
+
+                fig.canvas.draw()
+                fig.canvas.flush_events()
 
             # Print status periodically
             step_count += 1
