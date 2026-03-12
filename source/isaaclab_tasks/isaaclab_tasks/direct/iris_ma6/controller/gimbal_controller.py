@@ -7,7 +7,8 @@
 
 Frame Convention:
 - World: ENU (East-North-Up)
-- Body: FLU (Forward-Left-Up)
+- Body: FLU (Forward-Left-Up), where +X = physics forward
+- Visual Forward: Body +Y (mesh is rotated 90° CCW from physics frame)
 - Gimbal Base: FLU, attached to drone body
 - Joint Order: Yaw (outer) -> Roll (middle) -> Pitch (inner)
 
@@ -15,14 +16,26 @@ World-Frame Stabilization:
 - Rate commands adjust world-frame pointing direction (azimuth, elevation)
 - Body-frame joint angles are computed from world-frame targets + drone attitude
 - Camera pointing direction is preserved in world frame when drone tilts
+
+Yaw Offset:
+- The body mesh has xformOp:orient = R_z(90°), so visual forward = body +Y.
+- The controller works in body +X forward convention internally.
+- The env code adds YAW_JOINT_OFFSET (π/2) when setting joint targets,
+  so yaw_joint=0 in physics corresponds to visual forward (body +Y).
 """
 
 from __future__ import annotations
 
+import math
 import torch
 from isaaclab.utils.math import quat_rotate_inverse
 
 from .gimbal_controller_cfg import GimbalControllerCfg
+
+# Body mesh is rotated 90° CCW from physics frame (visual forward = body +Y).
+# This offset is added to yaw joint targets in the env code to align gimbal
+# yaw=0 with visual forward. Exported for use by the env.
+YAW_JOINT_OFFSET = -math.pi / 2
 
 
 class GimbalController:
@@ -198,6 +211,8 @@ class GimbalController:
 
         # Extract body-frame gimbal angles (yaw, pitch)
         # Yaw: rotation around body Z axis (positive = CCW = left)
+        # atan2 gives angle from body +X forward convention.
+        # The YAW_JOINT_OFFSET is applied later in env code when setting joint targets.
         yaw_body = torch.atan2(dir_body[:, 1], dir_body[:, 0])
 
         # Pitch: rotation around body Y axis (after yaw)
@@ -233,7 +248,8 @@ class GimbalController:
         # Transform world up to body frame (gimbal base frame)
         up_in_body = quat_rotate_inverse(q_body, world_up)
 
-        # Rotate by inverse yaw to get up in yawed frame
+        # Rotate by gimbal yaw to get up in yawed frame
+        # Controller yaw is in body +X forward convention (no offset needed).
         cos_yaw = torch.cos(gimbal_yaw)
         sin_yaw = torch.sin(gimbal_yaw)
 
@@ -290,6 +306,7 @@ class GimbalController:
             rotated: (N, 3) rotated vector.
         """
         # Rotation order: Yaw (Z) -> Roll (X) -> Pitch (Y)
+        # Controller yaw is in body +X forward convention (no offset needed).
         cos_yaw, sin_yaw = torch.cos(self._yaw), torch.sin(self._yaw)
         cos_roll, sin_roll = torch.cos(self._roll), torch.sin(self._roll)
         cos_pitch, sin_pitch = torch.cos(self._pitch), torch.sin(self._pitch)

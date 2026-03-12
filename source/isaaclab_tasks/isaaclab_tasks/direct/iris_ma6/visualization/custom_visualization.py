@@ -19,6 +19,7 @@ from typing import Dict, Tuple, TYPE_CHECKING
 
 from .camera_frustum import CameraFrustum
 from .detection_indicator import DetectionIndicator
+from .frame_visualizer import FrameVisualizer
 
 if TYPE_CHECKING:
     from isaaclab.sensors import TiledCameraCfg
@@ -82,6 +83,9 @@ class CustomVisualization:
         self.detection_indicator: Dict[str, DetectionIndicator] = {
             agent_id: DetectionIndicator(num_envs, device) for agent_id in possible_agents
         }
+
+        # Frame axes on body and gimbal links
+        self.frame_visualizer = FrameVisualizer(scale=0.15)
 
         # Track if clear has been called this frame
         self._cleared_this_frame = False
@@ -182,6 +186,26 @@ class CustomVisualization:
                 # Silently skip visualization on errors to prevent crashes
                 # This can happen during early simulation steps
                 pass
+
+    def update_frames(
+        self,
+        link_poses: Dict[str, tuple[torch.Tensor, torch.Tensor]],
+    ):
+        """Update frame axes visualization on body and gimbal links.
+
+        Args:
+            link_poses: Dict mapping link name (body, yaw_link, roll_link, pitch_link)
+                to (positions, orientations) tuples.
+                - positions: (num_envs * num_agents, 3)
+                - orientations: (num_envs * num_agents, 4) wxyz
+        """
+        if not self._visualization_enabled:
+            return
+
+        try:
+            self.frame_visualizer.update(link_poses)
+        except Exception:
+            pass
 
     def visualize_frustums(
         self,

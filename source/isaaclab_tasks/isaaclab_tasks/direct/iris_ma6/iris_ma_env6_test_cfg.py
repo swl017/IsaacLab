@@ -62,7 +62,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     num_agents: int = 3
     """Number of agents."""
 
-    episode_length_s: float = 10.0
+    episode_length_s: float = 30.0
     """Episode length in seconds."""
 
     decimation: int = 4
@@ -142,7 +142,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     """Target rigid body configuration."""
 
     viewer: ViewerCfg = ViewerCfg(
-        eye=(10.0, 7.0, 6.0),
+        eye=(2.0, 1.0, 0.6),
         lookat=(0.0, 0.0, 0.0),
         origin_type="asset_root",
         asset_name="Robot_0",
@@ -172,8 +172,11 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
         ),
         offset=TiledCameraCfg.OffsetCfg(
             pos=(0.0, 0.0, 0.0),
-            rot=(0.7071068, 0, 0, -0.7071068),  # -90° yaw to align camera forward with gimbal pointing direction
-            convention="world",
+            # ROS convention: forward=+Z, up=-Y
+            # Maps camera forward → body +X (forward), camera up → body +Z (up)
+            # Same quaternion value as frustum offset for consistency.
+            rot=(0.5, -0.5, 0.5, -0.5),
+            convention="ros",
         ),
     )
     """Reference camera parameters used to build zoom-aware intrinsics for bbox_raycaster_v2."""

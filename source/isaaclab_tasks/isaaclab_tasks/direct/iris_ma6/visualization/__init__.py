@@ -13,10 +13,12 @@ This module provides visualization utilities for the multi-agent drone environme
 from .camera_frustum import CameraFrustum, create_camera_cfg_tensor
 from .custom_visualization import CustomVisualization
 from .detection_indicator import DetectionIndicator
+from .frame_visualizer import FrameVisualizer
 
 __all__ = [
     "CameraFrustum",
     "create_camera_cfg_tensor",
     "CustomVisualization",
     "DetectionIndicator",
+    "FrameVisualizer",
 ]

@@ -50,6 +50,9 @@ def compute_camera_orientation_from_gimbal(
     yaw = joint_positions_b[:, 1] if joint_positions_b.shape[1] > 1 else torch.zeros_like(pitch)
     roll = joint_positions_b[:, 2] if joint_positions_b.shape[1] > 2 else torch.zeros_like(pitch)
 
+    # Note: The env code adds YAW_JOINT_OFFSET (π/2) when setting joint targets,
+    # so the physics joint position already includes the offset. No need to add it here.
+
     # Compute half angles
     half_yaw = yaw * 0.5
     half_roll = roll * 0.5
