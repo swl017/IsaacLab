@@ -26,8 +26,10 @@ from isaaclab.sensors import TiledCamera
 
 from .bbox_raycaster_v2 import BBoxRayCasterV2
 from .bbox_raycaster_v2.utils.projection import create_intrinsic_matrix_tensor
+from .cbf_safety import CBFManager
 from .controller import DroneController
 from .controller.gimbal_controller import YAW_JOINT_OFFSET
+from .delay_system_v3 import MultiAgentDelaySystemV3, AgentStates
 from .delay_system_v3.derived_field_computers import (
     compute_camera_orientation_from_gimbal,
     compute_camera_position,
@@ -203,6 +205,32 @@ class IrisMA6TestEnv(DirectMARLEnv):
             agent_ids=self.cfg.possible_agents,
         )
 
+        # Initialize CBF safety manager for collision avoidance
+        self.cbf_manager = CBFManager(
+            cfg=self.cfg.cbf_safety,
+            num_envs=self.num_envs,
+            num_agents=len(cfg.possible_agents),
+            device=self.device,
+        )
+
+        # Initialize delay system for realistic observation delays
+        if self.cfg.enable_delay_system:
+            self._delay_system = MultiAgentDelaySystemV3(
+                cfg=self.cfg.delay_system,
+                possible_agents=self.cfg.possible_agents,
+                num_envs=self.num_envs,
+                num_joints=3,  # pitch, yaw, roll
+                num_targets=1,
+                device=self.device,
+            )
+            # Set default delay mode (can be changed via curriculum)
+            self._delay_system.set_delay_mode("random", progress=1.0)
+        else:
+            self._delay_system = None
+
+        # Simulation time tracking for delay system
+        self._sim_time = torch.zeros(self.num_envs, device=self.device)
+
         # Visualization is created lazily via _set_debug_vis_impl when debug_vis is enabled
         self._visualization: CustomVisualization | None = None
 
@@ -350,6 +378,11 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self._target_pos_w = self.target.data.root_pos_w
         self._target_quat_w = self.target.data.root_quat_w
 
+        # Update delay system time
+        self._sim_time += self.cfg.sim.dt * self.cfg.decimation
+        if self._delay_system is not None:
+            self._delay_system.set_time(self._sim_time)
+
         camera_poses = {}
         camera_intrinsics = {}
         image_shapes = {}
@@ -421,6 +454,49 @@ class IrisMA6TestEnv(DirectMARLEnv):
             image_shapes=image_shapes,
         )
 
+        # Update delay system ground truth for each agent
+        if self._delay_system is not None:
+            for idx, agent_id in enumerate(self.cfg.possible_agents):
+                # Create AgentStates and populate with current ground truth
+                gt_states = AgentStates(
+                    num_envs=self.num_envs,
+                    num_joints=3,  # pitch, yaw, roll
+                    num_targets=1,
+                    device=self.device,
+                )
+                gt_data = gt_states.data
+
+                # Body motion
+                gt_data.body_position_w = self._root_pos_w[agent_id]
+                gt_data.body_orientation_w = self._root_quat_w[agent_id]
+                gt_data.body_linear_velocity_w = self._root_lin_vel_w[agent_id]
+                gt_data.body_angular_velocity_w = self._root_ang_vel_b[agent_id]
+
+                # Joint states (gimbal) - order is pitch, yaw, roll
+                gt_data.joint_positions_b = self._gimbal_joint_pos[agent_id]
+                gt_data.joint_velocities_b = torch.zeros_like(
+                    self._gimbal_joint_pos[agent_id]
+                )
+
+                # Camera geometry
+                cam_pos_w, cam_ori_w = camera_poses[agent_id]
+                gt_data.camera_position_w = cam_pos_w
+                gt_data.camera_orientation_w = cam_ori_w
+                gt_data.camera_zoom_level = self.zoom_level[:, idx]
+
+                # Detection (bbox) - shape (N, T, 4)
+                gt_data.bboxes_2d = self.bbox_raycaster_v2.data.bboxes_normalized[
+                    :, idx, :, :
+                ]
+
+                # Timestamps
+                gt_data.timestamp_sim_walltime = self._sim_time
+                gt_data.timestamp_motion = self._sim_time.clone()
+                gt_data.timestamp_detection = self._sim_time.clone()
+
+                # Update delay system
+                self._delay_system.update_ground_truth(agent_id, gt_states)
+
         # Cache data for debug visualization callback
         self._vis_camera_poses = camera_poses
         self._vis_target_pos = self._target_pos_w
@@ -436,49 +512,144 @@ class IrisMA6TestEnv(DirectMARLEnv):
     def _get_rewards(self) -> Dict[str, torch.Tensor]:
         """Get rewards for all agents.
 
-        Simple reward: negative distance to target for each agent.
+        Reward composition:
+        - Task reward: negative distance to target
+        - CBF penalty: CPA barrier violation (training-time only)
+
+        When delay system is enabled, task rewards use states based on
+        reward_state_cfg (use_delay, use_noise toggles):
+        - use_delay=False, use_noise=False: Pure GT (privileged)
+        - use_delay=True, use_noise=False: Delayed clean (default)
+        - use_delay=False, use_noise=True: GT with noise
+        - use_delay=True, use_noise=True: Full noisy delayed
+
+        CBF penalty always uses GT positions for safety.
 
         Returns:
             Dictionary mapping agent_id to reward tensor (N,).
         """
+        # Compute task reward (simple distance-based)
+        task_rewards = {}
+
+        if self._delay_system is not None:
+            # Use configurable reward states
+            # We use drone_0 as the reference ego since reward computation
+            # typically uses the same states for all agents
+            reward_states = self._delay_system.get_all_states_for_rewards(
+                ego_agent_id=self.cfg.possible_agents[0]
+            )
+
+            for idx, agent_id in enumerate(self.cfg.possible_agents):
+                agent_pos = reward_states[agent_id].data.body_position_w
+                dist = torch.norm(agent_pos - self._target_pos_w, dim=-1)
+                task_rewards[agent_id] = -dist * 0.1
+        else:
+            # Use ground truth states directly
+            for idx, agent_id in enumerate(self.cfg.possible_agents):
+                dist = torch.norm(self._root_pos_w[agent_id] - self._target_pos_w, dim=-1)
+                task_rewards[agent_id] = -dist * 0.1
+
+        # Stack GT positions for CBF computation: (E, N, 3)
+        # CBF always uses GT for safety
+        gt_positions = torch.stack(
+            [self._root_pos_w[agent_id] for agent_id in self.cfg.possible_agents],
+            dim=1,
+        )
+
+        # Get commanded velocities: (E, N, 3)
+        cmd_velocities = self.cmd_vel[:, :, 0:3]
+
+        # Compute CBF penalty from GT state
+        dt = self.cfg.sim.dt * self.cfg.decimation
+        cbf_penalty = self.cbf_manager.compute_training_penalty(
+            gt_positions=gt_positions,
+            commanded_velocities=cmd_velocities,
+            dt=dt,
+        )  # (E,)
+
+        # Compose final reward per agent
+        lambda_cbf = self.cbf_manager.lambda_cbf
         rewards = {}
         for idx, agent_id in enumerate(self.cfg.possible_agents):
-            dist = torch.norm(self._root_pos_w[agent_id] - self._target_pos_w, dim=-1)
-            rewards[agent_id] = -dist * 0.1
+            rewards[agent_id] = task_rewards[agent_id] - lambda_cbf * cbf_penalty
+
         return rewards
     
     def _get_observations(self) -> Dict[str, torch.Tensor]:
         """Get observations for all agents.
 
+        When delay system is enabled, observations use delayed states.
+        Otherwise, uses ground truth states directly.
+
         Returns:
             Dictionary mapping agent_id to observation tensor (N, 18).
         """
         obs = {}
-        for idx, agent_id in enumerate(self.cfg.possible_agents):
-            gimbal_jp = self._gimbal_joint_pos[agent_id]  # (N, 3) = [pitch, yaw, roll]
 
-            bbox = self.bbox_raycaster_v2.data.bboxes_normalized[:, idx, 0, :]
-            bbox_empty = self.bbox_raycaster_v2.data.bbox_empty[:, idx, 0].float().unsqueeze(-1)
+        if self._delay_system is not None:
+            # Use delayed states for each agent
+            for idx, agent_id in enumerate(self.cfg.possible_agents):
+                # Get delayed states from ego's perspective
+                delayed_states = self._delay_system.get_all_states_for_observations(
+                    ego_agent_id=agent_id
+                )
 
-            # Concatenate observation: pos(3) + vel(3) + quat(4) + gimbal_yaw(1) + gimbal_pitch(1) + zoom(1) + bbox(4) + bbox_empty(1)
-            obs[agent_id] = torch.cat(
-                [
-                    self._root_pos_w[agent_id],  # (N, 3)
-                    self._root_lin_vel_w[agent_id],  # (N, 3)
-                    self._root_quat_w[agent_id],  # (N, 4)
-                    gimbal_jp[:, 1:2],  # (N, 1) yaw
-                    gimbal_jp[:, 0:1],  # (N, 1) pitch
-                    self.zoom_level[:, idx : idx + 1],  # (N, 1)
-                    bbox,  # (N, 4)
-                    bbox_empty,  # (N, 1)
-                ],
-                dim=-1,
-            )
+                # Get ego's delayed self-state
+                ego_states = delayed_states[agent_id]
+                ego_data = ego_states.data
+
+                # Joint positions (pitch, yaw, roll)
+                gimbal_jp = ego_data.joint_positions_b
+
+                # Bbox from delayed states (shape: N, T, 4)
+                bbox = ego_data.bboxes_2d[:, 0, :]  # First target
+                bbox_empty = (bbox.abs().sum(dim=-1) < 1e-6).float().unsqueeze(-1)
+
+                # Build observation
+                obs[agent_id] = torch.cat(
+                    [
+                        ego_data.body_position_w,  # (N, 3)
+                        ego_data.body_linear_velocity_w,  # (N, 3)
+                        ego_data.body_orientation_w,  # (N, 4)
+                        gimbal_jp[:, 1:2],  # (N, 1) yaw
+                        gimbal_jp[:, 0:1],  # (N, 1) pitch
+                        ego_data.camera_zoom_level.unsqueeze(-1),  # (N, 1)
+                        bbox,  # (N, 4)
+                        bbox_empty,  # (N, 1)
+                    ],
+                    dim=-1,
+                )
+        else:
+            # Use ground truth states directly
+            for idx, agent_id in enumerate(self.cfg.possible_agents):
+                gimbal_jp = self._gimbal_joint_pos[agent_id]  # (N, 3) = [pitch, yaw, roll]
+
+                bbox = self.bbox_raycaster_v2.data.bboxes_normalized[:, idx, 0, :]
+                bbox_empty = self.bbox_raycaster_v2.data.bbox_empty[:, idx, 0].float().unsqueeze(-1)
+
+                # Concatenate observation: pos(3) + vel(3) + quat(4) + gimbal_yaw(1) + gimbal_pitch(1) + zoom(1) + bbox(4) + bbox_empty(1)
+                obs[agent_id] = torch.cat(
+                    [
+                        self._root_pos_w[agent_id],  # (N, 3)
+                        self._root_lin_vel_w[agent_id],  # (N, 3)
+                        self._root_quat_w[agent_id],  # (N, 4)
+                        gimbal_jp[:, 1:2],  # (N, 1) yaw
+                        gimbal_jp[:, 0:1],  # (N, 1) pitch
+                        self.zoom_level[:, idx : idx + 1],  # (N, 1)
+                        bbox,  # (N, 4)
+                        bbox_empty,  # (N, 1)
+                    ],
+                    dim=-1,
+                )
 
         return obs
 
     def _get_dones(self) -> tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         """Get termination and truncation flags for all agents.
+
+        Termination conditions:
+        - Crashed: drone goes below z=0.5m
+        - Collision: inter-agent distance < collision_distance (GT-based)
 
         Returns:
             Tuple of (terminated, truncated) dictionaries.
@@ -488,13 +659,20 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
+        # Check collisions using GT positions
+        gt_positions = torch.stack(
+            [self._root_pos_w[agent_id] for agent_id in self.cfg.possible_agents],
+            dim=1,
+        )
+        collided = self.cbf_manager.check_collisions(gt_positions)  # (E,)
+
         for agent_id in self.cfg.possible_agents:
-            # Terminate if drone goes too low (crashed)
+            # Terminate if drone goes too low (crashed) OR collision
             pos_z = self._root_pos_w[agent_id][:, 2]
             crashed = pos_z < 0.5
 
-            terminated[agent_id] = crashed
-            truncated[agent_id] = time_out & ~crashed
+            terminated[agent_id] = crashed | collided
+            truncated[agent_id] = time_out & ~terminated[agent_id]
 
         return terminated, truncated
 
@@ -553,6 +731,14 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self.zoom_level[env_ids] = 1.0
         self.cmd_gimbal_yaw[env_ids] = 0.0
         self.cmd_gimbal_pitch[env_ids] = 0.0
+
+        # Reset CBF manager state
+        self.cbf_manager.reset(env_ids)
+
+        # Reset delay system and simulation time
+        if self._delay_system is not None:
+            self._delay_system.reset(env_ids)
+        self._sim_time[env_ids] = 0.0
 
         # Populate state caches so _get_observations works on first reset
         self._update_state_cache()

@@ -66,6 +66,8 @@ from .delay_cfg_v3 import (
     DropoutCfg,
     NoiseCfg,
     FirstOrderLagCfg,
+    PerAgentDelayCfg,
+    RewardStateCfg,
     DelayPipelineCfgV3,
     PerspectiveCfg,
     UnifiedDelayCfgV3,
@@ -83,6 +85,12 @@ from .sampling_strategies import (
     LatencySampler,
     StalenessSampler,
     DropoutSampler,
+    # Per-agent variants
+    PerAgentDistributionSampler,
+    PerAgentParameterSampler,
+    PerAgentLatencySampler,
+    PerAgentStalenessSampler,
+    PerAgentDropoutSampler,
 )
 
 # Storage
@@ -115,6 +123,8 @@ __all__ = [
     "DropoutCfg",
     "NoiseCfg",
     "FirstOrderLagCfg",
+    "PerAgentDelayCfg",
+    "RewardStateCfg",
     "DelayPipelineCfgV3",
     "PerspectiveCfg",
     "UnifiedDelayCfgV3",
@@ -128,6 +138,12 @@ __all__ = [
     "LatencySampler",
     "StalenessSampler",
     "DropoutSampler",
+    # Per-agent sampling
+    "PerAgentDistributionSampler",
+    "PerAgentParameterSampler",
+    "PerAgentLatencySampler",
+    "PerAgentStalenessSampler",
+    "PerAgentDropoutSampler",
     # Storage
     "FieldStorage",
     "MultiFieldStorage",

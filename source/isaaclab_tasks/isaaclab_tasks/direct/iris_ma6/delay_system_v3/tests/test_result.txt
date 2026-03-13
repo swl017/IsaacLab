@@ -6,7 +6,7 @@ Device:        cuda
 Torch version: 2.5.1+cu118
 CUDA version:  11.8
 GPU name:      NVIDIA GeForce RTX 3090
-Started:       2026-03-09 16:27:14
+Started:       2026-03-13 18:48:03
 
 ================================================================================
 Configuration Tests
@@ -66,10 +66,40 @@ Curriculum Mode Tests
   [PASS] Dropout rate curriculum control
 
 ================================================================================
+Per-Agent Randomization Tests
+================================================================================
+  [PASS] PerAgentDistributionSampler initialization
+  [PASS] Per-agent scaled sampling
+  [PASS] Per-agent selective sampling
+  [PASS] PerAgentParameterSampler per-episode behavior
+  [PASS] PerAgentLatencySampler step conversion
+  [PASS] PerAgentLatencySampler min_steps enforcement
+  [PASS] PerAgentStalenessSampler FPS to period
+  [PASS] PerAgentDropoutSampler mask shape
+  [PASS] PerAgentDropoutSampler probability distribution
+  [PASS] Statistical independence between agents
+  [PASS] Curriculum scaling with per-agent sampler
+  [PASS] Per-env-reset resampling
+  [PASS] Normal distribution with clipping
+
+================================================================================
+Reward Mode Configuration Tests
+================================================================================
+  [PASS] RewardStateCfg default values
+  [PASS] Pure GT mode (use_delay=False, use_noise=False)
+  [PASS] Delayed clean mode (use_delay=True, use_noise=False)
+  [PASS] GT with noise mode (use_delay=False, use_noise=True)
+  [PASS] Full noisy delayed mode (use_delay=True, use_noise=True)
+  [PASS] Reward states differ from observation states
+  [PASS] Noise scale affects reward noise
+  [PASS] Configuration persistence
+  [PASS] All four modes produce different outputs
+
+================================================================================
 TEST SUMMARY
 ================================================================================
-Total Tests: 33
-Passed:      33 (100.0%)
+Total Tests: 55
+Passed:      55 (100.0%)
 Failed:      0 (0.0%)
 Errors:      0 (0.0%)
 ================================================================================

@@ -192,6 +192,62 @@ class FirstOrderLagCfg:
 
 
 @dataclass
+class PerAgentDelayCfg:
+    """Per-agent delay configuration with curriculum scaling.
+
+    When per_agent_randomization is enabled, each agent samples its own
+    delay parameters independently. Parameters scale with curriculum progress [0, 1].
+    """
+
+    # Communication delay (motion states from other agents)
+    max_comm_delay: float = 0.2
+    """Maximum communication delay in seconds (at progress=1.0)."""
+
+    comm_delay_distribution: Literal["uniform", "normal"] = "uniform"
+    """Distribution type for comm delay sampling."""
+
+    # Detection delay (bbox observations)
+    max_detection_delay: float = 0.15
+    """Maximum detection delay in seconds (at progress=1.0)."""
+
+    detection_delay_distribution: Literal["uniform", "normal"] = "uniform"
+    """Distribution type for detection delay sampling."""
+
+    # Staleness (FPS limiting)
+    min_fps: float = 10.0
+    """Minimum FPS for staleness (at progress=1.0). Lower FPS = more staleness."""
+
+    max_fps: float = 60.0
+    """Maximum FPS (at progress=0.0 or when staleness disabled)."""
+
+    # Dropout
+    max_dropout_rate: float = 0.1
+    """Maximum dropout rate (at progress=1.0)."""
+
+
+@dataclass
+class RewardStateCfg:
+    """Configuration for reward state computation.
+
+    Controls whether delay and/or noise are applied to states used for rewards.
+    This enables 4 different modes for reward computation:
+
+    | use_delay | use_noise | Result                           |
+    |-----------|-----------|----------------------------------|
+    | False     | False     | Pure GT (privileged)             |
+    | True      | False     | Delayed, clean (default)         |
+    | False     | True      | GT with noise                    |
+    | True      | True      | Full noisy delayed               |
+    """
+
+    use_delay: bool = True
+    """If True, apply delay pipeline. If False, use ground-truth timing."""
+
+    use_noise: bool = False
+    """If True, add observation noise to reward states."""
+
+
+@dataclass
 class DelayPipelineCfgV3:
     """Configuration for a single delay pipeline.
 
@@ -286,6 +342,18 @@ class MultiAgentDelayCfgV3:
 
     noise: NoiseCfg = field(default_factory=NoiseCfg)
     """Observation noise configuration."""
+
+    # Per-agent randomization settings
+    per_agent_randomization: bool = True
+    """If True, each agent samples its own delay parameters independently.
+    If False, all agents share the same delay parameters."""
+
+    per_agent_cfg: PerAgentDelayCfg = field(default_factory=PerAgentDelayCfg)
+    """Per-agent delay configuration with max values scaled by curriculum."""
+
+    # Reward state configuration
+    reward_state_cfg: RewardStateCfg = field(default_factory=RewardStateCfg)
+    """Configuration for reward state computation (delay/noise toggles)."""
 
     # Field definitions for multi-agent state tracking
     position_field: str = "body_position_w"

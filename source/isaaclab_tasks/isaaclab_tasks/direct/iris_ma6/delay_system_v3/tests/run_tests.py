@@ -37,6 +37,17 @@ import traceback
 from datetime import datetime
 from typing import List, Tuple, Optional
 
+# Import test modules (handle both script and module execution)
+try:
+    from .test_per_agent import run_per_agent_randomization_tests
+    from .test_reward_modes import run_reward_mode_tests
+except ImportError:
+    # Running as script, add parent to path
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from test_per_agent import run_per_agent_randomization_tests
+    from test_reward_modes import run_reward_mode_tests
+
 # Output file path (same directory as this script)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_FILE = os.path.join(SCRIPT_DIR, "test_result.txt")
@@ -979,6 +990,10 @@ def main():
             run_pipeline_tests(results, device, verbose)
             run_timestamp_sync_tests(results, device, verbose)
             run_curriculum_tests(results, device, verbose)
+
+            # New feature tests
+            run_per_agent_randomization_tests(results, device, verbose)
+            run_reward_mode_tests(results, device, verbose)
 
         except Exception as e:
             results.add_error("Test Suite Execution", traceback.format_exc())

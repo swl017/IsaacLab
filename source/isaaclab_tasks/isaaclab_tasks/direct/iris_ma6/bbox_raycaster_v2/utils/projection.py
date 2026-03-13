@@ -177,9 +177,11 @@ def create_intrinsic_matrix_tensor(camera_cfg_batch: torch.Tensor) -> torch.Tens
     focal_length = camera_cfg_batch[:, 2]
     horizontal_aperture = camera_cfg_batch[:, 3]
 
-    # Compute focal lengths in pixels
+    # Compute focal lengths in pixels (square pixels assumption)
+    # vertical_aperture = horizontal_aperture * height / width (same as TiledCamera default)
+    vertical_aperture = horizontal_aperture * height / width
     fx = (focal_length / horizontal_aperture) * width  # (N, C)
-    fy = (focal_length / horizontal_aperture) * height
+    fy = (focal_length / vertical_aperture) * height   # equals fx for square pixels
 
     # Principal point at image center
     cx = width / 2.0

@@ -279,20 +279,28 @@ class MultiAgentDelaySystemV3:
     def get_all_states_for_rewards(
         self, ego_agent_id: AgentID
     ) -> Dict[AgentID, AgentStates]:
-        """Get clean delayed states for reward computation.
+        """Get states for reward computation with configurable delay/noise.
 
-        Returns states with:
-        - No observation noise
-        - No dropout (all detections valid)
-        - Delay applied based on ego/other perspective
+        Behavior controlled by cfg.reward_state_cfg:
+        - use_delay=False, use_noise=False: Pure ground-truth (privileged)
+        - use_delay=True, use_noise=False: Delayed, clean (default)
+        - use_delay=False, use_noise=True: GT with noise
+        - use_delay=True, use_noise=True: Full noisy delayed
 
         Args:
             ego_agent_id: The agent computing rewards.
 
         Returns:
-            Dictionary mapping agent IDs to their delayed states.
+            Dictionary mapping agent IDs to their states.
         """
-        return self._build_all_states(ego_agent_id, use_noise=False)
+        reward_cfg = self._cfg.reward_state_cfg
+
+        if not reward_cfg.use_delay:
+            # No delay - return ground truth (optionally with noise)
+            return self._build_gt_states(add_noise=reward_cfg.use_noise)
+        else:
+            # Apply delay pipeline
+            return self._build_all_states(ego_agent_id, use_noise=reward_cfg.use_noise)
 
     def get_all_states_for_observations(
         self, ego_agent_id: AgentID
@@ -433,6 +441,124 @@ class MultiAgentDelaySystemV3:
         data.camera_ray_origins_w = gt.data.camera_ray_origins_w.clone()
 
         return states
+
+    def _build_gt_states(self, add_noise: bool = False) -> Dict[AgentID, AgentStates]:
+        """Build ground-truth states for all agents (no delay).
+
+        Args:
+            add_noise: If True, add observation noise to GT states.
+
+        Returns:
+            Dictionary of ground-truth states (optionally with noise).
+        """
+        result: Dict[AgentID, AgentStates] = {}
+        for agent_id in self._possible_agents:
+            if add_noise:
+                result[agent_id] = self._clone_with_noise(self._gt_states[agent_id])
+            else:
+                result[agent_id] = self._clone_agent_states(self._gt_states[agent_id])
+        return result
+
+    def _clone_agent_states(self, states: AgentStates) -> AgentStates:
+        """Create a deep copy of agent states.
+
+        Args:
+            states: Source states to clone.
+
+        Returns:
+            Cloned states with all tensors copied.
+        """
+        cloned = AgentStates(
+            self._num_envs,
+            self._num_joints,
+            self._num_targets,
+            self._device,
+        )
+
+        # Copy all data fields that are tensors
+        src_data = states.data
+        dst_data = cloned.data
+
+        # Body fields
+        dst_data.body_position_w = src_data.body_position_w.clone()
+        dst_data.body_orientation_w = src_data.body_orientation_w.clone()
+        dst_data.body_linear_velocity_w = src_data.body_linear_velocity_w.clone()
+        dst_data.body_angular_velocity_w = src_data.body_angular_velocity_w.clone()
+
+        # Joint fields
+        dst_data.joint_positions_b = src_data.joint_positions_b.clone()
+        dst_data.joint_velocities_b = src_data.joint_velocities_b.clone()
+
+        # Camera fields
+        dst_data.camera_position_w = src_data.camera_position_w.clone()
+        dst_data.camera_orientation_w = src_data.camera_orientation_w.clone()
+        dst_data.camera_offset_position_b = src_data.camera_offset_position_b.clone()
+        dst_data.camera_offset_rotation_b = src_data.camera_offset_rotation_b.clone()
+        dst_data.camera_base_intrinsics = src_data.camera_base_intrinsics.clone()
+        dst_data.camera_zoom_level = src_data.camera_zoom_level.clone()
+        dst_data.camera_ray_directions_w = src_data.camera_ray_directions_w.clone()
+        dst_data.camera_ray_origins_w = src_data.camera_ray_origins_w.clone()
+
+        # Detection fields
+        dst_data.bboxes_2d = src_data.bboxes_2d.clone()
+
+        # Timestamps
+        dst_data.timestamp_motion = src_data.timestamp_motion.clone()
+        dst_data.timestamp_detection = src_data.timestamp_detection.clone()
+        dst_data.timestamp_sim_walltime = src_data.timestamp_sim_walltime.clone()
+
+        return cloned
+
+    def _clone_with_noise(self, states: AgentStates) -> AgentStates:
+        """Clone states and add observation noise.
+
+        Args:
+            states: Source states to clone.
+
+        Returns:
+            Cloned states with observation noise added.
+        """
+        cloned = self._clone_agent_states(states)
+
+        # Get noise standard deviations
+        pos_noise = self._get_noise_std("position")
+        vel_noise = self._get_noise_std("velocity")
+        ori_noise = self._get_noise_std("orientation")
+
+        data = cloned.data
+
+        # Add noise to body fields
+        if pos_noise > 0:
+            data.body_position_w = data.body_position_w + torch.randn_like(
+                data.body_position_w
+            ) * pos_noise
+            data.camera_position_w = data.camera_position_w + torch.randn_like(
+                data.camera_position_w
+            ) * pos_noise
+
+        if vel_noise > 0:
+            data.body_linear_velocity_w = data.body_linear_velocity_w + torch.randn_like(
+                data.body_linear_velocity_w
+            ) * vel_noise
+            data.body_angular_velocity_w = data.body_angular_velocity_w + torch.randn_like(
+                data.body_angular_velocity_w
+            ) * vel_noise
+            data.joint_velocities_b = data.joint_velocities_b + torch.randn_like(
+                data.joint_velocities_b
+            ) * vel_noise
+
+        if ori_noise > 0:
+            data.body_orientation_w = data.body_orientation_w + torch.randn_like(
+                data.body_orientation_w
+            ) * ori_noise
+            data.camera_orientation_w = data.camera_orientation_w + torch.randn_like(
+                data.camera_orientation_w
+            ) * ori_noise
+            data.joint_positions_b = data.joint_positions_b + torch.randn_like(
+                data.joint_positions_b
+            ) * ori_noise
+
+        return cloned
 
     def get_detection_aoi(
         self, ego_agent_id: AgentID, target_agent_id: AgentID, use_noise: bool = True

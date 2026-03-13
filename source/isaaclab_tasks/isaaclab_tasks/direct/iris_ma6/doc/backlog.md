@@ -50,3 +50,7 @@ To implement visual-only propeller spinning without physics interference, the US
 - PhysX rigid body properties API
 
 ---
+
+## Per-agent Randomization
+
+Add per-agent randomization layer on top of per-episode, per-env, per-step randomization

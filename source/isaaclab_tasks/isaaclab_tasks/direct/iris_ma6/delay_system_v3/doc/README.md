@@ -7,19 +7,35 @@ A simplified, unified delay system with configurable per-step/per-episode sampli
 ### 1. Unified Architecture
 V3 replaces V2's 4 separate delay systems (clean_ego, clean_other, noisy_ego, noisy_other) with a single `UnifiedDelaySystem`. Perspective (ego/other) and noise mode are specified at query time.
 
-### 2. Timestamp-Data Coupling
+### 2. Per-Agent Randomization
+Each agent can have independent delay parameters sampled from configurable distributions:
+- Communication delay (latency between agents)
+- Detection delay (bbox staleness)
+- Dropout rate (missed detections)
+- Staleness FPS (sensor update rate)
+
+Parameters are stored with shape `(num_envs, num_agents)` and scale with curriculum progress.
+
+### 3. Configurable Reward States
+Four reward computation modes via `RewardStateCfg`:
+- `use_delay=False, use_noise=False`: Pure GT (privileged training)
+- `use_delay=True, use_noise=False`: Delayed clean (default Dec-POMDP)
+- `use_delay=False, use_noise=True`: GT with noise
+- `use_delay=True, use_noise=True`: Full perception-aligned
+
+### 4. Timestamp-Data Coupling
 **Fundamental invariant**: The returned timestamp is ALWAYS the capture time of the returned data. This ensures Age-of-Information (AoI) calculations are always correct:
 ```
 AoI = t_current - returned_timestamp
 ```
 
-### 3. Configurable Sampling Frequencies
+### 5. Configurable Sampling Frequencies
 Each parameter (latency, staleness, dropout) can be sampled at different frequencies:
 - `per_step`: Resample every simulation step
 - `per_episode`: Resample at episode start (all envs)
 - `per_env_reset`: Resample only for reset environments
 
-### 4. Curriculum Learning Support
+### 6. Curriculum Learning Support
 Full curriculum API for gradual delay introduction:
 - Mode `none`: No delay (pass-through)
 - Mode `fixed`: Deterministic delay (no variance)
@@ -42,7 +58,9 @@ delay_system_v3/
 ├── doc/
 │   └── README.md                 # This file
 └── tests/
-    ├── run_tests.py              # Test runner (33 tests)
+    ├── run_tests.py              # Test runner (55 tests)
+    ├── test_per_agent.py         # Per-agent randomization tests
+    ├── test_reward_modes.py      # Reward state mode tests
     └── README.md                 # Test documentation
 ```
 
@@ -164,6 +182,133 @@ Simulates communication failures by holding previous data.
 ### 4. First-Order Lag (Optional)
 Smooths sudden data changes. Does NOT affect timestamp.
 
+## Data Flow Architecture
+
+### Block Diagram: Rewards vs Observations
+
+```
+                              ┌─────────────────────────────────────────────────────────────┐
+                              │                    Ground Truth States                       │
+                              │  (body_position_w, body_orientation_w, velocities, etc.)    │
+                              └────────────────────────────┬────────────────────────────────┘
+                                                           │
+                                                           ▼
+                              ┌─────────────────────────────────────────────────────────────┐
+                              │                  update_ground_truth()                       │
+                              │               Store raw + noisy versions                     │
+                              └────────────────────────────┬────────────────────────────────┘
+                                                           │
+                         ┌─────────────────────────────────┴─────────────────────────────────┐
+                         │                                                                   │
+                         ▼                                                                   ▼
+          ┌──────────────────────────────┐                              ┌──────────────────────────────┐
+          │        Raw Storage           │                              │       Noisy Storage          │
+          │   (no observation noise)     │                              │   (with observation noise)   │
+          └──────────────┬───────────────┘                              └──────────────┬───────────────┘
+                         │                                                             │
+                         │ ◄── cfg.reward_state_cfg.use_delay ──►                      │ ◄── always use_delay=True
+                         │                                                             │     for observations
+    ┌────────────────────┴────────────────────┐                     ┌──────────────────┴───────────────────┐
+    │                                         │                     │                                      │
+    ▼                                         ▼                     ▼                                      ▼
+┌─────────────┐                    ┌─────────────────────┐   ┌─────────────────────┐            ┌─────────────────────┐
+│ use_delay   │                    │    use_delay        │   │    Delay Pipeline   │            │    Delay Pipeline   │
+│   = False   │                    │      = True         │   │    (Ego Path)       │            │   (Other Path)      │
+│ (GT timing) │                    │  ┌───────────────┐  │   │  ┌───────────────┐  │            │  ┌───────────────┐  │
+└──────┬──────┘                    │  │ Staleness     │  │   │  │ Staleness     │  │            │  │ Staleness     │  │
+       │                           │  │ (FPS limit)   │  │   │  │ (FPS limit)   │  │            │  │ (FPS limit)   │  │
+       │                           │  └───────┬───────┘  │   │  └───────┬───────┘  │            │  └───────┬───────┘  │
+       │                           │          ▼          │   │          ▼          │            │          ▼          │
+       │                           │  ┌───────────────┐  │   │  ┌───────────────┐  │            │  ┌───────────────┐  │
+       │                           │  │ Latency       │  │   │  │ Latency       │  │            │  │ Latency       │  │
+       │                           │  │ (comm delay)  │  │   │  │ (per-agent)   │  │            │  │ (per-agent)   │  │
+       │                           │  └───────┬───────┘  │   │  └───────┬───────┘  │            │  └───────┬───────┘  │
+       │                           │          ▼          │   │          ▼          │            │          ▼          │
+       │                           │  ┌───────────────┐  │   │  ┌───────────────┐  │            │  ┌───────────────┐  │
+       │                           │  │ Dropout       │  │   │  │ Dropout       │  │            │  │ Dropout       │  │
+       │                           │  │ (missed det)  │  │   │  │ (per-agent)   │  │            │  │ (per-agent)   │  │
+       │                           │  └───────┬───────┘  │   │  └───────┬───────┘  │            │  └───────┬───────┘  │
+       │                           └──────────┼──────────┘   └──────────┼──────────┘            └──────────┼──────────┘
+       │                                      │                         │                                  │
+       ▼                                      ▼                         ▼                                  ▼
+┌──────────────────────────────────────────────────┐         ┌───────────────────────────────────────────────────┐
+│           cfg.reward_state_cfg.use_noise         │         │           Always use_noise=True                   │
+├────────────────────┬─────────────────────────────┤         │                                                   │
+│   use_noise=False  │      use_noise=True         │         │                                                   │
+│   (clean states)   │  (add noise to GT/delayed)  │         │                                                   │
+└─────────┬──────────┴──────────────┬──────────────┘         └─────────────────────┬─────────────────────────────┘
+          │                         │                                              │
+          ▼                         ▼                                              ▼
+    ┌─────────────────────────────────────┐                          ┌─────────────────────────────────────┐
+    │       get_all_states_for_rewards()  │                          │    get_all_states_for_observations() │
+    │                                     │                          │                                     │
+    │  4 combinations:                    │                          │  Always: delayed + noisy            │
+    │  • delay=F, noise=F → Pure GT       │                          │  Per-agent latency/dropout          │
+    │  • delay=T, noise=F → Delayed clean │                          │                                     │
+    │  • delay=F, noise=T → GT + noise    │                          │                                     │
+    │  • delay=T, noise=T → Delayed noisy │                          │                                     │
+    └─────────────────┬───────────────────┘                          └─────────────────┬───────────────────┘
+                      │                                                                │
+                      ▼                                                                ▼
+           ┌─────────────────────┐                                        ┌─────────────────────┐
+           │  Reward Computation │                                        │ Observation Building│
+           │                     │                                        │                     │
+           │  • Task reward      │                                        │  • State vector     │
+           │  • CBF penalties    │                                        │  • BBox data        │
+           │  • Collision costs  │                                        │  • AoI info         │
+           └─────────────────────┘                                        └─────────────────────┘
+```
+
+### Reward State Modes
+
+The `RewardStateCfg` controls how states are computed for reward calculation:
+
+| use_delay | use_noise | Result | Use Case |
+|-----------|-----------|--------|----------|
+| False | False | Pure GT | Privileged training, baselines |
+| True | False | Delayed clean | Standard Dec-POMDP (default) |
+| False | True | GT + noise | Noise robustness without delay |
+| True | True | Delayed + noisy | Full perception-aligned training |
+
+### Per-Agent Delay Parameter Flow
+
+```
+                    ┌──────────────────────────────────────────┐
+                    │          PerAgentDelayCfg               │
+                    │  • max_comm_delay = 0.2s                 │
+                    │  • max_detection_delay = 0.15s           │
+                    │  • max_dropout_rate = 0.1                │
+                    │  • min_fps = 10, max_fps = 60            │
+                    └───────────────────┬──────────────────────┘
+                                        │
+                                        ▼
+                    ┌──────────────────────────────────────────┐
+                    │       Curriculum Progress [0, 1]         │
+                    │                                          │
+                    │  progress=0.0: No delay/dropout          │
+                    │  progress=0.5: Half max values           │
+                    │  progress=1.0: Full max values           │
+                    └───────────────────┬──────────────────────┘
+                                        │
+                                        ▼
+            ┌───────────────────────────────────────────────────────────┐
+            │              Per-Agent Independent Sampling               │
+            │                                                           │
+            │   Agent 0                Agent 1              Agent 2    │
+            │   ┌──────────┐           ┌──────────┐         ┌──────────┐│
+            │   │ latency: │           │ latency: │         │ latency: ││
+            │   │  0.08s   │           │  0.15s   │         │  0.12s   ││
+            │   │ dropout: │           │ dropout: │         │ dropout: ││
+            │   │  0.03    │           │  0.07    │         │  0.05    ││
+            │   │ fps:     │           │ fps:     │         │ fps:     ││
+            │   │  25 Hz   │           │  18 Hz   │         │  30 Hz   ││
+            │   └──────────┘           └──────────┘         └──────────┘│
+            │                                                           │
+            │   Shape: (num_envs, num_agents)                          │
+            │   Each env×agent combination has independent params       │
+            └───────────────────────────────────────────────────────────┘
+```
+
 ## Curriculum API
 
 ```python
@@ -190,7 +335,16 @@ Run the full test suite:
 ./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/delay_system_v3/tests/run_tests.py --headless
 ```
 
-Expected output: 33/33 tests passing.
+Expected output: 55/55 tests passing.
+
+Test categories:
+- **Distribution/Sampling**: Parameter sampling strategies
+- **Field Storage**: Data and timestamp storage
+- **Pipeline**: Core delay pipeline with timestamp guarantees
+- **Timestamp Sync**: AoI correctness verification
+- **Curriculum Modes**: none/fixed/random mode behavior
+- **Per-Agent Randomization**: Independent agent parameters (13 tests)
+- **Reward Modes**: 4-mode reward state configuration (9 tests)
 
 ## Improvements Over V2
 

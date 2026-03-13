@@ -22,8 +22,10 @@ from isaaclab.utils import configclass
 from isaaclab_assets import IRIS_GIMBAL3_CFG
 
 from .bbox_raycaster_v2 import BBoxRayCasterV2Cfg
+from .cbf_safety import CBFManagerCfg
 from .controller import DroneControllerCfg
 from .controller.tuning import TUNED_CONTROLLER_CFG
+from .delay_system_v3 import MultiAgentDelayCfgV3, create_random_delay_cfg
 
 
 def _create_robot_cfg() -> ArticulationCfg:
@@ -227,6 +229,50 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
 
     max_zoom_rate: float = 1.0
     """Maximum zoom rate (zoom levels per second)."""
+
+    # ==========================================================================
+    # CBF Safety Configuration
+    # ==========================================================================
+
+    cbf_safety: CBFManagerCfg = CBFManagerCfg()
+    """CBF safety filter configuration for collision avoidance.
+
+    Training mode (default):
+    - enable_training_penalty=True: CPA reward shaping using GT positions
+    - enable_deployment_filter=False: Actions unfiltered during training
+    - enable_collision_termination=True: Episodes terminate on GT collision
+
+    Deployment mode:
+    - enable_training_penalty=False
+    - enable_deployment_filter=True: Hard CBF constraint on actions
+    """
+
+    # ==========================================================================
+    # Delay System Configuration
+    # ==========================================================================
+
+    delay_system: MultiAgentDelayCfgV3 = create_random_delay_cfg()
+    """Delay system configuration for realistic observation delays.
+
+    The delay system simulates:
+    - Communication latency between agents
+    - Detection staleness (FPS limiting)
+    - Dropout (missed detections)
+    - Observation noise
+
+    Reward state configuration (delay_system.reward_state_cfg):
+    - use_delay=False, use_noise=False: Pure GT (privileged training)
+    - use_delay=True, use_noise=False: Delayed clean (default)
+    - use_delay=False, use_noise=True: GT with noise
+    - use_delay=True, use_noise=True: Full noisy delayed
+
+    Per-agent randomization (delay_system.per_agent_randomization):
+    - When enabled, each agent samples independent delay parameters
+    - Parameters scale with curriculum progress [0, 1]
+    """
+
+    enable_delay_system: bool = False
+    """Enable delay system for observations. Default False for backward compatibility."""
 
     def __post_init__(self):
         """Populate agent-specific fields from num_agents."""
