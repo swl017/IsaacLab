@@ -194,24 +194,35 @@ def build_camera_transforms(
     robot_pos: torch.Tensor,
     robot_quat: torch.Tensor,
     gimbal_yaw: torch.Tensor,
+    gimbal_roll: torch.Tensor,
     gimbal_pitch: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build camera transformation matrices from robot and gimbal state.
 
     The transformation chain fuses ego pose and gimbal orientation:
-        R_wc = R_wb(q_wb) @ R_bg(alpha, beta) @ R_gc
+        R_wc = R_wb(q_wb) @ R_bg(yaw, roll, pitch) @ R_gc
+
+    Gimbal rotation order: Yaw → Roll → Pitch (ZXY intrinsic)
+    This matches the kinematic chain: yaw_link → roll_link → pitch_link
+
+    Gimbal angle convention:
+    - Yaw: 0 = camera forward (body +X), positive = CCW (left)
+    - Roll: Stabilizing roll to keep horizon level
+    - Pitch: positive = looking down
 
     Args:
         robot_pos: [N, C, 3] Robot positions in world frame
         robot_quat: [N, C, 4] Robot orientations (wxyz quaternion)
-        gimbal_yaw: [N, C] Gimbal yaw angles (radians)
+        gimbal_yaw: [N, C] Gimbal yaw angles (radians), 0 = forward
+        gimbal_roll: [N, C] Gimbal roll angles (radians), for horizon stabilization
         gimbal_pitch: [N, C] Gimbal pitch angles (radians)
 
     Returns:
         R_wc: [N, C, 3, 3] World-to-camera rotation matrices
         t_wc: [N, C, 3] Camera positions in world frame
-        e_alpha: [N, C, 3] Gimbal yaw axis in camera frame
-        e_beta: [N, C, 3] Gimbal pitch axis in camera frame
+        e_yaw: [N, C, 3] Gimbal yaw axis in camera frame
+        e_roll: [N, C, 3] Gimbal roll axis in camera frame
+        e_pitch: [N, C, 3] Gimbal pitch axis in camera frame
     """
     N, C = robot_pos.shape[:2]
     device = robot_pos.device
@@ -220,9 +231,9 @@ def build_camera_transforms(
     # World to body rotation from quaternion
     R_wb = quat_to_rotation_matrix(robot_quat)  # [N, C, 3, 3]
 
-    # Body to gimbal: Z(yaw) then Y(pitch)
-    zeros = torch.zeros(N, C, device=device, dtype=dtype)
-    R_bg = rotation_matrix_from_euler(zeros, gimbal_pitch, gimbal_yaw, "ZYX")
+    # Body to gimbal: Yaw → Roll → Pitch (ZXY intrinsic)
+    # Using ZXY order matches the kinematic chain: yaw_link → roll_link → pitch_link
+    R_bg = rotation_matrix_from_euler(gimbal_roll, gimbal_pitch, gimbal_yaw, "ZXY")
 
     # Gimbal to camera (ENU to RDF - OpenCV convention)
     R_gc = torch.tensor(
@@ -237,13 +248,25 @@ def build_camera_transforms(
 
     # Gimbal axes in camera frame (for Jacobian computation)
     R_bc = R_bg @ R_gc
+
+    # Yaw axis: body Z in camera frame
     z_b = torch.tensor([0.0, 0.0, 1.0], device=device, dtype=dtype).expand(N, C, 3)
-    e_alpha = torch.bmm(
+    e_yaw = torch.bmm(
         R_bc.view(N * C, 3, 3).transpose(-1, -2), z_b.view(N * C, 3, 1)
     ).view(N, C, 3)
-    e_beta = torch.tensor([-1.0, 0.0, 0.0], device=device, dtype=dtype).expand(N, C, 3)
 
-    return R_wc, t_wc, e_alpha, e_beta
+    # Roll axis: body X rotated by yaw, in camera frame
+    cos_yaw = torch.cos(gimbal_yaw)
+    sin_yaw = torch.sin(gimbal_yaw)
+    x_yawed = torch.stack([cos_yaw, sin_yaw, torch.zeros_like(gimbal_yaw)], dim=-1)
+    e_roll = torch.bmm(
+        R_gc.view(N * C, 3, 3).transpose(-1, -2), x_yawed.view(N * C, 3, 1)
+    ).view(N, C, 3)
+
+    # Pitch axis: camera X (after yaw and roll rotations)
+    e_pitch = torch.tensor([-1.0, 0.0, 0.0], device=device, dtype=dtype).expand(N, C, 3)
+
+    return R_wc, t_wc, e_yaw, e_roll, e_pitch
 
 
 # =============================================================================
@@ -257,6 +280,7 @@ def get_ray_directions_from_bbox(
     robot_pos: torch.Tensor,
     robot_quat: torch.Tensor,
     gimbal_yaw: torch.Tensor,
+    gimbal_roll: torch.Tensor,
     gimbal_pitch: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Compute ray directions from 2D bounding box centers.
@@ -264,7 +288,7 @@ def get_ray_directions_from_bbox(
     CRITICAL: Ray computation fuses ego pose and gimbal orientation.
     The ray direction in world frame depends on:
     1. Ego pose: Robot position and orientation quaternion
-    2. Gimbal angles: Yaw and pitch
+    2. Gimbal angles: Yaw, roll, and pitch
     3. Bbox center: Pixel coordinates from detection
 
     Args:
@@ -272,7 +296,8 @@ def get_ray_directions_from_bbox(
         camera_intrinsics: [N, C, 3, 3] Camera intrinsic matrices
         robot_pos: [N, C, 3] Robot positions
         robot_quat: [N, C, 4] Robot orientations (wxyz)
-        gimbal_yaw: [N, C] Gimbal yaw angles
+        gimbal_yaw: [N, C] Gimbal yaw angles (0 = forward)
+        gimbal_roll: [N, C] Gimbal roll angles (horizon stabilization)
         gimbal_pitch: [N, C] Gimbal pitch angles
 
     Returns:
@@ -283,8 +308,10 @@ def get_ray_directions_from_bbox(
     device = bbox_2d.device
     dtype = bbox_2d.dtype
 
-    # Build camera transforms (fuses ego pose + gimbal)
-    R_wc, _, _, _ = build_camera_transforms(robot_pos, robot_quat, gimbal_yaw, gimbal_pitch)
+    # Build camera transforms (fuses ego pose + gimbal including roll)
+    R_wc, _, _, _, _ = build_camera_transforms(
+        robot_pos, robot_quat, gimbal_yaw, gimbal_roll, gimbal_pitch
+    )
 
     # Extract intrinsic parameters
     fx = camera_intrinsics[..., 0, 0].unsqueeze(-1)  # [N, C, 1]
@@ -479,6 +506,7 @@ def compute_triangulation_covariance(
     robot_positions: torch.Tensor,
     robot_quats: torch.Tensor,
     gimbal_yaws: torch.Tensor,
+    gimbal_rolls: torch.Tensor,
     gimbal_pitches: torch.Tensor,
     camera_intrinsics: torch.Tensor,
     valid_mask: torch.Tensor,
@@ -491,13 +519,14 @@ def compute_triangulation_covariance(
     - Pixel detection noise
     - Camera position uncertainty
     - Camera orientation uncertainty
-    - Gimbal angle uncertainty
+    - Gimbal angle uncertainty (yaw, roll, pitch)
 
     Args:
         X_target: [N, T, 3] Target positions (can be GT or triangulated)
         robot_positions: [N, C, 3] Camera positions
         robot_quats: [N, C, 4] Camera orientations (wxyz)
-        gimbal_yaws: [N, C] Gimbal yaw angles
+        gimbal_yaws: [N, C] Gimbal yaw angles (0 = forward)
+        gimbal_rolls: [N, C] Gimbal roll angles (horizon stabilization)
         gimbal_pitches: [N, C] Gimbal pitch angles
         camera_intrinsics: [N, C, 3, 3] Camera intrinsic matrices
         valid_mask: [N, C, T] Valid observation mask
@@ -518,9 +547,9 @@ def compute_triangulation_covariance(
     Sigma_X = torch.full((N, T, 3, 3), float("nan"), device=device, dtype=dtype)
     quality_metric = torch.full((N, T), float("nan"), device=device, dtype=dtype)
 
-    # Build camera transforms
-    R_wc, t_wc, e_alpha, e_beta = build_camera_transforms(
-        robot_positions, robot_quats, gimbal_yaws, gimbal_pitches
+    # Build camera transforms (now returns roll axis too)
+    R_wc, t_wc, e_yaw, e_roll, e_pitch = build_camera_transforms(
+        robot_positions, robot_quats, gimbal_yaws, gimbal_rolls, gimbal_pitches
     )
 
     # Build covariance matrices for uncertainty sources
@@ -545,10 +574,8 @@ def compute_triangulation_covariance(
         )
 
     if cfg.include_gimbal_uncertainty:
-        Sigma_alpha = (
-            torch.ones(N, C, 1, 1, device=device, dtype=dtype) * (cfg.gimbal_std**2)
-        )
-        Sigma_beta = (
+        # All gimbal angles use the same uncertainty (yaw, roll, pitch)
+        Sigma_gimbal = (
             torch.ones(N, C, 1, 1, device=device, dtype=dtype) * (cfg.gimbal_std**2)
         )
 
@@ -594,25 +621,31 @@ def compute_triangulation_covariance(
         J_blocks.append(J_phi)
         Sig_blocks.append(Sigma_phiwb)
 
-    if cfg.include_gimbal_uncertainty and Sigma_alpha is not None:
-        # Gimbal yaw
-        e_alpha_exp = e_alpha.unsqueeze(1)  # [N, 1, C, 3]
+    if cfg.include_gimbal_uncertainty:
+        # Gimbal yaw Jacobian
+        e_yaw_exp = e_yaw.unsqueeze(1)  # [N, 1, C, 3]
         skew_Xc = skew(Xc)
-        J_alpha = torch.matmul(
-            Ju_Xc, torch.matmul(-skew_Xc, e_alpha_exp.unsqueeze(-1))
+        J_yaw = torch.matmul(
+            Ju_Xc, torch.matmul(-skew_Xc, e_yaw_exp.unsqueeze(-1))
         ) * mask_exp
-        J_blocks.append(J_alpha)
-        Sig_blocks.append(Sigma_alpha)
+        J_blocks.append(J_yaw)
+        Sig_blocks.append(Sigma_gimbal)
 
-    if cfg.include_gimbal_uncertainty and Sigma_beta is not None:
-        # Gimbal pitch
-        e_beta_exp = e_beta.unsqueeze(1)  # [N, 1, C, 3]
-        skew_Xc = skew(Xc)
-        J_beta = torch.matmul(
-            Ju_Xc, torch.matmul(-skew_Xc, e_beta_exp.unsqueeze(-1))
+        # Gimbal roll Jacobian (horizon stabilization)
+        e_roll_exp = e_roll.unsqueeze(1)  # [N, 1, C, 3]
+        J_roll = torch.matmul(
+            Ju_Xc, torch.matmul(-skew_Xc, e_roll_exp.unsqueeze(-1))
         ) * mask_exp
-        J_blocks.append(J_beta)
-        Sig_blocks.append(Sigma_beta)
+        J_blocks.append(J_roll)
+        Sig_blocks.append(Sigma_gimbal)
+
+        # Gimbal pitch Jacobian
+        e_pitch_exp = e_pitch.unsqueeze(1)  # [N, 1, C, 3]
+        J_pitch = torch.matmul(
+            Ju_Xc, torch.matmul(-skew_Xc, e_pitch_exp.unsqueeze(-1))
+        ) * mask_exp
+        J_blocks.append(J_pitch)
+        Sig_blocks.append(Sigma_gimbal)
 
     # Concatenate nuisance Jacobians
     if len(J_blocks) > 0:
@@ -766,6 +799,7 @@ def compute_full_triangulation(
     robot_positions: torch.Tensor,
     robot_quats: torch.Tensor,
     gimbal_yaws: torch.Tensor,
+    gimbal_rolls: torch.Tensor,
     gimbal_pitches: torch.Tensor,
     camera_intrinsics: torch.Tensor,
     cfg: TriangulationCfg,
@@ -780,7 +814,8 @@ def compute_full_triangulation(
         bbox_valid: [N, C, T] Valid detection mask
         robot_positions: [N, C, 3] Robot/camera positions
         robot_quats: [N, C, 4] Robot orientations (wxyz)
-        gimbal_yaws: [N, C] Gimbal yaw angles
+        gimbal_yaws: [N, C] Gimbal yaw angles (body-frame, 0 = forward)
+        gimbal_rolls: [N, C] Gimbal roll angles (stabilizing roll)
         gimbal_pitches: [N, C] Gimbal pitch angles
         camera_intrinsics: [N, C, 3, 3] Camera intrinsic matrices
         cfg: Triangulation configuration
@@ -792,7 +827,8 @@ def compute_full_triangulation(
     """
     # Step 1: Compute ray directions
     ray_dirs, _ = get_ray_directions_from_bbox(
-        bbox_2d, camera_intrinsics, robot_positions, robot_quats, gimbal_yaws, gimbal_pitches
+        bbox_2d, camera_intrinsics, robot_positions, robot_quats,
+        gimbal_yaws, gimbal_rolls, gimbal_pitches
     )
 
     # Step 2: Triangulate positions
@@ -815,6 +851,7 @@ def compute_full_triangulation(
         robot_positions,
         robot_quats,
         gimbal_yaws,
+        gimbal_rolls,
         gimbal_pitches,
         camera_intrinsics,
         bbox_valid,

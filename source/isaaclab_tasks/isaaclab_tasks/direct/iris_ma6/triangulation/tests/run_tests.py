@@ -568,6 +568,7 @@ def run_covariance_tests(results: TestResults, device: torch.device):
 
         camera_quats = create_identity_quats(N, C, device)
         gimbal_yaws = torch.zeros(N, C, device=device)
+        gimbal_rolls = torch.zeros(N, C, device=device)
         gimbal_pitches = torch.zeros(N, C, device=device)
         camera_intrinsics = create_test_intrinsics(N, C, device=device)
 
@@ -584,6 +585,7 @@ def run_covariance_tests(results: TestResults, device: torch.device):
             camera_positions,
             camera_quats,
             gimbal_yaws,
+            gimbal_rolls,
             gimbal_pitches,
             camera_intrinsics,
             valid_mask,
@@ -635,6 +637,7 @@ def run_covariance_tests(results: TestResults, device: torch.device):
 
         camera_quats = create_identity_quats(N, C, device)
         gimbal_yaws = torch.zeros(N, C, device=device)
+        gimbal_rolls = torch.zeros(N, C, device=device)
         gimbal_pitches = torch.zeros(N, C, device=device)
         camera_intrinsics = create_test_intrinsics(N, C, device=device)
 
@@ -646,13 +649,13 @@ def run_covariance_tests(results: TestResults, device: torch.device):
         tri_valid = torch.ones(N, T, dtype=torch.bool, device=device)
 
         _, quality_pose, _ = compute_triangulation_covariance(
-            X_target, camera_positions, camera_quats, gimbal_yaws, gimbal_pitches,
-            camera_intrinsics, valid_mask, tri_valid, cfg_pose
+            X_target, camera_positions, camera_quats, gimbal_yaws, gimbal_rolls,
+            gimbal_pitches, camera_intrinsics, valid_mask, tri_valid, cfg_pose
         )
 
         _, quality_no_pose, _ = compute_triangulation_covariance(
-            X_target, camera_positions, camera_quats, gimbal_yaws, gimbal_pitches,
-            camera_intrinsics, valid_mask, tri_valid, cfg_no_pose
+            X_target, camera_positions, camera_quats, gimbal_yaws, gimbal_rolls,
+            gimbal_pitches, camera_intrinsics, valid_mask, tri_valid, cfg_no_pose
         )
 
         # With pose uncertainty, quality metric should be higher (more uncertainty)
@@ -676,6 +679,7 @@ def run_covariance_tests(results: TestResults, device: torch.device):
 
         camera_quats = create_identity_quats(N, C, device)
         gimbal_yaws = torch.zeros(N, C, device=device)
+        gimbal_rolls = torch.zeros(N, C, device=device)
         gimbal_pitches = torch.zeros(N, C, device=device)
         camera_intrinsics = create_test_intrinsics(N, C, device=device)
 
@@ -696,8 +700,8 @@ def run_covariance_tests(results: TestResults, device: torch.device):
             )
 
             _, quality, _ = compute_triangulation_covariance(
-                X_target, camera_positions, camera_quats, gimbal_yaws, gimbal_pitches,
-                camera_intrinsics, valid_mask, tri_valid, cfg
+                X_target, camera_positions, camera_quats, gimbal_yaws, gimbal_rolls,
+                gimbal_pitches, camera_intrinsics, valid_mask, tri_valid, cfg
             )
             metrics[metric_name] = quality[0, 0].item()
 
@@ -719,6 +723,7 @@ def run_covariance_tests(results: TestResults, device: torch.device):
         camera_positions = torch.zeros(N, C, 3, device=device)
         camera_quats = create_identity_quats(N, C, device)
         gimbal_yaws = torch.zeros(N, C, device=device)
+        gimbal_rolls = torch.zeros(N, C, device=device)
         gimbal_pitches = torch.zeros(N, C, device=device)
         camera_intrinsics = create_test_intrinsics(N, C, device=device)
 
@@ -729,8 +734,8 @@ def run_covariance_tests(results: TestResults, device: torch.device):
         tri_valid = torch.zeros(N, T, dtype=torch.bool, device=device)
 
         Sigma_X, quality, is_valid = compute_triangulation_covariance(
-            X_target, camera_positions, camera_quats, gimbal_yaws, gimbal_pitches,
-            camera_intrinsics, valid_mask, tri_valid, cfg
+            X_target, camera_positions, camera_quats, gimbal_yaws, gimbal_rolls,
+            gimbal_pitches, camera_intrinsics, valid_mask, tri_valid, cfg
         )
 
         assert not is_valid.any(), "Should be invalid with no cameras"
@@ -770,6 +775,7 @@ def run_full_pipeline_tests(results: TestResults, device: torch.device):
 
         robot_quats = create_identity_quats(N, C, device)
         gimbal_yaws = torch.zeros(N, C, device=device)
+        gimbal_rolls = torch.zeros(N, C, device=device)
         gimbal_pitches = torch.zeros(N, C, device=device)
         camera_intrinsics = create_test_intrinsics(N, C, device=device)
 
@@ -788,6 +794,7 @@ def run_full_pipeline_tests(results: TestResults, device: torch.device):
             robot_positions,
             robot_quats,
             gimbal_yaws,
+            gimbal_rolls,
             gimbal_pitches,
             camera_intrinsics,
             cfg,
@@ -826,6 +833,7 @@ def run_full_pipeline_tests(results: TestResults, device: torch.device):
 
         robot_quats = create_identity_quats(N, C, device)
         gimbal_yaws = torch.zeros(N, C, device=device)
+        gimbal_rolls = torch.zeros(N, C, device=device)
         gimbal_pitches = torch.zeros(N, C, device=device)
         camera_intrinsics = create_test_intrinsics(N, C, device=device)
 
@@ -847,6 +855,7 @@ def run_full_pipeline_tests(results: TestResults, device: torch.device):
             robot_positions,
             robot_quats,
             gimbal_yaws,
+            gimbal_rolls,
             gimbal_pitches,
             camera_intrinsics,
             cfg,
@@ -892,6 +901,7 @@ def run_ray_direction_tests(results: TestResults, device: torch.device):
         robot_positions = torch.zeros(N, C, 3, device=device)
         robot_quats = create_identity_quats(N, C, device)
         gimbal_yaws = torch.zeros(N, C, device=device)
+        gimbal_rolls = torch.zeros(N, C, device=device)
         gimbal_pitches = torch.zeros(N, C, device=device)
         camera_intrinsics = create_test_intrinsics(N, C, fx=500.0, device=device)
 
@@ -902,7 +912,7 @@ def run_ray_direction_tests(results: TestResults, device: torch.device):
 
         ray_dirs, R_wc = get_ray_directions_from_bbox(
             bbox_2d, camera_intrinsics, robot_positions, robot_quats,
-            gimbal_yaws, gimbal_pitches
+            gimbal_yaws, gimbal_rolls, gimbal_pitches
         )
 
         # With identity orientation and RDF->ENU, center pixel should give a specific direction
@@ -924,6 +934,7 @@ def run_ray_direction_tests(results: TestResults, device: torch.device):
         robot_positions = torch.zeros(N, C, 3, device=device)
         robot_quats = create_identity_quats(N, C, device)
         gimbal_yaws = torch.zeros(N, C, device=device)
+        gimbal_rolls = torch.zeros(N, C, device=device)
         gimbal_pitches = torch.zeros(N, C, device=device)
         camera_intrinsics = create_test_intrinsics(N, C, fx=500.0, device=device)
 
@@ -939,7 +950,7 @@ def run_ray_direction_tests(results: TestResults, device: torch.device):
 
         ray_dirs, _ = get_ray_directions_from_bbox(
             bbox_2d, camera_intrinsics, robot_positions, robot_quats,
-            gimbal_yaws, gimbal_pitches
+            gimbal_yaws, gimbal_rolls, gimbal_pitches
         )
 
         # Each bbox should give different ray direction
@@ -972,20 +983,20 @@ def run_ray_direction_tests(results: TestResults, device: torch.device):
 
         # No gimbal rotation
         gimbal_yaws_0 = torch.zeros(N, C, device=device)
+        gimbal_rolls_0 = torch.zeros(N, C, device=device)
         gimbal_pitches_0 = torch.zeros(N, C, device=device)
 
         ray_dirs_0, _ = get_ray_directions_from_bbox(
             bbox_2d, camera_intrinsics, robot_positions, robot_quats,
-            gimbal_yaws_0, gimbal_pitches_0
+            gimbal_yaws_0, gimbal_rolls_0, gimbal_pitches_0
         )
 
         # With gimbal yaw
         gimbal_yaws_45 = torch.full((N, C), math.pi / 4, device=device)
-        gimbal_pitches_0 = torch.zeros(N, C, device=device)
 
         ray_dirs_45, _ = get_ray_directions_from_bbox(
             bbox_2d, camera_intrinsics, robot_positions, robot_quats,
-            gimbal_yaws_45, gimbal_pitches_0
+            gimbal_yaws_45, gimbal_rolls_0, gimbal_pitches_0
         )
 
         # Ray directions should be different
@@ -1061,15 +1072,19 @@ def run_utility_tests(results: TestResults, device: torch.device):
         robot_pos = torch.zeros(N, C, 3, device=device)
         robot_quat = create_identity_quats(N, C, device)
         gimbal_yaw = torch.zeros(N, C, device=device)
+        gimbal_roll = torch.zeros(N, C, device=device)
         gimbal_pitch = torch.zeros(N, C, device=device)
 
-        R_wc, t_wc, e_alpha, e_beta = build_camera_transforms(
-            robot_pos, robot_quat, gimbal_yaw, gimbal_pitch
+        R_wc, t_wc, e_yaw, e_roll, e_pitch = build_camera_transforms(
+            robot_pos, robot_quat, gimbal_yaw, gimbal_roll, gimbal_pitch
         )
 
         # Check shapes
         assert R_wc.shape == (N, C, 3, 3), f"R_wc shape: {R_wc.shape}"
         assert t_wc.shape == (N, C, 3), f"t_wc shape: {t_wc.shape}"
+        assert e_yaw.shape == (N, C, 3), f"e_yaw shape: {e_yaw.shape}"
+        assert e_roll.shape == (N, C, 3), f"e_roll shape: {e_roll.shape}"
+        assert e_pitch.shape == (N, C, 3), f"e_pitch shape: {e_pitch.shape}"
 
         # R_wc should be orthogonal
         R_flat = R_wc.reshape(N * C, 3, 3)
