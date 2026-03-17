@@ -19,6 +19,7 @@ from .triangulation_cfg import TriangulationCfg
 from .triangulation import (
     triangulate_targets,
     compute_triangulation_covariance,
+    compute_full_triangulation,
     get_ray_directions_from_bbox,
     TriangulationResult,
 )

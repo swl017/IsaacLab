@@ -18,6 +18,7 @@ import torch
 from typing import Dict, Tuple, TYPE_CHECKING
 
 from .camera_frustum import CameraFrustum
+from .covariance_ellipsoid import CovarianceEllipsoid
 from .detection_indicator import DetectionIndicator
 from .frame_visualizer import FrameVisualizer
 
@@ -87,6 +88,11 @@ class CustomVisualization:
         # Frame axes on body and gimbal links
         self.frame_visualizer = FrameVisualizer(scale=0.15)
 
+        # Covariance ellipsoid visualizers (per-agent, unique prim paths)
+        self.covariance_ellipsoid: Dict[str, CovarianceEllipsoid] = {
+            agent_id: CovarianceEllipsoid(agent_id) for agent_id in possible_agents
+        }
+
         # Track if clear has been called this frame
         self._cleared_this_frame = False
 
@@ -99,6 +105,10 @@ class CustomVisualization:
         self._frame_count += 1
         if self._frame_count >= MIN_FRAMES_BEFORE_VISUALIZATION:
             self._visualization_enabled = True
+
+        # Update covariance ellipsoid frame counters (separate warmup tracking)
+        for agent_id in self.possible_agents:
+            self.covariance_ellipsoid[agent_id].step()
 
         # Reset clear flag for new frame
         self._cleared_this_frame = False
@@ -278,3 +288,64 @@ class CustomVisualization:
                 )
             except Exception:
                 pass
+
+    def update_covariance_ellipsoids(
+        self,
+        translations: torch.Tensor,
+        covariance: torch.Tensor,
+        is_valid: torch.Tensor,
+    ):
+        """Update covariance ellipsoid visualization for triangulation uncertainty.
+
+        Draws ellipsoids centered at triangulated target positions with axes
+        proportional to the standard deviations from the covariance matrix.
+        All agents share the same triangulation result (cooperative observation).
+
+        Args:
+            translations: Triangulated target positions (N, 3) in world frame.
+            covariance: Covariance matrices (N, 3, 3) from triangulation.
+            is_valid: Validity mask (N,) indicating successful triangulation.
+        """
+        if not self._visualization_enabled:
+            return
+
+        # All agents visualize the same triangulation result
+        # Use the first agent's visualizer (they share the target)
+        first_agent = self.possible_agents[0]
+        try:
+            self.covariance_ellipsoid[first_agent].visualize(
+                translations=translations,
+                covariance=covariance,
+                is_valid=is_valid,
+            )
+        except Exception:
+            # Silently skip on errors to prevent crashes
+            pass
+
+    def update_covariance_ellipsoids_from_std(
+        self,
+        translations: torch.Tensor,
+        std_dev: torch.Tensor,
+        is_valid: torch.Tensor,
+    ):
+        """Update covariance ellipsoids from pre-computed standard deviations.
+
+        Convenience method when standard deviations are already computed.
+
+        Args:
+            translations: Triangulated target positions (N, 3) in world frame.
+            std_dev: Standard deviations per axis (N, 3).
+            is_valid: Validity mask (N,) indicating successful triangulation.
+        """
+        if not self._visualization_enabled:
+            return
+
+        first_agent = self.possible_agents[0]
+        try:
+            self.covariance_ellipsoid[first_agent].visualize_from_std(
+                translations=translations,
+                std_dev=std_dev,
+                is_valid=is_valid,
+            )
+        except Exception:
+            pass

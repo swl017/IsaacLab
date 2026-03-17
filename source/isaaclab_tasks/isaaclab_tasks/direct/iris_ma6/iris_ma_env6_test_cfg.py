@@ -26,6 +26,8 @@ from .cbf_safety import CBFManagerCfg
 from .controller import DroneControllerCfg
 from .controller.tuning import TUNED_CONTROLLER_CFG
 from .delay_system_v3 import MultiAgentDelayCfgV3, create_random_delay_cfg
+from .initial_states import InitialStatesCfg
+from .triangulation import TriangulationCfg
 
 
 def _create_robot_cfg() -> ArticulationCfg:
@@ -64,7 +66,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     num_agents: int = 3
     """Number of agents."""
 
-    episode_length_s: float = 30.0
+    episode_length_s: float = 300.0
     """Episode length in seconds."""
 
     decimation: int = 4
@@ -275,6 +277,43 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     enable_delay_system: bool = False
     """Enable delay system for observations. Default False for backward compatibility."""
 
+    # ==========================================================================
+    # Triangulation Configuration
+    # ==========================================================================
+
+    triangulation: TriangulationCfg = TriangulationCfg()
+    """Triangulation module configuration for multi-camera target localization."""
+
+    enable_triangulation: bool = True
+    """Enable triangulation-based rewards and observations. Default False for backward compatibility."""
+
+    triangulation_reward_scale: float = 5.0
+    """Scale factor for triangulation quality reward (analytical mode: 1/sqrt(trace))."""
+
+    # ==========================================================================
+    # Initial States Configuration
+    # ==========================================================================
+
+    initial_states: InitialStatesCfg = InitialStatesCfg()
+    """Initial states configuration for reset randomization.
+
+    Controls curriculum-driven randomization of:
+    - Agent positions (cylinder-based placement)
+    - Target position and velocity
+    - Gimbal joint angles (designated observer points at target)
+    - Zoom levels
+
+    Curriculum sampling prevents forgetting:
+    - value ~ Uniform(min, min + progress * (max - min))
+    """
+
+    enable_initial_states_randomization: bool = True
+    """Enable randomized initial states.
+
+    If True, uses InitialStates module for curriculum-driven randomization.
+    If False, uses hardcoded triangle formation (for debugging).
+    """
+
     def __post_init__(self):
         """Populate agent-specific fields from num_agents."""
         if self.num_agents < 2:
@@ -283,4 +322,11 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
         self.possible_agents = [f"drone_{i}" for i in range(self.num_agents)]
         self.action_spaces = {a: 7 for a in self.possible_agents}
         self.bbox_raycaster_v2.num_cameras_per_env = self.num_agents
-        self.observation_spaces = {a: 18 for a in self.possible_agents}
+
+        # Update observation space based on triangulation
+        # Base: 18D (pos, vel, quat, gimbal_yaw, gimbal_pitch, zoom, bbox, bbox_empty)
+        # With triangulation: +6D (triangulated position + std_dev)
+        obs_dim = 18
+        if self.enable_triangulation:
+            obs_dim += 6  # triangulated position (3) + std_dev (3)
+        self.observation_spaces = {a: obs_dim for a in self.possible_agents}

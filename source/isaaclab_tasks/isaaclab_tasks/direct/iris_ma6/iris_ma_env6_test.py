@@ -31,7 +31,9 @@ from .cbf_safety import CBFManager
 from .controller import DroneController
 from .controller.gimbal_controller import YAW_JOINT_OFFSET
 from .delay_system_v3 import MultiAgentDelaySystemV3, AgentStates
+from .initial_states import InitialStates
 from .iris_ma_env6_test_cfg import IrisMA6TestEnvCfg
+from .triangulation import TriangulationResult, compute_full_triangulation
 from .visualization import CustomVisualization
 from .visualization.frame_visualizer import FRAME_LINKS
 
@@ -244,6 +246,28 @@ class IrisMA6TestEnv(DirectMARLEnv):
             self.num_envs, num_agents, 1, device=self.device
         )  # (N, C, T) - starts at 1.0 (visible)
         self._smoothed_bbox_empty_threshold = 0.4  # Below this confidence = occluded
+
+        # Triangulation module initialization
+        # Dual pipeline: GT for rewards, triangulated for observations
+        self._triangulation_result_gt: TriangulationResult | None = None
+        self._triangulation_result_obs: TriangulationResult | None = None
+
+        # Cache for camera intrinsics per agent (updated each step with zoom)
+        self._camera_intrinsics_cache: Dict[str, torch.Tensor] = {}
+
+        # Initialize initial states generator for curriculum-driven reset randomization
+        if self.cfg.enable_initial_states_randomization:
+            self._initial_states = InitialStates(
+                cfg=self.cfg.initial_states,
+                num_envs=self.num_envs,
+                num_agents=len(cfg.possible_agents),
+                device=self.device,
+            )
+        else:
+            self._initial_states = None
+
+        # Curriculum progress tracking (updated externally, used by initial_states)
+        self._curriculum_progress = 0.0
 
         # Enable debug visualization if configured
         if self.cfg.debug_vis:
@@ -521,11 +545,92 @@ class IrisMA6TestEnv(DirectMARLEnv):
             for idx, agent_id in enumerate(self.cfg.possible_agents)
         }
 
+        # Update camera intrinsics cache for triangulation
+        for idx, agent_id in enumerate(self.cfg.possible_agents):
+            self._camera_intrinsics_cache[agent_id] = camera_intrinsics[agent_id]
+
+    def _compute_triangulation(self, use_gt_target: bool = True) -> TriangulationResult:
+        """Compute triangulation and covariance for all targets.
+
+        Dual-pipeline architecture:
+        - use_gt_target=True: For rewards - covariance computed at GT position
+        - use_gt_target=False: For observations - uses midpoint triangulation
+
+        Args:
+            use_gt_target: If True, use GT target position for covariance computation.
+                          If False, use triangulated position (midpoint method).
+
+        Returns:
+            TriangulationResult with position, covariance, quality_metric, validity
+        """
+        num_agents = len(self.cfg.possible_agents)
+
+        # Stack camera data: [N, C, ...] where C = num_agents
+        # CRITICAL: Use actual camera positions from pitch_link, NOT robot root
+        # The camera is mounted on the gimbal, which has an offset from robot root
+        camera_positions = []
+        for agent_id in self.cfg.possible_agents:
+            robot = self._robots[agent_id]
+            pitch_link_idx = self._frame_link_ids[agent_id]["pitch_link"]
+            camera_pos_w = robot.data.body_pos_w[:, pitch_link_idx]
+            camera_positions.append(camera_pos_w)
+        robot_positions = torch.stack(camera_positions, dim=1)  # [N, C, 3]
+
+        robot_quats = torch.stack(
+            [self._root_quat_w[agent_id] for agent_id in self.cfg.possible_agents],
+            dim=1,
+        )  # [N, C, 4]
+
+        # Gimbal angles from joint positions (order: pitch, yaw, roll)
+        # CRITICAL: Subtract YAW_JOINT_OFFSET from raw joint yaw to get logical gimbal yaw.
+        # The physical joint has offset -π/2 applied, so joint_yaw=-π/2 means camera forward.
+        # Triangulation expects gimbal_yaw=0 to mean camera forward.
+        gimbal_yaws = torch.stack(
+            [self._gimbal_joint_pos[agent_id][:, 1] - YAW_JOINT_OFFSET for agent_id in self.cfg.possible_agents],
+            dim=1,
+        )  # [N, C]
+
+        gimbal_pitches = torch.stack(
+            [self._gimbal_joint_pos[agent_id][:, 0] for agent_id in self.cfg.possible_agents],
+            dim=1,
+        )  # [N, C]
+
+        # Camera intrinsics (with zoom applied)
+        camera_intrinsics = torch.stack(
+            [self._camera_intrinsics_cache[agent_id] for agent_id in self.cfg.possible_agents],
+            dim=1,
+        )  # [N, C, 3, 3]
+
+        # Get bbox data: [N, C, T, 4] (normalized xywh format)
+        bbox_2d = self.bbox_raycaster_v2.data.bboxes_normalized  # [N, C, T, 4]
+
+        # Valid mask: use smoothed confidence to reduce oscillation
+        bbox_valid = self._smoothed_bbox_confidence > self._smoothed_bbox_empty_threshold  # [N, C, T]
+
+        # Target position (GT): [N, T, 3]
+        target_pos_gt = self._target_pos_w.unsqueeze(1) if use_gt_target else None
+
+        # Call triangulation
+        result = compute_full_triangulation(
+            bbox_2d=bbox_2d,
+            bbox_valid=bbox_valid,
+            robot_positions=robot_positions,
+            robot_quats=robot_quats,
+            gimbal_yaws=gimbal_yaws,
+            gimbal_pitches=gimbal_pitches,
+            camera_intrinsics=camera_intrinsics,
+            cfg=self.cfg.triangulation,
+            target_positions_gt=target_pos_gt,
+        )
+
+        return result
+
     def _get_rewards(self) -> Dict[str, torch.Tensor]:
         """Get rewards for all agents.
 
         Reward composition:
         - Task reward: negative distance to target
+        - Triangulation reward: 1/sqrt(trace) covariance quality (if enabled)
         - CBF penalty: CPA barrier violation (training-time only)
 
         When delay system is enabled, task rewards use states based on
@@ -536,6 +641,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
         - use_delay=True, use_noise=True: Full noisy delayed
 
         CBF penalty always uses GT positions for safety.
+        Triangulation reward uses GT target position for covariance computation.
 
         Returns:
             Dictionary mapping agent_id to reward tensor (N,).
@@ -561,6 +667,35 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 dist = torch.norm(self._root_pos_w[agent_id] - self._target_pos_w, dim=-1)
                 task_rewards[agent_id] = -dist * 0.1
 
+        # Triangulation reward (uses GT target position for covariance computation)
+        tri_reward = torch.zeros(self.num_envs, device=self.device)
+
+        if self.cfg.enable_triangulation:
+            # Compute triangulation with GT target position (reward pipeline)
+            self._triangulation_result_gt = self._compute_triangulation(use_gt_target=True)
+
+            # Analytical reward: 1/sqrt(trace)
+            # quality_metric is the trace of covariance (lower = better geometry)
+            quality = self._triangulation_result_gt.quality_metric[:, 0]  # [N]
+            is_valid = self._triangulation_result_gt.is_valid[:, 0]  # [N]
+
+            # Safe computation: clamp quality to avoid division by zero
+            # Handle NaN values from invalid triangulations
+            quality_safe = torch.where(
+                torch.isnan(quality),
+                torch.full_like(quality, 1e6),  # Large value -> small reward
+                quality,
+            )
+            quality_safe = torch.clamp(quality_safe, min=1e-6)
+
+            # Reward = 1/sqrt(trace), clipped to [0, 100]
+            tri_reward = torch.where(
+                is_valid,
+                torch.clamp(1.0 / torch.sqrt(quality_safe), max=100.0),
+                torch.zeros_like(quality),
+            )
+            tri_reward = tri_reward * self.cfg.triangulation_reward_scale
+
         # Stack GT positions for CBF computation: (E, N, 3)
         # CBF always uses GT for safety
         gt_positions = torch.stack(
@@ -580,10 +715,11 @@ class IrisMA6TestEnv(DirectMARLEnv):
         )  # (E,)
 
         # Compose final reward per agent
+        # All agents share the same triangulation reward (cooperative task)
         lambda_cbf = self.cbf_manager.lambda_cbf
         rewards = {}
         for idx, agent_id in enumerate(self.cfg.possible_agents):
-            rewards[agent_id] = task_rewards[agent_id] - lambda_cbf * cbf_penalty
+            rewards[agent_id] = task_rewards[agent_id] + tri_reward - lambda_cbf * cbf_penalty
 
         return rewards
     
@@ -593,8 +729,14 @@ class IrisMA6TestEnv(DirectMARLEnv):
         When delay system is enabled, observations use delayed states.
         Otherwise, uses ground truth states directly.
 
+        When triangulation is enabled, appends triangulation tail (6D):
+        - Triangulated position (3D) - uses midpoint method, not GT
+        - Standard deviation (3D) - from covariance diagonal
+
         Returns:
-            Dictionary mapping agent_id to observation tensor (N, 18).
+            Dictionary mapping agent_id to observation tensor.
+            - Base: 18D (pos, vel, quat, gimbal_yaw, gimbal_pitch, zoom, bbox, bbox_empty)
+            - With triangulation: 24D (+6D triangulation tail)
         """
         obs = {}
 
@@ -657,6 +799,52 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     dim=-1,
                 )
 
+        # Append triangulation tail if enabled (observation pipeline uses triangulated position)
+        if self.cfg.enable_triangulation:
+            # Compute triangulation WITHOUT GT (uses midpoint method for position)
+            self._triangulation_result_obs = self._compute_triangulation(use_gt_target=False)
+
+            result = self._triangulation_result_obs
+            is_valid = result.is_valid[:, 0]  # [N]
+
+            # Triangulated position (use first agent's position as fallback when invalid)
+            first_agent_id = self.cfg.possible_agents[0]
+            tri_pos = torch.where(
+                is_valid.unsqueeze(-1).expand(-1, 3),
+                result.position[:, 0, :],  # [N, 3] - triangulated
+                self._root_pos_w[first_agent_id],  # fallback to first agent's position
+            )
+
+            # Standard deviation from covariance diagonal (or -1 as invalid marker)
+            # Handle NaN values in covariance
+            cov = result.covariance[:, 0, :, :]  # [N, 3, 3]
+            cov_diag = torch.diagonal(cov, dim1=-2, dim2=-1)  # [N, 3]
+
+            # Replace NaN with large values before sqrt
+            cov_diag_safe = torch.where(
+                torch.isnan(cov_diag),
+                torch.ones_like(cov_diag),  # Will become -1 due to invalid mask
+                cov_diag,
+            )
+            cov_diag_safe = torch.clamp(cov_diag_safe, min=1e-12)
+
+            tri_std = torch.where(
+                is_valid.unsqueeze(-1).expand(-1, 3),
+                torch.sqrt(cov_diag_safe),
+                torch.full_like(cov_diag, -1.0),  # Invalid marker
+            )
+
+            # Append triangulation tail to each agent's observation
+            for agent_id in self.cfg.possible_agents:
+                obs[agent_id] = torch.cat(
+                    [
+                        obs[agent_id],
+                        tri_pos,   # [N, 3] - triangulated position
+                        tri_std,   # [N, 3] - uncertainty std_dev
+                    ],
+                    dim=-1,
+                )
+
         return obs
 
     def _get_dones(self) -> tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
@@ -694,12 +882,125 @@ class IrisMA6TestEnv(DirectMARLEnv):
     def _reset_idx(self, env_ids: torch.Tensor):
         """Reset environments at specified indices.
 
+        Uses InitialStates module for curriculum-driven randomization if enabled,
+        otherwise falls back to hardcoded triangle formation.
+
         Args:
             env_ids: Environment indices to reset.
         """
         super()._reset_idx(env_ids)
 
-        # Reset each robot to initial position
+        num_reset = len(env_ids)
+
+        if self._initial_states is not None:
+            # Generate randomized initial states via InitialStates module
+            result = self._initial_states.generate(
+                env_ids=torch.arange(num_reset, device=self.device),
+                curriculum_progress=self._curriculum_progress,
+            )
+
+            # Apply agent states
+            for idx, agent_id in enumerate(self.cfg.possible_agents):
+                robot = self._robots[agent_id]
+
+                # Root pose: position + orientation
+                # Add terrain origin offset
+                agent_pos = result.agent_positions[:, idx] + self._terrain.env_origins[env_ids]
+                agent_quat = result.agent_orientations[:, idx]
+                root_pose = torch.cat([agent_pos, agent_quat], dim=-1)
+
+                # Root velocity: linear + angular
+                root_vel = torch.cat([
+                    result.agent_linear_velocities[:, idx],
+                    result.agent_angular_velocities[:, idx],
+                ], dim=-1)
+
+                robot.write_root_pose_to_sim(root_pose, env_ids)
+                robot.write_root_velocity_to_sim(root_vel, env_ids)
+
+                # Apply gimbal joint states
+                # Result has [yaw, roll, pitch], need to set via joint indices
+                gimbal_angles = result.gimbal_joint_positions[:, idx]  # [N, 3] = [yaw, roll, pitch]
+
+                # Build full joint position tensor from defaults
+                joint_pos = robot.data.default_joint_pos[env_ids].clone()
+                joint_vel = torch.zeros_like(joint_pos)
+
+                # Set gimbal joints with YAW_JOINT_OFFSET applied to yaw
+                yaw_idx = self.gimbal_joint_idx[agent_id]["yaw"]
+                roll_idx = self.gimbal_joint_idx[agent_id]["roll"]
+                pitch_idx = self.gimbal_joint_idx[agent_id]["pitch"]
+
+                joint_pos[:, yaw_idx] = gimbal_angles[:, 0] + YAW_JOINT_OFFSET
+                joint_pos[:, roll_idx] = gimbal_angles[:, 1]
+                joint_pos[:, pitch_idx] = gimbal_angles[:, 2]
+
+                robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
+
+                # Reset controller state and sync gimbal internal state
+                self._controllers[agent_id].reset(env_ids)
+                # Sync gimbal controller internal state to initial body-frame angles
+                self._controllers[agent_id]._gimbal._yaw[env_ids] = gimbal_angles[:, 0]
+                self._controllers[agent_id]._gimbal._pitch[env_ids] = gimbal_angles[:, 2]
+
+                # Compute world-frame azimuth/elevation for LOS stabilization
+                # Direction from agent to target in world frame (before terrain offset)
+                dir_to_target = result.target_positions - result.agent_positions[:, idx]
+                azimuth_world = torch.atan2(dir_to_target[:, 1], dir_to_target[:, 0])
+                xy_dist = torch.sqrt(dir_to_target[:, 0] ** 2 + dir_to_target[:, 1] ** 2)
+                elevation_world = torch.atan2(dir_to_target[:, 2], xy_dist)
+
+                self._controllers[agent_id]._gimbal._azimuth_world[env_ids] = azimuth_world
+                self._controllers[agent_id]._gimbal._elevation_world[env_ids] = elevation_world
+
+                # Set zoom level
+                self.zoom_level[env_ids, idx] = result.zoom_levels[:, idx]
+
+            # Apply target states
+            target_pos = result.target_positions + self._terrain.env_origins[env_ids]
+            target_quat = result.target_orientations
+            target_pose = torch.cat([target_pos, target_quat], dim=-1)
+
+            self.target.write_root_pose_to_sim(target_pose, env_ids)
+            self.target.write_root_velocity_to_sim(result.target_velocities, env_ids)
+
+        else:
+            # Fallback to hardcoded triangle formation
+            self._reset_idx_hardcoded(env_ids)
+
+        # Reset command buffers
+        self.cmd_vel[env_ids] = 0.0
+        if self._initial_states is None:
+            self.zoom_level[env_ids] = 1.0
+        self.cmd_gimbal_yaw[env_ids] = 0.0
+        self.cmd_gimbal_pitch[env_ids] = 0.0
+
+        # Reset CBF manager state
+        self.cbf_manager.reset(env_ids)
+
+        # Reset delay system and simulation time
+        if self._delay_system is not None:
+            self._delay_system.reset(env_ids)
+        self._sim_time[env_ids] = 0.0
+
+        # Reset smoothed occlusion confidence to visible state
+        self._smoothed_bbox_confidence[env_ids] = 1.0
+
+        # Clear triangulation results (will be recomputed on first step)
+        self._triangulation_result_gt = None
+        self._triangulation_result_obs = None
+
+        # Populate state caches so _get_observations works on first reset
+        self._update_state_cache()
+
+    def _reset_idx_hardcoded(self, env_ids: torch.Tensor):
+        """Hardcoded reset logic (fallback when initial_states is disabled).
+
+        Places agents in a triangle formation around origin with target at 10m.
+
+        Args:
+            env_ids: Environment indices to reset.
+        """
         num_reset = len(env_ids)
 
         for idx, agent_id in enumerate(self.cfg.possible_agents):
@@ -741,25 +1042,8 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self.target.write_root_pose_to_sim(torch.cat([target_pos, target_quat], dim=-1), env_ids)
         self.target.write_root_velocity_to_sim(target_vel, env_ids)
 
-        # Reset command buffers
-        self.cmd_vel[env_ids] = 0.0
+        # Reset zoom level for hardcoded mode
         self.zoom_level[env_ids] = 1.0
-        self.cmd_gimbal_yaw[env_ids] = 0.0
-        self.cmd_gimbal_pitch[env_ids] = 0.0
-
-        # Reset CBF manager state
-        self.cbf_manager.reset(env_ids)
-
-        # Reset delay system and simulation time
-        if self._delay_system is not None:
-            self._delay_system.reset(env_ids)
-        self._sim_time[env_ids] = 0.0
-
-        # Reset smoothed occlusion confidence to visible state
-        self._smoothed_bbox_confidence[env_ids] = 1.0
-
-        # Populate state caches so _get_observations works on first reset
-        self._update_state_cache()
 
     # ==================================================================================
     # Debug Visualization
@@ -837,3 +1121,12 @@ class IrisMA6TestEnv(DirectMARLEnv):
             )
         if self.cfg.debug_frame_vis:
             self._visualization.update_frames(link_poses)
+
+        # Draw covariance ellipsoids for triangulation uncertainty
+        if self.cfg.enable_triangulation and self._triangulation_result_gt is not None:
+            result = self._triangulation_result_gt
+            self._visualization.update_covariance_ellipsoids(
+                translations=result.position[:, 0, :],  # [N, 3] - first target
+                covariance=result.covariance[:, 0, :, :],  # [N, 3, 3] - first target
+                is_valid=result.is_valid[:, 0],  # [N] - first target
+            )

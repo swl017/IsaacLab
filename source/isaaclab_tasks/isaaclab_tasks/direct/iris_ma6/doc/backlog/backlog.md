@@ -54,3 +54,42 @@ To implement visual-only propeller spinning without physics interference, the US
 ## Per-agent Randomization
 
 Add per-agent randomization layer on top of per-episode, per-env, per-step randomization
+
+---
+
+## Domain Randomization
+
+**Priority:** Medium
+**Status:** Spec Complete
+**Spec:** [../domain_randomization_spec.md](../domain_randomization_spec.md)
+
+Apply domain randomization for sim-to-real transfer including:
+- Physics properties (mass, friction, scale)
+- Camera parameters (focal length, resolution via computational simulation)
+- Gimbal mount positions and dynamics
+
+### Key Design Decisions
+
+1. **Camera resolution randomization**: Implemented via computational crop+resize pipeline
+   - Render at max resolution (1920x1080 Full HD)
+   - Apply symmetric crops for FOV simulation
+   - Resize to target resolution (1080p, 720p, 360p)
+   - Maintain centered principal points and square pixels (16:9 aspect ratio)
+
+2. **Randomization hierarchy**: Pre-startup → Per-env → Per-episode → Per-agent → Per-step
+
+---
+
+## Adverserial MARL
+
+---
+
+## Roll-switching
+
+Observer-Intercepter
+
+---
+
+## Ontology-based Mission Planning
+
+Mission planning and task allocation
