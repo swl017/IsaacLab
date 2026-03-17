@@ -1,13 +1,17 @@
 # file: utils/occlusion_fully_batched.py
 
 """
-Fully batched occlusion detection - NO environment loops!
+Fully batched occlusion detection - NO environment OR camera loops!
 
 Key insight: Since all environments share the same agent meshes,
-we can batch ALL rays across ALL environments at once in body frame.
+we can batch ALL rays across ALL cameras AND ALL environments at once in body frame.
 
-Complexity: O(num_agents) raycasts instead of O(N*C*num_agents)
-Expected speedup: 10-1000x depending on N
+Complexity: O(num_agents) raycasts instead of O(C*num_agents) per agent
+  - Static mesh: O(1) raycast call
+  - Agent meshes: O(num_agents) raycast calls (1 per agent, ALL cameras batched)
+  - Total: O(1 + num_agents) raycast calls
+
+Expected speedup: C× fewer raycast calls (e.g., 3× for 3 cameras)
 """
 
 import torch
@@ -34,15 +38,18 @@ def batch_check_occlusion_fully_batched(
     enable_self_occlusion: bool = True,
     self_occlusion_min_hit_distance_m: float = 0.05,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Fully batched occlusion checking with NO environment loops.
-    
-    This is the ultimate optimization: batch ALL rays from ALL environments
-    at once for each agent mesh. Since meshes are shared across environments,
-    we can do this transformation once per agent instead of once per (env, agent).
-    
-    Complexity: O(num_agents) raycasts
-    Previous: O(N * C * num_agents) raycasts
-    Speedup: Up to N*C*1000x for large N
+    """Fully batched occlusion checking with NO environment OR camera loops.
+
+    This is the ultimate optimization: batch ALL rays from ALL cameras AND
+    ALL environments at once for each agent mesh. Since meshes are shared
+    across environments, we can do this transformation once per agent instead
+    of once per (env, camera, agent).
+
+    Complexity: O(1 + num_agents) raycast calls total
+      - Static mesh: O(1) call
+      - Agent meshes: O(num_agents) calls (1 per agent, all cameras batched)
+    Previous: O(1 + C * num_agents) raycast calls
+    Speedup: C× fewer raycast calls for agent meshes
     
     Args:
         camera_pos: Camera positions in world frame. Shape (N, C, 3).
@@ -71,8 +78,18 @@ def batch_check_occlusion_fully_batched(
     self_occluded_points = torch.zeros((N, C, T, K), dtype=torch.bool, device=device)
     
     # Compute target bbox radius for tolerance
-    if target_bbox_size.ndim == 2:
-        target_bbox_size = target_bbox_size.unsqueeze(1).expand(N, T, -1)
+    # Handle all possible input shapes: (3,), (T, 3), (N, 3), (N, T, 3)
+    if target_bbox_size.ndim == 1:
+        # Shape (3,) -> expand to (N, T, 3)
+        target_bbox_size = target_bbox_size.view(1, 1, 3).expand(N, T, -1)
+    elif target_bbox_size.ndim == 2:
+        if target_bbox_size.shape[0] == T:
+            # Shape (T, 3) -> (N, T, 3)
+            target_bbox_size = target_bbox_size.unsqueeze(0).expand(N, -1, -1)
+        else:
+            # Shape (N, 3) -> (N, T, 3)
+            target_bbox_size = target_bbox_size.unsqueeze(1).expand(-1, T, -1)
+    # Now guaranteed shape (N, T, 3)
     bbox_radius = torch.norm(target_bbox_size, dim=-1) / 2.0  # (N, T)
     
     # === Prepare data for batched operations ===
@@ -207,100 +224,136 @@ def _raycast_agent_fully_batched(
     max_distance: float,
     self_occlusion_min_hit_distance_m: float,
 ) -> torch.Tensor:
-    """Fully batched agent raycasting - NO environment loops!
-    
+    """Fully batched agent raycasting - NO environment or camera loops!
+
+    Key optimization: Batch ALL cameras AND ALL environments into a single raycast.
+
+    Previous approach: O(C) raycast calls per agent (one per camera)
+    New approach: O(1) raycast call per agent (all cameras batched)
+
     Key idea: Since agent_mesh is the same for all environments, we can:
-    1. Transform ALL rays from ALL environments to body frame
+    1. Transform ALL rays from ALL cameras and ALL environments to body frame
     2. Do ONE massive raycast
     3. Check occlusions in batch
-    
+    4. Apply self-occlusion filtering post-hoc
+
     Returns:
         occluded: Shape (N, C, T, K) boolean tensor.
     """
     N, C, T, K = camera_pos_exp.shape[:4]
     device = camera_pos_exp.device
-    
+
     # Initialize result
     occluded = torch.zeros((N, C, T, K), dtype=torch.bool, device=device)
-    
+
     # Get cameras that need testing
     test_cam_indices = torch.where(test_camera_mask)[0]
-    if len(test_cam_indices) == 0:
+    num_test_cams = len(test_cam_indices)
+    if num_test_cams == 0:
         return occluded
-    
-    # === Transform ALL rays to agent body frame (BATCHED) ===
-    
-    # Normalize agent quaternions
+
+    # === Normalize agent quaternions once ===
     agent_quat_norm = agent_quat / torch.clamp(
         torch.norm(agent_quat, dim=-1, keepdim=True), min=1e-8
     )
     agent_quat_inv = math_utils.quat_inv(agent_quat_norm)  # (N, 4)
-    
-    # For each camera that needs testing
-    for cam_idx in test_cam_indices:
-        cam_idx = cam_idx.item()
-        
-        # Get data for this camera across ALL environments
-        cam_pos_w = camera_pos_exp[:, cam_idx, 0, 0, :]  # (N, 3)
-        ray_dirs_w_cam = ray_dirs_w[:, cam_idx, :, :, :]  # (N, T, K, 3)
-        cam_to_tgt = cam_to_target[:, cam_idx, :, :]  # (N, T, K)
-        
-        # === Transform camera positions to body frame ===
-        # cam_pos_w: (N, 3), agent_pos: (N, 3)
-        cam_rel = cam_pos_w - agent_pos  # (N, 3)
-        cam_body = math_utils.quat_apply(agent_quat_inv, cam_rel)  # (N, 3)
-        
-        # === Transform ray directions to body frame ===
-        # ray_dirs_w_cam: (N, T, K, 3)
-        # We need to apply rotation for each (N, T, K) ray
-        
-        # Flatten rays
-        ray_dirs_flat = ray_dirs_w_cam.reshape(N * T * K, 3)  # (N*T*K, 3)
-        
-        # Expand quaternions to match
-        quat_inv_exp = agent_quat_inv.unsqueeze(1).unsqueeze(1).expand(-1, T, K, -1)  # (N, T, K, 4)
-        quat_inv_flat = quat_inv_exp.reshape(N * T * K, 4)  # (N*T*K, 4)
-        
-        # Rotate all rays at once
-        ray_dirs_body_flat = math_utils.quat_apply(quat_inv_flat, ray_dirs_flat)
-        ray_dirs_body = ray_dirs_body_flat.view(N, T, K, 3)  # (N, T, K, 3)
-        
-        # === Prepare for raycasting ===
-        # Expand camera positions in body frame for all test points
-        cam_body_exp = cam_body.view(N, 1, 1, 3).expand(-1, T, K, -1)  # (N, T, K, 3)
-        
-        # Flatten everything for ONE massive raycast
-        batch_size = N * T * K
-        ray_starts_flat = cam_body_exp.reshape(batch_size, 3)
-        ray_dirs_flat = ray_dirs_body.reshape(batch_size, 3)
-        
-        # === SINGLE RAYCAST FOR ALL ENVIRONMENTS ===
-        ray_hits_flat, _, _, _ = raycast_mesh(
-            ray_starts_flat,
-            ray_dirs_flat,
-            mesh=agent_mesh,
-            max_dist=max_distance,
-            return_distance=False,
-            return_normal=False
-        )
-        
-        ray_hits_body = ray_hits_flat.view(N, T, K, 3)
-        
-        # === Check occlusions ===
-        valid_hit = ~(torch.isinf(ray_hits_body).any(dim=-1) | 
-                     torch.isnan(ray_hits_body).any(dim=-1))
-        
-        if valid_hit.any():
-            hit_distances = torch.norm(ray_hits_body - cam_body_exp, dim=-1)  # (N, T, K)
-            min_clear_dist = cam_to_tgt - target_radius[:, 0, :, 0]  # (N, T, K)
-            
-            occluded_this_cam = valid_hit & (hit_distances < min_clear_dist)
-            if self_camera_mask[cam_idx]:
-                occluded_this_cam &= hit_distances >= self_occlusion_min_hit_distance_m
-            
-            # Update result for this camera
-            occluded[:, cam_idx, :, :] = occluded_this_cam
-    
+
+    # === Extract only the cameras we need to test ===
+    # camera_pos_exp: (N, C, T, K, 3) -> select test cameras -> (N, C', T, K, 3)
+    cam_pos_w_selected = camera_pos_exp[:, test_cam_indices, 0, 0, :]  # (N, C', 3)
+    ray_dirs_w_selected = ray_dirs_w[:, test_cam_indices, :, :, :]  # (N, C', T, K, 3)
+    cam_to_tgt_selected = cam_to_target[:, test_cam_indices, :, :]  # (N, C', T, K)
+
+    C_test = num_test_cams
+
+    # === Transform ALL camera positions to body frame (BATCHED) ===
+    # cam_pos_w_selected: (N, C', 3), agent_pos: (N, 3) -> expand agent_pos to (N, 1, 3)
+    agent_pos_exp = agent_pos.unsqueeze(1)  # (N, 1, 3)
+    cam_rel = cam_pos_w_selected - agent_pos_exp  # (N, C', 3)
+
+    # Expand quat_inv for all cameras: (N, 4) -> (N, C', 4)
+    agent_quat_inv_cam = agent_quat_inv.unsqueeze(1).expand(-1, C_test, -1)  # (N, C', 4)
+
+    # Flatten for quat_apply: (N*C', 3) and (N*C', 4)
+    cam_rel_flat = cam_rel.reshape(N * C_test, 3)
+    quat_inv_cam_flat = agent_quat_inv_cam.reshape(N * C_test, 4)
+
+    # Transform camera positions to body frame
+    cam_body_flat = math_utils.quat_apply(quat_inv_cam_flat, cam_rel_flat)  # (N*C', 3)
+    cam_body = cam_body_flat.view(N, C_test, 3)  # (N, C', 3)
+
+    # === Transform ALL ray directions to body frame (BATCHED) ===
+    # ray_dirs_w_selected: (N, C', T, K, 3)
+    # Expand quat_inv: (N, 4) -> (N, C', T, K, 4)
+    quat_inv_expanded = agent_quat_inv.view(N, 1, 1, 1, 4).expand(-1, C_test, T, K, -1)
+
+    # Flatten for quat_apply
+    ray_dirs_flat = ray_dirs_w_selected.reshape(N * C_test * T * K, 3)
+    quat_inv_flat = quat_inv_expanded.reshape(N * C_test * T * K, 4)
+
+    # Transform all ray directions at once
+    ray_dirs_body_flat = math_utils.quat_apply(quat_inv_flat, ray_dirs_flat)
+    ray_dirs_body = ray_dirs_body_flat.view(N, C_test, T, K, 3)  # (N, C', T, K, 3)
+
+    # === Prepare for ONE MASSIVE RAYCAST ===
+    # Expand camera positions in body frame: (N, C', 3) -> (N, C', T, K, 3)
+    cam_body_exp = cam_body.view(N, C_test, 1, 1, 3).expand(-1, -1, T, K, -1)
+
+    # Flatten everything for ONE raycast across ALL cameras and environments
+    batch_size = N * C_test * T * K
+    ray_starts_flat = cam_body_exp.reshape(batch_size, 3)
+    ray_dirs_final_flat = ray_dirs_body.reshape(batch_size, 3)
+
+    # === SINGLE RAYCAST FOR ALL CAMERAS AND ALL ENVIRONMENTS ===
+    ray_hits_flat, _, _, _ = raycast_mesh(
+        ray_starts_flat,
+        ray_dirs_final_flat,
+        mesh=agent_mesh,
+        max_dist=max_distance,
+        return_distance=False,
+        return_normal=False
+    )
+
+    ray_hits_body = ray_hits_flat.view(N, C_test, T, K, 3)
+
+    # === Check occlusions in batch ===
+    valid_hit = ~(torch.isinf(ray_hits_body).any(dim=-1) |
+                 torch.isnan(ray_hits_body).any(dim=-1))  # (N, C', T, K)
+
+    if valid_hit.any():
+        hit_distances = torch.norm(ray_hits_body - cam_body_exp, dim=-1)  # (N, C', T, K)
+
+        # target_radius: (N, 1, T, 1) -> (N, T)
+        target_radius_2d = target_radius[:, 0, :, 0]  # (N, T)
+        # Expand for (N, C', T, K)
+        target_radius_exp = target_radius_2d.view(N, 1, T, 1).expand(-1, C_test, -1, K)
+
+        min_clear_dist = cam_to_tgt_selected - target_radius_exp  # (N, C', T, K)
+
+        occluded_selected = valid_hit & (hit_distances < min_clear_dist)  # (N, C', T, K)
+
+        # === Apply self-occlusion filtering per camera ===
+        # self_camera_mask: (C,) -> select test cameras -> (C',)
+        self_mask_selected = self_camera_mask[test_cam_indices]  # (C',)
+
+        if self_mask_selected.any():
+            # For self-cameras, filter out hits closer than min distance
+            # self_mask_selected: (C',) -> (1, C', 1, 1)
+            self_mask_exp = self_mask_selected.view(1, C_test, 1, 1)
+
+            # Only apply distance filter for self-cameras
+            distance_filter = hit_distances >= self_occlusion_min_hit_distance_m
+            occluded_selected = torch.where(
+                self_mask_exp,
+                occluded_selected & distance_filter,
+                occluded_selected
+            )
+
+        # === Write results back to full tensor ===
+        # occluded: (N, C, T, K), occluded_selected: (N, C', T, K)
+        # test_cam_indices maps C' -> C
+        occluded[:, test_cam_indices, :, :] = occluded_selected
+
     return occluded
 
 

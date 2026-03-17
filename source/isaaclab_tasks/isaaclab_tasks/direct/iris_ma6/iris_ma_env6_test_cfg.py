@@ -164,7 +164,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
 
     camera: TiledCameraCfg = TiledCameraCfg(
         prim_path="/World/envs/env_.*/{robot_name}/pitch_link/camera",
-        update_period=0.1,
+        update_period=0.04,
         height=480,
         width=640,
         data_types=["rgb"],
@@ -190,17 +190,18 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
         mesh_prim_paths=["/World/ground"],
         num_cameras_per_env=3,
         num_cameras_per_agent=1,
-        load_agent_meshes=False,  # Disabled - causes shape bug with multi-env occlusion
+        load_agent_meshes=True,  # Enabled - loads agent body meshes for occlusion
         min_bbox_size=(0.01, 0.01),
         max_bbox_size=(0.95, 0.95),
         partial_detection_allowed=False,
         min_bbox_area_pixels=4.0,
-        enable_occlusion_check=False,  # Disabled - shape bug with multi-env
-        enable_self_occlusion=False,
-        enable_inter_target_occlusion=False,
-        occlusion_ray_pattern="center_only",
-        occlusion_visibility_threshold=0.5,
-        occlusion_ray_tolerance=1.1,
+        enable_occlusion_check=True,  # Enabled - raycasting occlusion detection
+        enable_self_occlusion=True,  # Enabled - camera's own body can block view
+        enable_inter_target_occlusion=True,  # Enabled - image-space inter-target occlusion
+        occlusion_ray_pattern="9point",  # Use 9 test points for more robust detection
+        occlusion_visibility_threshold=0.3,  # 30% of points must be visible (lower = more sensitive to occlusion)
+        occlusion_ray_tolerance=1.2,  # Slightly larger tolerance to reduce edge oscillation
+        self_occlusion_min_hit_distance_m=0.05,  # Avoids camera mount false positives
         max_distance=100.0,
         debug_vis=False,
         debug_memory=False,

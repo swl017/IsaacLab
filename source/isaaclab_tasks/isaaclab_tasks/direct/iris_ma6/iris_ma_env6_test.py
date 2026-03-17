@@ -23,6 +23,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectMARLEnv
 from isaaclab.sensors import TiledCamera
+from isaaclab.utils.math import quat_mul
 
 from .bbox_raycaster_v2 import BBoxRayCasterV2
 from .bbox_raycaster_v2.utils.projection import create_intrinsic_matrix_tensor
@@ -30,10 +31,6 @@ from .cbf_safety import CBFManager
 from .controller import DroneController
 from .controller.gimbal_controller import YAW_JOINT_OFFSET
 from .delay_system_v3 import MultiAgentDelaySystemV3, AgentStates
-from .delay_system_v3.derived_field_computers import (
-    compute_camera_orientation_from_gimbal,
-    compute_camera_position,
-)
 from .iris_ma_env6_test_cfg import IrisMA6TestEnvCfg
 from .visualization import CustomVisualization
 from .visualization.frame_visualizer import FRAME_LINKS
@@ -240,6 +237,14 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self._vis_bbox_empty: Dict[str, torch.Tensor] = {}
         self._vis_zoom_levels: Dict[str, torch.Tensor] = {}
 
+        # Temporal smoothing for occlusion detection to prevent oscillation
+        # Uses exponential moving average (EMA) on bbox_confidence
+        self._occlusion_ema_alpha = 1.0  # Lower = more smoothing (0.3 = 70% history, 30% new)
+        self._smoothed_bbox_confidence: torch.Tensor = torch.ones(
+            self.num_envs, num_agents, 1, device=self.device
+        )  # (N, C, T) - starts at 1.0 (visible)
+        self._smoothed_bbox_empty_threshold = 0.4  # Below this confidence = occluded
+
         # Enable debug visualization if configured
         if self.cfg.debug_vis:
             self.set_debug_vis(True)
@@ -360,7 +365,6 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 ],
             )
 
-            # DEBUG: Print gimbal info for first agent, first env, every 100 steps
             # Store zoom level for observations
             self.zoom_level[:, idx] = zoom_level
 
@@ -413,24 +417,23 @@ class IrisMA6TestEnv(DirectMARLEnv):
             root_pos = self._root_pos_w[agent_id]
             root_quat = self._root_quat_w[agent_id]
 
-            # Strip YAW_JOINT_OFFSET from yaw for frustum computation.
-            # The camera offset already encodes the yaw correction (R_z(-90°)*R_x(-90°)),
-            # so the gimbal quaternion must use the controller's logical yaw (offset-free).
-            gimbal_joint_pos_frustum = self._gimbal_joint_pos[agent_id].clone()
-            gimbal_joint_pos_frustum[:, 1] -= YAW_JOINT_OFFSET
-            # Use pitch_link body position (actual camera mount point) instead of
-            # root_pos + zero offset. This matches TiledCamera which is attached to pitch_link.
+            # Use pitch_link body pose directly from physics simulation.
+            # This ensures exact match with TiledCamera which is attached to pitch_link.
+            # Previously used compute_camera_orientation_from_gimbal() which analytically
+            # computed the orientation from joint angles, but this could drift from the
+            # actual physics-computed link transforms under motion.
             robot = self._robots[agent_id]
             pitch_link_idx = self._frame_link_ids[agent_id]["pitch_link"]
             camera_pos_w = robot.data.body_pos_w[:, pitch_link_idx]  # (N, 3)
-            camera_poses[agent_id] = (
-                camera_pos_w,
-                compute_camera_orientation_from_gimbal(
-                    root_quat,
-                    gimbal_joint_pos_frustum,
-                    self._camera_offset_rotation_b,
-                ),
-            )  # FLU
+            camera_quat_physics = robot.data.body_quat_w[:, pitch_link_idx]  # (N, 4)
+
+            # Apply camera offset rotation to convert from pitch_link frame to camera frame.
+            # The offset (0.5, -0.5, 0.5, -0.5) is R_z(-90°) * R_x(-90°) which maps:
+            # - Camera +Z (optical axis) -> Body +X (forward)
+            # - Camera +Y (down) -> Body -Z (down)
+            # - Camera +X (right) -> Body +Y (left, then negated = right)
+            camera_quat_w = quat_mul(camera_quat_physics, self._camera_offset_rotation_b)
+            camera_poses[agent_id] = (camera_pos_w, camera_quat_w)
 
             intrinsic = self._camera_intrinsics_base.clone()
             intrinsic[:, 0, 0] *= self.zoom_level[:, idx]
@@ -452,6 +455,14 @@ class IrisMA6TestEnv(DirectMARLEnv):
             target_poses=(target_pos, target_quat),
             agent_poses=agent_poses,
             image_shapes=image_shapes,
+        )
+
+        # Apply temporal smoothing to bbox_confidence to prevent oscillation
+        # EMA: smoothed = alpha * new + (1 - alpha) * old
+        raw_confidence = self.bbox_raycaster_v2.data.bbox_confidence  # (N, C, T)
+        self._smoothed_bbox_confidence = (
+            self._occlusion_ema_alpha * raw_confidence
+            + (1.0 - self._occlusion_ema_alpha) * self._smoothed_bbox_confidence
         )
 
         # Update delay system ground truth for each agent
@@ -500,8 +511,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
         # Cache data for debug visualization callback
         self._vis_camera_poses = camera_poses
         self._vis_target_pos = self._target_pos_w
+        # Use smoothed confidence for visualization to reduce flickering
         self._vis_bbox_empty = {
-            agent_id: self.bbox_raycaster_v2.data.bbox_empty[:, idx, 0]
+            agent_id: self._smoothed_bbox_confidence[:, idx, 0] < self._smoothed_bbox_empty_threshold
             for idx, agent_id in enumerate(self.cfg.possible_agents)
         }
         self._vis_zoom_levels = {
@@ -625,7 +637,10 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 gimbal_jp = self._gimbal_joint_pos[agent_id]  # (N, 3) = [pitch, yaw, roll]
 
                 bbox = self.bbox_raycaster_v2.data.bboxes_normalized[:, idx, 0, :]
-                bbox_empty = self.bbox_raycaster_v2.data.bbox_empty[:, idx, 0].float().unsqueeze(-1)
+                # Use smoothed confidence for bbox_empty to prevent oscillation
+                smoothed_empty = (
+                    self._smoothed_bbox_confidence[:, idx, 0] < self._smoothed_bbox_empty_threshold
+                ).float().unsqueeze(-1)
 
                 # Concatenate observation: pos(3) + vel(3) + quat(4) + gimbal_yaw(1) + gimbal_pitch(1) + zoom(1) + bbox(4) + bbox_empty(1)
                 obs[agent_id] = torch.cat(
@@ -637,7 +652,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                         gimbal_jp[:, 0:1],  # (N, 1) pitch
                         self.zoom_level[:, idx : idx + 1],  # (N, 1)
                         bbox,  # (N, 4)
-                        bbox_empty,  # (N, 1)
+                        smoothed_empty,  # (N, 1)
                     ],
                     dim=-1,
                 )
@@ -692,7 +707,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
             # Calculate initial position in a formation around origin
             # Agents positioned in a triangle formation
-            angle = idx * 2 * 3.14159 / len(self.cfg.possible_agents)
+            angle = (idx - 1) * 2 * 3.14159 / len(self.cfg.possible_agents)
             offset_x = 5.0 * torch.cos(torch.tensor(angle))
             offset_y = 5.0 * torch.sin(torch.tensor(angle))
 
@@ -739,6 +754,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
         if self._delay_system is not None:
             self._delay_system.reset(env_ids)
         self._sim_time[env_ids] = 0.0
+
+        # Reset smoothed occlusion confidence to visible state
+        self._smoothed_bbox_confidence[env_ids] = 1.0
 
         # Populate state caches so _get_observations works on first reset
         self._update_state_cache()

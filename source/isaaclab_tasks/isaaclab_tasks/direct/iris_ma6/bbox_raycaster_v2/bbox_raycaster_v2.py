@@ -348,52 +348,128 @@ class BBoxRayCasterV2:
 
     def _load_agent_mesh(self, agent_id: str) -> wp.Mesh | None:
         """Load agent mesh in body-local coordinates from first environment.
-        
+
+        Loads ALL mesh components (body, propellers, arms) and combines them
+        into a single mesh for comprehensive occlusion detection.
+
         Args:
             agent_id: Agent identifier (e.g., "drone_0").
-            
+
         Returns:
             Warp mesh in body-local coordinates, or None if loading failed.
         """
         # Construct path to first environment's agent
         robot_index = agent_id.split("_")[-1]
         robot_prim_path = f"/World/envs/env_0/Robot_{robot_index}"
-        
-        # Find the body link (main rigid body)
-        body_prim = sim_utils.get_first_matching_child_prim(
-            robot_prim_path,
-            lambda prim: "body" in str(prim.GetPath()).lower() and prim.GetTypeName() == "Mesh"
-        )
-        
-        if body_prim is None or not body_prim.IsValid():
-            omni.log.warn(f"Could not find body mesh for {agent_id} at {robot_prim_path}")
+
+        # Find ALL meshes under the robot prim (body, propellers, etc.)
+        all_vertices = []
+        all_faces = []
+        vertex_offset = 0
+
+        # Get the robot root prim to find body position for coordinate transform
+        robot_prim = prim_utils.get_prim_at_path(robot_prim_path)
+        if robot_prim is None or not robot_prim.IsValid():
+            omni.log.warn(f"Could not find robot prim for {agent_id} at {robot_prim_path}")
             return None
-        
-        # Extract mesh geometry
-        mesh_prim = UsdGeom.Mesh(body_prim)
-        points = mesh_prim.GetPointsAttr().Get()
-        indices = mesh_prim.GetFaceVertexIndicesAttr().Get()
-        
-        if points is None or indices is None:
-            omni.log.warn(f"Invalid mesh data for {agent_id}")
+
+        # Get body transform to use as reference frame
+        body_prim_path = f"{robot_prim_path}/body"
+        body_xform_prim = prim_utils.get_prim_at_path(body_prim_path)
+        body_world_transform = None
+        if body_xform_prim is not None and body_xform_prim.IsValid():
+            body_world_transform = np.array(omni.usd.get_world_transform_matrix(body_xform_prim)).T
+
+        # Recursively find all Mesh prims under the robot
+        def find_all_meshes(prim, meshes: list):
+            if prim.GetTypeName() == "Mesh":
+                meshes.append(prim)
+            for child in prim.GetChildren():
+                find_all_meshes(child, meshes)
+
+        mesh_prims = []
+        find_all_meshes(robot_prim, mesh_prims)
+
+        if len(mesh_prims) == 0:
+            omni.log.warn(f"No meshes found for {agent_id} at {robot_prim_path}")
             return None
-        
-        points = np.asarray(points, dtype=np.float32)
-        indices = np.asarray(indices, dtype=np.int32)
-        
-        # Get the body's local transform (relative to robot root)
-        # We want the mesh in the body's LOCAL frame, not world frame
-        # So we DON'T apply the world transform here
-        
+
+        omni.log.info(f"Found {len(mesh_prims)} meshes for {agent_id}: {[str(m.GetPath()) for m in mesh_prims]}")
+
+        for mesh_prim in mesh_prims:
+            mesh_geom = UsdGeom.Mesh(mesh_prim)
+            points = mesh_geom.GetPointsAttr().Get()
+            indices = mesh_geom.GetFaceVertexIndicesAttr().Get()
+
+            if points is None or indices is None:
+                continue
+
+            points = np.asarray(points, dtype=np.float32)
+            indices = np.asarray(indices, dtype=np.int32)
+
+            # Get mesh's world transform
+            mesh_world_transform = np.array(omni.usd.get_world_transform_matrix(mesh_prim)).T
+
+            # Transform points to world frame
+            points_world = np.matmul(points, mesh_world_transform[:3, :3].T) + mesh_world_transform[:3, 3]
+
+            # Transform from world frame to body-local frame
+            if body_world_transform is not None:
+                # Inverse transform: world -> body local
+                body_rotation_inv = body_world_transform[:3, :3].T
+                body_translation = body_world_transform[:3, 3]
+                points_body_local = np.matmul(points_world - body_translation, body_rotation_inv.T)
+            else:
+                points_body_local = points_world
+
+            # Handle face indices (USD can have quads, we need triangles)
+            # Get face vertex counts to triangulate properly
+            face_counts = mesh_geom.GetFaceVertexCountsAttr().Get()
+            if face_counts is not None:
+                face_counts = np.asarray(face_counts)
+                triangulated_indices = []
+                idx_ptr = 0
+                for count in face_counts:
+                    if count == 3:
+                        triangulated_indices.append(indices[idx_ptr:idx_ptr+3])
+                    elif count == 4:
+                        # Triangulate quad into 2 triangles
+                        quad = indices[idx_ptr:idx_ptr+4]
+                        triangulated_indices.append([quad[0], quad[1], quad[2]])
+                        triangulated_indices.append([quad[0], quad[2], quad[3]])
+                    else:
+                        # Fan triangulation for polygons
+                        for i in range(1, count - 1):
+                            triangulated_indices.append([indices[idx_ptr], indices[idx_ptr+i], indices[idx_ptr+i+1]])
+                    idx_ptr += count
+                indices = np.array(triangulated_indices, dtype=np.int32).flatten()
+
+            # Adjust indices for combined mesh
+            indices_adjusted = indices + vertex_offset
+
+            all_vertices.append(points_body_local)
+            all_faces.append(indices_adjusted.reshape(-1, 3))
+            vertex_offset += len(points_body_local)
+
+        if len(all_vertices) == 0:
+            omni.log.warn(f"No valid mesh data for {agent_id}")
+            return None
+
+        # Combine all meshes
+        combined_vertices = np.concatenate(all_vertices, axis=0)
+        combined_faces = np.concatenate(all_faces, axis=0).flatten()
+
+        omni.log.info(f"Combined mesh for {agent_id}: {len(combined_vertices)} vertices, {len(combined_faces)//3} triangles")
+
         # Optional: Apply mesh simplification
         if self.cfg.agent_mesh_simplification < 1.0:
-            points, indices = self._simplify_mesh(
-                points, indices, self.cfg.agent_mesh_simplification
+            combined_vertices, combined_faces = self._simplify_mesh(
+                combined_vertices, combined_faces, self.cfg.agent_mesh_simplification
             )
-        
+
         # Convert to warp mesh
-        wp_mesh = convert_to_warp_mesh(points, indices, device=self.device)
-        
+        wp_mesh = convert_to_warp_mesh(combined_vertices, combined_faces, device=self.device)
+
         return wp_mesh
 
     def _create_box_collision_mesh(self) -> wp.Mesh:
@@ -778,15 +854,22 @@ class BBoxRayCasterV2:
             out=self._occlusion_test_points
         )
 
-        # Get target bbox size
+        # Get target bbox size and ensure shape (N, T, 3) for occlusion checking
+        N, T = self.num_envs, self.num_targets
         if self.targets_share_bbox:
+            # Shape (3,) - same bbox for all targets across all environments
             target_bbox_size = self.target_bbox_sizes
             if target_scale is not None:
                 target_bbox_size = target_bbox_size * target_scale.squeeze(1)[0, :]
+            # Expand to (N, T, 3)
+            target_bbox_size = target_bbox_size.view(1, 1, 3).expand(N, T, -1)
         else:
+            # Shape (num_envs, 3) - stacked from per-environment extraction
             target_bbox_size = self.target_bbox_sizes
             if target_scale is not None:
                 target_bbox_size = target_bbox_size * target_scale.squeeze(1)
+            # Expand to (N, T, 3) - each environment has same bbox size for all T targets
+            target_bbox_size = target_bbox_size.unsqueeze(1).expand(-1, T, -1)
 
         # Get current agent IDs for cameras
         current_agent_ids = sorted(camera_poses.keys())

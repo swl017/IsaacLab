@@ -217,5 +217,311 @@ class TestBBoxRayCasterV2SelfOcclusion(unittest.TestCase):
             self.assertFalse(self_mask[0, 0, 0].item())
 
 
+class TestOcclusionShapeHandling(unittest.TestCase):
+    """Tests for shape handling fixes in occlusion detection."""
+
+    def test_target_bbox_size_shape_1d(self):
+        """Test that 1D target_bbox_size (3,) is handled correctly."""
+        try:
+            occlusion = load_module_from_path(
+                "bbox_raycaster_v2_occlusion_fully_batched",
+                V2_ROOT / "utils" / "occlusion_fully_batched.py",
+            )
+        except Exception as exc:
+            self.skipTest(f"occlusion module unavailable: {exc}")
+
+        N, C, T, K = 4, 2, 1, 1
+        camera_pos = torch.zeros((N, C, 3), dtype=torch.float32)
+        camera_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32).expand(N, C, 4)
+        test_points_world = torch.zeros((N, T, K, 3), dtype=torch.float32)
+        test_points_world[..., 2] = 10.0  # Target at z=10
+        target_positions = torch.zeros((N, T, 3), dtype=torch.float32)
+        target_positions[..., 2] = 10.0
+
+        # 1D shape - this was the bug case
+        target_bbox_size = torch.tensor([1.0, 1.0, 1.0], dtype=torch.float32)
+
+        # Should not raise any errors
+        vis_mask, vis_ratio, self_mask = occlusion.batch_check_occlusion_fully_batched(
+            camera_pos=camera_pos,
+            camera_quat=camera_quat,
+            test_points_world=test_points_world,
+            target_positions=target_positions,
+            target_bbox_size=target_bbox_size,
+            agent_poses={},
+            agent_meshes={},
+            static_mesh=None,
+            max_distance=100.0,
+            visibility_threshold=0.5,
+            current_agent_ids=["drone_0", "drone_1"],
+            enable_self_occlusion=False,
+        )
+
+        self.assertEqual(vis_mask.shape, (N, C, T))
+        self.assertEqual(vis_ratio.shape, (N, C, T))
+        self.assertEqual(self_mask.shape, (N, C, T))
+        # All should be visible (no occlusion)
+        self.assertTrue(vis_mask.all())
+
+    def test_target_bbox_size_shape_2d_T3(self):
+        """Test that 2D target_bbox_size (T, 3) is handled correctly."""
+        try:
+            occlusion = load_module_from_path(
+                "bbox_raycaster_v2_occlusion_fully_batched",
+                V2_ROOT / "utils" / "occlusion_fully_batched.py",
+            )
+        except Exception as exc:
+            self.skipTest(f"occlusion module unavailable: {exc}")
+
+        N, C, T, K = 4, 2, 3, 1
+        camera_pos = torch.zeros((N, C, 3), dtype=torch.float32)
+        camera_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32).expand(N, C, 4)
+        test_points_world = torch.zeros((N, T, K, 3), dtype=torch.float32)
+        test_points_world[..., 2] = 10.0
+        target_positions = torch.zeros((N, T, 3), dtype=torch.float32)
+        target_positions[..., 2] = 10.0
+
+        # 2D shape (T, 3) - one bbox size per target
+        target_bbox_size = torch.tensor([[1.0, 1.0, 1.0], [0.5, 0.5, 0.5], [2.0, 2.0, 2.0]], dtype=torch.float32)
+
+        vis_mask, vis_ratio, self_mask = occlusion.batch_check_occlusion_fully_batched(
+            camera_pos=camera_pos,
+            camera_quat=camera_quat,
+            test_points_world=test_points_world,
+            target_positions=target_positions,
+            target_bbox_size=target_bbox_size,
+            agent_poses={},
+            agent_meshes={},
+            static_mesh=None,
+            max_distance=100.0,
+            visibility_threshold=0.5,
+            current_agent_ids=["drone_0", "drone_1"],
+            enable_self_occlusion=False,
+        )
+
+        self.assertEqual(vis_mask.shape, (N, C, T))
+        self.assertTrue(vis_mask.all())
+
+    def test_target_bbox_size_shape_3d_NT3(self):
+        """Test that 3D target_bbox_size (N, T, 3) is handled correctly."""
+        try:
+            occlusion = load_module_from_path(
+                "bbox_raycaster_v2_occlusion_fully_batched",
+                V2_ROOT / "utils" / "occlusion_fully_batched.py",
+            )
+        except Exception as exc:
+            self.skipTest(f"occlusion module unavailable: {exc}")
+
+        N, C, T, K = 4, 2, 2, 1
+        camera_pos = torch.zeros((N, C, 3), dtype=torch.float32)
+        camera_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32).expand(N, C, 4)
+        test_points_world = torch.zeros((N, T, K, 3), dtype=torch.float32)
+        test_points_world[..., 2] = 10.0
+        target_positions = torch.zeros((N, T, 3), dtype=torch.float32)
+        target_positions[..., 2] = 10.0
+
+        # 3D shape (N, T, 3) - already expanded
+        target_bbox_size = torch.ones((N, T, 3), dtype=torch.float32)
+
+        vis_mask, vis_ratio, self_mask = occlusion.batch_check_occlusion_fully_batched(
+            camera_pos=camera_pos,
+            camera_quat=camera_quat,
+            test_points_world=test_points_world,
+            target_positions=target_positions,
+            target_bbox_size=target_bbox_size,
+            agent_poses={},
+            agent_meshes={},
+            static_mesh=None,
+            max_distance=100.0,
+            visibility_threshold=0.5,
+            current_agent_ids=["drone_0", "drone_1"],
+            enable_self_occlusion=False,
+        )
+
+        self.assertEqual(vis_mask.shape, (N, C, T))
+        self.assertTrue(vis_mask.all())
+
+    def test_multi_env_agent_occlusion_shapes(self):
+        """Test that shapes are correct with multiple environments and agent occlusion."""
+        try:
+            occlusion = load_module_from_path(
+                "bbox_raycaster_v2_occlusion_fully_batched",
+                V2_ROOT / "utils" / "occlusion_fully_batched.py",
+            )
+        except Exception as exc:
+            self.skipTest(f"occlusion module unavailable: {exc}")
+
+        N, C, T, K = 8, 3, 1, 1
+        camera_pos = torch.zeros((N, C, 3), dtype=torch.float32)
+        camera_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32).expand(N, C, 4)
+        test_points_world = torch.zeros((N, T, K, 3), dtype=torch.float32)
+        test_points_world[..., 2] = 10.0
+        target_positions = torch.zeros((N, T, 3), dtype=torch.float32)
+        target_positions[..., 2] = 10.0
+
+        # 1D shape with multi-env, multi-camera
+        target_bbox_size = torch.tensor([1.0, 1.0, 1.0], dtype=torch.float32)
+
+        agent_poses = {
+            "drone_0": (torch.zeros((N, 3)), torch.tensor([[1.0, 0.0, 0.0, 0.0]]).expand(N, 4)),
+            "drone_1": (torch.zeros((N, 3)), torch.tensor([[1.0, 0.0, 0.0, 0.0]]).expand(N, 4)),
+            "drone_2": (torch.zeros((N, 3)), torch.tensor([[1.0, 0.0, 0.0, 0.0]]).expand(N, 4)),
+        }
+        agent_meshes = {"drone_0": object(), "drone_1": object(), "drone_2": object()}
+
+        # Mock raycast to return no hits
+        def fake_raycast_mesh(ray_starts, ray_dirs, mesh, max_dist, return_distance=False, return_normal=False):
+            return torch.full_like(ray_starts, float("inf")), None, None, None
+
+        with mock.patch.object(occlusion, "raycast_mesh", side_effect=fake_raycast_mesh):
+            vis_mask, vis_ratio, self_mask = occlusion.batch_check_occlusion_fully_batched(
+                camera_pos=camera_pos,
+                camera_quat=camera_quat,
+                test_points_world=test_points_world,
+                target_positions=target_positions,
+                target_bbox_size=target_bbox_size,
+                agent_poses=agent_poses,
+                agent_meshes=agent_meshes,
+                static_mesh=None,
+                max_distance=100.0,
+                visibility_threshold=0.5,
+                current_agent_ids=["drone_0", "drone_1", "drone_2"],
+                enable_self_occlusion=True,
+                self_occlusion_min_hit_distance_m=0.05,
+            )
+
+        # Verify shapes
+        self.assertEqual(vis_mask.shape, (N, C, T))
+        self.assertEqual(vis_ratio.shape, (N, C, T))
+        self.assertEqual(self_mask.shape, (N, C, T))
+        # All visible since no hits
+        self.assertTrue(vis_mask.all())
+
+
+class TestRaycastCallCount(unittest.TestCase):
+    """Test that raycasting is called the expected number of times."""
+
+    def test_single_raycast_per_agent_all_cameras(self):
+        """Verify that agent mesh raycasting uses O(1) call per agent (all cameras batched)."""
+        try:
+            occlusion = load_module_from_path(
+                "bbox_raycaster_v2_occlusion_fully_batched",
+                V2_ROOT / "utils" / "occlusion_fully_batched.py",
+            )
+        except Exception as exc:
+            self.skipTest(f"occlusion module unavailable: {exc}")
+
+        N, C, T, K = 16, 3, 1, 9  # 3 cameras
+        camera_pos = torch.zeros((N, C, 3), dtype=torch.float32)
+        camera_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32).expand(N, C, 4).clone()
+        test_points_world = torch.zeros((N, T, K, 3), dtype=torch.float32)
+        test_points_world[..., 2] = 10.0
+        target_positions = torch.zeros((N, T, 3), dtype=torch.float32)
+        target_positions[..., 2] = 10.0
+        target_bbox_size = torch.tensor([1.0, 1.0, 1.0], dtype=torch.float32)
+
+        # 3 agents
+        agent_poses = {
+            "drone_0": (torch.zeros((N, 3)), torch.tensor([[1.0, 0.0, 0.0, 0.0]]).expand(N, 4).clone()),
+            "drone_1": (torch.zeros((N, 3)), torch.tensor([[1.0, 0.0, 0.0, 0.0]]).expand(N, 4).clone()),
+            "drone_2": (torch.zeros((N, 3)), torch.tensor([[1.0, 0.0, 0.0, 0.0]]).expand(N, 4).clone()),
+        }
+        agent_meshes = {"drone_0": object(), "drone_1": object(), "drone_2": object()}
+
+        raycast_call_count = {"count": 0}
+
+        def counting_fake_raycast_mesh(ray_starts, ray_dirs, mesh, max_dist, return_distance=False, return_normal=False):
+            raycast_call_count["count"] += 1
+            return torch.full_like(ray_starts, float("inf")), None, None, None
+
+        with mock.patch.object(occlusion, "raycast_mesh", side_effect=counting_fake_raycast_mesh):
+            occlusion.batch_check_occlusion_fully_batched(
+                camera_pos=camera_pos,
+                camera_quat=camera_quat,
+                test_points_world=test_points_world,
+                target_positions=target_positions,
+                target_bbox_size=target_bbox_size,
+                agent_poses=agent_poses,
+                agent_meshes=agent_meshes,
+                static_mesh=None,
+                max_distance=100.0,
+                visibility_threshold=0.5,
+                current_agent_ids=["drone_0", "drone_1", "drone_2"],
+                enable_self_occlusion=True,
+                self_occlusion_min_hit_distance_m=0.05,
+            )
+
+        # With the optimization, we should have exactly num_agents raycast calls (3)
+        # Old implementation would have C * num_agents = 9 calls
+        # No static mesh, so no static raycast call
+        num_agents = len(agent_meshes)
+        self.assertEqual(
+            raycast_call_count["count"],
+            num_agents,
+            f"Expected {num_agents} raycast calls (O(1) per agent), got {raycast_call_count['count']}"
+        )
+
+    def test_raycast_count_with_static_mesh(self):
+        """Verify raycast call count with both static mesh and agent meshes."""
+        try:
+            occlusion = load_module_from_path(
+                "bbox_raycaster_v2_occlusion_fully_batched",
+                V2_ROOT / "utils" / "occlusion_fully_batched.py",
+            )
+        except Exception as exc:
+            self.skipTest(f"occlusion module unavailable: {exc}")
+
+        N, C, T, K = 16, 3, 1, 9
+        camera_pos = torch.zeros((N, C, 3), dtype=torch.float32)
+        camera_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32).expand(N, C, 4).clone()
+        test_points_world = torch.zeros((N, T, K, 3), dtype=torch.float32)
+        test_points_world[..., 2] = 10.0
+        target_positions = torch.zeros((N, T, 3), dtype=torch.float32)
+        target_positions[..., 2] = 10.0
+        target_bbox_size = torch.tensor([1.0, 1.0, 1.0], dtype=torch.float32)
+
+        # 3 agents
+        agent_poses = {
+            "drone_0": (torch.zeros((N, 3)), torch.tensor([[1.0, 0.0, 0.0, 0.0]]).expand(N, 4).clone()),
+            "drone_1": (torch.zeros((N, 3)), torch.tensor([[1.0, 0.0, 0.0, 0.0]]).expand(N, 4).clone()),
+            "drone_2": (torch.zeros((N, 3)), torch.tensor([[1.0, 0.0, 0.0, 0.0]]).expand(N, 4).clone()),
+        }
+        agent_meshes = {"drone_0": object(), "drone_1": object(), "drone_2": object()}
+        static_mesh = object()
+
+        raycast_call_count = {"count": 0}
+
+        def counting_fake_raycast_mesh(ray_starts, ray_dirs, mesh, max_dist, return_distance=False, return_normal=False):
+            raycast_call_count["count"] += 1
+            return torch.full_like(ray_starts, float("inf")), None, None, None
+
+        with mock.patch.object(occlusion, "raycast_mesh", side_effect=counting_fake_raycast_mesh):
+            occlusion.batch_check_occlusion_fully_batched(
+                camera_pos=camera_pos,
+                camera_quat=camera_quat,
+                test_points_world=test_points_world,
+                target_positions=target_positions,
+                target_bbox_size=target_bbox_size,
+                agent_poses=agent_poses,
+                agent_meshes=agent_meshes,
+                static_mesh=static_mesh,
+                max_distance=100.0,
+                visibility_threshold=0.5,
+                current_agent_ids=["drone_0", "drone_1", "drone_2"],
+                enable_self_occlusion=True,
+                self_occlusion_min_hit_distance_m=0.05,
+            )
+
+        # Should be: 1 (static) + 3 (agents) = 4 calls
+        # Old implementation would have: 1 (static) + 9 (C * agents) = 10 calls
+        num_agents = len(agent_meshes)
+        expected_calls = 1 + num_agents  # 1 static + num_agents
+        self.assertEqual(
+            raycast_call_count["count"],
+            expected_calls,
+            f"Expected {expected_calls} raycast calls (1 static + {num_agents} agents), got {raycast_call_count['count']}"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
