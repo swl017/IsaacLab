@@ -20,6 +20,7 @@ from isaaclab.envs.common import AgentID
 from .delay_cfg_v3 import MultiAgentDelayCfgV3, NoiseCfg
 from .delay_system_v3 import UnifiedDelaySystem
 from .agent_states import AgentStates, AgentStatesData
+from .derived_field_computers import compute_ray_origins, compute_ray_directions_from_bbox
 
 
 # Standard field definitions
@@ -38,6 +39,7 @@ JOINT_FIELDS = [
 CAMERA_FIELDS = [
     ("camera_position_w", (3,)),
     ("camera_orientation_w", (4,)),
+    ("camera_zoom_level", (1,)),  # zoom level scalar per env
 ]
 
 DETECTION_FIELDS = [
@@ -243,21 +245,28 @@ class MultiAgentDelaySystemV3:
             data.camera_orientation_w,
             noise_std=ori_noise,
         )
+        # Zoom level (no noise on discrete camera setting)
+        self._delay_system.store(
+            prefix + "camera_zoom_level",
+            data.camera_zoom_level.unsqueeze(-1),  # Convert [N] to [N, 1]
+            noise_std=0.0,
+        )
 
         # Detection fields (bbox)
         # Flatten bbox for storage: (N, T, 4) -> (N, T*4)
         # Actually, we keep it as (N, T, 4) since we registered it with that shape
+        bbox_noise = self._get_noise_std("bbox")
         self._delay_system.store(
             prefix + "bboxes_2d",
             data.bboxes_2d,
-            noise_std=0.0,  # No noise on bbox (it's detection output)
+            noise_std=bbox_noise,  # Pixel noise on bbox center/dimensions
         )
 
     def _get_noise_std(self, noise_type: str) -> float:
         """Get noise standard deviation for a field type.
 
         Args:
-            noise_type: Type of noise ("position", "velocity", "orientation").
+            noise_type: Type of noise ("position", "velocity", "orientation", "bbox").
 
         Returns:
             Noise standard deviation scaled by curriculum.
@@ -271,6 +280,8 @@ class MultiAgentDelaySystemV3:
             base_std = self._noise_cfg.velocity_std.value
         elif noise_type == "orientation":
             base_std = self._noise_cfg.orientation_std.value
+        elif noise_type == "bbox":
+            base_std = self._noise_cfg.bbox_std.value
         else:
             base_std = 0.0
 
@@ -431,14 +442,32 @@ class MultiAgentDelaySystemV3:
         # Store motion timestamp (use position timestamp)
         data.timestamp_motion = pos_ts
 
-        # Copy static fields from ground truth
+        # Copy static fields from ground truth (these don't change at runtime)
         gt = self._gt_states[agent_id]
         data.camera_offset_position_b = gt.data.camera_offset_position_b.clone()
         data.camera_offset_rotation_b = gt.data.camera_offset_rotation_b.clone()
         data.camera_base_intrinsics = gt.data.camera_base_intrinsics.clone()
-        data.camera_zoom_level = gt.data.camera_zoom_level.clone()
-        data.camera_ray_directions_w = gt.data.camera_ray_directions_w.clone()
-        data.camera_ray_origins_w = gt.data.camera_ray_origins_w.clone()
+
+        # Retrieve delayed zoom level
+        zoom, _ = self._delay_system.get_delayed(
+            prefix + "camera_zoom_level", perspective, use_noise, allow_dropout
+        )
+        data.camera_zoom_level = zoom.squeeze(-1)  # Convert [N, 1] back to [N]
+
+        # Compute derived ray geometry from delayed states
+        # Ray origins = camera position (expanded to match num_targets)
+        data.camera_ray_origins_w = compute_ray_origins(
+            camera_position_w=data.camera_position_w,
+            num_targets=self._num_targets,
+        )
+
+        # Ray directions = unprojected bbox centers in world frame
+        data.camera_ray_directions_w = compute_ray_directions_from_bbox(
+            camera_orientation_w=data.camera_orientation_w,
+            camera_base_intrinsics=data.camera_base_intrinsics,
+            camera_zoom_level=data.camera_zoom_level,
+            bboxes_2d=data.bboxes_2d,
+        )
 
         return states
 

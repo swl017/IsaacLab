@@ -108,7 +108,7 @@ class UnifiedDelaySystem:
         """Register a field for delay processing.
 
         Args:
-            field_name: Unique field identifier.
+            field_name: Unique field identifier (e.g., "agent_0.bboxes_2d").
             data_shape: Shape of data per environment (excluding batch dim).
             custom_cfg: Optional custom pipeline config (overrides defaults).
         """
@@ -117,13 +117,23 @@ class UnifiedDelaySystem:
 
         self._field_shapes[field_name] = data_shape
 
-        # Determine pipeline configs
-        ego_cfg = custom_cfg or self._cfg.field_overrides.get(
-            field_name, self._cfg.ego.pipeline
-        )
-        other_cfg = custom_cfg or self._cfg.field_overrides.get(
-            field_name, self._cfg.other.pipeline
-        )
+        # Extract field suffix for override lookup
+        # field_name is like "agent_0.bboxes_2d" -> suffix is "bboxes_2d"
+        field_suffix = field_name.split(".")[-1] if "." in field_name else field_name
+
+        # Determine pipeline configs using perspective-specific overrides
+        # Priority: custom_cfg > perspective.field_overrides > perspective.pipeline
+        if custom_cfg is not None:
+            ego_cfg = custom_cfg
+            other_cfg = custom_cfg
+        else:
+            # Check perspective-specific field overrides, then fall back to default
+            ego_cfg = self._cfg.ego.field_overrides.get(
+                field_suffix, self._cfg.ego.pipeline
+            )
+            other_cfg = self._cfg.other.field_overrides.get(
+                field_suffix, self._cfg.other.pipeline
+            )
 
         # Create pipelines for this field
         self._ego_pipelines[field_name] = DelayPipelineV3(

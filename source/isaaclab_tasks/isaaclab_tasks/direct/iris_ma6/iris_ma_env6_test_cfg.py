@@ -25,8 +25,13 @@ from .bbox_raycaster_v2 import BBoxRayCasterV2Cfg
 from .cbf_safety import CBFManagerCfg
 from .controller import DroneControllerCfg
 from .controller.tuning import TUNED_CONTROLLER_CFG
-from .delay_system_v3 import MultiAgentDelayCfgV3, create_random_delay_cfg
+from .delay_system_v3 import (
+    MultiAgentDelayCfgV3,
+    DelaySystemKeyParams,
+    create_delay_cfg_from_params,
+)
 from .initial_states import InitialStatesCfg
+from .target_controller import TargetControllerCfg
 from .triangulation import TriangulationCfg
 
 
@@ -44,8 +49,34 @@ def _create_robot_cfg() -> ArticulationCfg:
     return cfg
 
 
+def _create_target_cfg() -> RigidObjectCfg:
+    """Create target config as RigidObject with gravity enabled.
+
+    Uses iris_body.usda (drone body without propellers) as a simple rigid body.
+    RigidObjectCfg is used instead of ArticulationCfg because the USD has no joints.
+    """
+    return RigidObjectCfg(
+        prim_path="/World/envs/env_.*/target",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path="/home/usrg/IsaacPX4/PegasusSimulator/extensions/pegasus.simulator/pegasus/simulator/assets/Robots/Iris/iris_body.usda",
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=False,  # Enable gravity for physics-based movement
+                max_depenetration_velocity=10.0,
+                enable_gyroscopic_forces=False,
+            ),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(5.0, 0.0, 3.5),
+            rot=(1.0, 0.0, 0.0, 0.0),
+        ),
+    )
+
+
 # Pre-create robot config with overridden physics properties
 IRIS_GIMBAL2_TEST_CFG = _create_robot_cfg()
+
+# Pre-create target config with gravity enabled
+IRIS_TARGET_CFG = _create_target_cfg()
 
 
 @configclass
@@ -131,22 +162,8 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # Assets
     # ==========================================================================
 
-    target_cfg: RigidObjectCfg = RigidObjectCfg(
-        prim_path="/World/envs/env_.*/target",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path="/home/usrg/IsaacPX4/PegasusSimulator/extensions/pegasus.simulator/pegasus/simulator/assets/Robots/Iris/iris_body.usda",
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                kinematic_enabled=False,
-                disable_gravity=True,
-                enable_gyroscopic_forces=False,
-                rigid_body_enabled=True,
-            ),
-            copy_from_source=False,
-            scale=(1.0, 1.0, 1.0),
-        ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(5.0, 0.0, 3.5), rot=(1.0, 0.0, 0.0, 0.0)),
-    )
-    """Target rigid body configuration."""
+    target_cfg: RigidObjectCfg = IRIS_TARGET_CFG
+    """Target rigid object configuration with gravity enabled."""
 
     viewer: ViewerCfg = ViewerCfg(
         eye=(18.0, 15.0, 16.0),
@@ -254,27 +271,49 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # Delay System Configuration
     # ==========================================================================
 
-    delay_system: MultiAgentDelayCfgV3 = create_random_delay_cfg()
-    """Delay system configuration for realistic observation delays.
+    delay_system_params: DelaySystemKeyParams = DelaySystemKeyParams(
+        # === Ego Motion Latency (proprioceptive sensing) ===
+        ego_motion_latency_enabled=False,  # First-order lag only (fast IMU/GPS)
+        ego_motion_fol_tau=0.005,          # 5ms time constant for smoothing
+        # === Ego Detection Latency (NN inference) ===
+        ego_detection_latency_mean=0.1,   # 100ms mean (GPU inference time)
+        ego_detection_latency_std=0.015,   # 15ms std
+        # === Other Agent Latency (communication) ===
+        other_latency_mean=0.5,            # 500ms mean for other agents (network delay)
+        other_latency_std=0.08,            # 80ms std
+        # === Staleness (detection FPS) ===
+        staleness_fps_mean=25.0,           # 25 FPS mean detection rate
+        staleness_fps_range=5.0,           # ±5 FPS range -> [20, 30] FPS
+        # === Dropout (missed detections) ===
+        dropout_prob=0.05,                 # 5% dropout probability per step
+        # === Noise ===
+        noise_enabled=True,
+        noise_position_std=0.1,            # 10cm position noise
+        noise_velocity_std=0.05,           # 5cm/s velocity noise
+        noise_orientation_std=0.01,        # ~0.6° orientation noise
+        noise_bbox_std=7.0,                # 7 pixels bbox noise (center x,y and w,h)
+        # === Reward computation ===
+        reward_use_delay=True,             # Use delayed states for rewards
+        reward_use_noise=False,            # But without noise (clean delayed)
+    )
+    """Key parameters for delay system - tune these for sim-to-real transfer.
 
-    The delay system simulates:
-    - Communication latency between agents
-    - Detection staleness (FPS limiting)
-    - Dropout (missed detections)
-    - Observation noise
+    Ego Latency Architecture (matches delay_system_v2):
+    - Ego MOTION fields (pos, vel, orientation): First-order lag only (fast proprioceptive)
+    - Ego DETECTION fields (bboxes): Latency + staleness + dropout (NN inference time)
+    - Other agents: Full delay pipeline (communication delay)
 
-    Reward state configuration (delay_system.reward_state_cfg):
-    - use_delay=False, use_noise=False: Pure GT (privileged training)
-    - use_delay=True, use_noise=False: Delayed clean (default)
-    - use_delay=False, use_noise=True: GT with noise
-    - use_delay=True, use_noise=True: Full noisy delayed
-
-    Per-agent randomization (delay_system.per_agent_randomization):
-    - When enabled, each agent samples independent delay parameters
-    - Parameters scale with curriculum progress [0, 1]
+    These are the most important parameters affecting observation realism:
+    - Ego motion: Nearly instant via first-order lag (proprioceptive sensing)
+    - Ego detection: 100ms latency for NN processing on own camera
+    - Other agents: 500ms communication delay + staleness + dropout
+    - Noise: Sensor measurement noise for all fields
     """
 
-    enable_delay_system: bool = False
+    delay_system: MultiAgentDelayCfgV3 = None  # type: ignore[assignment]
+    """Full delay system configuration (built from delay_system_params in __post_init__)."""
+
+    enable_delay_system: bool = True
     """Enable delay system for observations. Default False for backward compatibility."""
 
     # ==========================================================================
@@ -316,6 +355,31 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     Default is False for simple testing. Set to True for training with curriculum.
     """
 
+    # ==========================================================================
+    # Target Controller Configuration
+    # ==========================================================================
+
+    target_controller: TargetControllerCfg = TargetControllerCfg()
+    """Target controller configuration for physics-based target movement.
+
+    Uses DroneController architecture to generate forces/torques for targets
+    instead of direct velocity writes. Supports:
+    - Linear/circular movement modes (iris_ma5 compatible)
+    - Approach/evade modes (attacker behavior)
+    - Curriculum-scaled difficulty
+    - Behavior profiles (kamikaze, standard, evasive, stealth)
+    """
+
+    enable_target_controller: bool = True
+    """Enable physics-based target controller.
+
+    If True, uses TargetController to apply forces/torques to target.
+    If False, target remains stationary (for simple tests/debugging).
+
+    Default is False for backward compatibility. Set to True to enable
+    physics-based target movement with realistic dynamics.
+    """
+
     def __post_init__(self):
         """Populate agent-specific fields from num_agents."""
         if self.num_agents < 2:
@@ -324,6 +388,9 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
         self.possible_agents = [f"drone_{i}" for i in range(self.num_agents)]
         self.action_spaces = {a: 7 for a in self.possible_agents}
         self.bbox_raycaster_v2.num_cameras_per_env = self.num_agents
+
+        # Build delay system from key parameters
+        self.delay_system = create_delay_cfg_from_params(self.delay_system_params)
 
         # Update observation space based on triangulation
         # Base: 18D (pos, vel, quat, gimbal_yaw, gimbal_pitch, zoom, bbox, bbox_empty)

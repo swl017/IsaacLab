@@ -72,6 +72,9 @@ from .delay_cfg_v3 import (
     PerspectiveCfg,
     UnifiedDelayCfgV3,
     MultiAgentDelayCfgV3,
+    # Key parameters (simplified interface)
+    DelaySystemKeyParams,
+    create_delay_cfg_from_params,
     # Preset configurations
     create_no_delay_cfg,
     create_fixed_delay_cfg,
@@ -129,6 +132,10 @@ __all__ = [
     "PerspectiveCfg",
     "UnifiedDelayCfgV3",
     "MultiAgentDelayCfgV3",
+    # Key parameters (simplified interface)
+    "DelaySystemKeyParams",
+    "create_delay_cfg_from_params",
+    # Preset configurations
     "create_no_delay_cfg",
     "create_fixed_delay_cfg",
     "create_random_delay_cfg",

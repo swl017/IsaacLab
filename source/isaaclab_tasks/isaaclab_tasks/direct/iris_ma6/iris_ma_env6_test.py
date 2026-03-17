@@ -33,6 +33,7 @@ from .controller.gimbal_controller import YAW_JOINT_OFFSET
 from .delay_system_v3 import MultiAgentDelaySystemV3, AgentStates
 from .initial_states import InitialStates
 from .iris_ma_env6_test_cfg import IrisMA6TestEnvCfg
+from .target_controller import TargetController
 from .triangulation import TriangulationResult, compute_full_triangulation
 from .visualization import CustomVisualization
 from .visualization.frame_visualizer import FRAME_LINKS
@@ -269,6 +270,31 @@ class IrisMA6TestEnv(DirectMARLEnv):
         # Curriculum progress tracking (updated externally, used by initial_states)
         self._curriculum_progress = 0.0
 
+        # Initialize target controller for physics-based target movement
+        if self.cfg.enable_target_controller:
+            # Get target mass from physics
+            target_masses = self.target.root_physx_view.get_masses()
+            target_mass = target_masses[0].sum().item()
+
+            # Set control_dt to match simulation dt
+            target_cfg = self.cfg.target_controller
+            target_cfg.control_dt = self.cfg.sim.dt
+
+            self._target_controller = TargetController(
+                cfg=target_cfg,
+                mass=target_mass,
+                gravity=9.81,
+                num_envs=self.num_envs,
+                num_targets=1,
+                device=self.device,
+            )
+        else:
+            self._target_controller = None
+
+        # Facility position for approach mode (at each environment's origin)
+        # Clone env_origins so targets approach their local environment center
+        self._facility_position = self._terrain.env_origins.clone()
+
         # Enable debug visualization if configured
         if self.cfg.debug_vis:
             self.set_debug_vis(True)
@@ -292,7 +318,8 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
 
-        # Create shared target
+        # Create shared target (RigidObject with gravity enabled)
+        # RigidObject is used because iris_body.usda has no joints (propellers removed)
         self.target = RigidObject(self.cfg.target_cfg)
 
         # Clone environments
@@ -300,8 +327,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
         if self.cfg.terrain is not None:
             self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
 
-        # Register rigid objects
-        self.scene.rigid_objects["target"] = self.target
+        # NOTE: Target is a RigidObject (not registered in scene) and managed manually.
+        # Forces/torques are applied via set_external_force_and_torque() from TargetController.
+        # Reset is handled via write_root_pose_to_sim/write_root_velocity_to_sim in _reset_idx.
 
         # Register TiledCamera sensors in scene
         for agent_id, camera in self._cameras.items():
@@ -391,6 +419,79 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
             # Store zoom level for observations
             self.zoom_level[:, idx] = zoom_level
+
+        # Apply target controller if enabled
+        if self._target_controller is not None:
+            # Update target data from simulation (not in scene.articulations so must update manually)
+            self.target.update(self.cfg.sim.dt)
+
+            # Get current target state (add target dimension)
+            target_pos = self.target.data.root_pos_w.unsqueeze(1)  # [N, 1, 3]
+            target_vel = self.target.data.root_lin_vel_w.unsqueeze(1)  # [N, 1, 3]
+            target_quat = self.target.data.root_quat_w.unsqueeze(1)  # [N, 1, 4]
+            target_omega = self.target.data.root_ang_vel_b.unsqueeze(1)  # [N, 1, 3]
+
+            # Get agent positions for evasion logic
+            agent_positions = torch.stack([
+                self._robots[agent_id].data.root_pos_w
+                for agent_id in self.cfg.possible_agents
+            ], dim=1)  # [N, num_agents, 3]
+
+            # Interceptor roles (1 = INTERCEPT for all agents)
+            agent_roles = torch.ones(
+                self.num_envs, len(self.cfg.possible_agents),
+                dtype=torch.long, device=self.device
+            )
+
+            # Step the target controller
+            dt = self.cfg.sim.dt
+            F_body_target, tau_body_target = self._target_controller.step(
+                current_position=target_pos,
+                current_velocity=target_vel,
+                current_quat=target_quat,
+                current_angular_vel=target_omega,
+                facility_position=self._facility_position,
+                interceptor_positions=agent_positions,
+                interceptor_roles=agent_roles,
+                curriculum_progress=self._curriculum_progress,
+                dt=dt,
+                env_origins=self._terrain.env_origins,
+            )
+
+            # DEBUG: Print target controller state every 100 steps (env 0 only)
+            if not hasattr(self, "_debug_step_counter"):
+                self._debug_step_counter = 0
+            self._debug_step_counter += 1
+            if self._debug_step_counter % 100 == 1:
+                print(f"\n[DEBUG] Step {self._debug_step_counter}")
+                print(f"  Target pos (env0): {target_pos[0, 0].cpu().numpy()}")
+                print(f"  Target vel (env0): {target_vel[0, 0].cpu().numpy()}")
+                print(f"  Facility pos (env0): {self._facility_position[0].cpu().numpy()}")
+                print(f"  Direction: {(self._facility_position[0] - target_pos[0, 0]).cpu().numpy()}")
+                print(f"  Force (env0): {F_body_target[0, 0].cpu().numpy()}")
+                print(f"  Torque (env0): {tau_body_target[0, 0].cpu().numpy()}")
+                print(f"  FSM state: {self._target_controller._fsm.fsm_state[0].item()}")
+                print(f"  Velocity mode: {self._target_controller._fsm.velocity_mode[0].item()}")
+                print(f"  Alive: {self._target_controller._fsm.alive[0].item()}")
+                # Debug velocity command from target controller
+                tc = self._target_controller
+                print(f"  Evasion agility: {tc._evasion_agility[0].item():.3f}")
+                print(f"  Speed multiplier: {tc._speed_multiplier[0].item():.3f}")
+                if hasattr(tc, '_debug_v_cmd'):
+                    print(f"  V_cmd (env0): {tc._debug_v_cmd[0].cpu().numpy()}")
+
+            # Apply forces to target (squeeze target dimension, add body dimension)
+            self.target.set_external_force_and_torque(
+                forces=F_body_target.squeeze(1).unsqueeze(1),  # [N, 1, 3]
+                torques=tau_body_target.squeeze(1).unsqueeze(1),  # [N, 1, 3]
+                body_ids=[0],  # Root body
+            )
+
+            # Write forces to simulation
+            self.target.write_data_to_sim()
+        else:
+            # Update target data even when controller is disabled (for observations)
+            self.target.update(self.cfg.sim.dt)
 
         # Acquire and process states on the final substep (used by rewards/dones/obs after decimation)
         if self.decimated_step == self.cfg.decimation - 1:
@@ -521,7 +622,8 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 gt_data.camera_base_intrinsics = self._camera_intrinsics_base.clone()
 
                 # Detection (bbox) - shape (N, T, 4)
-                gt_data.bboxes_2d = self.bbox_raycaster_v2.data.bboxes_normalized[
+                # CRITICAL: Use pixel bboxes, not normalized - triangulation expects pixels
+                gt_data.bboxes_2d = self.bbox_raycaster_v2.data.bboxes[
                     :, idx, :, :
                 ]
 
@@ -833,9 +935,17 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 # Joint positions (pitch, yaw, roll)
                 gimbal_jp = ego_data.joint_positions_b
 
-                # Bbox from delayed states (shape: N, T, 4)
-                bbox = ego_data.bboxes_2d[:, 0, :]  # First target
-                bbox_empty = (bbox.abs().sum(dim=-1) < 1e-6).float().unsqueeze(-1)
+                # Bbox from delayed states (shape: N, T, 4) - pixel format
+                bbox_pixel = ego_data.bboxes_2d[:, 0, :]  # First target
+                bbox_empty = (bbox_pixel.abs().sum(dim=-1) < 1e-6).float().unsqueeze(-1)
+
+                # Normalize bbox to [0, 1] for observation (xywh format)
+                img_h, img_w = self._camera_image_shape
+                bbox = bbox_pixel.clone()
+                bbox[:, 0] /= img_w  # x center
+                bbox[:, 1] /= img_h  # y center
+                bbox[:, 2] /= img_w  # width
+                bbox[:, 3] /= img_h  # height
 
                 # Build observation
                 obs[agent_id] = torch.cat(
@@ -846,7 +956,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                         gimbal_jp[:, 1:2],  # (N, 1) yaw
                         gimbal_jp[:, 0:1],  # (N, 1) pitch
                         ego_data.camera_zoom_level.unsqueeze(-1),  # (N, 1)
-                        bbox,  # (N, 4)
+                        bbox,  # (N, 4) - normalized
                         bbox_empty,  # (N, 1)
                     ],
                     dim=-1,
@@ -1066,6 +1176,10 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         # Reset CBF manager state
         self.cbf_manager.reset(env_ids)
+
+        # Reset target controller state
+        if self._target_controller is not None:
+            self._target_controller.reset(env_ids)
 
         # Reset delay system and simulation time
         if self._delay_system is not None:

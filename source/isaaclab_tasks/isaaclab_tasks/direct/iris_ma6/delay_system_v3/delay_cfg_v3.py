@@ -175,6 +175,17 @@ class NoiseCfg:
     )
     """Standard deviation for orientation noise (radians)."""
 
+    bbox_std: DistributionCfg = field(
+        default_factory=lambda: DistributionCfg(
+            type="constant", value=7.0, min_value=0.0
+        )
+    )
+    """Standard deviation for bounding box noise (pixels).
+
+    Applied to bbox center (x, y) and dimensions (w, h).
+    Default 7.0 pixels matches iris_ma5 implementation.
+    """
+
 
 @dataclass
 class FirstOrderLagCfg:
@@ -287,6 +298,16 @@ class PerspectiveCfg:
 
     dropout_for_rewards: bool = False
     """Whether dropout applies to reward computation (clean path)."""
+
+    field_overrides: dict[str, DelayPipelineCfgV3] = field(default_factory=dict)
+    """Per-field pipeline overrides for this perspective.
+
+    Key: field name suffix (e.g., 'bboxes_2d')
+    Value: custom pipeline config for that field type.
+
+    This allows different delay behavior for motion fields vs detection fields
+    within the same perspective.
+    """
 
 
 @dataclass
@@ -410,6 +431,194 @@ def create_fixed_delay_cfg(
     # Disable staleness in fixed mode
     cfg.delay_cfg.ego.pipeline.staleness.enabled = False
     cfg.delay_cfg.other.pipeline.staleness.enabled = False
+
+    return cfg
+
+
+@dataclass
+class DelaySystemKeyParams:
+    """Key parameters for delay system configuration.
+
+    This dataclass exposes the most important tunable parameters for the delay system,
+    making them easy to configure in the main environment config without navigating
+    the nested configuration structure.
+
+    These parameters are the most critical for sim-to-real transfer and should be
+    tuned based on real-world communication/sensor characteristics.
+
+    Ego Latency Architecture (matches v2):
+    - Ego MOTION fields (pos, vel, orientation): First-order lag only (fast proprioceptive)
+    - Ego DETECTION fields (bboxes): Latency + staleness + dropout (NN inference time)
+    """
+
+    # === Ego Motion Latency (proprioceptive sensing) ===
+    ego_motion_latency_enabled: bool = False
+    """Whether to apply latency pipeline to ego motion fields (pos/vel/orientation).
+
+    When False (default), ego motion uses first-order lag only - nearly instant.
+    This matches real-world proprioceptive sensing (IMU, GPS) which is very fast.
+    """
+
+    ego_motion_fol_tau: float = 0.005
+    """First-order lag time constant for ego motion fields in seconds.
+
+    Applied regardless of ego_motion_latency_enabled to smooth sensor noise.
+    """
+
+    # === Ego Detection Latency (NN inference) ===
+    ego_detection_latency_mean: float = 0.05
+    """Mean latency for ego detection (running neural network on own camera) in seconds.
+
+    Detection requires running a NN which takes time even on ego camera.
+    Default 50ms represents typical GPU inference + post-processing time.
+    """
+
+    ego_detection_latency_std: float = 0.015
+    """Standard deviation of ego detection latency in seconds."""
+
+    # === Other Agent Latency (communication) ===
+    other_latency_mean: float = 0.1
+    """Mean latency for observing other agents in seconds.
+    Higher than ego due to network communication delays."""
+
+    other_latency_std: float = 0.08
+    """Standard deviation of other-agent latency in seconds."""
+
+    # === Staleness (FPS) Parameters ===
+    staleness_fps_mean: float = 25.0
+    """Mean detection FPS. Lower FPS = more staleness (older detections)."""
+
+    staleness_fps_range: float = 5.0
+    """Half-range for FPS sampling: samples from [mean - range, mean + range]."""
+
+    # === Dropout Parameters ===
+    dropout_prob: float = 0.05
+    """Probability of detection dropout (missed detections) per step."""
+
+    # === Noise Parameters ===
+    noise_enabled: bool = True
+    """Whether observation noise is applied."""
+
+    noise_position_std: float = 0.1
+    """Standard deviation for position noise in meters."""
+
+    noise_velocity_std: float = 0.05
+    """Standard deviation for velocity noise in m/s."""
+
+    noise_orientation_std: float = 0.01
+    """Standard deviation for orientation noise in radians."""
+
+    noise_bbox_std: float = 7.0
+    """Standard deviation for bounding box noise in pixels.
+    Applied to bbox center (x, y) and dimensions (w, h)."""
+
+    # === Reward State Configuration ===
+    reward_use_delay: bool = True
+    """If True, reward computation uses delayed states. If False, uses GT."""
+
+    reward_use_noise: bool = False
+    """If True, reward computation uses noisy states."""
+
+
+def create_delay_cfg_from_params(params: DelaySystemKeyParams) -> MultiAgentDelayCfgV3:
+    """Create delay system configuration from key parameters.
+
+    This function creates separate pipelines for motion vs detection fields:
+    - Ego MOTION fields: First-order lag only (fast proprioceptive sensing)
+    - Ego DETECTION fields: Latency + staleness + dropout (NN inference)
+    - Other agent fields: Full delay pipeline (communication delay)
+
+    Args:
+        params: Key parameters dataclass with tunable values.
+
+    Returns:
+        Fully configured MultiAgentDelayCfgV3.
+    """
+    cfg = MultiAgentDelayCfgV3()
+
+    # === Ego Motion Pipeline (first-order lag only) ===
+    # Motion fields (pos, vel, orientation) use fast proprioceptive sensing
+    ego_motion_pipeline = DelayPipelineCfgV3(
+        latency=LatencyCfg(enabled=params.ego_motion_latency_enabled),
+        staleness=StalenessCfg(enabled=False),  # No staleness for motion
+        dropout=DropoutCfg(enabled=False),  # No dropout for motion
+        first_order_lag=FirstOrderLagCfg(
+            enabled=True, tau=params.ego_motion_fol_tau
+        ),
+    )
+
+    # === Ego Detection Pipeline (latency + staleness + dropout) ===
+    # Detection fields (bboxes) require NN processing time
+    fps_dist = DistributionCfg(
+        type="uniform",
+        mean=params.staleness_fps_mean,
+        half_range=params.staleness_fps_range,
+        min_value=5.0,
+        max_value=60.0,
+    )
+    ego_detection_pipeline = DelayPipelineCfgV3(
+        latency=LatencyCfg(
+            enabled=True,
+            distribution=DistributionCfg(
+                type="normal",
+                mean=params.ego_detection_latency_mean,
+                std=params.ego_detection_latency_std,
+                min_value=0.0,
+            ),
+        ),
+        staleness=StalenessCfg(enabled=True, fps_distribution=fps_dist),
+        dropout=DropoutCfg(enabled=True, probability=params.dropout_prob),
+        first_order_lag=FirstOrderLagCfg(enabled=False),
+    )
+
+    # === Other Agent Pipeline (full delay for communication) ===
+    other_pipeline = DelayPipelineCfgV3(
+        latency=LatencyCfg(
+            enabled=True,
+            distribution=DistributionCfg(
+                type="normal",
+                mean=params.other_latency_mean,
+                std=params.other_latency_std,
+                min_value=0.0,
+            ),
+        ),
+        staleness=StalenessCfg(enabled=True, fps_distribution=fps_dist),
+        dropout=DropoutCfg(enabled=True, probability=params.dropout_prob),
+        first_order_lag=FirstOrderLagCfg(enabled=True, tau=params.ego_motion_fol_tau),
+    )
+
+    # Build perspective configs
+    # Ego: motion pipeline as default, detection fields use override
+    cfg.delay_cfg.ego = PerspectiveCfg(
+        pipeline=ego_motion_pipeline,
+        field_overrides={
+            "bboxes_2d": ego_detection_pipeline,
+        },
+    )
+
+    # Other: full delay pipeline for all fields
+    cfg.delay_cfg.other = PerspectiveCfg(
+        pipeline=other_pipeline,
+    )
+
+    # Noise configuration
+    cfg.noise.enabled = params.noise_enabled
+    cfg.noise.position_std = DistributionCfg(
+        type="constant", value=params.noise_position_std, min_value=0.0
+    )
+    cfg.noise.velocity_std = DistributionCfg(
+        type="constant", value=params.noise_velocity_std, min_value=0.0
+    )
+    cfg.noise.orientation_std = DistributionCfg(
+        type="constant", value=params.noise_orientation_std, min_value=0.0
+    )
+    cfg.noise.bbox_std = DistributionCfg(
+        type="constant", value=params.noise_bbox_std, min_value=0.0
+    )
+
+    # Reward state configuration
+    cfg.reward_state_cfg.use_delay = params.reward_use_delay
+    cfg.reward_state_cfg.use_noise = params.reward_use_noise
 
     return cfg
 
