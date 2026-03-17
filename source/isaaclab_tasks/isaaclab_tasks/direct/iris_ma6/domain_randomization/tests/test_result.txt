@@ -1,0 +1,101 @@
+[3gH    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H   [INFO] Using python from: /home/usrg/IsaacPX4/IsaacLab/_isaac_sim/python.sh
+Loading user config located at: '/home/usrg/isaacsim/kit/data/Kit/Isaac-Sim/4.5/user.config.json'
+[Info] [carb] Logging to file: /home/usrg/isaacsim/kit/logs/Kit/Isaac-Sim/4.5/kit_20260317_173428.log
+2026-03-17 08:34:28 [0ms] [Warning] [omni.kit.app.plugin] No crash reporter present, dumps uploading isn't available.
+2026-03-17 08:34:28 [4ms] [Warning] [omni.ext.plugin] [ext: driver_artifacts] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts' or '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts/config'
+2026-03-17 08:34:28 [4ms] [Warning] [omni.ext.plugin] [ext: rendering_modes] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes' or '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes/config'
+2026-03-17 08:34:29 [497ms] [Warning] [omni.usd_config.extension] Enable omni.materialx.libs extension to use MaterialX
+2026-03-17 08:34:29 [903ms] [Warning] [omni.isaac.dynamic_control] omni.isaac.dynamic_control is deprecated as of Isaac Sim 4.5. No action is needed from end-users.
+
+|---------------------------------------------------------------------------------------------|
+| Driver Version: 535.230.02    | Graphics API: Vulkan
+|=============================================================================================|
+| GPU | Name                             | Active | LDA | GPU Memory | Vendor-ID | LUID       |
+|     |                                  |        |     |            | Device-ID | UUID       |
+|     |                                  |        |     |            | Bus-ID    |            |
+|---------------------------------------------------------------------------------------------|
+| 0   | NVIDIA GeForce RTX 3090          | Yes: 0 |     | 24822   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2204      | 7116df58.. |
+|     |                                  |        |     |            | 9         |            |
+|=============================================================================================|
+| OS: 20.04.6 LTS (Focal Fossa) ubuntu, Version: 20.04.6, Kernel: 5.15.0-139-generic
+| XServer Vendor: The X.Org Foundation, XServer Version: 12013000 (1.20.13.0)
+| Processor: AMD Ryzen 9 5950X 16-Core Processor
+| Cores: 16 | Logical Cores: 32
+|---------------------------------------------------------------------------------------------|
+| Total Memory (MB): 64194 | Free Memory: 38941
+| Total Page/Swap (MB): 13730 | Free Page/Swap: 13730
+|---------------------------------------------------------------------------------------------|
+[WARN][AppLauncher]: There are no arguments attached to the ArgumentParser object. If you have your own arguments, please load your own arguments before calling the `AppLauncher.add_app_launcher_args` method. This allows the method to check the validity of the arguments and perform checks for argument names.
+[INFO][AppLauncher]: Using device: cuda:0
+[INFO][AppLauncher]: Loading experience file: /home/usrg/IsaacPX4/IsaacLab/apps/isaaclab.python.headless.kit
+================================================================================
+DOMAIN RANDOMIZATION MODULE TEST SUITE
+================================================================================
+Device:        cuda
+Torch version: 2.5.1+cu118
+CUDA version:  11.8
+GPU name:      NVIDIA GeForce RTX 3090
+Started:       2026-03-17 17:34:35
+
+================================================================================
+Testing Configuration Classes
+================================================================================
+  ✓ Import configuration classes
+  ✓ DomainRandomizationCfg default instantiation
+  ✓ CameraRandomizationCfg defaults
+  ✓ PhysicsRandomizationCfg composition
+  ✓ GimbalRandomizationCfg defaults
+  ✓ Custom configuration override
+
+================================================================================
+Testing Camera Processor
+================================================================================
+  ✓ Import CameraProcessor
+  ✓ CameraProcessor initialization
+  ✓ Default intrinsic matrices
+  ✓ Camera parameter randomization
+  ✓ Symmetric crop computation
+  ✓ Image processing with grid_sample
+  ✓ Intrinsic matrix consistency
+  ✓ Focal length scaling
+
+================================================================================
+Testing Physics Randomizer
+================================================================================
+  ✓ Import PhysicsRandomizer
+  ✓ PhysicsRandomizer initialization
+  ✓ Mass scale sampling
+  ✓ Payload mass sampling
+  ✓ Material parameter sampling
+
+================================================================================
+Testing Gimbal Randomizer
+================================================================================
+  ✓ Import GimbalRandomizer
+  ✓ GimbalRandomizer initialization
+  ✓ Joint offset sampling
+  ✓ Individual offset getters
+  ✓ Dynamics sampling
+
+================================================================================
+Testing Domain Randomizer (Integration)
+================================================================================
+  ✓ Import DomainRandomizer
+  ✓ DomainRandomizer initialization
+  ✓ randomize_all orchestration
+  ✓ Image processing through randomizer
+  ✓ State summary generation
+  ✓ Component access
+  ✓ Disabled randomization
+
+================================================================================
+TEST SUMMARY
+================================================================================
+Total Tests: 31
+Passed:      31 (100.0%)
+Failed:      0 (0.0%)
+Errors:      0 (0.0%)
+================================================================================
+2026-03-17 08:34:35 [6,635ms] [Warning] [omni.fabric.plugin] gFabricState->gUsdStageToSimStageWithHistoryMap had 1 outstanding SimStageWithHistory(s) at shutdown
+2026-03-17 08:34:35 [6,659ms] [Warning] [carb] Recursive unloadAllPlugins() detected!
