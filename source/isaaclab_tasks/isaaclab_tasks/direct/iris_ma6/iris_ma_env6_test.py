@@ -595,14 +595,21 @@ class IrisMA6TestEnv(DirectMARLEnv):
             dim=1,
         )  # [N, C]
 
+        # Gimbal roll for horizon stabilization (joint index 2)
+        gimbal_rolls = torch.stack(
+            [self._gimbal_joint_pos[agent_id][:, 2] for agent_id in self.cfg.possible_agents],
+            dim=1,
+        )  # [N, C]
+
         # Camera intrinsics (with zoom applied)
         camera_intrinsics = torch.stack(
             [self._camera_intrinsics_cache[agent_id] for agent_id in self.cfg.possible_agents],
             dim=1,
         )  # [N, C, 3, 3]
 
-        # Get bbox data: [N, C, T, 4] (normalized xywh format)
-        bbox_2d = self.bbox_raycaster_v2.data.bboxes_normalized  # [N, C, T, 4]
+        # Get bbox data: [N, C, T, 4] (pixel xywh format)
+        # CRITICAL: Use pixel coordinates, NOT normalized - triangulation expects pixels
+        bbox_2d = self.bbox_raycaster_v2.data.bboxes  # [N, C, T, 4]
 
         # Valid mask: use smoothed confidence to reduce oscillation
         bbox_valid = self._smoothed_bbox_confidence > self._smoothed_bbox_empty_threshold  # [N, C, T]
@@ -617,6 +624,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
             robot_positions=robot_positions,
             robot_quats=robot_quats,
             gimbal_yaws=gimbal_yaws,
+            gimbal_rolls=gimbal_rolls,
             gimbal_pitches=gimbal_pitches,
             camera_intrinsics=camera_intrinsics,
             cfg=self.cfg.triangulation,

@@ -307,11 +307,13 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     - value ~ Uniform(min, min + progress * (max - min))
     """
 
-    enable_initial_states_randomization: bool = True
+    enable_initial_states_randomization: bool = False
     """Enable randomized initial states.
 
     If True, uses InitialStates module for curriculum-driven randomization.
-    If False, uses hardcoded triangle formation (for debugging).
+    If False, uses hardcoded triangle formation (for simple tests/debugging).
+
+    Default is False for simple testing. Set to True for training with curriculum.
     """
 
     def __post_init__(self):
