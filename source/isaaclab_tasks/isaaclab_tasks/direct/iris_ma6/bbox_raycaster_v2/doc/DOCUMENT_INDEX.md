@@ -10,6 +10,7 @@ This directory contains documentation for the BBoxRayCasterV2 module - a GPU-acc
 | [CONFIGURATION.md](CONFIGURATION.md) | Complete configuration reference with examples |
 | [OCCLUSION_DETECTION.md](OCCLUSION_DETECTION.md) | Occlusion detection pipeline and algorithms |
 | [USAGE_GUIDE.md](USAGE_GUIDE.md) | Integration guide with code examples |
+| [ISAAC_SIM_BBOX_COMPARISON.md](ISAAC_SIM_BBOX_COMPARISON.md) | Comparison with Isaac Sim built-in bbox annotators |
 
 ## Quick Overview
 
