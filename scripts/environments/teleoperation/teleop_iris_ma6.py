@@ -75,6 +75,7 @@ simulation_app = app_launcher.app
 
 import cv2
 import numpy as np
+import time
 import torch
 import gymnasium as gym
 import matplotlib.pyplot as plt
@@ -135,6 +136,9 @@ def draw_bbox_overlay(
     agent_idx: int,
     zoom_level: float = 1.0,
     target_pixel: tuple[int, int, bool] | None = None,
+    distance_m: float | None = None,
+    sim_time: float | None = None,
+    realtime_factor: float | None = None,
 ) -> np.ndarray:
     """Draw bounding box overlay on camera image.
 
@@ -145,6 +149,9 @@ def draw_bbox_overlay(
         agent_idx: Index of the controlled agent.
         zoom_level: Current zoom level for display.
         target_pixel: (u, v, valid) from TiledCamera re-projection. Blue crosshair.
+        distance_m: Distance to target in meters.
+        sim_time: Simulation time in seconds.
+        realtime_factor: Ratio of sim time to wall clock time.
 
     Returns:
         Annotated image (H, W, 3), uint8.
@@ -178,6 +185,18 @@ def draw_bbox_overlay(
     cv2.putText(vis, label, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
     cv2.putText(vis, f"Agent {agent_idx} | Zoom: {zoom_level:.2f}x", (10, 50),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+    # Distance to target
+    if distance_m is not None:
+        cv2.putText(vis, f"{distance_m:.1f} m", (10, 75),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+    # Simulation time and realtime factor
+    if sim_time is not None and realtime_factor is not None:
+        time_str = f"{sim_time:.2f} sec (x {realtime_factor:.2f})"
+        cv2.putText(vis, time_str, (10, 100),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
     # Legend
     cv2.putText(vis, "green=raycaster  blue=camera", (10, h_img - 10),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
@@ -480,6 +499,10 @@ def main():
 
     print("[INFO] Starting teleoperation loop...")
 
+    # Time tracking for realtime factor
+    wall_clock_start = time.time()
+    sim_time_start = env.sim.current_time
+
     # Main loop
     step_count = 0
     while simulation_app.is_running():
@@ -550,9 +573,24 @@ def main():
                 )
                 target_pixel = (tu, tv, tvalid)
 
+                # Compute distance from drone to target
+                drone_pos = robot.data.root_pos_w[0]
+                distance_m = (target_pos - drone_pos).norm().item()
+
+                # Compute simulation time and realtime factor
+                sim_time_elapsed = env.sim.current_time - sim_time_start
+                wall_clock_elapsed = time.time() - wall_clock_start
+                if wall_clock_elapsed > 0.01:
+                    realtime_factor = sim_time_elapsed / wall_clock_elapsed
+                else:
+                    realtime_factor = 0.0
+
                 vis_image = draw_bbox_overlay(
                     camera_rgb, bbox_xyxy, bbox_empty_val, controlled_agent_idx, zoom,
                     target_pixel=target_pixel,
+                    distance_m=distance_m,
+                    sim_time=sim_time_elapsed,
+                    realtime_factor=realtime_factor,
                 )
 
                 if image_display is None:
