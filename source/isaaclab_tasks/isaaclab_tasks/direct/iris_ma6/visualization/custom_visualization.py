@@ -349,3 +349,38 @@ class CustomVisualization:
             )
         except Exception:
             pass
+
+    def update_covariance_ellipsoids_obs(
+        self,
+        translations: torch.Tensor,
+        covariance: torch.Tensor,
+        is_valid: torch.Tensor,
+    ):
+        """Update covariance ellipsoid visualization for observed triangulation.
+
+        Same as update_covariance_ellipsoids but draws in gray to distinguish
+        from ground truth.
+
+        Args:
+            translations: Triangulated target positions (N, 3) in world frame.
+            covariance: Covariance matrices (N, 3, 3) from triangulation.
+            is_valid: Validity mask (N,) indicating successful triangulation.
+        """
+        if not self._visualization_enabled:
+            return
+
+        # Gray color for observed (delayed/noisy) triangulation result
+        gray_color = (0.5, 0.5, 0.5, 1.0)
+
+        # Use second agent's visualizer to avoid overlapping with GT
+        # If only one agent, use the same visualizer (will overlap but different color)
+        agent = self.possible_agents[1] if len(self.possible_agents) > 1 else self.possible_agents[0]
+        try:
+            self.covariance_ellipsoid[agent].visualize(
+                translations=translations,
+                covariance=covariance,
+                is_valid=is_valid,
+                color=gray_color,
+            )
+        except Exception:
+            pass

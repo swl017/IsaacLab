@@ -115,6 +115,7 @@ class CovarianceEllipsoid:
         translations: torch.Tensor,
         covariance: torch.Tensor,
         is_valid: torch.Tensor | None = None,
+        color: tuple[float, float, float, float] | None = None,
     ) -> bool:
         """Visualize covariance ellipsoids at triangulated positions.
 
@@ -125,6 +126,7 @@ class CovarianceEllipsoid:
             covariance: Covariance matrices (N, 3, 3).
             is_valid: Optional validity mask (N,). If provided, invalid entries
                 are skipped.
+            color: Optional RGBA color tuple. Defaults to ELLIPSOID_COLOR (cyan).
 
         Returns:
             True if visualization was performed, False if skipped.
@@ -149,7 +151,7 @@ class CovarianceEllipsoid:
         # Convert variance to standard deviation and apply scale
         std_dev = torch.sqrt(variances) * SCALE_MULTIPLIER
 
-        return self._draw_ellipsoids(translations, std_dev, is_valid)
+        return self._draw_ellipsoids(translations, std_dev, is_valid, color)
 
     def visualize_from_std(
         self,
@@ -190,6 +192,7 @@ class CovarianceEllipsoid:
         centers: torch.Tensor,
         radii: torch.Tensor,
         is_valid: torch.Tensor | None,
+        color: tuple[float, float, float, float] | None = None,
     ) -> bool:
         """Draw wireframe ellipsoids using debug_draw lines.
 
@@ -202,6 +205,7 @@ class CovarianceEllipsoid:
             centers: Ellipsoid centers (N, 3).
             radii: Radii along each axis (N, 3).
             is_valid: Validity mask (N,) or None.
+            color: Optional RGBA color tuple. Defaults to ELLIPSOID_COLOR (cyan).
 
         Returns:
             True if drawing succeeded.
@@ -258,7 +262,8 @@ class CovarianceEllipsoid:
             return True  # Nothing to draw but not an error
 
         # Draw all lines at once
-        colors = [list(ELLIPSOID_COLOR)] * len(start_points)
+        draw_color = color if color is not None else ELLIPSOID_COLOR
+        colors = [list(draw_color)] * len(start_points)
         thicknesses = [2.0] * len(start_points)
 
         try:

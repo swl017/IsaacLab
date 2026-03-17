@@ -518,6 +518,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 gt_data.camera_position_w = cam_pos_w
                 gt_data.camera_orientation_w = cam_ori_w
                 gt_data.camera_zoom_level = self.zoom_level[:, idx]
+                gt_data.camera_base_intrinsics = self._camera_intrinsics_base.clone()
 
                 # Detection (bbox) - shape (N, T, 4)
                 gt_data.bboxes_2d = self.bbox_raycaster_v2.data.bboxes_normalized[
@@ -549,7 +550,66 @@ class IrisMA6TestEnv(DirectMARLEnv):
         for idx, agent_id in enumerate(self.cfg.possible_agents):
             self._camera_intrinsics_cache[agent_id] = camera_intrinsics[agent_id]
 
-    def _compute_triangulation(self, use_gt_target: bool = True) -> TriangulationResult:
+    def _compute_zoomed_intrinsics(
+        self,
+        base_intrinsics: torch.Tensor,
+        zoom_level: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute camera intrinsics with zoom applied.
+
+        Args:
+            base_intrinsics: Base camera intrinsics [N, 3, 3]
+            zoom_level: Zoom level multiplier [N]
+
+        Returns:
+            Zoomed intrinsics [N, 3, 3] with fx, fy scaled by zoom
+        """
+        intrinsics = base_intrinsics.clone()
+        intrinsics[:, 0, 0] *= zoom_level  # fx
+        intrinsics[:, 1, 1] *= zoom_level  # fy
+        return intrinsics
+
+    def _build_gt_states(self) -> Dict[AgentID, AgentStates]:
+        """Build GT states dictionary when delay system is disabled.
+
+        Returns:
+            Dictionary mapping agent_id to AgentStates with current GT values.
+        """
+        gt_states = {}
+        for idx, agent_id in enumerate(self.cfg.possible_agents):
+            states = AgentStates(
+                num_envs=self.num_envs,
+                num_joints=3,
+                num_targets=1,
+                device=self.device,
+            )
+            data = states.data
+
+            # Body motion
+            data.body_position_w = self._root_pos_w[agent_id]
+            data.body_orientation_w = self._root_quat_w[agent_id]
+
+            # Joint states
+            data.joint_positions_b = self._gimbal_joint_pos[agent_id]
+
+            # Camera geometry
+            robot = self._robots[agent_id]
+            pitch_link_idx = self._frame_link_ids[agent_id]["pitch_link"]
+            data.camera_position_w = robot.data.body_pos_w[:, pitch_link_idx]
+            data.camera_base_intrinsics = self._camera_intrinsics_base.clone()
+            data.camera_zoom_level = self.zoom_level[:, idx]
+
+            # Detection - use pixel bboxes (not normalized) for triangulation
+            data.bboxes_2d = self.bbox_raycaster_v2.data.bboxes[:, idx, :, :]
+
+            gt_states[agent_id] = states
+        return gt_states
+
+    def _compute_triangulation(
+        self,
+        states: Dict[AgentID, AgentStates],
+        use_gt_target: bool = True,
+    ) -> TriangulationResult:
         """Compute triangulation and covariance for all targets.
 
         Dual-pipeline architecture:
@@ -557,62 +617,62 @@ class IrisMA6TestEnv(DirectMARLEnv):
         - use_gt_target=False: For observations - uses midpoint triangulation
 
         Args:
+            states: Agent states dictionary (reward_states or delayed_states).
+                Must be provided - no fallback to GT.
             use_gt_target: If True, use GT target position for covariance computation.
                           If False, use triangulated position (midpoint method).
 
         Returns:
             TriangulationResult with position, covariance, quality_metric, validity
         """
-        num_agents = len(self.cfg.possible_agents)
+        # Extract camera positions from states
+        camera_positions = torch.stack([
+            states[agent_id].data.camera_position_w
+            for agent_id in self.cfg.possible_agents
+        ], dim=1)  # [N, C, 3]
 
-        # Stack camera data: [N, C, ...] where C = num_agents
-        # CRITICAL: Use actual camera positions from pitch_link, NOT robot root
-        # The camera is mounted on the gimbal, which has an offset from robot root
-        camera_positions = []
-        for agent_id in self.cfg.possible_agents:
-            robot = self._robots[agent_id]
-            pitch_link_idx = self._frame_link_ids[agent_id]["pitch_link"]
-            camera_pos_w = robot.data.body_pos_w[:, pitch_link_idx]
-            camera_positions.append(camera_pos_w)
-        robot_positions = torch.stack(camera_positions, dim=1)  # [N, C, 3]
-
-        robot_quats = torch.stack(
-            [self._root_quat_w[agent_id] for agent_id in self.cfg.possible_agents],
-            dim=1,
-        )  # [N, C, 4]
+        # Extract robot orientations from states
+        robot_quats = torch.stack([
+            states[agent_id].data.body_orientation_w
+            for agent_id in self.cfg.possible_agents
+        ], dim=1)  # [N, C, 4]
 
         # Gimbal angles from joint positions (order: pitch, yaw, roll)
         # CRITICAL: Subtract YAW_JOINT_OFFSET from raw joint yaw to get logical gimbal yaw.
         # The physical joint has offset -π/2 applied, so joint_yaw=-π/2 means camera forward.
         # Triangulation expects gimbal_yaw=0 to mean camera forward.
-        gimbal_yaws = torch.stack(
-            [self._gimbal_joint_pos[agent_id][:, 1] - YAW_JOINT_OFFSET for agent_id in self.cfg.possible_agents],
-            dim=1,
-        )  # [N, C]
+        gimbal_pitches = torch.stack([
+            states[agent_id].data.joint_positions_b[:, 0]
+            for agent_id in self.cfg.possible_agents
+        ], dim=1)  # [N, C]
 
-        gimbal_pitches = torch.stack(
-            [self._gimbal_joint_pos[agent_id][:, 0] for agent_id in self.cfg.possible_agents],
-            dim=1,
-        )  # [N, C]
+        gimbal_yaws = torch.stack([
+            states[agent_id].data.joint_positions_b[:, 1] - YAW_JOINT_OFFSET
+            for agent_id in self.cfg.possible_agents
+        ], dim=1)  # [N, C]
 
-        # Gimbal roll for horizon stabilization (joint index 2)
-        gimbal_rolls = torch.stack(
-            [self._gimbal_joint_pos[agent_id][:, 2] for agent_id in self.cfg.possible_agents],
-            dim=1,
-        )  # [N, C]
+        gimbal_rolls = torch.stack([
+            states[agent_id].data.joint_positions_b[:, 2]
+            for agent_id in self.cfg.possible_agents
+        ], dim=1)  # [N, C]
 
-        # Camera intrinsics (with zoom applied)
-        camera_intrinsics = torch.stack(
-            [self._camera_intrinsics_cache[agent_id] for agent_id in self.cfg.possible_agents],
-            dim=1,
-        )  # [N, C, 3, 3]
+        # Compute zoomed camera intrinsics from states
+        camera_intrinsics = torch.stack([
+            self._compute_zoomed_intrinsics(
+                states[agent_id].data.camera_base_intrinsics,
+                states[agent_id].data.camera_zoom_level
+            )
+            for agent_id in self.cfg.possible_agents
+        ], dim=1)  # [N, C, 3, 3]
 
-        # Get bbox data: [N, C, T, 4] (pixel xywh format)
-        # CRITICAL: Use pixel coordinates, NOT normalized - triangulation expects pixels
-        bbox_2d = self.bbox_raycaster_v2.data.bboxes  # [N, C, T, 4]
+        # Get bbox from states [N, C, T, 4] (pixel xywh format)
+        bbox_2d = torch.stack([
+            states[agent_id].data.bboxes_2d
+            for agent_id in self.cfg.possible_agents
+        ], dim=1)
 
-        # Valid mask: use smoothed confidence to reduce oscillation
-        bbox_valid = self._smoothed_bbox_confidence > self._smoothed_bbox_empty_threshold  # [N, C, T]
+        # Bbox validity from states (non-zero bbox)
+        bbox_valid = bbox_2d.abs().sum(dim=-1) > 1e-6  # [N, C, T]
 
         # Target position (GT): [N, T, 3]
         target_pos_gt = self._target_pos_w.unsqueeze(1) if use_gt_target else None
@@ -621,7 +681,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
         result = compute_full_triangulation(
             bbox_2d=bbox_2d,
             bbox_valid=bbox_valid,
-            robot_positions=robot_positions,
+            robot_positions=camera_positions,
             robot_quats=robot_quats,
             gimbal_yaws=gimbal_yaws,
             gimbal_rolls=gimbal_rolls,
@@ -679,8 +739,18 @@ class IrisMA6TestEnv(DirectMARLEnv):
         tri_reward = torch.zeros(self.num_envs, device=self.device)
 
         if self.cfg.enable_triangulation:
+            # Get states for triangulation
+            if self._delay_system is not None:
+                tri_states = self._delay_system.get_all_states_for_rewards(
+                    ego_agent_id=self.cfg.possible_agents[0]
+                )
+            else:
+                tri_states = self._build_gt_states()
+
             # Compute triangulation with GT target position (reward pipeline)
-            self._triangulation_result_gt = self._compute_triangulation(use_gt_target=True)
+            self._triangulation_result_gt = self._compute_triangulation(
+                states=tri_states, use_gt_target=True
+            )
 
             # Analytical reward: 1/sqrt(trace)
             # quality_metric is the trace of covariance (lower = better geometry)
@@ -809,8 +879,19 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         # Append triangulation tail if enabled (observation pipeline uses triangulated position)
         if self.cfg.enable_triangulation:
+            # Get states for triangulation
+            if self._delay_system is not None:
+                # Use delayed states from first agent's perspective
+                tri_states = self._delay_system.get_all_states_for_observations(
+                    ego_agent_id=self.cfg.possible_agents[0]
+                )
+            else:
+                tri_states = self._build_gt_states()
+
             # Compute triangulation WITHOUT GT (uses midpoint method for position)
-            self._triangulation_result_obs = self._compute_triangulation(use_gt_target=False)
+            self._triangulation_result_obs = self._compute_triangulation(
+                states=tri_states, use_gt_target=False
+            )
 
             result = self._triangulation_result_obs
             is_valid = result.is_valid[:, 0]  # [N]
@@ -1137,4 +1218,12 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 translations=result.position[:, 0, :],  # [N, 3] - first target
                 covariance=result.covariance[:, 0, :, :],  # [N, 3, 3] - first target
                 is_valid=result.is_valid[:, 0],  # [N] - first target
+            )
+        # Draw observed triangulation (gray) alongside GT (cyan)
+        if self.cfg.enable_triangulation and self._triangulation_result_obs is not None:
+            result_obs = self._triangulation_result_obs
+            self._visualization.update_covariance_ellipsoids_obs(
+                translations=result_obs.position[:, 0, :],  # [N, 3] - first target
+                covariance=result_obs.covariance[:, 0, :, :],  # [N, 3, 3] - first target
+                is_valid=result_obs.is_valid[:, 0],  # [N] - first target
             )
