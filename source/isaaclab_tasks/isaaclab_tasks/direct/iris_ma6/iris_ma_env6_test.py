@@ -151,6 +151,12 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         # Action buffers
         self._actions: Dict[str, torch.Tensor] = {}
+        self._last_actions: Dict[str, torch.Tensor] = {
+            agent_id: torch.zeros(self.num_envs, len(self.cfg.action_weight), device=self.device)
+            for agent_id in cfg.possible_agents
+        }
+        self.action_weight = torch.tensor(self.cfg.action_weight, device=self.device)
+        self.action_delta_weight = torch.tensor(self.cfg.action_delta_weight, device=self.device)
         num_agents = len(cfg.possible_agents)
         self.cmd_vel = torch.zeros(self.num_envs, num_agents, 7, device=self.device)
 
@@ -247,6 +253,41 @@ class IrisMA6TestEnv(DirectMARLEnv):
             self.num_envs, num_agents, 1, device=self.device
         )  # (N, C, T) - starts at 1.0 (visible)
         self._smoothed_bbox_empty_threshold = 0.4  # Below this confidence = occluded
+
+        # Image dimensions for bbox normalization
+        self._img_dims = torch.tensor(
+            [self.cfg.camera.width, self.cfg.camera.height],
+            device=self.device,
+            dtype=torch.float32,
+        )
+
+        # NaN recovery: envs flagged for termination due to NaN/Inf in rewards
+        self._nan_terminated_envs: Dict[str, torch.Tensor] = {}
+
+        # Per-step reward components (for visualization/debugging)
+        self._step_rewards: Dict[str, Dict[str, torch.Tensor]] = {}
+
+        # Episode reward tracking for logging
+        self._episode_sums = {
+            agent: {
+                key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+                for key in [
+                    "action_sum",
+                    "action_delta",
+                    "bbox_center",
+                    "bbox_size",
+                    "triangulation",
+                    "cbf_penalty",
+                    "est_error_gt",
+                    "est_error_e2e",
+                ]
+            }
+            for agent in self.cfg.possible_agents
+        }
+
+        # Curriculum progress factors (updated each step in _get_rewards)
+        self.progress_coord = 0.0
+        self.progress_safety = 0.0
 
         # Triangulation module initialization
         # Dual pipeline: GT for rewards, triangulated for observations
@@ -798,111 +839,321 @@ class IrisMA6TestEnv(DirectMARLEnv):
     def _get_rewards(self) -> Dict[str, torch.Tensor]:
         """Get rewards for all agents.
 
-        Reward composition:
-        - Task reward: negative distance to target
-        - Triangulation reward: 1/sqrt(trace) covariance quality (if enabled)
-        - CBF penalty: CPA barrier violation (training-time only)
-
-        When delay system is enabled, task rewards use states based on
-        reward_state_cfg (use_delay, use_noise toggles):
-        - use_delay=False, use_noise=False: Pure GT (privileged)
-        - use_delay=True, use_noise=False: Delayed clean (default)
-        - use_delay=False, use_noise=True: GT with noise
-        - use_delay=True, use_noise=True: Full noisy delayed
+        Reward composition (6 components, migrated from iris_ma5):
+        - action_sum: Penalty for action magnitude (weighted per dimension)
+        - action_delta: Penalty for action changes (smoothness)
+        - bbox_center: Reward for centering target in image
+        - bbox_size: Reward for appropriate bbox size (~20% of image area)
+        - triangulation: Covariance-based quality (multiple modes)
+        - cbf_penalty: CPA barrier violation (replaces iris_ma5 collision+ttc)
 
         CBF penalty always uses GT positions for safety.
-        Triangulation reward uses GT target position for covariance computation.
+        Triangulation uses GT target position for covariance computation.
 
         Returns:
             Dictionary mapping agent_id to reward tensor (N,).
         """
-        # Compute task reward (simple distance-based)
-        task_rewards = {}
+        rewards_dict = {}
 
+        # Update curriculum progress
+        current_step = self.common_step_counter
+        curr = self.cfg.curriculum
+        self.progress_coord = self._linear_progress(
+            curr.coordination_start_step, curr.coordination_end_step, current_step
+        )
+        self.progress_safety = self._linear_progress(
+            curr.safety_start_step, curr.safety_end_step, current_step
+        )
+
+        # Get states for reward computation
         if self._delay_system is not None:
-            # Use configurable reward states
-            # We use drone_0 as the reference ego since reward computation
-            # typically uses the same states for all agents
-            reward_states = self._delay_system.get_all_states_for_rewards(
-                ego_agent_id=self.cfg.possible_agents[0]
-            )
-
-            for idx, agent_id in enumerate(self.cfg.possible_agents):
-                agent_pos = reward_states[agent_id].data.body_position_w
-                dist = torch.norm(agent_pos - self._target_pos_w, dim=-1)
-                task_rewards[agent_id] = -dist * 0.1
-        else:
-            # Use ground truth states directly
-            for idx, agent_id in enumerate(self.cfg.possible_agents):
-                dist = torch.norm(self._root_pos_w[agent_id] - self._target_pos_w, dim=-1)
-                task_rewards[agent_id] = -dist * 0.1
-
-        # Triangulation reward (uses GT target position for covariance computation)
-        tri_reward = torch.zeros(self.num_envs, device=self.device)
-
-        if self.cfg.enable_triangulation:
-            # Get states for triangulation
-            if self._delay_system is not None:
-                tri_states = self._delay_system.get_all_states_for_rewards(
+            if self.cfg.use_noisy_rewards:
+                reward_states = self._delay_system.get_all_states_for_observations(
                     ego_agent_id=self.cfg.possible_agents[0]
                 )
             else:
-                tri_states = self._build_gt_states()
+                reward_states = self._delay_system.get_all_states_for_rewards(
+                    ego_agent_id=self.cfg.possible_agents[0]
+                )
+        else:
+            reward_states = self._build_gt_states()
 
-            # Compute triangulation with GT target position (reward pipeline)
+        # Compute triangulation for all active task reward levels
+        if self.cfg.enable_triangulation:
+            task_level = self.cfg.task_reward_level
+
+            # Level 1 (FIM): covariance at GT target position
             self._triangulation_result_gt = self._compute_triangulation(
-                states=tri_states, use_gt_target=True
+                states=reward_states, use_gt_target=True
             )
 
-            # Analytical reward: 1/sqrt(trace)
-            # quality_metric is the trace of covariance (lower = better geometry)
-            quality = self._triangulation_result_gt.quality_metric[:, 0]  # [N]
-            is_valid = self._triangulation_result_gt.is_valid[:, 0]  # [N]
+            # Level 2 (GT-anchored estimation error): triangulate with GT drone positions
+            if task_level >= 2 or self.cfg.curriculum_task_levels:
+                gt_states = self._build_gt_states()
+                self._tri_result_l2 = self._compute_triangulation(
+                    states=gt_states, use_gt_target=False
+                )
+            else:
+                self._tri_result_l2 = None
 
-            # Safe computation: clamp quality to avoid division by zero
-            # Handle NaN values from invalid triangulations
-            quality_safe = torch.where(
-                torch.isnan(quality),
-                torch.full_like(quality, 1e6),  # Large value -> small reward
-                quality,
-            )
-            quality_safe = torch.clamp(quality_safe, min=1e-6)
-
-            # Reward = 1/sqrt(trace), clipped to [0, 100]
-            tri_reward = torch.where(
-                is_valid,
-                torch.clamp(1.0 / torch.sqrt(quality_safe), max=100.0),
-                torch.zeros_like(quality),
-            )
-            tri_reward = tri_reward * self.cfg.triangulation_reward_scale
+            # Level 3 (E2E estimation error): triangulate with delayed drone positions
+            if task_level >= 3 or self.cfg.curriculum_task_levels:
+                delayed_states_e2e = self._get_delayed_states_for_e2e()
+                self._tri_result_l3 = self._compute_triangulation(
+                    states=delayed_states_e2e, use_gt_target=False
+                )
+            else:
+                self._tri_result_l3 = None
 
         # Stack GT positions for CBF computation: (E, N, 3)
-        # CBF always uses GT for safety
         gt_positions = torch.stack(
             [self._root_pos_w[agent_id] for agent_id in self.cfg.possible_agents],
             dim=1,
         )
-
-        # Get commanded velocities: (E, N, 3)
         cmd_velocities = self.cmd_vel[:, :, 0:3]
+        dt = self.cfg.sim.dt * self.cfg.decimation
 
         # Compute CBF penalty from GT state
-        dt = self.cfg.sim.dt * self.cfg.decimation
-        cbf_penalty = self.cbf_manager.compute_training_penalty(
+        cbf_penalty_all = self.cbf_manager.compute_training_penalty(
             gt_positions=gt_positions,
             commanded_velocities=cmd_velocities,
             dt=dt,
         )  # (E,)
 
-        # Compose final reward per agent
-        # All agents share the same triangulation reward (cooperative task)
-        lambda_cbf = self.cbf_manager.lambda_cbf
-        rewards = {}
-        for idx, agent_id in enumerate(self.cfg.possible_agents):
-            rewards[agent_id] = task_rewards[agent_id] + tri_reward - lambda_cbf * cbf_penalty
+        # Compute rewards for each agent
+        for i, agent_id in enumerate(self.cfg.possible_agents):
+            delayed_state = reward_states[agent_id]
 
-        return rewards
-    
+            # ---- Action penalties ----
+            action_sum = torch.sum(
+                torch.square(self.action_weight * self._actions[agent_id]), dim=1
+            )
+            action_delta = torch.sum(
+                torch.square(
+                    self.action_delta_weight
+                    * (self._actions[agent_id] - self._last_actions[agent_id])
+                ),
+                dim=1,
+            )
+
+            # ---- BBox rewards (using delayed/observed state) ----
+            bbox_center_raw = delayed_state.data.bboxes_2d[:, 0, 0:2]  # [N, 2] pixel center
+            bbox_size_raw = delayed_state.data.bboxes_2d[:, 0, 2:4]    # [N, 2] pixel w,h
+            bbox_raw = delayed_state.data.bboxes_2d[:, 0, :]  # [N, 4]
+            bbox_valid = bbox_raw.abs().sum(dim=-1) > 1e-6  # [N]
+
+            if self.cfg.use_omnidirectional_cameras:
+                bbox_valid = torch.ones_like(bbox_valid)
+
+            # Normalize to [0, 1]
+            bbox_center = bbox_center_raw / self._img_dims
+            bbox_size = bbox_size_raw / self._img_dims
+
+            # Center reward: exp(-10 * dist_from_center) * valid
+            bbox_center_dist = torch.norm(bbox_center - 0.5, dim=1)
+            bbox_center_mapped = torch.exp(-10.0 * bbox_center_dist) * bbox_valid.float()
+
+            # Size reward: exp(-|area - 0.2|) * valid (ideal bbox area = 20% of image)
+            bbox_area = bbox_size[:, 0] * bbox_size[:, 1]
+            bbox_size_mapped = torch.exp(-torch.abs(bbox_area - 0.2)) * bbox_valid.float()
+
+            # ---- Triangulation / task reward (3 switchable levels) ----
+            if self.cfg.enable_triangulation and self._triangulation_result_gt is not None:
+                task_level = self.cfg.task_reward_level
+
+                # Level 1: FIM (always computed for logging/curriculum)
+                fim_reward = self._compute_fim_reward()
+
+                # Level 2: GT-anchored estimation error
+                if self._tri_result_l2 is not None:
+                    est_error_gt_reward = self._compute_estimation_error_reward(
+                        self._tri_result_l2
+                    )
+                else:
+                    est_error_gt_reward = torch.zeros(self.num_envs, device=self.device)
+
+                # Level 3: E2E estimation error
+                if self._tri_result_l3 is not None:
+                    est_error_e2e_reward = self._compute_estimation_error_reward(
+                        self._tri_result_l3
+                    )
+                else:
+                    est_error_e2e_reward = torch.zeros(self.num_envs, device=self.device)
+
+                # Blend based on curriculum or fixed level
+                if self.cfg.curriculum_task_levels:
+                    l2_prog, l3_prog = self.cfg.curriculum.get_task_level_progress(
+                        current_step
+                    )
+                    triangulation_quality = (
+                        (1.0 - l2_prog) * fim_reward
+                        + l2_prog * (1.0 - l3_prog) * est_error_gt_reward
+                        + l2_prog * l3_prog * (
+                            (1.0 - self.cfg.e2e_weight) * est_error_gt_reward
+                            + self.cfg.e2e_weight * est_error_e2e_reward
+                        )
+                    )
+                else:
+                    if task_level == 1:
+                        triangulation_quality = fim_reward
+                    elif task_level == 2:
+                        triangulation_quality = est_error_gt_reward
+                    elif task_level == 3:
+                        triangulation_quality = (
+                            (1.0 - self.cfg.e2e_weight) * est_error_gt_reward
+                            + self.cfg.e2e_weight * est_error_e2e_reward
+                        )
+                    else:
+                        raise ValueError(
+                            f"Unknown task_reward_level: {task_level}"
+                        )
+            else:
+                triangulation_quality = torch.zeros(self.num_envs, device=self.device)
+                fim_reward = torch.zeros(self.num_envs, device=self.device)
+                est_error_gt_reward = torch.zeros(self.num_envs, device=self.device)
+                est_error_e2e_reward = torch.zeros(self.num_envs, device=self.device)
+
+            step_dt = self.cfg.sim.dt * self.cfg.decimation
+            rewards = {
+                "action_sum": action_sum * self.cfg.action_sum_penalty_scale * step_dt,
+                "action_delta": action_delta * self.cfg.action_delta_penalty_scale * step_dt,
+                "bbox_center": bbox_center_mapped * self.cfg.bbox_center_reward_scale * step_dt,
+                "bbox_size": bbox_size_mapped * self.cfg.bbox_size_reward_scale * step_dt,
+                "triangulation": (
+                    triangulation_quality
+                    * self.cfg.triangulation_reward_scale
+                    * step_dt
+                    * self.progress_coord
+                ),
+                "cbf_penalty": -self.cbf_manager.lambda_cbf * cbf_penalty_all * self.progress_safety,
+                "est_error_gt": est_error_gt_reward,
+                "est_error_e2e": est_error_e2e_reward,
+            }
+
+            # ---- NaN sanitization ----
+            for key in rewards:
+                nan_mask = torch.isnan(rewards[key]) | torch.isinf(rewards[key])
+                if nan_mask.any():
+                    rewards[key] = torch.where(
+                        nan_mask, torch.zeros_like(rewards[key]), rewards[key]
+                    )
+                    if agent_id not in self._nan_terminated_envs:
+                        self._nan_terminated_envs[agent_id] = nan_mask
+                    else:
+                        self._nan_terminated_envs[agent_id] = (
+                            self._nan_terminated_envs[agent_id] | nan_mask
+                        )
+
+            # ---- Store per-step rewards for visualization ----
+            self._step_rewards[agent_id] = {k: v.clone() for k, v in rewards.items()}
+
+            # ---- Episode sum tracking ----
+            for key, value in rewards.items():
+                self._episode_sums[agent_id][key] += value
+
+            # ---- Total reward (exclude diagnostic keys from sum) ----
+            _diagnostic_keys = {"est_error_gt", "est_error_e2e"}
+            total_reward = torch.sum(
+                torch.stack([v for k, v in rewards.items() if k not in _diagnostic_keys]),
+                dim=0,
+            )
+            rewards_dict[agent_id] = total_reward
+
+            # Update last actions
+            self._last_actions[agent_id] = self._actions[agent_id].clone()
+
+        return rewards_dict
+
+    def _linear_progress(self, start: int, end: int, current=None):
+        """Calculate linear curriculum progress for a given phase.
+
+        Args:
+            start: Phase start step.
+            end: Phase end step.
+            current: Current step (defaults to common_step_counter).
+
+        Returns:
+            Progress value between 0.0 and 1.0.
+        """
+        if end <= start:
+            return 1.0
+        if current is None:
+            current = self.common_step_counter
+        x = (current - start) / (end - start)
+        return 0.0 if x < 0 else (1.0 if x > 1 else float(x))
+
+    def _compute_fim_reward(self) -> torch.Tensor:
+        """Level 1: FIM reward from covariance trace.
+
+        Uses the already-computed triangulation result (use_gt_target=True)
+        to extract quality_metric (trace of covariance) and map it to a
+        reward via sqrt(10 / trace).
+
+        Returns:
+            [N] tensor of FIM-based triangulation quality reward.
+        """
+        tri_result = self._triangulation_result_gt
+        quality = tri_result.quality_metric[:, 0]  # trace of covariance
+        is_valid = tri_result.is_valid[:, 0]
+        safe_trace = torch.clamp(quality, min=1e-6)
+        safe_trace = torch.where(
+            torch.isnan(safe_trace),
+            torch.full_like(safe_trace, 1e6),
+            safe_trace,
+        )
+        return torch.where(
+            is_valid,
+            torch.clamp(torch.sqrt(10.0 / safe_trace), max=100.0),
+            torch.zeros_like(quality),
+        )
+
+    def _compute_estimation_error_reward(
+        self, tri_result: "TriangulationResult"
+    ) -> torch.Tensor:
+        """Compute reward from estimation error: scale * exp(-temp * ||error||).
+
+        Maps estimation error to [0, scale] range using exponential.
+        Used by both Level 2 (GT-anchored) and Level 3 (E2E).
+
+        Args:
+            tri_result: Triangulation result computed with use_gt_target=False,
+                       so result.position contains the estimated target position.
+
+        Returns:
+            [N] tensor of estimation error reward.
+        """
+        est_pos = tri_result.position[:, 0, :]  # [N, 3] estimated target position
+        gt_pos = self._target_pos_w             # [N, 3] GT target position
+        is_valid = tri_result.is_valid[:, 0]    # [N]
+
+        error = torch.norm(est_pos - gt_pos, dim=-1)  # [N]
+        # Replace NaN errors with large value (invalid triangulation)
+        error = torch.where(
+            torch.isnan(error), torch.full_like(error, 100.0), error
+        )
+
+        reward = self.cfg.estimation_error_scale * torch.exp(
+            -self.cfg.estimation_error_temp * error
+        )
+        return torch.where(is_valid, reward, torch.zeros_like(reward))
+
+    def _get_delayed_states_for_e2e(self) -> Dict[str, "AgentStates"]:
+        """Get fully delayed states for Level 3 E2E reward.
+
+        Always uses the delay pipeline regardless of use_noisy_rewards config,
+        since Level 3 is defined as triangulation with delayed drone positions.
+
+        Returns:
+            Dictionary mapping agent_id to delayed AgentStates.
+        """
+        if self._delay_system is not None:
+            return self._delay_system.get_all_states_for_observations(
+                ego_agent_id=self.cfg.possible_agents[0]
+            )
+        else:
+            # Fallback to GT when no delay system is configured
+            return self._build_gt_states()
+
     def _get_observations(self) -> Dict[str, torch.Tensor]:
         """Get observations for all agents.
 
@@ -1072,9 +1323,18 @@ class IrisMA6TestEnv(DirectMARLEnv):
             # Terminate if drone goes too low (crashed) OR collision
             pos_z = self._root_pos_w[agent_id][:, 2]
             crashed = pos_z < 0.5
+            died = crashed | collided
 
-            terminated[agent_id] = crashed | collided
+            # Also terminate envs that had NaN/Inf in rewards
+            if agent_id in self._nan_terminated_envs:
+                died = died | self._nan_terminated_envs[agent_id]
+
+            terminated[agent_id] = died
             truncated[agent_id] = time_out & ~terminated[agent_id]
+
+        # Clear NaN flags after reading — they'll be re-set by _get_rewards()
+        # if NaN persists in the next step.
+        self._nan_terminated_envs = {}
 
         return terminated, truncated
 
@@ -1188,6 +1448,21 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         # Reset smoothed occlusion confidence to visible state
         self._smoothed_bbox_confidence[env_ids] = 1.0
+
+        # Log episode reward sums and reset tracking
+        all_extras = {}
+        for agent_id in self.cfg.possible_agents:
+            self._last_actions[agent_id][env_ids].zero_()
+            for key, value in self._episode_sums[agent_id].items():
+                episodic_sum_avg = torch.mean(value[env_ids])
+                all_extras[f"Episode_Reward/{agent_id}_{key}"] = (
+                    episodic_sum_avg / self.max_episode_length_s
+                )
+                self._episode_sums[agent_id][key][env_ids] = 0.0
+
+        if "log" not in self.extras:
+            self.extras["log"] = {}
+        self.extras["log"].update(all_extras)
 
         # Clear triangulation results (will be recomputed on first step)
         self._triangulation_result_gt = None

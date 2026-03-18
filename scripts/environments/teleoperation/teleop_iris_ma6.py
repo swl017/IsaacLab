@@ -489,13 +489,49 @@ def main():
     show_camera = args_cli.show_camera
     image_display = None
     fig = None
-    ax = None
+    ax_camera = None
+
+    # Reward plot components to display (exclude diagnostic keys)
+    reward_plot_keys = ["action_sum", "action_delta", "bbox_center", "bbox_size",
+                        "triangulation", "cbf_penalty"]
+    reward_colors = {
+        "action_sum": "#e74c3c",      # red
+        "action_delta": "#e67e22",     # orange
+        "bbox_center": "#2ecc71",     # green
+        "bbox_size": "#27ae60",       # dark green
+        "triangulation": "#3498db",   # blue
+        "cbf_penalty": "#9b59b6",     # purple
+    }
+    reward_history_len = 200  # number of steps to show
+    reward_history = {k: [] for k in reward_plot_keys}
+    total_reward_history = []
+    reward_lines = {}
+    total_reward_line = None
+    ax_rewards = None
 
     if show_camera:
         plt.ion()
-        fig, ax = plt.subplots(1, 1, figsize=(8, 6))
-        ax.set_title(f"Camera - drone_{controlled_agent_idx}")
-        ax.axis("off")
+        fig, (ax_camera, ax_rewards) = plt.subplots(
+            1, 2, figsize=(14, 5),
+            gridspec_kw={"width_ratios": [1.2, 1]},
+        )
+        ax_camera.set_title(f"Camera - drone_{controlled_agent_idx}")
+        ax_camera.axis("off")
+
+        # Initialize reward plot
+        ax_rewards.set_title("Reward Components (per step)")
+        ax_rewards.set_xlabel("Step")
+        ax_rewards.set_ylabel("Reward")
+        ax_rewards.set_xlim(0, reward_history_len)
+        ax_rewards.grid(True, alpha=0.3)
+        for key in reward_plot_keys:
+            line, = ax_rewards.plot([], [], label=key, color=reward_colors[key],
+                                    linewidth=1.0, alpha=0.8)
+            reward_lines[key] = line
+        total_reward_line, = ax_rewards.plot([], [], label="total", color="black",
+                                             linewidth=1.5)
+        ax_rewards.legend(fontsize=7, loc="upper left")
+        fig.tight_layout()
 
     print("[INFO] Starting teleoperation loop...")
 
@@ -594,10 +630,41 @@ def main():
                 )
 
                 if image_display is None:
-                    image_display = ax.imshow(vis_image)
+                    image_display = ax_camera.imshow(vis_image)
                     plt.show(block=False)
                 else:
                     image_display.set_data(vis_image)
+
+                # Update reward plots
+                if hasattr(env, '_step_rewards') and agent_id in env._step_rewards:
+                    step_rewards = env._step_rewards[agent_id]
+                    step_total = 0.0
+                    for key in reward_plot_keys:
+                        val = step_rewards[key][0].item() if key in step_rewards else 0.0
+                        reward_history[key].append(val)
+                        if len(reward_history[key]) > reward_history_len:
+                            reward_history[key].pop(0)
+                        step_total += val
+                    total_reward_history.append(step_total)
+                    if len(total_reward_history) > reward_history_len:
+                        total_reward_history.pop(0)
+
+                    # Update line data
+                    n = len(total_reward_history)
+                    x_data = list(range(n))
+                    for key in reward_plot_keys:
+                        reward_lines[key].set_data(x_data, reward_history[key])
+                    total_reward_line.set_data(x_data, total_reward_history)
+
+                    # Rescale axes
+                    ax_rewards.set_xlim(0, max(reward_history_len, n))
+                    all_vals = total_reward_history[:]
+                    for key in reward_plot_keys:
+                        all_vals.extend(reward_history[key])
+                    if all_vals:
+                        ymin, ymax = min(all_vals), max(all_vals)
+                        margin = max(0.01, (ymax - ymin) * 0.1)
+                        ax_rewards.set_ylim(ymin - margin, ymax + margin)
 
                 fig.canvas.draw()
                 fig.canvas.flush_events()

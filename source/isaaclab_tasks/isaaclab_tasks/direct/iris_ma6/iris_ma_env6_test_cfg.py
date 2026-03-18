@@ -25,6 +25,7 @@ from .bbox_raycaster_v2 import BBoxRayCasterV2Cfg
 from .cbf_safety import CBFManagerCfg
 from .controller import DroneControllerCfg
 from .controller.tuning import TUNED_CONTROLLER_CFG
+from .curriculum import CurriculumCfg
 from .delay_system_v3 import (
     MultiAgentDelayCfgV3,
     DelaySystemKeyParams,
@@ -330,6 +331,75 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     """Scale factor for triangulation quality reward (analytical mode: 1/sqrt(trace))."""
 
     # ==========================================================================
+    # Reward Scales (migrated from iris_ma5)
+    # ==========================================================================
+
+    action_sum_penalty_scale: float = -2.0
+    """Penalty scale for total action magnitude."""
+
+    # [0 vx, 1 vy, 2 vz, 3 yaw_rate, 4 gimbal_yaw_rate, 5 gimbal_pitch_rate, 6 zoom_rate]
+    action_weight: list = [1, 1, 5, 1, 0.5, 0.5, 0.3]
+    """Weights for each action dimension in penalty computation."""
+
+    action_delta_weight: list = [1, 1, 1, 1, 0.5, 0.5, 0.3]
+    """Weights for action delta (smoothness) penalty."""
+
+    action_delta_penalty_scale: float = -0.05
+    """Penalty scale for action changes (smoothness)."""
+
+    bbox_center_reward_scale: float = 60.0
+    """Reward scale for centering target in image."""
+
+    bbox_size_reward_scale: float = 60.0
+    """Reward scale for appropriate bbox size (~20% of image area)."""
+
+    # ==========================================================================
+    # Curriculum Configuration
+    # ==========================================================================
+
+    curriculum: CurriculumCfg = CurriculumCfg()
+    """Curriculum configuration for progressive reward scaling."""
+
+    # ==========================================================================
+    # Experiment Ablation Flags
+    # ==========================================================================
+
+    task_reward_level: int = 1
+    """Task reward level for the triangulation reward slot.
+
+    Level 1: FIM proxy - sqrt(10/Tr(Sigma)). Smooth, well-behaved geometric proxy.
+    Level 2: GT-anchored estimation error - exp(-temp * ||p_hat_GT - p_true||).
+             Triangulates with GT drone positions, measures error vs GT target.
+    Level 3: Composite - (1-w)*Level2 + w*E2E estimation error.
+             Blends GT-anchored and end-to-end (delayed drone positions).
+    """
+
+    estimation_error_scale: float = 1.0
+    """Scale for estimation error reward (Levels 2/3). Reward mapped to [0, scale]."""
+
+    estimation_error_temp: float = 1.0
+    """Temperature for exponential mapping of estimation error.
+    Higher values = sharper reward falloff with distance.
+    r = scale * exp(-temp * ||error||)."""
+
+    e2e_weight: float = 0.5
+    """End-to-end weight in Level 3 composite reward.
+    0.0 = pure GT-anchored, 1.0 = pure E2E.
+    Level 3 reward = (1 - e2e_weight) * r_est_GT + e2e_weight * r_est_E2E."""
+
+    curriculum_task_levels: bool = False
+    """If True, progressively switch task reward levels using curriculum schedule.
+    If False, use task_reward_level as a fixed setting throughout training."""
+
+    use_noisy_rewards: bool = False
+    """If True, compute rewards using the noisy delayed pipeline instead of
+    the clean pipeline. Used for dual-path ablation."""
+
+    use_omnidirectional_cameras: bool = False
+    """If True, simulate omnidirectional cameras.
+    Forces all bbox detections to be valid in the reward path."""
+
+    # ==========================================================================
     # Initial States Configuration
     # ==========================================================================
 
@@ -370,7 +440,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     - Behavior profiles (kamikaze, standard, evasive, stealth)
     """
 
-    enable_target_controller: bool = True
+    enable_target_controller: bool = False
     """Enable physics-based target controller.
 
     If True, uses TargetController to apply forces/torques to target.
