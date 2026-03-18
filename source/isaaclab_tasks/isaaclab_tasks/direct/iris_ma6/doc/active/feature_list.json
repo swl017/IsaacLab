@@ -1,0 +1,83 @@
+{
+  "project": "iris_ma6",
+  "last_updated": "2026-03-18",
+  "features": [
+    {
+      "id": "controller",
+      "name": "PX4-style cascaded drone controller",
+      "status": "done",
+      "spec": "doc/controller_spec.md",
+      "notes": "Velocity→attitude→rate→motor cascade with gimbal and zoom control"
+    },
+    {
+      "id": "delay-system-v3",
+      "name": "Multi-agent delay/staleness/dropout simulation",
+      "status": "done",
+      "spec": null,
+      "notes": "Ringbuffer-based with timestamp guarantees and interpolation"
+    },
+    {
+      "id": "cbf-safety",
+      "name": "Two-layer collision avoidance (CPA + deploy filter)",
+      "status": "done",
+      "spec": "doc/safety_spec.md",
+      "notes": "Training-time soft penalty + deployment-time hard filter"
+    },
+    {
+      "id": "triangulation",
+      "name": "Multi-camera multi-target triangulation with covariance",
+      "status": "done",
+      "spec": "doc/triangulation_spec.md",
+      "notes": "Linear least-squares with condition number check"
+    },
+    {
+      "id": "bbox-raycaster-v2",
+      "name": "GPU-accelerated 2D bbox extraction with occlusion",
+      "status": "done",
+      "spec": "doc/bbox_spec.md",
+      "notes": "Warp raycasting for occlusion detection"
+    },
+    {
+      "id": "initial-states",
+      "name": "Curriculum-driven initial state randomization",
+      "status": "done",
+      "spec": "doc/initial_states_spec.md",
+      "notes": "Cylinder-based agent placement with curriculum progression"
+    },
+    {
+      "id": "domain-randomization",
+      "name": "Sim-to-real domain randomization",
+      "status": "done",
+      "spec": "doc/domain_randomization_spec.md",
+      "notes": "Camera FOV, physics, gimbal randomization"
+    },
+    {
+      "id": "target-controller",
+      "name": "Target movement with behavior FSM",
+      "status": "done",
+      "spec": "doc/target_movement_spec.md",
+      "notes": "Approach/evade/linear/circular modes using DroneController"
+    },
+    {
+      "id": "visualization",
+      "name": "Debug visualization (frustums, ellipsoids, detection)",
+      "status": "done",
+      "spec": "doc/visualization_spec.md",
+      "notes": "Camera frustums, LOS indicators, covariance ellipsoids"
+    },
+    {
+      "id": "curriculum",
+      "name": "Curriculum learning system",
+      "status": "in_progress",
+      "spec": null,
+      "notes": "Config exists; full curriculum progression logic TBD"
+    },
+    {
+      "id": "env-integration",
+      "name": "Full environment integration and training",
+      "status": "in_progress",
+      "spec": "doc/iris_ma6_env_spec.md",
+      "notes": "iris_ma_env6_test.py — all modules integrated"
+    }
+  ]
+}

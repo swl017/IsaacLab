@@ -1,0 +1,38 @@
+
+╔════════════════════════════════════════════════════════════════════════════════╗
+║                    WHY CPA PENALTY CONVERGES TO ~0.32                           ║
+╠════════════════════════════════════════════════════════════════════════════════╣
+║                                                                                 ║
+║  For HEAD-ON APPROACH at any distance d, with relative velocity v_rel:          ║
+║                                                                                 ║
+║  1. TIME TO CPA:  τ* = d / v_rel                                               ║
+║     - If τ* <= T (look-ahead horizon), τ = τ*                                  ║
+║     - If τ* > T, τ = T (clamped)                                               ║
+║                                                                                 ║
+║  2. CPA DISTANCE: For head-on approach, CPA predicts collision                  ║
+║     d_CPA = |d - v_rel × τ|                                                    ║
+║     - If τ = τ* = d/v_rel: d_CPA = |d - v_rel × d/v_rel| = 0                   ║
+║     - The CPA distance is ZERO regardless of current distance!                  ║
+║                                                                                 ║
+║  3. BARRIER VALUE:                                                              ║
+║     h_CPA = d_CPA² - D_s² = 0 - 4 = -4  (for D_s = 2m)                         ║
+║     h is NEGATIVE = unsafe trajectory predicted                                 ║
+║                                                                                 ║
+║  4. DISCRETE-TIME CBF CONDITION:                                                ║
+║     violation = max(0, (1 - γ·Δt)·h_current - h_next)                          ║
+║                                                                                 ║
+║     With γ=2.0, Δt=0.04:                                                       ║
+║     (1 - γ·Δt) = 1 - 2×0.04 = 0.92                                             ║
+║                                                                                 ║
+║     Since h_current ≈ h_next ≈ -4:                                              ║
+║     violation = max(0, 0.92×(-4) - (-4))                                        ║
+║              = max(0, -3.68 + 4)                                                ║
+║              = max(0, 0.32)                                                     ║
+║              = 0.32 ✓                                                           ║
+║                                                                                 ║
+║  INTERPRETATION:                                                                ║
+║  The penalty ~0.32 represents the RATE at which the barrier is becoming         ║
+║  more negative - i.e., how fast the system is heading toward collision.         ║
+║  This is γ·Δt·|h| = 2×0.04×4 = 0.32 when h is stable at -4.                    ║
+║                                                                                 ║
+╚════════════════════════════════════════════════════════════════════════════════╝

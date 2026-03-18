@@ -1,0 +1,19 @@
+========================================
+SESSION LOG — iris_ma6
+========================================
+Append to this file at the end of each session.
+Format: date, what was done, what's next.
+
+----------------------------------------
+2026-03-18 — Harness setup
+----------------------------------------
+Done:
+- Created CONTEXT.md for all 11 sub-modules (ICM Layer 2 contracts)
+- Created ARCHITECTURE.md with module dependency graph and data flow
+- Created doc/active/ with feature_list.json and this progress file
+- Documented harness engineering research in doc/backlog/
+
+Next:
+- Review and refine CONTEXT.md files as modules evolve
+- Begin curriculum system implementation
+- Continue environment integration and training runs
