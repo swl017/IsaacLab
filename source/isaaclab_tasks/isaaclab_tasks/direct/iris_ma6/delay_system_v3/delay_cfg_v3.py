@@ -235,6 +235,17 @@ class PerAgentDelayCfg:
     max_dropout_rate: float = 0.1
     """Maximum dropout rate (at progress=1.0)."""
 
+    # Per-agent heterogeneity (multiplicative scales on base parameters)
+    latency_scale_range: tuple[float, float] = (0.5, 2.0)
+    """Per-agent latency multiplier range. E.g., (0.5, 2.0) means agent latency
+    ranges from 50% to 200% of configured base latency."""
+
+    noise_scale_range: tuple[float, float] = (0.5, 2.0)
+    """Per-agent noise multiplier range on configured noise stds."""
+
+    dropout_offset_range: tuple[float, float] = (0.0, 0.05)
+    """Per-agent additive dropout offset range. Added to curriculum dropout rate."""
+
 
 @dataclass
 class RewardStateCfg:

@@ -24,6 +24,7 @@ from isaaclab_assets import IRIS_GIMBAL3_CFG
 from .bbox_raycaster_v2 import BBoxRayCasterV2Cfg
 from .cbf_safety import CBFManagerCfg
 from .controller import DroneControllerCfg
+from .controller.gain_randomization_cfg import GainRandomizationCfg
 from .controller.tuning import TUNED_CONTROLLER_CFG
 from .curriculum import CurriculumCfg
 from .delay_system_v3 import (
@@ -416,7 +417,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     - value ~ Uniform(min, min + progress * (max - min))
     """
 
-    enable_initial_states_randomization: bool = False
+    enable_initial_states_randomization: bool = True
     """Enable randomized initial states.
 
     If True, uses InitialStates module for curriculum-driven randomization.
@@ -440,7 +441,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     - Behavior profiles (kamikaze, standard, evasive, stealth)
     """
 
-    enable_target_controller: bool = False
+    enable_target_controller: bool = True
     """Enable physics-based target controller.
 
     If True, uses TargetController to apply forces/torques to target.
@@ -448,6 +449,18 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
 
     Default is False for backward compatibility. Set to True to enable
     physics-based target movement with realistic dynamics.
+    """
+
+    # ==========================================================================
+    # Controller Gain Randomization
+    # ==========================================================================
+
+    gain_randomization: GainRandomizationCfg = GainRandomizationCfg()
+    """Configuration for per-env controller gain randomization.
+
+    Applies +-20% uniform scaling on controller gains (velocity PID,
+    attitude P, rate PID, motor time constant). Curriculum-gated to
+    dynamics phase (dynamics_start_step to dynamics_end_step).
     """
 
     def __post_init__(self):

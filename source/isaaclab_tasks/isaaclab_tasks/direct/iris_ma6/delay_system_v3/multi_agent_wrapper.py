@@ -120,6 +120,19 @@ class MultiAgentDelaySystemV3:
         self._mode: Literal["none", "fixed", "random"] = "none"
         self._progress: float = 1.0
 
+        # Per-agent heterogeneity scales (sampled at episode reset)
+        self._per_agent_latency_scale: Dict[AgentID, float] = {
+            a: 1.0 for a in possible_agents
+        }
+        self._per_agent_noise_scale: Dict[AgentID, float] = {
+            a: 1.0 for a in possible_agents
+        }
+        self._per_agent_dropout_offset: Dict[AgentID, float] = {
+            a: 0.0 for a in possible_agents
+        }
+        # Base dropout rate from curriculum (before per-agent offsets)
+        self._base_dropout_rate: float = 0.0
+
     def _register_fields(self):
         """Register all fields for delay processing."""
         for agent_id in self._possible_agents:
@@ -191,10 +204,10 @@ class MultiAgentDelaySystemV3:
         # Store ground truth
         self._gt_states[agent_id] = states
 
-        # Get noise standard deviations
-        pos_noise = self._get_noise_std("position")
-        vel_noise = self._get_noise_std("velocity")
-        ori_noise = self._get_noise_std("orientation")
+        # Get noise standard deviations (per-agent scaled)
+        pos_noise = self._get_noise_std("position", agent_id)
+        vel_noise = self._get_noise_std("velocity", agent_id)
+        ori_noise = self._get_noise_std("orientation", agent_id)
 
         # Store fields in delay system
         data = states.data
@@ -255,21 +268,24 @@ class MultiAgentDelaySystemV3:
         # Detection fields (bbox)
         # Flatten bbox for storage: (N, T, 4) -> (N, T*4)
         # Actually, we keep it as (N, T, 4) since we registered it with that shape
-        bbox_noise = self._get_noise_std("bbox")
+        bbox_noise = self._get_noise_std("bbox", agent_id)
         self._delay_system.store(
             prefix + "bboxes_2d",
             data.bboxes_2d,
             noise_std=bbox_noise,  # Pixel noise on bbox center/dimensions
         )
 
-    def _get_noise_std(self, noise_type: str) -> float:
+    def _get_noise_std(
+        self, noise_type: str, agent_id: Optional[AgentID] = None
+    ) -> float:
         """Get noise standard deviation for a field type.
 
         Args:
             noise_type: Type of noise ("position", "velocity", "orientation", "bbox").
+            agent_id: Optional agent ID for per-agent noise scaling.
 
         Returns:
-            Noise standard deviation scaled by curriculum.
+            Noise standard deviation scaled by curriculum and per-agent factor.
         """
         if not self._noise_cfg.enabled:
             return 0.0
@@ -285,7 +301,11 @@ class MultiAgentDelaySystemV3:
         else:
             base_std = 0.0
 
-        return base_std * self._noise_scale
+        per_agent_scale = 1.0
+        if agent_id is not None and self._cfg.per_agent_randomization:
+            per_agent_scale = self._per_agent_noise_scale.get(agent_id, 1.0)
+
+        return base_std * self._noise_scale * per_agent_scale
 
     def get_all_states_for_rewards(
         self, ego_agent_id: AgentID
@@ -483,7 +503,7 @@ class MultiAgentDelaySystemV3:
         result: Dict[AgentID, AgentStates] = {}
         for agent_id in self._possible_agents:
             if add_noise:
-                result[agent_id] = self._clone_with_noise(self._gt_states[agent_id])
+                result[agent_id] = self._clone_with_noise(self._gt_states[agent_id], agent_id)
             else:
                 result[agent_id] = self._clone_agent_states(self._gt_states[agent_id])
         return result
@@ -538,21 +558,24 @@ class MultiAgentDelaySystemV3:
 
         return cloned
 
-    def _clone_with_noise(self, states: AgentStates) -> AgentStates:
+    def _clone_with_noise(
+        self, states: AgentStates, agent_id: Optional[AgentID] = None
+    ) -> AgentStates:
         """Clone states and add observation noise.
 
         Args:
             states: Source states to clone.
+            agent_id: Optional agent ID for per-agent noise scaling.
 
         Returns:
             Cloned states with observation noise added.
         """
         cloned = self._clone_agent_states(states)
 
-        # Get noise standard deviations
-        pos_noise = self._get_noise_std("position")
-        vel_noise = self._get_noise_std("velocity")
-        ori_noise = self._get_noise_std("orientation")
+        # Get noise standard deviations (per-agent scaled)
+        pos_noise = self._get_noise_std("position", agent_id)
+        vel_noise = self._get_noise_std("velocity", agent_id)
+        ori_noise = self._get_noise_std("orientation", agent_id)
 
         data = cloned.data
 
@@ -612,34 +635,83 @@ class MultiAgentDelaySystemV3:
     def set_delay_mode(
         self, mode: Literal["none", "fixed", "random"], progress: float = 1.0
     ):
-        """Set delay mode for curriculum learning.
+        """Set delay mode for curriculum learning with per-agent scaling.
+
+        When per_agent_randomization is enabled, each agent's latency progress
+        is scaled by its independently sampled latency_scale factor.
 
         Args:
-            mode: Delay mode:
-                - 'none': No delay (clean observations)
-                - 'fixed': Fixed deterministic delay
-                - 'random': Random delay with staleness
+            mode: Delay mode ('none', 'fixed', 'random').
             progress: Curriculum progress [0, 1].
         """
         self._mode = mode
         self._progress = max(0.0, min(1.0, progress))
-        self._delay_system.set_delay_mode(mode, progress)
+
+        if self._cfg.per_agent_randomization:
+            # Apply per-agent latency scaling
+            for agent_id in self._possible_agents:
+                scale = self._per_agent_latency_scale[agent_id]
+                effective_progress = min(progress * scale, 1.0)
+                self._delay_system.set_field_delay_mode(
+                    str(agent_id), mode, effective_progress
+                )
+        else:
+            self._delay_system.set_delay_mode(mode, progress)
 
     def set_dropout_rate(self, rate: float):
-        """Set dropout rate for curriculum control.
+        """Set dropout rate for curriculum control with per-agent offsets.
 
         Args:
-            rate: Dropout probability [0, 1].
+            rate: Base dropout probability [0, 1].
         """
-        self._delay_system.set_dropout_rate(rate)
+        self._base_dropout_rate = rate
+
+        if self._cfg.per_agent_randomization:
+            for agent_id in self._possible_agents:
+                offset = self._per_agent_dropout_offset[agent_id]
+                effective_rate = min(rate + offset, 1.0)
+                self._delay_system.set_field_dropout_rate(str(agent_id), effective_rate)
+        else:
+            self._delay_system.set_dropout_rate(rate)
 
     def set_noise_scale(self, scale: float):
         """Set noise scale for curriculum control.
+
+        Per-agent noise scaling is applied in _get_noise_std() at query time.
 
         Args:
             scale: Noise scale [0, 1].
         """
         self._noise_scale = max(0.0, min(1.0, scale))
+
+    def randomize_per_agent_params(self, env_ids: Optional[torch.Tensor] = None):
+        """Sample independent delay parameters per agent at episode reset.
+
+        Each agent gets its own latency scale, noise scale, and dropout offset,
+        creating heterogeneous delay characteristics across the team.
+
+        Args:
+            env_ids: Environment indices being reset (unused currently since
+                     per-agent params are shared across envs).
+        """
+        if not self._cfg.per_agent_randomization:
+            return
+
+        cfg = self._cfg.per_agent_cfg
+        for agent_id in self._possible_agents:
+            self._per_agent_latency_scale[agent_id] = (
+                torch.empty(1).uniform_(*cfg.latency_scale_range).item()
+            )
+            self._per_agent_noise_scale[agent_id] = (
+                torch.empty(1).uniform_(*cfg.noise_scale_range).item()
+            )
+            self._per_agent_dropout_offset[agent_id] = (
+                torch.empty(1).uniform_(*cfg.dropout_offset_range).item()
+            )
+
+        # Re-apply current curriculum state with new per-agent scales
+        self.set_delay_mode(self._mode, self._progress)
+        self.set_dropout_rate(self._base_dropout_rate)
 
     def reset(self, env_ids: Optional[torch.Tensor] = None):
         """Reset system for specified environments.

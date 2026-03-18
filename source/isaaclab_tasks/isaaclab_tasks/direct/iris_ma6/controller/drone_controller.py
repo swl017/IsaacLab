@@ -28,6 +28,7 @@ import torch
 from .aerodynamics import AerodynamicEffects
 from .attitude_controller import AttitudeController
 from .controller_cfg import DroneControllerCfg
+from .gain_randomization_cfg import GainRandomizationCfg
 from .gimbal_controller import GimbalController
 from .mixer import MixerMatrix
 from .motor_dynamics import MotorDynamics
@@ -317,6 +318,100 @@ class DroneController:
             fov: (N,) current field of view [degrees].
         """
         return self._zoom.get_fov(base_fov)
+
+    def randomize_gains(
+        self,
+        env_ids: torch.Tensor,
+        progress: float,
+        cfg: GainRandomizationCfg,
+    ):
+        """Randomize controller gains for specified environments.
+
+        Applies per-env uniform scaling to nominal gains. The scaling range
+        is curriculum-ramped: at progress=0 all gains are nominal, at
+        progress=1 gains are sampled from cfg.scale_range.
+
+        Args:
+            env_ids: (M,) environment indices to randomize.
+            progress: Curriculum progress [0, 1].
+            cfg: Gain randomization configuration.
+        """
+        if not cfg.enabled or progress <= 0.0:
+            return
+
+        # Store nominal gains on first call
+        if not hasattr(self, "_nominal_gains"):
+            self._nominal_gains = {
+                "Kp_vel": self._velocity._Kp_vel.clone(),
+                "Ki_vel": self._velocity._Ki_vel.clone(),
+                "Kp_att": self._attitude._Kp_att.clone(),
+                "Kp_rate": self._rate._Kp_rate.clone(),
+                "Ki_rate": self._rate._Ki_rate.clone(),
+                "Kd_rate": self._rate._Kd_rate.clone(),
+                "tau_motor": (
+                    self._motor._tau_motor.clone()
+                    if isinstance(self._motor._tau_motor, torch.Tensor)
+                    else torch.tensor(self._motor._tau_motor, device=self.device)
+                ),
+            }
+            # Expand all gains to (N, 3) for per-env storage
+            for key in ["Kp_vel", "Ki_vel", "Kp_att", "Kp_rate", "Ki_rate", "Kd_rate"]:
+                g = self._nominal_gains[key]
+                if g.dim() == 1:
+                    self._nominal_gains[key] = g.unsqueeze(0).expand(self.num_envs, -1).clone()
+                    # Also set the controller to use (N, 3)
+            # Expand tau to (N,)
+            tau = self._nominal_gains["tau_motor"]
+            if tau.dim() == 0:
+                self._nominal_gains["tau_motor"] = tau.expand(self.num_envs).clone()
+
+            # Initialize per-env gains from nominal
+            self._velocity.set_gains(
+                Kp_vel=self._nominal_gains["Kp_vel"],
+                Ki_vel=self._nominal_gains["Ki_vel"],
+            )
+            self._attitude.set_gains(Kp_att=self._nominal_gains["Kp_att"])
+            self._rate.set_gains(
+                Kp_rate=self._nominal_gains["Kp_rate"],
+                Ki_rate=self._nominal_gains["Ki_rate"],
+                Kd_rate=self._nominal_gains["Kd_rate"],
+            )
+            self._motor.set_tau_motor(self._nominal_gains["tau_motor"])
+
+        # Curriculum-ramped range: at progress=0 -> (1,1), at progress=1 -> scale_range
+        low = 1.0 - progress * (1.0 - cfg.scale_range[0])
+        high = 1.0 + progress * (cfg.scale_range[1] - 1.0)
+        M = len(env_ids)
+
+        if cfg.randomize_velocity:
+            scale = torch.empty(M, 1, device=self.device).uniform_(low, high)
+            new_Kp = self._nominal_gains["Kp_vel"].clone()
+            new_Ki = self._nominal_gains["Ki_vel"].clone()
+            new_Kp[env_ids] = self._nominal_gains["Kp_vel"][env_ids] * scale
+            new_Ki[env_ids] = self._nominal_gains["Ki_vel"][env_ids] * scale
+            self._velocity.set_gains(Kp_vel=new_Kp, Ki_vel=new_Ki)
+
+        if cfg.randomize_attitude:
+            scale = torch.empty(M, 1, device=self.device).uniform_(low, high)
+            new_Kp = self._nominal_gains["Kp_att"].clone()
+            new_Kp[env_ids] = self._nominal_gains["Kp_att"][env_ids] * scale
+            self._attitude.set_gains(Kp_att=new_Kp)
+
+        if cfg.randomize_rate:
+            scale = torch.empty(M, 1, device=self.device).uniform_(low, high)
+            new_Kp = self._nominal_gains["Kp_rate"].clone()
+            new_Ki = self._nominal_gains["Ki_rate"].clone()
+            new_Kd = self._nominal_gains["Kd_rate"].clone()
+            new_Kp[env_ids] = self._nominal_gains["Kp_rate"][env_ids] * scale
+            new_Ki[env_ids] = self._nominal_gains["Ki_rate"][env_ids] * scale
+            new_Kd[env_ids] = self._nominal_gains["Kd_rate"][env_ids] * scale
+            self._rate.set_gains(Kp_rate=new_Kp, Ki_rate=new_Ki, Kd_rate=new_Kd)
+
+        if cfg.randomize_motor:
+            scale = torch.empty(M, device=self.device).uniform_(low, high)
+            new_tau = self._nominal_gains["tau_motor"].clone()
+            new_tau[env_ids] = self._nominal_gains["tau_motor"][env_ids] * scale
+            self._motor.set_tau_motor(new_tau)
 
     def set_aerodynamic_level(self, level: int):
         """Set aerodynamic fidelity level.

@@ -90,7 +90,11 @@ class MotorDynamics:
 
         # First-order lag: exact discretization alpha = 1 - exp(-dt/tau)
         # This gives exactly 63.2% response at t=tau
-        alpha = 1.0 - torch.exp(torch.tensor(-dt / self._tau_motor, device=self.device))
+        if isinstance(self._tau_motor, torch.Tensor) and self._tau_motor.dim() >= 1:
+            # Per-env tau: (N,) -> (N, 1) for broadcasting with (N, 4)
+            alpha = 1.0 - torch.exp(-dt / self._tau_motor.unsqueeze(-1))
+        else:
+            alpha = 1.0 - torch.exp(torch.tensor(-dt / self._tau_motor, device=self.device))
 
         # Update rotor speeds
         self._omega = self._omega + alpha * (omega_cmd_clamped - self._omega)

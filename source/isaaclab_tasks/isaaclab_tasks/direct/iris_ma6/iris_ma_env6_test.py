@@ -229,8 +229,8 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 num_targets=1,
                 device=self.device,
             )
-            # Set default delay mode (can be changed via curriculum)
-            self._delay_system.set_delay_mode("random", progress=1.0)
+            # Start with no delay — curriculum will ramp it up
+            self._delay_system.set_delay_mode("none", progress=0.0)
         else:
             self._delay_system = None
 
@@ -865,6 +865,31 @@ class IrisMA6TestEnv(DirectMARLEnv):
             curr.safety_start_step, curr.safety_end_step, current_step
         )
 
+        # Update curriculum progress for initial states randomization
+        self._curriculum_progress = curr.get_progress(
+            current_step, curr.tracking_start_step, curr.tracking_end_step
+        )
+
+        # Update delay system curriculum (none → fixed → random, noise/dropout ramp)
+        if self._delay_system is not None:
+            delay_mode = curr.get_delay_mode(current_step)
+            if delay_mode == "none":
+                delay_progress = 0.0
+            elif delay_mode == "fixed":
+                delay_progress = curr.get_fixed_delay_progress(current_step)
+            else:  # "random"
+                delay_progress = curr.get_random_delay_progress(current_step)
+            self._delay_system.set_delay_mode(delay_mode, progress=delay_progress)
+
+            # Ramp noise (phase 2: 80k-100k)
+            self._delay_system.set_noise_scale(curr.get_noise_progress(current_step))
+
+            # Ramp dropout (phase 5: 160k-200k)
+            dropout_progress = curr.get_dropout_progress(current_step)
+            self._delay_system.set_dropout_rate(
+                dropout_progress * self.cfg.delay_system_params.dropout_prob
+            )
+
         # Get states for reward computation
         if self._delay_system is not None:
             if self.cfg.use_noisy_rewards:
@@ -1301,7 +1326,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
         """Get termination and truncation flags for all agents.
 
         Termination conditions:
-        - Crashed: drone goes below z=0.5m
+        - Crashed: drone goes below z=2.0m
         - Collision: inter-agent distance < collision_distance (GT-based)
 
         Returns:
@@ -1322,7 +1347,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
         for agent_id in self.cfg.possible_agents:
             # Terminate if drone goes too low (crashed) OR collision
             pos_z = self._root_pos_w[agent_id][:, 2]
-            crashed = pos_z < 0.5
+            crashed = pos_z < 2.0
             died = crashed | collided
 
             # Also terminate envs that had NaN/Inf in rewards
@@ -1441,9 +1466,22 @@ class IrisMA6TestEnv(DirectMARLEnv):
         if self._target_controller is not None:
             self._target_controller.reset(env_ids)
 
-        # Reset delay system and simulation time
+        # Reset delay system and randomize per-agent delay parameters
         if self._delay_system is not None:
             self._delay_system.reset(env_ids)
+            self._delay_system.randomize_per_agent_params(env_ids)
+
+        # Randomize controller gains (curriculum-gated to dynamics phase)
+        dynamics_progress = self._linear_progress(
+            self.cfg.curriculum.dynamics_start_step,
+            self.cfg.curriculum.dynamics_end_step,
+        )
+        if dynamics_progress > 0.0:
+            for agent_id in self.cfg.possible_agents:
+                self._controllers[agent_id].randomize_gains(
+                    env_ids, dynamics_progress, self.cfg.gain_randomization
+                )
+
         self._sim_time[env_ids] = 0.0
 
         # Reset smoothed occlusion confidence to visible state

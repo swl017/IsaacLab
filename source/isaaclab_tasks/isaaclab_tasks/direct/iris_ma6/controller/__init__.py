@@ -18,6 +18,7 @@ This module provides a realistic quadcopter control system with:
 from .aerodynamics_cfg import AerodynamicsCfg
 from .attitude_controller_cfg import AttitudeControllerCfg
 from .controller_cfg import DroneControllerCfg
+from .gain_randomization_cfg import GainRandomizationCfg
 from .gimbal_controller_cfg import GimbalControllerCfg
 from .motor_dynamics_cfg import MotorDynamicsCfg
 from .rate_controller_cfg import RateControllerCfg
@@ -43,6 +44,7 @@ __all__ = [
     "AerodynamicsCfg",
     "AttitudeControllerCfg",
     "DroneControllerCfg",
+    "GainRandomizationCfg",
     "GimbalControllerCfg",
     "MotorDynamicsCfg",
     "RateControllerCfg",

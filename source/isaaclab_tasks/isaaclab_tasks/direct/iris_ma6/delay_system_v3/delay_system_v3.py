@@ -288,6 +288,43 @@ class UnifiedDelaySystem:
         for pipeline in self._other_pipelines.values():
             pipeline.set_dropout_rate(rate)
 
+    def set_field_delay_mode(
+        self,
+        field_prefix: str,
+        mode: Literal["none", "fixed", "random"],
+        progress: float = 1.0,
+    ):
+        """Set delay mode for pipelines whose key starts with field_prefix.
+
+        Args:
+            field_prefix: Prefix to match (e.g., 'drone_0' for all drone_0 fields).
+            mode: Delay mode ('none', 'fixed', 'random').
+            progress: Curriculum progress [0, 1].
+        """
+        progress = max(0.0, min(1.0, progress))
+        dot_prefix = field_prefix + "."
+        for key, pipeline in self._ego_pipelines.items():
+            if key.startswith(dot_prefix):
+                pipeline.set_mode(mode, progress)
+        for key, pipeline in self._other_pipelines.items():
+            if key.startswith(dot_prefix):
+                pipeline.set_mode(mode, progress)
+
+    def set_field_dropout_rate(self, field_prefix: str, rate: float):
+        """Set dropout rate for pipelines whose key starts with field_prefix.
+
+        Args:
+            field_prefix: Prefix to match (e.g., 'drone_0').
+            rate: Dropout probability [0, 1].
+        """
+        dot_prefix = field_prefix + "."
+        for key, pipeline in self._ego_pipelines.items():
+            if key.startswith(dot_prefix):
+                pipeline.set_dropout_rate(rate)
+        for key, pipeline in self._other_pipelines.items():
+            if key.startswith(dot_prefix):
+                pipeline.set_dropout_rate(rate)
+
     def reset(self, env_ids: Optional[torch.Tensor] = None):
         """Reset system for specified environments.
 
