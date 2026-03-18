@@ -261,9 +261,6 @@ class IrisMA6TestEnv(DirectMARLEnv):
             dtype=torch.float32,
         )
 
-        # NaN recovery: envs flagged for termination due to NaN/Inf in rewards
-        self._nan_terminated_envs: Dict[str, torch.Tensor] = {}
-
         # Per-step reward components (for visualization/debugging)
         self._step_rewards: Dict[str, Dict[str, torch.Tensor]] = {}
 
@@ -422,9 +419,22 @@ class IrisMA6TestEnv(DirectMARLEnv):
             gimbal_pitch_rate = self.cmd_vel[:, idx, 5]
             zoom_rate = self.cmd_vel[:, idx, 6]
 
+            # Read current gimbal joint positions [pitch, yaw, roll]
+            gimbal_jp = torch.stack(
+                [
+                    robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["pitch"]],
+                    robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["yaw"]],
+                    robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["roll"]],
+                ],
+                dim=-1,
+            )
+
             # Step the DroneController
-            # Returns: F_body, tau_body, (gimbal_yaw, gimbal_roll, gimbal_pitch), zoom_level
-            F_body, tau_body, gimbal_targets, zoom_level = controller.step_policy(
+            # _apply_action runs every sim step (sim.dt = 0.01s), not every policy
+            # step (sim.dt * decimation = 0.04s). The drone cascade needs the full
+            # decimated dt for its inner-loop subdivision (velocity→attitude→rate).
+            # The gimbal receives sim.dt separately for correct rate integration.
+            F_body, tau_body, gimbal_pos_targets, gimbal_vel_targets, zoom_level = controller.step_policy(
                 v_cmd=v_cmd,
                 yaw_rate_cmd=yaw_rate_cmd,
                 gimbal_yaw_rate_cmd=gimbal_yaw_rate,
@@ -434,6 +444,8 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 v_body=robot.data.root_lin_vel_w,
                 omega_body=robot.data.root_ang_vel_b,
                 sim_dt=self.cfg.sim.dt * self.cfg.decimation,
+                gimbal_joint_positions=gimbal_jp,
+                physics_dt=self.cfg.sim.dt,
             )
 
             # Apply forces in body frame (Isaac Lab expects local frame)
@@ -443,14 +455,28 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 body_ids=self._body_ids[agent_id],
             )
 
-            # Apply gimbal targets
+            # Apply gimbal position targets
             # Add YAW_JOINT_OFFSET (-π/2) to yaw: controller yaw=0 means body +X
             # (physics forward). The offset shifts the physical joint so the
             # combined chain (joint + camera offset) points along body +X.
-            gimbal_yaw, gimbal_roll, gimbal_pitch = gimbal_targets
+            gimbal_yaw, gimbal_roll, gimbal_pitch = gimbal_pos_targets
             gimbal_yaw_joint = gimbal_yaw + YAW_JOINT_OFFSET
             robot.set_joint_position_target(
                 target=torch.stack([gimbal_pitch, gimbal_yaw_joint, gimbal_roll], dim=-1),
+                joint_ids=[
+                    self.gimbal_joint_idx[agent_id]["pitch"],
+                    self.gimbal_joint_idx[agent_id]["yaw"],
+                    self.gimbal_joint_idx[agent_id]["roll"],
+                ],
+            )
+
+            # Apply gimbal velocity feedforward targets
+            # Makes the actuator's damping term assistive during transients:
+            # τ_d = d*(v_target - v) pushes toward the expected velocity
+            # instead of opposing motion (when v_target=0).
+            gimbal_yaw_vel, gimbal_roll_vel, gimbal_pitch_vel = gimbal_vel_targets
+            robot.set_joint_velocity_target(
+                target=torch.stack([gimbal_pitch_vel, gimbal_yaw_vel, gimbal_roll_vel], dim=-1),
                 joint_ids=[
                     self.gimbal_joint_idx[agent_id]["pitch"],
                     self.gimbal_joint_idx[agent_id]["yaw"],
@@ -856,7 +882,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
         rewards_dict = {}
 
         # Update curriculum progress
-        current_step = self.common_step_counter
+        current_step = self.common_step_counter if self.cfg.debug_initial_step == 0 else self.cfg.debug_initial_step
         curr = self.cfg.curriculum
         self.progress_coord = self._linear_progress(
             curr.coordination_start_step, curr.coordination_end_step, current_step
@@ -1055,19 +1081,13 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 "est_error_e2e": est_error_e2e_reward,
             }
 
-            # ---- NaN sanitization ----
+            # ---- NaN sanitization (zero out, don't terminate) ----
             for key in rewards:
                 nan_mask = torch.isnan(rewards[key]) | torch.isinf(rewards[key])
                 if nan_mask.any():
                     rewards[key] = torch.where(
                         nan_mask, torch.zeros_like(rewards[key]), rewards[key]
                     )
-                    if agent_id not in self._nan_terminated_envs:
-                        self._nan_terminated_envs[agent_id] = nan_mask
-                    else:
-                        self._nan_terminated_envs[agent_id] = (
-                            self._nan_terminated_envs[agent_id] | nan_mask
-                        )
 
             # ---- Store per-step rewards for visualization ----
             self._step_rewards[agent_id] = {k: v.clone() for k, v in rewards.items()}
@@ -1350,16 +1370,8 @@ class IrisMA6TestEnv(DirectMARLEnv):
             crashed = pos_z < 2.0
             died = crashed | collided
 
-            # Also terminate envs that had NaN/Inf in rewards
-            if agent_id in self._nan_terminated_envs:
-                died = died | self._nan_terminated_envs[agent_id]
-
             terminated[agent_id] = died
             truncated[agent_id] = time_out & ~terminated[agent_id]
-
-        # Clear NaN flags after reading — they'll be re-set by _get_rewards()
-        # if NaN persists in the next step.
-        self._nan_terminated_envs = {}
 
         return terminated, truncated
 
@@ -1427,18 +1439,32 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 self._controllers[agent_id]._gimbal._yaw[env_ids] = gimbal_angles[:, 0]
                 self._controllers[agent_id]._gimbal._pitch[env_ids] = gimbal_angles[:, 2]
 
-                # Compute world-frame azimuth/elevation for LOS stabilization
-                # Direction from agent to target in world frame (before terrain offset)
-                dir_to_target = result.target_positions - result.agent_positions[:, idx]
-                azimuth_world = torch.atan2(dir_to_target[:, 1], dir_to_target[:, 0])
-                xy_dist = torch.sqrt(dir_to_target[:, 0] ** 2 + dir_to_target[:, 1] ** 2)
-                elevation_world = torch.atan2(dir_to_target[:, 2], xy_dist)
+                # Compute world-frame azimuth/elevation from the ACTUAL initial
+                # body-frame gimbal angles (not always the target direction).
+                # When curriculum randomizes gimbal, the initial angles may NOT
+                # point at the target.  Using _body_to_world_angles ensures
+                # _azimuth_world/_elevation_world are consistent with _yaw/_pitch,
+                # so the first compute_control() produces no gimbal movement.
+                azimuth_world, elevation_world = (
+                    self._controllers[agent_id]._gimbal._body_to_world_angles(
+                        gimbal_angles[:, 0],   # body-frame yaw
+                        gimbal_angles[:, 2],   # body-frame pitch
+                        result.agent_orientations[:, idx],  # body quaternion
+                    )
+                )
 
                 self._controllers[agent_id]._gimbal._azimuth_world[env_ids] = azimuth_world
                 self._controllers[agent_id]._gimbal._elevation_world[env_ids] = elevation_world
 
-                # Set zoom level
+                # Set zoom level (both env tracking tensor AND controller internal state).
+                # The controller.reset() above resets zoom to 1.0, so we must
+                # sync the random initial zoom into the controller's internal
+                # _zoom and _zoom_target to prevent the first _apply_action from
+                # overwriting it back to 1.0.
                 self.zoom_level[env_ids, idx] = result.zoom_levels[:, idx]
+                self._controllers[agent_id]._zoom.set_zoom(
+                    result.zoom_levels[:, idx], env_ids
+                )
 
             # Apply target states
             target_pos = result.target_positions + self._terrain.env_origins[env_ids]

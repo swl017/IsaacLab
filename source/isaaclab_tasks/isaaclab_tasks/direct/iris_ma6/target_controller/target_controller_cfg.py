@@ -251,10 +251,10 @@ class TargetControllerCfg:
     # Altitude Constraints
     # ==========================================================================
 
-    min_altitude: float = 1.0
+    min_altitude: float = 10.0
     """Minimum altitude above ground [m]."""
 
-    max_altitude: float = 20.0
+    max_altitude: float = 40.0
     """Maximum altitude above ground [m]."""
 
     # ==========================================================================

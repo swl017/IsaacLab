@@ -178,9 +178,12 @@ class DroneController:
         v_body: torch.Tensor,
         omega_body: torch.Tensor,
         sim_dt: float,
+        gimbal_joint_positions: torch.Tensor,
+        physics_dt: float | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor],
         tuple[torch.Tensor, torch.Tensor, torch.Tensor],
         torch.Tensor,
     ]:
@@ -195,14 +198,21 @@ class DroneController:
             q_body: (N, 4) current body quaternion (wxyz).
             v_body: (N, 3) current body velocity in world frame [m/s].
             omega_body: (N, 3) current body angular velocity [rad/s].
-            sim_dt: Simulation timestep [s].
+            sim_dt: Decimated policy timestep [s] (sim.dt * decimation).
+            gimbal_joint_positions: (N, 3) actual gimbal joint positions [pitch, yaw, roll].
+            physics_dt: Actual physics step [s] (sim.dt). If None, uses sim_dt.
+                Used by gimbal/zoom for correct rate integration when called every physics step.
 
         Returns:
             F_body: (N, 3) force to apply in body frame [N].
             tau_body: (N, 3) torque to apply in body frame [Nm].
-            gimbal_targets: (yaw, roll, pitch) joint position targets [rad].
+            gimbal_pos_targets: (yaw, roll, pitch) joint position targets [rad].
+            gimbal_vel_targets: (yaw, roll, pitch) joint velocity feedforward [rad/s].
             zoom_level: (N,) current zoom level.
         """
+        # Resolve physics dt (actual time between calls)
+        _physics_dt = physics_dt if physics_dt is not None else sim_dt
+
         # Compute number of inner loop steps
         num_substeps = max(1, int(sim_dt / self.cfg.control_dt))
         inner_dt = sim_dt / num_substeps
@@ -263,22 +273,26 @@ class DroneController:
         F_body = F_motor + F_aero
         tau_body = tau_motor + tau_aero
 
-        # Gimbal controller
-        gimbal_yaw, gimbal_roll, gimbal_pitch = self._gimbal.compute_control(
+        # Gimbal controller — uses physics_dt for correct rate integration
+        # since it's called every physics step, not every policy step.
+        gimbal_pos, gimbal_vel = self._gimbal.compute_control(
             gimbal_yaw_rate_cmd=gimbal_yaw_rate_cmd,
             gimbal_pitch_rate_cmd=gimbal_pitch_rate_cmd,
             q_body=q_body,
-            dt=sim_dt,
+            dt=_physics_dt,
+            omega_body=omega_body,
+            joint_positions_actual=gimbal_joint_positions,
         )
+        gimbal_yaw, gimbal_roll, gimbal_pitch = gimbal_pos
 
-        # Zoom controller
+        # Zoom controller — also uses physics_dt
         zoom_level = self._zoom.compute_control(
             zoom_rate_cmd=zoom_rate_cmd,
-            dt=sim_dt,
+            dt=_physics_dt,
         )
 
         # Return forces in body frame (Isaac Lab expects local frame)
-        return F_body, tau_body, (gimbal_yaw, gimbal_roll, gimbal_pitch), zoom_level
+        return F_body, tau_body, (gimbal_yaw, gimbal_roll, gimbal_pitch), gimbal_vel, zoom_level
 
     def reset(self, env_ids: torch.Tensor | None = None):
         """Reset all controller states.

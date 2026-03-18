@@ -30,6 +30,7 @@ import traceback
 from datetime import datetime
 
 import torch
+from isaaclab.utils.math import quat_rotate
 
 
 class TestResults:
@@ -485,9 +486,16 @@ def run_gimbal_tests(results: TestResults, device: torch.device, verbose: bool =
     print("=" * 80)
 
     from isaaclab_tasks.direct.iris_ma6.controller import GimbalController, GimbalControllerCfg
+    from isaaclab_tasks.direct.iris_ma6.controller.gimbal_controller import YAW_JOINT_OFFSET
 
     num_envs = 16
     cfg = GimbalControllerCfg()
+
+    # Default args for compute_control
+    omega_zero = torch.zeros((num_envs, 3), device=device)
+    # joint_positions_actual [pitch, yaw, roll] — raw yaw includes YAW_JOINT_OFFSET
+    jp_zero = torch.zeros((num_envs, 3), device=device)
+    jp_zero[:, 1] = YAW_JOINT_OFFSET  # yaw slot has offset applied
 
     # Test 1: Initialization
     try:
@@ -512,7 +520,7 @@ def run_gimbal_tests(results: TestResults, device: torch.device, verbose: bool =
 
         # After 0.5s, should have rotated about 0.5 * 0.5 * max_rate * 0.5 (accounting for lag)
         for _ in range(50):
-            gimbal.compute_control(yaw_rate, pitch_rate, q_body, dt)
+            gimbal.compute_control(yaw_rate, pitch_rate, q_body, dt, omega_zero, jp_zero)
 
         assert gimbal.yaw[0].abs() > 0.1, f"Yaw should have increased, got {gimbal.yaw[0].item()}"
 
@@ -538,6 +546,8 @@ def run_gimbal_tests(results: TestResults, device: torch.device, verbose: bool =
                 torch.zeros(num_envs, device=device),
                 q_body,
                 dt,
+                omega_zero,
+                jp_zero,
             )
 
         assert torch.all(gimbal.yaw <= cfg.yaw_limits[1] + 1e-5)
@@ -549,38 +559,40 @@ def run_gimbal_tests(results: TestResults, device: torch.device, verbose: bool =
     except Exception as e:
         results.add_fail("Joint limits", traceback.format_exc())
 
-    # Test 4: First-order dynamics (world-frame stabilization)
+    # Test 4: No controller-side lag (body-frame targets track instantly)
     try:
-        gimbal.reset()
+        cfg_nlag = GimbalControllerCfg(feedback_blend=0.0)
+        g_nlag = GimbalController(cfg=cfg_nlag, num_envs=num_envs, device=device)
+        g_nlag.reset()
         dt = 0.01
         q_body = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device).expand(num_envs, 4)
+        jp_nlag = torch.zeros((num_envs, 3), device=device)
+        jp_nlag[:, 1] = YAW_JOINT_OFFSET
 
-        # Set world-frame target directly (simulating accumulated rate commands)
-        gimbal._azimuth_world = torch.full((num_envs,), 1.0, device=device)  # Target 1 rad
+        # Set a world-frame target azimuth directly and step once
+        g_nlag._azimuth_world = torch.full((num_envs,), 0.5, device=device)
 
-        # After one tau, should reach ~63% of target
-        steps_per_tau = int(cfg.tau_gimbal / dt)
-        for _ in range(steps_per_tau):
-            gimbal.compute_control(
-                torch.zeros(num_envs, device=device),  # No rate command
-                torch.zeros(num_envs, device=device),
-                q_body,
-                dt,
-            )
+        g_nlag.compute_control(
+            torch.zeros(num_envs, device=device),
+            torch.zeros(num_envs, device=device),
+            q_body, dt, omega_zero, jp_nlag,
+        )
 
-        expected = 0.632 * 1.0
-        actual = gimbal.yaw[0].item()
-
-        assert abs(actual - expected) < 0.2, f"Expected ~{expected:.2f}, got {actual:.2f}"
+        # Body-frame yaw should match azimuth instantly (identity quat)
+        actual = g_nlag.yaw[0].item()
+        expected = 0.5
 
         if verbose:
-            print(f"    After 1 tau: expected ~{expected:.2f}, got {actual:.2f}")
+            print(f"    Azimuth=0.5, body yaw={actual:.4f} (expected {expected:.4f})")
 
-        results.add_pass("First-order dynamics")
+        assert abs(actual - expected) < 0.01, (
+            f"Body-frame target should track instantly: expected {expected:.3f}, got {actual:.3f}"
+        )
+        results.add_pass("Instant body-frame tracking (no controller lag)")
     except AssertionError as e:
-        results.add_fail("First-order dynamics", str(e))
+        results.add_fail("Instant body-frame tracking", str(e))
     except Exception as e:
-        results.add_fail("First-order dynamics", traceback.format_exc())
+        results.add_fail("Instant body-frame tracking", traceback.format_exc())
 
     # Test 5: World-frame stabilization (gimbal compensates for drone tilt)
     try:
@@ -590,6 +602,9 @@ def run_gimbal_tests(results: TestResults, device: torch.device, verbose: bool =
         # Start with drone level, gimbal pointing forward (+X world)
         q_level = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device).expand(num_envs, 4)
 
+        # Track actual joint positions (simulating perfect actuator tracking)
+        jp_track = jp_zero.clone()
+
         # Run a few steps to stabilize at forward direction
         for _ in range(50):
             gimbal.compute_control(
@@ -597,7 +612,13 @@ def run_gimbal_tests(results: TestResults, device: torch.device, verbose: bool =
                 torch.zeros(num_envs, device=device),
                 q_level,
                 dt,
+                omega_zero,
+                jp_track,
             )
+            # Simulate perfect actuator: actual = commanded + offset
+            jp_track[:, 0] = gimbal.pitch
+            jp_track[:, 1] = gimbal.yaw + YAW_JOINT_OFFSET
+            jp_track[:, 2] = gimbal.roll
 
         # Record initial body-frame yaw
         yaw_level = gimbal.yaw[0].item()
@@ -615,7 +636,12 @@ def run_gimbal_tests(results: TestResults, device: torch.device, verbose: bool =
                 torch.zeros(num_envs, device=device),
                 q_tilted,
                 dt,
+                omega_zero,
+                jp_track,
             )
+            jp_track[:, 0] = gimbal.pitch
+            jp_track[:, 1] = gimbal.yaw + YAW_JOINT_OFFSET
+            jp_track[:, 2] = gimbal.roll
 
         # After compensation, body-frame yaw should have changed by ~30 deg
         yaw_tilted = gimbal.yaw[0].item()
@@ -637,6 +663,242 @@ def run_gimbal_tests(results: TestResults, device: torch.device, verbose: bool =
         results.add_fail("World-frame stabilization", str(e))
     except Exception as e:
         results.add_fail("World-frame stabilization", traceback.format_exc())
+
+    # Test 6: World-frame azimuth stable during continuous yaw rotation
+    try:
+        dt = 0.01
+        zero_rate = torch.zeros(num_envs, device=device)
+        cfg_rot = GimbalControllerCfg(feedback_blend=0.0)
+        g_rot = GimbalController(cfg=cfg_rot, num_envs=num_envs, device=device)
+        g_rot.reset()
+
+        jp_rot = jp_zero.clone()
+        errors = []
+        angle = 0.0
+        for step in range(200):
+            angle += 1.0 * dt  # 1 rad/s yaw rotation
+            cos_ha = math.cos(angle / 2)
+            sin_ha = math.sin(angle / 2)
+            q_rot = torch.tensor([[cos_ha, 0.0, 0.0, sin_ha]], device=device).expand(num_envs, 4)
+            g_rot.compute_control(zero_rate, zero_rate, q_rot, dt, omega_zero, jp_rot)
+            jp_rot[:, 0] = g_rot.pitch
+            jp_rot[:, 1] = g_rot.yaw + YAW_JOINT_OFFSET
+            jp_rot[:, 2] = g_rot.roll
+            errors.append(g_rot.azimuth_world[0].abs().item())
+
+        rms = (sum(e**2 for e in errors) / len(errors)) ** 0.5
+
+        if verbose:
+            print(f"    Azimuth RMS during 1 rad/s yaw: {math.degrees(rms):.4f} deg")
+
+        assert rms < math.radians(0.1), f"Azimuth should stay at 0 during rotation, RMS={math.degrees(rms):.3f}°"
+        results.add_pass(f"Azimuth stable during yaw rotation (RMS={math.degrees(rms):.4f}°)")
+    except AssertionError as e:
+        results.add_fail("Azimuth stable during yaw rotation", str(e))
+    except Exception as e:
+        results.add_fail("Azimuth stable during yaw rotation", traceback.format_exc())
+
+    # Test 7: Feedback corrects internal state drift
+    try:
+        cfg_fb = GimbalControllerCfg(feedback_blend=0.1)
+        g_fb = GimbalController(cfg=cfg_fb, num_envs=num_envs, device=device)
+        g_fb.reset()
+        dt = 0.01
+        q_body = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device).expand(num_envs, 4)
+
+        # Artificially perturb internal yaw by 0.1 rad (simulating drift)
+        g_fb._yaw += 0.1
+
+        # Actual joint positions reflect truth (yaw=0 + offset)
+        jp_truth = torch.zeros((num_envs, 3), device=device)
+        jp_truth[:, 1] = YAW_JOINT_OFFSET  # yaw actual = 0 + offset
+
+        initial_error = g_fb._yaw[0].item()
+
+        # Run 50 steps with feedback
+        for _ in range(50):
+            g_fb.compute_control(
+                torch.zeros(num_envs, device=device),
+                torch.zeros(num_envs, device=device),
+                q_body,
+                dt,
+                omega_zero,
+                jp_truth,
+            )
+
+        final_error = g_fb._yaw[0].item()
+
+        if verbose:
+            print(f"    Initial drift: {math.degrees(initial_error):.2f} deg")
+            print(f"    After 50 steps: {math.degrees(final_error):.2f} deg")
+
+        assert abs(final_error) < abs(initial_error) * 0.5, (
+            f"Feedback should reduce drift: initial={math.degrees(initial_error):.2f}°, "
+            f"final={math.degrees(final_error):.2f}°"
+        )
+        results.add_pass("Feedback corrects drift")
+    except AssertionError as e:
+        results.add_fail("Feedback corrects drift", str(e))
+    except Exception as e:
+        results.add_fail("Feedback corrects drift", traceback.format_exc())
+
+    # Test 8: No swing under abrupt tilt change
+    try:
+        cfg_ns = GimbalControllerCfg(feedback_blend=0.0)
+        g_ns = GimbalController(cfg=cfg_ns, num_envs=num_envs, device=device)
+        g_ns.reset()
+        dt = 0.01
+        jp_ns = torch.zeros((num_envs, 3), device=device)
+        jp_ns[:, 1] = YAW_JOINT_OFFSET
+
+        # Start level, pointing forward (azimuth=0)
+        q_level = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device).expand(num_envs, 4)
+        g_ns.compute_control(
+            torch.zeros(num_envs, device=device),
+            torch.zeros(num_envs, device=device),
+            q_level, dt, omega_zero, jp_ns,
+        )
+        az_before = g_ns.azimuth_world[0].item()
+
+        # Abruptly tilt drone 30 degrees in yaw
+        angle = math.radians(30)
+        q_tilted = torch.tensor(
+            [[math.cos(angle / 2), 0.0, 0.0, math.sin(angle / 2)]], device=device
+        ).expand(num_envs, 4)
+
+        # Single step after tilt — body-frame yaw should adapt instantly
+        jp_ns[:, 1] = g_ns.yaw + YAW_JOINT_OFFSET
+        g_ns.compute_control(
+            torch.zeros(num_envs, device=device),
+            torch.zeros(num_envs, device=device),
+            q_tilted, dt, omega_zero, jp_ns,
+        )
+        az_after = g_ns.azimuth_world[0].item()
+
+        # World-frame azimuth should NOT change (no swing)
+        az_drift = abs(az_after - az_before)
+
+        if verbose:
+            print(f"    Azimuth before tilt: {math.degrees(az_before):.2f} deg")
+            print(f"    Azimuth after tilt:  {math.degrees(az_after):.2f} deg")
+            print(f"    Drift: {math.degrees(az_drift):.4f} deg")
+
+        assert az_drift < math.radians(0.1), (
+            f"World-frame azimuth should not change on tilt: drifted {math.degrees(az_drift):.3f} deg"
+        )
+        results.add_pass("No swing under abrupt tilt")
+    except AssertionError as e:
+        results.add_fail("No swing under abrupt tilt", str(e))
+    except Exception as e:
+        results.add_fail("No swing under abrupt tilt", traceback.format_exc())
+
+    # Test 9: Cross-axis coupling at ±30° with first-order actuator model
+    # Simulates the actuator as a first-order lag (tau = d/k = 50/1000 = 0.05s)
+    # receiving both position and velocity targets.
+    # actuator_pos += alpha * (pos_target - pos) + vel_target * dt
+    # where alpha = 1 - exp(-dt/tau).
+    try:
+        from isaaclab.utils.math import quat_from_euler_xyz
+
+        cfg_cx = GimbalControllerCfg(feedback_blend=0.1)
+        g_cx = GimbalController(cfg=cfg_cx, num_envs=num_envs, device=device)
+        g_cx.reset()
+        dt = 0.01
+        tau_act = 0.05  # d/k = 50/1000
+        alpha = 1.0 - math.exp(-dt / tau_act)
+
+        # Simulated actuator positions [pitch, yaw, roll]
+        act_pos = torch.zeros((num_envs, 3), device=device)
+        act_pos[:, 1] = YAW_JOINT_OFFSET
+
+        # Initialize
+        q_level = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device).expand(num_envs, 4)
+        for _ in range(20):
+            pos_tgt, vel_tgt = g_cx.compute_control(
+                torch.zeros(num_envs, device=device),
+                torch.zeros(num_envs, device=device),
+                q_level, dt, omega_zero, act_pos,
+            )
+            pos_target = torch.stack([pos_tgt[2], pos_tgt[0] + YAW_JOINT_OFFSET, pos_tgt[1]], dim=-1)
+            vel_target = torch.stack([vel_tgt[2], vel_tgt[0], vel_tgt[1]], dim=-1)
+            act_pos = act_pos + alpha * (pos_target - act_pos)
+
+        initial_dir = g_cx.get_camera_direction_world(q_level)
+
+        max_error_deg = 0.0
+        pitch_angle = 0.0
+        roll_angle = 0.0
+        rate_deg_per_step = 0.2
+
+        maneuvers = [
+            (150, "pitch", +1), (150, "roll", +1),
+            (300, "pitch", -1), (300, "roll", -1),
+            (300, "pitch", +1), (300, "roll", +1),
+            (150, "pitch", -1), (150, "roll", -1),
+        ]
+
+        for steps, axis, sign in maneuvers:
+            for _ in range(steps):
+                delta = math.radians(rate_deg_per_step * sign)
+                if axis == "pitch":
+                    pitch_angle += delta
+                else:
+                    roll_angle += delta
+
+                omega = torch.zeros((num_envs, 3), device=device)
+                if axis == "pitch":
+                    omega[:, 1] = delta / dt
+                else:
+                    omega[:, 0] = delta / dt
+
+                q_man = quat_from_euler_xyz(
+                    torch.full((num_envs,), roll_angle, device=device),
+                    torch.full((num_envs,), pitch_angle, device=device),
+                    torch.zeros(num_envs, device=device),
+                )
+
+                pos_tgt, vel_tgt = g_cx.compute_control(
+                    torch.zeros(num_envs, device=device),
+                    torch.zeros(num_envs, device=device),
+                    q_man, dt, omega, act_pos,
+                )
+
+                pos_target = torch.stack([pos_tgt[2], pos_tgt[0] + YAW_JOINT_OFFSET, pos_tgt[1]], dim=-1)
+                vel_target = torch.stack([vel_tgt[2], vel_tgt[0], vel_tgt[1]], dim=-1)
+                # First-order position tracking (velocity feedforward is applied
+                # by the real PhysX actuator's damping term, not modeled here)
+                act_pos = act_pos + alpha * (pos_target - act_pos)
+
+                # Camera forward from actual joint positions
+                a_yaw = act_pos[:, 1] - YAW_JOINT_OFFSET
+                a_roll = act_pos[:, 2]
+                a_pitch = act_pos[:, 0]
+                cy, sy = torch.cos(a_yaw), torch.sin(a_yaw)
+                cr, sr = torch.cos(a_roll), torch.sin(a_roll)
+                cp, sp = torch.cos(a_pitch), torch.sin(a_pitch)
+                fwd_body = torch.stack([cy*cp + sy*sr*sp, sy*cp - cy*sr*sp, -cr*sp], dim=-1)
+                fwd_world = quat_rotate(q_man, fwd_body)
+
+                dot = (initial_dir * fwd_world).sum(dim=-1).clamp(-1.0, 1.0)
+                error_deg = math.degrees(torch.acos(dot)[0].item())
+                max_error_deg = max(max_error_deg, error_deg)
+
+        if verbose:
+            print(f"    Max direction error during ±30° maneuver: {max_error_deg:.2f} deg")
+
+        # Position loop alone has ~30° error at combined ±30° tilts (inherent
+        # Euler decomposition limitation). The Jacobian velocity feedforward
+        # compensates dynamically in the real simulation. This test verifies
+        # the position loop doesn't diverge; actual stabilization quality
+        # must be tested in Isaac Sim with the full actuator model.
+        assert max_error_deg < 40.0, (
+            f"Position loop diverged: max error {max_error_deg:.2f}° exceeds 40° limit"
+        )
+        results.add_pass(f"Cross-axis ±30° position loop (max err={max_error_deg:.2f}°, FF in sim)")
+    except AssertionError as e:
+        results.add_fail("Cross-axis coupling", str(e))
+    except Exception as e:
+        results.add_fail("Cross-axis coupling", traceback.format_exc())
 
 
 def run_attitude_controller_tests(results: TestResults, device: torch.device, verbose: bool = False):
@@ -990,7 +1252,10 @@ def run_integration_tests(results: TestResults, device: torch.device, verbose: b
         v_body = torch.zeros((num_envs, 3), device=device)
         omega_body = torch.zeros((num_envs, 3), device=device)
 
-        F_body, tau_body, gimbal_targets, zoom_level = drone.step_policy(
+        gimbal_jp = torch.zeros((num_envs, 3), device=device)
+        gimbal_jp[:, 1] = -math.pi / 2  # yaw offset
+
+        F_body, tau_body, gimbal_targets, gimbal_vel_targets, zoom_level = drone.step_policy(
             v_cmd=v_cmd,
             yaw_rate_cmd=yaw_rate_cmd,
             gimbal_yaw_rate_cmd=gimbal_yaw_rate_cmd,
@@ -1000,6 +1265,7 @@ def run_integration_tests(results: TestResults, device: torch.device, verbose: b
             v_body=v_body,
             omega_body=omega_body,
             sim_dt=0.04,  # 25 Hz policy
+            gimbal_joint_positions=gimbal_jp,
         )
 
         assert F_body.shape == (num_envs, 3)
@@ -1032,7 +1298,10 @@ def run_integration_tests(results: TestResults, device: torch.device, verbose: b
 
         # Step policy at 25 Hz (sim_dt = 0.04s), inner loop at 100 Hz (control_dt = 0.01s)
         # Should run 4 inner loop iterations
-        F_body, tau_body, _, _ = drone.step_policy(
+        gimbal_jp2 = torch.zeros((num_envs, 3), device=device)
+        gimbal_jp2[:, 1] = -math.pi / 2
+
+        F_body, tau_body, _, _, _ = drone.step_policy(
             v_cmd=torch.zeros((num_envs, 3), device=device),
             yaw_rate_cmd=torch.zeros(num_envs, device=device),
             gimbal_yaw_rate_cmd=torch.zeros(num_envs, device=device),
@@ -1042,6 +1311,7 @@ def run_integration_tests(results: TestResults, device: torch.device, verbose: b
             v_body=torch.zeros((num_envs, 3), device=device),
             omega_body=torch.zeros((num_envs, 3), device=device),
             sim_dt=0.04,
+            gimbal_joint_positions=gimbal_jp2,
         )
 
         # Just verify it runs (inner loop is implicit)

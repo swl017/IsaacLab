@@ -89,13 +89,13 @@ class InitialStatesCfg:
     # Target Configuration
     # ==========================================================================
 
-    target_distance_min: float = 30.0
+    target_distance_min: float = 20.0
     """Minimum distance from cylinder center to target (meters).
 
     At curriculum progress=0, target is placed at this distance.
     """
 
-    target_distance_max: float = 200.0
+    target_distance_max: float = 80.0
     """Maximum distance from cylinder center to target (meters).
 
     At curriculum progress=1, target can be placed up to this distance.

@@ -152,8 +152,9 @@ def run_controller_tests(results: TestResults, device: torch.device):
         q_body = torch.tensor([[1.0, 0.0, 0.0, 0.0]] * num_envs, device=device)
         v_body = torch.zeros((num_envs, 3), device=device)
         omega_body = torch.zeros((num_envs, 3), device=device)
+        gimbal_jp = torch.zeros((num_envs, 3), device=device)
 
-        F, tau, gimbal, zoom = controller.step_policy(
+        F, tau, gimbal, gimbal_vel, zoom = controller.step_policy(
             v_cmd,
             yaw_rate_cmd,
             gimbal_yaw_rate,
@@ -163,6 +164,7 @@ def run_controller_tests(results: TestResults, device: torch.device):
             v_body,
             omega_body,
             sim_dt=0.04,
+            gimbal_joint_positions=gimbal_jp,
         )
 
         assert F.shape == (num_envs, 3), f"F shape mismatch: {F.shape}"
@@ -184,7 +186,7 @@ def run_controller_tests(results: TestResults, device: torch.device):
         v_cmd = torch.tensor([[1.0, 0.0, 0.0]] * num_envs, device=device)  # Forward velocity
         yaw_rate_cmd = torch.zeros(num_envs, device=device)
 
-        F, tau, _, _ = controller.step_policy(
+        F, tau, _, _, _ = controller.step_policy(
             v_cmd,
             yaw_rate_cmd,
             gimbal_yaw_rate,
@@ -194,6 +196,7 @@ def run_controller_tests(results: TestResults, device: torch.device):
             v_body,
             omega_body,
             sim_dt=0.04,
+            gimbal_joint_positions=gimbal_jp,
         )
 
         # With forward velocity command but zero current velocity, should pitch forward
@@ -218,7 +221,7 @@ def run_controller_tests(results: TestResults, device: torch.device):
         # Zero velocity command (should try to level)
         v_cmd = torch.zeros((num_envs, 3), device=device)
 
-        F, tau, _, _ = controller.step_policy(
+        F, tau, _, _, _ = controller.step_policy(
             v_cmd,
             yaw_rate_cmd,
             gimbal_yaw_rate,
@@ -228,6 +231,7 @@ def run_controller_tests(results: TestResults, device: torch.device):
             v_body,
             omega_body,
             sim_dt=0.04,
+            gimbal_joint_positions=gimbal_jp,
         )
 
         # With roll error, should produce roll correction moment
@@ -249,7 +253,7 @@ def run_controller_tests(results: TestResults, device: torch.device):
         v_cmd = torch.zeros((num_envs, 3), device=device)
 
         for step in range(10):
-            F, tau, _, _ = controller.step_policy(
+            F, tau, _, _, _ = controller.step_policy(
                 v_cmd,
                 yaw_rate_cmd,
                 gimbal_yaw_rate,
@@ -259,6 +263,7 @@ def run_controller_tests(results: TestResults, device: torch.device):
                 v_body,
                 omega_body,
                 sim_dt=0.04,
+                gimbal_joint_positions=gimbal_jp,
             )
 
             # Check for NaN

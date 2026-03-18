@@ -96,10 +96,10 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # Environment Meta
     # ==========================================================================
 
-    num_agents: int = 3
+    num_agents: int = 2
     """Number of agents."""
 
-    episode_length_s: float = 300.0
+    episode_length_s: float = 20.0
     """Episode length in seconds."""
 
     decimation: int = 4
@@ -246,7 +246,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     max_yaw_rate: float = math.radians(45.0)
     """Maximum yaw rate (rad/s)."""
 
-    max_gimbal_rate: float = math.radians(180.0)
+    max_gimbal_rate: float = math.radians(360.0)
     """Maximum gimbal rate (rad/s)."""
 
     max_zoom_rate: float = 1.0
@@ -315,8 +315,8 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     delay_system: MultiAgentDelayCfgV3 = None  # type: ignore[assignment]
     """Full delay system configuration (built from delay_system_params in __post_init__)."""
 
-    enable_delay_system: bool = True
-    """Enable delay system for observations. Default False for backward compatibility."""
+    enable_delay_system: bool = False
+    """Enable delay system for observations. Set False for ground-truth testing."""
 
     # ==========================================================================
     # Triangulation Configuration
@@ -417,7 +417,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     - value ~ Uniform(min, min + progress * (max - min))
     """
 
-    enable_initial_states_randomization: bool = True
+    enable_initial_states_randomization: bool = False
     """Enable randomized initial states.
 
     If True, uses InitialStates module for curriculum-driven randomization.
@@ -462,6 +462,13 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     attitude P, rate PID, motor time constant). Curriculum-gated to
     dynamics phase (dynamics_start_step to dynamics_end_step).
     """
+
+    # ==========================================================================
+    # Debugging and Testing Flags
+    # ==========================================================================
+    debug_initial_step: int = 200000
+    """If > 0, initializes the environment at the specified training step for debugging."""
+
 
     def __post_init__(self):
         """Populate agent-specific fields from num_agents."""

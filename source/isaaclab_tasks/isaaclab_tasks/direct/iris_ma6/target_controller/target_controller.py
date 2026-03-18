@@ -247,7 +247,10 @@ class TargetController:
         self._debug_v_cmd = v_cmd.clone()
 
         # Pass through DroneController
-        F_body_flat, tau_body_flat, _, _ = self._drone_controller.step_policy(
+        # Target has no gimbal — pass zeros for joint positions
+        gimbal_jp_zeros = torch.zeros(self.total_targets, 3, device=self.device)
+
+        F_body_flat, tau_body_flat, _, _, _ = self._drone_controller.step_policy(
             v_cmd=v_cmd,
             yaw_rate_cmd=torch.zeros(self.total_targets, device=self.device),
             gimbal_yaw_rate_cmd=torch.zeros(self.total_targets, device=self.device),
@@ -257,6 +260,7 @@ class TargetController:
             v_body=vel_flat,
             omega_body=omega_flat,
             sim_dt=dt,
+            gimbal_joint_positions=gimbal_jp_zeros,
         )
 
         # Zero out forces for dead targets
