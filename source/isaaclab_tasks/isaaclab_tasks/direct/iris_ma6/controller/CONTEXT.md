@@ -34,3 +34,6 @@ None (standalone module).
 
 ## Spec
 `doc/controller_spec.md`
+
+## Records
+- `doc/gimbal_stabilization_status.md` — Gimbal tuning results, stability analysis, final config (pointing_gain, feedback_blend, actuation mode)

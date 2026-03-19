@@ -412,7 +412,7 @@ def main():
             num_envs=1, device=device,
         )
         gimbal_implicit = GimbalController(
-            cfg=GimbalControllerCfg(feedback_blend=0.1), num_envs=1, device=device,
+            cfg=GimbalControllerCfg(feedback_blend=0.05), num_envs=1, device=device,
         )
 
         results_implicit = []

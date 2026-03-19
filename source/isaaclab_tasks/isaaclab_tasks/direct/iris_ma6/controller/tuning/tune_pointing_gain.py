@@ -60,7 +60,7 @@ def main():
 
     # Generate gain values: linearly spaced from 1 to 95
     # Upper bound < 100 to avoid instability (K*dt=1 at K=100 for dt=0.01)
-    gains = torch.linspace(90.0, 1000.0, N, device=device)
+    gains = torch.linspace(20.0, 200.0, N, device=device)
     print(f"Testing {N} gains: [{gains[0]:.1f}, ..., {gains[-1]:.1f}]")
 
     # Create environment

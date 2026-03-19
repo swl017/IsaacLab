@@ -70,7 +70,19 @@ Done:
 - Ran sweeps: gains 20-60 plateau, error dominated by joint limits at high gimbal amp
 - User exploring gains 90-1000 (beyond theoretical K*dt=1 stability limit at K=100)
 
+Continued:
+- Corrected stability analysis: K*dt < 2 is the true limit (not K*dt < 1)
+  - K*dt < 1: monotonic convergence
+  - 1 < K*dt < 2: oscillatory but convergent (pole in (-1, 0))
+  - K*dt > 2: unstable (diverges). Confirmed by sweep: K≈220 diverges.
+- Swept gains 90-1000 with direct state setting: optimal K=112 (score 5.83 deg)
+- Switched to implicit actuator control (PD via set_joint_position_target):
+  - Optimal K dropped from 112 → 30.5 (score 5.80 deg — same quality)
+  - PD actuator adds natural damping, lowering the required controller gain
+  - One-step actuation lag changes effective system order (1st → 2nd)
+- Enabled feedback_blend=0.05 to correct internal state drift with implicit actuator
+- Final tuned values: pointing_gain=32.5, feedback_blend=0.05, implicit actuator
+
 Next:
-- Analyze sweep results at gains 90-1000 — check if direct state setting masks oscillations
-- Finalize pointing_gain default based on sweep
-- Update gimbal_controller_cfg.py docstring Range once gain is decided
+- Continue environment integration and training runs
+- Monitor gimbal tracking quality during RL training (curriculum may stress edge cases)

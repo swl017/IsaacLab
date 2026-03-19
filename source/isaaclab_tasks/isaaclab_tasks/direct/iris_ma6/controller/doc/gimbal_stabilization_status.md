@@ -87,31 +87,47 @@ Root cause: three bugs in the yaw control chain.
 1. **Wrong rotation formula in `gimbal_world_direction()`** — Y and Z components used incorrect Pitch-Roll-Yaw with negated roll instead of the actual Yaw(Z)->Roll(X)->Pitch(Y) chain. Caused gain-dependent noise in the error metric (different gains → different roll trajectories → different formula errors). Fixed to match `_apply_gimbal_rotation` exactly.
 2. **Original maneuvers had zero gimbal commands** — only tested disturbance rejection (feedforward `-omega_body` handles this regardless of gain). Fixed: maneuvers now command active gimbal slewing while body moves.
 
+### Stability analysis
+Discrete-time P-controller pole = `(1 - K*dt)`:
+- K*dt < 1: monotonic convergence (pole 0 to 1)
+- 1 < K*dt < 2: oscillatory but convergent (pole -1 to 0)
+- K*dt > 2: unstable (diverges). Confirmed: K≈220 diverges in sweep.
+
 ### Tuning results
-- **Stability limit**: `K * dt < 1` → `K < 100` for `dt = 0.01s` (sim rate)
-- **Current value**: `pointing_gain = 112.24` (user-set, exploring beyond K*dt=1)
-- **Sweep range**: gains 90–1000 (user's current sweep)
-- With moderate gimbal commands (`gimbal_amp=0.1`, ~18 deg peak excursion), gains 20–60 produce similar scores. Higher gains improve tracking but approach the discrete-time instability boundary.
-- Aggressive gimbal commands (`gimbal_amp=0.4`, ~92 deg excursion) saturate joint limits, making the error insensitive to gain above K≈20.
+
+**Direct state setting** (`write_joint_state_to_sim`):
+- Optimal K=112 (K*dt=1.12, oscillatory-convergent regime), score 5.83 deg
+- Gains 95–140 all score ~5.8 deg (flat plateau)
+
+**Implicit actuator** (`set_joint_position_target` + PD loop):
+- Optimal K=30.5, score 5.80 deg — same tracking quality at 1/3 the gain
+- PD actuator adds natural damping (smooths oscillation) + one-step lag
+- Effectively changes system from 1st order to 2nd order
+- Requires `feedback_blend > 0` to correct internal state drift
+
+### Final configuration (implicit actuator mode)
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `pointing_gain` | 32.5 | Center of optimal plateau for implicit actuator |
+| `feedback_blend` | 0.05 | Corrects drift between internal state and actual joints |
+| `mode` | "jacobian" | J^{-1} velocity tracking with body-rate feedforward |
+| Actuation | Implicit PD | Smoother tracking, natural damping, lower gain needed |
 
 ### Environment config changes for tuning
 - Added `enable_tiled_cameras: bool` to `IrisMA6TestEnvCfg` — skip TiledCamera creation for faster headless runs
 - Increased PhysX GPU buffer capacities (`gpu_heap_capacity=2**27`, `gpu_temp_buffer_capacity=2**25`) for 1024-env runs
 - Tuning script disables `enable_target_controller` and `enable_tiled_cameras`
 
-## Remaining Issues
+## Known Physical Limitations (accepted)
 
 ### Cross vx+vy error (7-14° RMS)
 During circular maneuvers (37° body tilt), residual gimbal error comes from:
-- 1-step physics latency (body moves between state read and joint write)
 - Roll joint saturation (±45° limit with 37° body roll leaves 8° margin)
-Not a controller bug — physical limitation.
+- 1-step physics latency (~1° additional)
+Not a controller bug — hardware constraint of 3-axis gimbal with these joint limits.
 
 ### Pure Yaw body yaw reaches 51.6°
-During commanded yaw rate, the drone physically rotates. The gimbal compensates well (<1° RMS error) but the body yaw is large. This is expected — the yaw hold only engages when `yaw_rate_cmd ≈ 0`.
-
-### Pointing gain beyond stability boundary
-User is sweeping gains 90–1000, which exceeds the theoretical K*dt=1 stability limit. The direct joint state setting (`write_joint_state_to_sim`) may mask oscillations since joints are overwritten each step. Needs investigation: does the Jacobian controller remain well-behaved at K>100, or do hidden oscillations degrade tracking?
+During commanded yaw rate, the drone physically rotates. The gimbal compensates well (<1° RMS error). The large body yaw is intended behavior — yaw hold only engages when `yaw_rate_cmd ≈ 0`.
 
 ## Key Files
 

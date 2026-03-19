@@ -457,7 +457,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 body_ids=self._body_ids[agent_id],
             )
 
-            use_implicit_gimbal_control = False  # Set to False to bypass implicit control and write joint state directly
+            use_implicit_gimbal_control = True  # Set to False to bypass implicit control and write joint state directly
             if use_implicit_gimbal_control:
                 # Apply gimbal position targets
                 # Add YAW_JOINT_OFFSET (-π/2) to yaw: controller yaw=0 means body +X

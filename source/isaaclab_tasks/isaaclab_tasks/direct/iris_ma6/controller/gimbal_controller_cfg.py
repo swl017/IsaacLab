@@ -43,17 +43,18 @@ class GimbalControllerCfg:
     auto_stabilize_roll: bool = True
     """Whether to automatically compute roll to keep horizon level."""
 
-    feedback_blend: float = 0.0
+    feedback_blend: float = 0.05
     """Blend factor for closed-loop joint position feedback.
     Corrects internal state drift: state += beta * (actual - state).
     Set to 0.0 when using direct joint state setting (no actuator lag).
     Use 0.05-0.2 when using implicit actuator PD loop."""
 
-    pointing_gain: float = 112.24
+    pointing_gain: float = 32.5
     """Proportional gain converting pointing error (rad) to angular velocity command (rad/s).
     Converts body-frame attitude error to a rate command fed through J^{-1}.
-    Discrete-time stability limit: K * physics_dt < 1 (K < 100 at dt=0.01s).
-    Sweep results: gains 20-60 perform similarly; values above 100 may oscillate."""
+    Discrete-time stability: K*dt < 2 (K < 200 at dt=0.01s). Diverges above K≈200.
+    With implicit actuator (PD loop): optimal K≈30 (score 5.8 deg).
+    With direct state setting: optimal K≈112 (score 5.8 deg)."""
 
     initial_yaw: float = 0.0  # was -math.radians(90) when visual forward = body +Y
     """Initial gimbal yaw angle [rad]."""
