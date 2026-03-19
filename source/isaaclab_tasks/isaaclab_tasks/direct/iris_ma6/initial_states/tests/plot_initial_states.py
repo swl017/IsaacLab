@@ -252,7 +252,7 @@ def plot_overview(out_dir: Path, dark: bool):
     # Draw height range
     h_min = cfg.cylinder_height_min
     h_max = cfg.cylinder_height_max
-    h_range = cfg.cylinder_height_range
+    h_range = cfg.cylinder_height_range_max
 
     # Ground
     ax.axhline(0, color="brown", lw=3, alpha=0.5, label="Ground")
@@ -516,7 +516,8 @@ def plot_details(out_dir: Path, dark: bool):
                        f"{cfg.cylinder_diameter_max:.0f}] m"),
         ("  Height (center)", f"[{cfg.cylinder_height_min:.0f}, "
                               f"{cfg.cylinder_height_max:.0f}] m"),
-        ("  Vertical spread", f"{cfg.cylinder_height_range:.0f} m"),
+        ("  Vertical spread", f"[{cfg.cylinder_height_range_min:.0f}, "
+                              f"{cfg.cylinder_height_range_max:.0f}] m"),
         ("  Agent clearance", f"{cfg.agent_clearance:.0f} m"),
         ("", ""),
         ("Target", ""),

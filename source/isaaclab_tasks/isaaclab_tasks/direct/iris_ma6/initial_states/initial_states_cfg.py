@@ -51,7 +51,7 @@ class InitialStatesCfg:
     # Cylinder Configuration (Agent Placement)
     # ==========================================================================
 
-    cylinder_diameter_min: float = 30.0
+    cylinder_diameter_min: float = 20.0
     """Minimum cylinder diameter (meters).
 
     At curriculum progress=0, agents are placed within this diameter.
@@ -70,13 +70,21 @@ class InitialStatesCfg:
     cylinder_height_max: float = 50.0
     """Maximum cylinder base height above ground (meters)."""
 
-    cylinder_height_range: float = 20.0
-    """Vertical spread within cylinder for agent placement (meters).
+    cylinder_height_range_min: float = 2.0
+    """Vertical spread at curriculum progress=0 (meters).
 
-    Agents are distributed within [center_z, center_z + height_range].
+    0 = planar formation (all agents at same height). Matches iris_ma5 behavior
+    at early training for easier gimbal learning.
     """
 
-    agent_clearance: float = 10.0
+    cylinder_height_range_max: float = 10.0
+    """Vertical spread at curriculum progress=1 (meters).
+
+    Agents are distributed within [center_z, center_z + height_range].
+    Sampled as: min + progress * (max - min).
+    """
+
+    agent_clearance: float = 5.0
     """Minimum distance between any two agents (meters).
 
     Enforced via rejection sampling during placement.
@@ -102,10 +110,10 @@ class InitialStatesCfg:
     Sampled as: uniform(min, min + progress * (max - min))
     """
 
-    target_height_offset_min: float = -5.0
+    target_height_offset_min: float = -2.0
     """Minimum target height offset from cylinder center (meters)."""
 
-    target_height_offset_max: float = 5.0
+    target_height_offset_max: float = 2.0
     """Maximum target height offset from cylinder center (meters)."""
 
     # ==========================================================================
@@ -137,17 +145,19 @@ class InitialStatesCfg:
     designated_observer_faces_target: bool = True
     """Whether the designated observer's body faces toward target."""
 
-    other_agents_orientation_mode: Literal["random", "face_target"] = "random"
+    other_agents_orientation_mode: Literal["random", "face_target", "curriculum"] = "curriculum"
     """Orientation mode for non-designated agents.
 
     - "random": Random yaw orientation
     - "face_target": All agents face toward target
+    - "curriculum": Gradual transition from face_target (progress=0) to random (progress=1).
+      With probability (1 - progress), agent faces target; otherwise random yaw.
     """
 
-    orientation_noise_std: float = 0.1
+    orientation_noise_std: float = 0.2
     """Standard deviation of orientation noise (radians).
 
-    Applied to body yaw when facing target.
+    Applied to body yaw when facing target. ~0.2 rad ≈ 11° matches iris_ma5.
     """
 
     # ==========================================================================
@@ -190,7 +200,7 @@ class InitialStatesCfg:
     zoom_initial_min: float = 1.0
     """Minimum initial zoom level for sampling."""
 
-    zoom_initial_max_start: float = 2.0
+    zoom_initial_max_start: float = 1.0
     """Maximum initial zoom level at curriculum progress 0."""
 
     zoom_initial_max_end: float = 10.0

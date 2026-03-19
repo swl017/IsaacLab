@@ -117,7 +117,7 @@ class InitialStatesGenerator:
         # Step 3: Place agents in cylinder with clearance
         # ======================================================================
         agent_positions = self._generate_agent_positions_in_cylinder(
-            num_envs, cylinder_centers, params["diameters"]
+            num_envs, cylinder_centers, params["diameters"], progress
         )
 
         # ======================================================================
@@ -143,7 +143,7 @@ class InitialStatesGenerator:
         # Step 7: Generate agent orientations
         # ======================================================================
         agent_orientations = self._generate_agent_orientations(
-            agent_positions, target_positions, designated_observer_idx
+            agent_positions, target_positions, designated_observer_idx, progress
         )
 
         # ======================================================================
@@ -284,6 +284,7 @@ class InitialStatesGenerator:
         num_envs: int,
         centers: torch.Tensor,
         diameters: torch.Tensor,
+        progress: float = 1.0,
     ) -> torch.Tensor:
         """Place agents randomly within cylinder using rejection sampling.
 
@@ -294,6 +295,7 @@ class InitialStatesGenerator:
             num_envs: Number of environments.
             centers: [num_envs, 3] cylinder center positions.
             diameters: [num_envs] cylinder diameters per environment.
+            progress: Curriculum progress [0, 1] for height range scaling.
 
         Returns:
             positions: [num_envs, num_agents, 3] agent positions.
@@ -301,10 +303,14 @@ class InitialStatesGenerator:
         cfg = self.cfg
         positions = torch.zeros(num_envs, self.num_agents, 3, device=self.device)
 
+        # Curriculum-controlled vertical spread
+        height_range = cfg.cylinder_height_range_min + progress * (
+            cfg.cylinder_height_range_max - cfg.cylinder_height_range_min
+        )
+
         for env_idx in range(num_envs):
             center = centers[env_idx]
             radius = diameters[env_idx] / 2.0
-            height_range = cfg.cylinder_height_range
 
             placed = 0
             attempts = 0
@@ -492,6 +498,7 @@ class InitialStatesGenerator:
         agent_positions: torch.Tensor,
         target_positions: torch.Tensor,
         designated_observer_idx: torch.Tensor,
+        progress: float = 1.0,
     ) -> torch.Tensor:
         """Generate agent body orientations.
 
@@ -501,6 +508,7 @@ class InitialStatesGenerator:
             agent_positions: [num_envs, num_agents, 3]
             target_positions: [num_envs, 3]
             designated_observer_idx: [num_envs]
+            progress: Curriculum progress [0, 1] for "curriculum" orientation mode.
 
         Returns:
             orientations: [num_envs, num_agents, 4] quaternions (wxyz).
@@ -531,6 +539,15 @@ class InitialStatesGenerator:
                     to_target = target_pos - agent_pos
                     yaw = torch.atan2(to_target[1], to_target[0]).item()
                     yaw += torch.randn(1, device=self.device).item() * cfg.orientation_noise_std
+
+                elif cfg.other_agents_orientation_mode == "curriculum":
+                    # Gradual transition: face target at progress=0, random at progress=1
+                    if torch.rand(1, device=self.device).item() < (1.0 - progress):
+                        to_target = target_pos - agent_pos
+                        yaw = torch.atan2(to_target[1], to_target[0]).item()
+                        yaw += torch.randn(1, device=self.device).item() * cfg.orientation_noise_std
+                    else:
+                        yaw = (torch.rand(1, device=self.device).item() * 2 - 1) * math.pi
 
                 else:
                     # Random yaw

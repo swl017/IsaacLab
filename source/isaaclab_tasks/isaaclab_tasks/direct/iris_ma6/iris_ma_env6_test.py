@@ -327,7 +327,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
             self._initial_states = None
 
         # Curriculum progress tracking (updated externally, used by initial_states)
-        self._curriculum_progress = 0.0
+        self.progress_tracking = 0.0
+        self.progress_moving_target = 0.0
+        self.progress_delay = 0.0
 
         # Initialize target controller for physics-based target movement
         if self.cfg.enable_target_controller:
@@ -566,7 +568,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 facility_position=self._facility_position,
                 interceptor_positions=agent_positions,
                 interceptor_roles=agent_roles,
-                curriculum_progress=self._curriculum_progress,
+                curriculum_progress=self.progress_moving_target,
                 dt=dt,
                 env_origins=self._terrain.env_origins,
             )
@@ -910,20 +912,24 @@ class IrisMA6TestEnv(DirectMARLEnv):
         )
 
         # Update curriculum progress for initial states randomization
-        self._curriculum_progress = curr.get_progress(
+        self.progress_tracking = curr.get_progress(
             current_step, curr.tracking_start_step, curr.tracking_end_step
+        )
+
+        self.progress_moving_target = curr.get_progress(
+            current_step, curr.moving_target_start_step, curr.moving_target_end_step
         )
 
         # Update delay system curriculum (none → fixed → random, noise/dropout ramp)
         if self._delay_system is not None:
             delay_mode = curr.get_delay_mode(current_step)
             if delay_mode == "none":
-                delay_progress = 0.0
+                self.progress_delay = 0.0
             elif delay_mode == "fixed":
-                delay_progress = curr.get_fixed_delay_progress(current_step)
+                self.progress_delay = curr.get_fixed_delay_progress(current_step)
             else:  # "random"
-                delay_progress = curr.get_random_delay_progress(current_step)
-            self._delay_system.set_delay_mode(delay_mode, progress=delay_progress)
+                self.progress_delay = curr.get_random_delay_progress(current_step)
+            self._delay_system.set_delay_mode(delay_mode, progress=self.progress_delay)
 
             # Ramp noise (phase 2: 80k-100k)
             self._delay_system.set_noise_scale(curr.get_noise_progress(current_step))
@@ -1424,7 +1430,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
             # Generate randomized initial states via InitialStates module
             result = self._initial_states.generate(
                 env_ids=torch.arange(num_reset, device=self.device),
-                curriculum_progress=self._curriculum_progress,
+                curriculum_progress=self.progress_tracking,
             )
 
             # Apply agent states
