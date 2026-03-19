@@ -42,8 +42,9 @@ class ZoomController:
         # Target zoom level (before dynamics)
         self._zoom_target = torch.ones(num_envs, dtype=torch.float32, device=self.device)
 
-        # Store tau for potential per-env randomization
+        # Store tau and max_zoom_rate for potential per-env randomization
         self._tau_zoom = cfg.tau_zoom
+        self._max_zoom_rate = cfg.max_zoom_rate
 
     @property
     def zoom(self) -> torch.Tensor:
@@ -64,8 +65,8 @@ class ZoomController:
         Returns:
             zoom_level: (N,) current zoom level [1x to zoom_max].
         """
-        # Scale rate command
-        zoom_rate = zoom_rate_cmd * self.cfg.max_zoom_rate
+        # Scale rate command (supports per-env _max_zoom_rate)
+        zoom_rate = zoom_rate_cmd * self._max_zoom_rate
 
         # Integrate to get target zoom
         self._zoom_target = self._zoom_target + zoom_rate * dt
@@ -128,6 +129,17 @@ class ZoomController:
             self._tau_zoom = tau_zoom.to(self.device)
         else:
             self._tau_zoom = tau_zoom
+
+    def set_max_zoom_rate(self, max_zoom_rate: torch.Tensor | float):
+        """Set maximum zoom rate (for randomization).
+
+        Args:
+            max_zoom_rate: Max zoom rate [1/s]. Can be scalar or (N,) tensor.
+        """
+        if isinstance(max_zoom_rate, torch.Tensor):
+            self._max_zoom_rate = max_zoom_rate.to(self.device)
+        else:
+            self._max_zoom_rate = max_zoom_rate
 
     def set_zoom(self, zoom_level: torch.Tensor, env_ids: torch.Tensor | None = None):
         """Directly set zoom level (for initialization/teleop).

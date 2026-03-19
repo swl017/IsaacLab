@@ -666,8 +666,11 @@ def run_zoom_tests(results: TestResults, device: torch.device, verbose: bool):
 
         assert zoom_min >= cfg.zoom_initial_min - 0.01, \
             f"Zoom min {zoom_min} below config min {cfg.zoom_initial_min}"
-        assert zoom_max <= cfg.zoom_initial_max + 0.01, \
-            f"Zoom max {zoom_max} above config max {cfg.zoom_initial_max}"
+        expected_zoom_max = cfg.zoom_initial_max_start + 0.5 * (
+            cfg.zoom_initial_max_end - cfg.zoom_initial_max_start
+        )
+        assert zoom_max <= expected_zoom_max + 0.01, \
+            f"Zoom max {zoom_max} above expected max {expected_zoom_max} at progress=0.5"
 
         results.add_pass("Zoom levels within range")
     except AssertionError as e:

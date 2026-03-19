@@ -572,7 +572,8 @@ class TargetController:
         weights = weights / weights.sum()
         cumsum = torch.cumsum(weights, dim=0)
 
-        profile_names = ["kamikaze", "standard", "evasive", "stealth"]
+        profile_names = ["standard"]
+        # profile_names = ["kamikaze", "standard", "evasive", "stealth"]
 
         for target_idx in range(self.num_targets):
             flat_indices = env_ids * self.num_targets + target_idx

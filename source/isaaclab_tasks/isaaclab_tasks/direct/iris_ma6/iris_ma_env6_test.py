@@ -178,6 +178,11 @@ class IrisMA6TestEnv(DirectMARLEnv):
         # Zoom level tracking (controller manages internal state, we track for observations)
         self.zoom_level = torch.ones(self.num_envs, num_agents, device=self.device)
 
+        # Per-env max linear velocity (randomized via curriculum)
+        self._max_lin_vel = torch.full(
+            (self.num_envs,), self.cfg.max_lin_vel, device=self.device
+        )
+
         # Initial gimbal angles
         self.cmd_gimbal_yaw = torch.zeros(self.num_envs, num_agents, device=self.device)
         self.cmd_gimbal_pitch = torch.zeros(self.num_envs, num_agents, device=self.device)
@@ -287,6 +292,16 @@ class IrisMA6TestEnv(DirectMARLEnv):
             }
             for agent in self.cfg.possible_agents
         }
+
+        # Detection dropout tracking for debugging
+        self._detection_stats = {
+            "total_steps": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            "invalid_all_agents": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            "pair_valid_count": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+        }
+
+        # Collision event counter (per-episode)
+        self._collision_count = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
         # Curriculum progress factors (updated each step in _get_rewards)
         self.progress_coord = 0.0
@@ -400,7 +415,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
             # Scale actions from [-1, 1] to physical units
             # [0 vx, 1 vy, 2 vz, 3 yaw_rate, 4 gimbal_yaw_rate, 5 gimbal_pitch_rate, 6 zoom_rate]
-            self.cmd_vel[:, idx, 0:3] = action[:, 0:3] * self.cfg.max_lin_vel
+            self.cmd_vel[:, idx, 0:3] = action[:, 0:3] * self._max_lin_vel.unsqueeze(-1)
             self.cmd_vel[:, idx, 3] = action[:, 3] * self.cfg.max_yaw_rate
             # Gimbal and zoom controllers expect normalized [-1, 1] input and scale internally
             self.cmd_vel[:, idx, 4] = action[:, 4]  # Gimbal yaw rate (normalized)
@@ -941,6 +956,17 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 states=reward_states, use_gt_target=True
             )
 
+            # Track detection dropout statistics
+            # bbox_valid per agent for target 0: count how many agents see the target
+            num_valid_detections = torch.zeros(self.num_envs, device=self.device)
+            for agent_id in self.cfg.possible_agents:
+                bbox_raw = reward_states[agent_id].data.bboxes_2d[:, 0, :]  # [N, 4]
+                agent_valid = bbox_raw.abs().sum(dim=-1) > 1e-6  # [N]
+                num_valid_detections += agent_valid.float()
+            self._detection_stats["total_steps"] += 1.0
+            self._detection_stats["invalid_all_agents"] += (num_valid_detections == 0).float()
+            self._detection_stats["pair_valid_count"] += (num_valid_detections >= 2).float()
+
             # Level 2 (GT-anchored estimation error): triangulate with GT drone positions
             if task_level >= 2 or self.cfg.curriculum_task_levels:
                 gt_states = self._build_gt_states()
@@ -1367,6 +1393,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
         )
         collided = self.cbf_manager.check_collisions(gt_positions)  # (E,)
 
+        # Track collision events per episode
+        self._collision_count += collided.float()
+
         for agent_id in self.cfg.possible_agents:
             # Terminate if drone goes too low (crashed) OR collision
             pos_z = self._root_pos_w[agent_id][:, 2]
@@ -1500,6 +1529,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
             self._delay_system.reset(env_ids)
             self._delay_system.randomize_per_agent_params(env_ids)
 
+        # Reset per-env max_lin_vel to nominal before potential randomization
+        self._max_lin_vel[env_ids] = self.cfg.max_lin_vel
+
         # Randomize controller gains (curriculum-gated to dynamics phase)
         dynamics_progress = self._linear_progress(
             self.cfg.curriculum.dynamics_start_step,
@@ -1510,6 +1542,15 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 self._controllers[agent_id].randomize_gains(
                     env_ids, dynamics_progress, self.cfg.gain_randomization
                 )
+
+            # Randomize max linear velocity (same dynamics curriculum gate)
+            gain_cfg = self.cfg.gain_randomization
+            if gain_cfg.randomize_max_lin_vel:
+                low = 1.0 - dynamics_progress * (1.0 - gain_cfg.max_lin_vel_scale_range[0])
+                high = 1.0 + dynamics_progress * (gain_cfg.max_lin_vel_scale_range[1] - 1.0)
+                M = len(env_ids)
+                scale = torch.empty(M, device=self.device).uniform_(low, high)
+                self._max_lin_vel[env_ids] = self.cfg.max_lin_vel * scale
 
         self._sim_time[env_ids] = 0.0
 
@@ -1526,6 +1567,23 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     episodic_sum_avg / self.max_episode_length_s
                 )
                 self._episode_sums[agent_id][key][env_ids] = 0.0
+
+        # Log detection dropout statistics
+        total_steps = torch.clamp(self._detection_stats["total_steps"][env_ids], min=1.0)
+        all_extras["Detection/all_invalid_rate"] = torch.mean(
+            self._detection_stats["invalid_all_agents"][env_ids] / total_steps
+        )
+        all_extras["Detection/pair_valid_rate"] = torch.mean(
+            self._detection_stats["pair_valid_count"][env_ids] / total_steps
+        )
+
+        # Log collision rate (total collision steps / episode length)
+        all_extras["Safety/collision"] = torch.mean(self._collision_count[env_ids])
+
+        # Reset detection stats and collision count for these envs
+        for key in self._detection_stats:
+            self._detection_stats[key][env_ids] = 0.0
+        self._collision_count[env_ids] = 0.0
 
         if "log" not in self.extras:
             self.extras["log"] = {}

@@ -125,7 +125,7 @@ class TargetControllerCfg:
     # Speed Control (Curriculum-Scaled)
     # ==========================================================================
 
-    max_speed_start: float = 3.0
+    max_speed_start: float = 1.0
     """Maximum speed at curriculum progress 0 [m/s]."""
 
     max_speed_end: float = 12.0
@@ -280,5 +280,5 @@ class TargetControllerCfg:
     use_attacker_mode: bool = False
     """If True, use approach/evade modes. If False, use linear/circular only."""
 
-    default_velocity_mode: str = "approach"
+    default_velocity_mode: str = "linear"
     """Default velocity mode: 'linear', 'circular', or 'approach'."""

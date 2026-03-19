@@ -83,7 +83,7 @@ agent:
   # Experiment tracking
   experiment:
     directory: iris_ma6
-    experiment_name: "838677df74"      # Will be set by training script
+    experiment_name: "ae0373df47_initial_zoom_fix"      # Will be set by training script
     write_interval: auto
     checkpoint_interval: auto
     store_separately: false
@@ -92,6 +92,6 @@ agent:
 
 # Trainer configuration
 trainer:
-  timesteps: 400000          # Total training timesteps
+  timesteps: 20000          # Total training timesteps
   headless: true
   environment_info: log

@@ -356,10 +356,12 @@ def plot_details(out_dir: Path, dark: bool):
     # ---- 2) Zoom level range ----
     ax = axes[0, 1]
     zoom_lo = np.full_like(steps, cfg.zoom_initial_min, dtype=float)
-    zoom_hi = np.full_like(steps, cfg.zoom_initial_max, dtype=float)
+    zoom_hi = cfg.zoom_initial_max_start + progress * (
+        cfg.zoom_initial_max_end - cfg.zoom_initial_max_start
+    )
     ax.fill_between(steps, zoom_lo, zoom_hi, alpha=0.3, color=COLORS["zoom"],
                     label=f"Initial zoom [{cfg.zoom_initial_min:.0f}, "
-                          f"{cfg.zoom_initial_max:.0f}]")
+                          f"{cfg.zoom_initial_max_start:.0f}\u2192{cfg.zoom_initial_max_end:.0f}]")
     ax.plot(steps, zoom_lo, lw=2, color=COLORS["zoom"])
     ax.plot(steps, zoom_hi, lw=2, color=COLORS["zoom"], ls="--")
 
@@ -537,7 +539,7 @@ def plot_details(out_dir: Path, dark: bool):
         ("  Orientation noise", f"\u03c3 = {math.degrees(cfg.orientation_noise_std):.1f}\u00b0"),
         ("", ""),
         ("Zoom", ""),
-        ("  Initial range", f"[{cfg.zoom_initial_min:.0f}, {cfg.zoom_initial_max:.0f}]x"),
+        ("  Initial range", f"[{cfg.zoom_initial_min:.0f}, {cfg.zoom_initial_max_start:.0f}\u2192{cfg.zoom_initial_max_end:.0f}]x"),
         ("  Hardware range", f"[{cfg.zoom_min:.0f}, {cfg.zoom_max:.0f}]x"),
         ("", ""),
         ("Observer mode", f'"{cfg.designated_observer_mode}"'),

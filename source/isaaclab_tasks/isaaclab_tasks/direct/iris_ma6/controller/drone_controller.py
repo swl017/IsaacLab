@@ -367,6 +367,16 @@ class DroneController:
                     if isinstance(self._motor._tau_motor, torch.Tensor)
                     else torch.tensor(self._motor._tau_motor, device=self.device)
                 ),
+                "tau_zoom": (
+                    self._zoom._tau_zoom.clone()
+                    if isinstance(self._zoom._tau_zoom, torch.Tensor)
+                    else torch.tensor(self._zoom._tau_zoom, device=self.device)
+                ),
+                "max_zoom_rate": (
+                    self._zoom._max_zoom_rate.clone()
+                    if isinstance(self._zoom._max_zoom_rate, torch.Tensor)
+                    else torch.tensor(self._zoom._max_zoom_rate, device=self.device)
+                ),
             }
             # Expand all gains to (N, 3) for per-env storage
             for key in ["Kp_vel", "Ki_vel", "Kp_att", "Kp_rate", "Ki_rate", "Kd_rate"]:
@@ -374,10 +384,16 @@ class DroneController:
                 if g.dim() == 1:
                     self._nominal_gains[key] = g.unsqueeze(0).expand(self.num_envs, -1).clone()
                     # Also set the controller to use (N, 3)
-            # Expand tau to (N,)
+            # Expand scalar gains to (N,)
             tau = self._nominal_gains["tau_motor"]
             if tau.dim() == 0:
                 self._nominal_gains["tau_motor"] = tau.expand(self.num_envs).clone()
+            tau_z = self._nominal_gains["tau_zoom"]
+            if tau_z.dim() == 0:
+                self._nominal_gains["tau_zoom"] = tau_z.expand(self.num_envs).clone()
+            mzr = self._nominal_gains["max_zoom_rate"]
+            if mzr.dim() == 0:
+                self._nominal_gains["max_zoom_rate"] = mzr.expand(self.num_envs).clone()
 
             # Initialize per-env gains from nominal
             self._velocity.set_gains(
@@ -391,6 +407,8 @@ class DroneController:
                 Kd_rate=self._nominal_gains["Kd_rate"],
             )
             self._motor.set_tau_motor(self._nominal_gains["tau_motor"])
+            self._zoom.set_tau_zoom(self._nominal_gains["tau_zoom"])
+            self._zoom.set_max_zoom_rate(self._nominal_gains["max_zoom_rate"])
 
         # Curriculum-ramped range: at progress=0 -> (1,1), at progress=1 -> scale_range
         low = 1.0 - progress * (1.0 - cfg.scale_range[0])
@@ -426,6 +444,17 @@ class DroneController:
             new_tau = self._nominal_gains["tau_motor"].clone()
             new_tau[env_ids] = self._nominal_gains["tau_motor"][env_ids] * scale
             self._motor.set_tau_motor(new_tau)
+
+        if cfg.randomize_zoom:
+            scale = torch.empty(M, device=self.device).uniform_(low, high)
+            new_tau_z = self._nominal_gains["tau_zoom"].clone()
+            new_tau_z[env_ids] = self._nominal_gains["tau_zoom"][env_ids] * scale
+            self._zoom.set_tau_zoom(new_tau_z)
+
+            scale2 = torch.empty(M, device=self.device).uniform_(low, high)
+            new_mzr = self._nominal_gains["max_zoom_rate"].clone()
+            new_mzr[env_ids] = self._nominal_gains["max_zoom_rate"][env_ids] * scale2
+            self._zoom.set_max_zoom_rate(new_mzr)
 
     def set_aerodynamic_level(self, level: int):
         """Set aerodynamic fidelity level.

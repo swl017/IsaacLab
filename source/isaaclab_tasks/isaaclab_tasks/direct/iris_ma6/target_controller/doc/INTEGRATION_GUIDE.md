@@ -179,7 +179,7 @@ def set_curriculum_progress(self, progress: float):
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `use_attacker_mode` | True | Use approach/evade vs linear/circular |
-| `default_velocity_mode` | "approach" | Default mode: linear, circular, approach |
+| `default_velocity_mode` | "linear" | Default mode: linear, circular, approach |
 | `linear_weight` | 0.5 | Probability of linear vs circular |
 
 ### Behavior Profiles

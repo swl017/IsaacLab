@@ -167,7 +167,7 @@ class InitialStatesGenerator:
         # ======================================================================
         # Step 10: Generate zoom levels
         # ======================================================================
-        zoom_levels = self._generate_zoom_levels(num_envs)
+        zoom_levels = self._generate_zoom_levels(num_envs, curriculum_progress)
 
         # ======================================================================
         # Compute distances for logging
@@ -748,20 +748,28 @@ class InitialStatesGenerator:
     # Zoom Levels
     # ==========================================================================
 
-    def _generate_zoom_levels(self, num_envs: int) -> torch.Tensor:
+    def _generate_zoom_levels(self, num_envs: int, curriculum_progress: float = 0.5) -> torch.Tensor:
         """Generate random zoom levels.
+
+        The maximum zoom level scales with curriculum progress from
+        zoom_initial_max_start to zoom_initial_max_end.
 
         Args:
             num_envs: Number of environments.
+            curriculum_progress: Curriculum progress in [0, 1].
 
         Returns:
             zoom_levels: [num_envs, num_agents]
         """
         cfg = self.cfg
 
+        zoom_max = cfg.zoom_initial_max_start + curriculum_progress * (
+            cfg.zoom_initial_max_end - cfg.zoom_initial_max_start
+        )
+
         zoom_levels = (
             torch.rand(num_envs, self.num_agents, device=self.device)
-            * (cfg.zoom_initial_max - cfg.zoom_initial_min)
+            * (zoom_max - cfg.zoom_initial_min)
             + cfg.zoom_initial_min
         )
 

@@ -89,23 +89,23 @@ class InitialStatesCfg:
     # Target Configuration
     # ==========================================================================
 
-    target_distance_min: float = 20.0
+    target_distance_min: float = 10.0
     """Minimum distance from cylinder center to target (meters).
 
     At curriculum progress=0, target is placed at this distance.
     """
 
-    target_distance_max: float = 80.0
+    target_distance_max: float = 40.0
     """Maximum distance from cylinder center to target (meters).
 
     At curriculum progress=1, target can be placed up to this distance.
     Sampled as: uniform(min, min + progress * (max - min))
     """
 
-    target_height_offset_min: float = -10.0
+    target_height_offset_min: float = -5.0
     """Minimum target height offset from cylinder center (meters)."""
 
-    target_height_offset_max: float = 10.0
+    target_height_offset_max: float = 5.0
     """Maximum target height offset from cylinder center (meters)."""
 
     # ==========================================================================
@@ -190,8 +190,11 @@ class InitialStatesCfg:
     zoom_initial_min: float = 1.0
     """Minimum initial zoom level for sampling."""
 
-    zoom_initial_max: float = 10.0
-    """Maximum initial zoom level for sampling."""
+    zoom_initial_max_start: float = 2.0
+    """Maximum initial zoom level at curriculum progress 0."""
+
+    zoom_initial_max_end: float = 10.0
+    """Maximum initial zoom level at curriculum progress 1."""
 
     # ==========================================================================
     # Designated Observer Selection
