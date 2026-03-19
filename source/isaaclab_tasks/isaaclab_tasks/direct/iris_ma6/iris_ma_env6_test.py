@@ -16,6 +16,7 @@ Control Architecture:
 from __future__ import annotations
 
 import copy
+import os
 import torch
 from typing import Dict
 
@@ -75,6 +76,10 @@ class IrisMA6TestEnv(DirectMARLEnv):
             render_mode: Render mode for visualization.
             **kwargs: Additional arguments passed to DirectMARLEnv.
         """
+        # Auto-disable tiled cameras when --enable_cameras is not set
+        if cfg.enable_tiled_cameras and not int(os.environ.get("ENABLE_CAMERAS", 0)):
+            cfg.enable_tiled_cameras = False
+
         # Dynamically generate agent-specific robot and camera configs BEFORE super().__init__
         # This is required because the scene setup needs the configs
         self.agent_robot_cfgs: Dict[str, object] = {}
@@ -361,15 +366,14 @@ class IrisMA6TestEnv(DirectMARLEnv):
         # Create shared target (RigidObject with gravity enabled)
         # RigidObject is used because iris_body.usda has no joints (propellers removed)
         self.target = RigidObject(self.cfg.target_cfg)
+        # Register target in scene so it gets proper lifecycle management
+        # (write_data_to_sim / update are handled by scene automatically)
+        self.scene.rigid_objects["target"] = self.target
 
         # Clone environments
         self.scene.clone_environments(copy_from_source=False)
         if self.cfg.terrain is not None:
             self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
-
-        # NOTE: Target is a RigidObject (not registered in scene) and managed manually.
-        # Forces/torques are applied via set_external_force_and_torque() from TargetController.
-        # Reset is handled via write_root_pose_to_sim/write_root_velocity_to_sim in _reset_idx.
 
         # Register TiledCamera sensors in scene
         for agent_id, camera in self._cameras.items():
@@ -517,8 +521,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         # Apply target controller if enabled
         if self._target_controller is not None:
-            # Update target data from simulation (not in scene.articulations so must update manually)
-            self.target.update(self.cfg.sim.dt)
+            # Target data is kept current by scene.update() (target registered in scene)
 
             # Get current target state (add target dimension)
             target_pos = self.target.data.root_pos_w.unsqueeze(1)  # [N, 1, 3]
@@ -553,40 +556,12 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 env_origins=self._terrain.env_origins,
             )
 
-            # DEBUG: Print target controller state every 100 steps (env 0 only)
-            if not hasattr(self, "_debug_step_counter"):
-                self._debug_step_counter = 0
-            self._debug_step_counter += 1
-            if self._debug_step_counter % 100 == 1:
-                print(f"\n[DEBUG] Step {self._debug_step_counter}")
-                print(f"  Target pos (env0): {target_pos[0, 0].cpu().numpy()}")
-                print(f"  Target vel (env0): {target_vel[0, 0].cpu().numpy()}")
-                print(f"  Facility pos (env0): {self._facility_position[0].cpu().numpy()}")
-                print(f"  Direction: {(self._facility_position[0] - target_pos[0, 0]).cpu().numpy()}")
-                print(f"  Force (env0): {F_body_target[0, 0].cpu().numpy()}")
-                print(f"  Torque (env0): {tau_body_target[0, 0].cpu().numpy()}")
-                print(f"  FSM state: {self._target_controller._fsm.fsm_state[0].item()}")
-                print(f"  Velocity mode: {self._target_controller._fsm.velocity_mode[0].item()}")
-                print(f"  Alive: {self._target_controller._fsm.alive[0].item()}")
-                # Debug velocity command from target controller
-                tc = self._target_controller
-                print(f"  Evasion agility: {tc._evasion_agility[0].item():.3f}")
-                print(f"  Speed multiplier: {tc._speed_multiplier[0].item():.3f}")
-                if hasattr(tc, '_debug_v_cmd'):
-                    print(f"  V_cmd (env0): {tc._debug_v_cmd[0].cpu().numpy()}")
-
             # Apply forces to target (squeeze target dimension, add body dimension)
             self.target.set_external_force_and_torque(
                 forces=F_body_target.squeeze(1).unsqueeze(1),  # [N, 1, 3]
                 torques=tau_body_target.squeeze(1).unsqueeze(1),  # [N, 1, 3]
                 body_ids=[0],  # Root body
             )
-
-            # Write forces to simulation
-            self.target.write_data_to_sim()
-        else:
-            # Update target data even when controller is disabled (for observations)
-            self.target.update(self.cfg.sim.dt)
 
         # Acquire and process states on the final substep (used by rewards/dones/obs after decimation)
         if self.decimated_step == self.cfg.decimation - 1:

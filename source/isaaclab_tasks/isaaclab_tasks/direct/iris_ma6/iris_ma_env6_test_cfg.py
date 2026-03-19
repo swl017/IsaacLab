@@ -66,6 +66,9 @@ def _create_target_cfg() -> RigidObjectCfg:
                 max_depenetration_velocity=10.0,
                 enable_gyroscopic_forces=False,
             ),
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                articulation_enabled=False,  # Disable articulation — treat as pure rigid body
+            ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
             pos=(5.0, 0.0, 3.5),
@@ -124,7 +127,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     debug_frame_vis: bool = False
     """Enable visualization of coordinate frames for debugging."""
 
-    enable_tiled_cameras: bool = True
+    enable_tiled_cameras: bool = False
     """Enable TiledCamera sensors in the scene. Disable to skip camera creation for faster headless training."""
 
     # ==========================================================================
@@ -180,7 +183,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     )
 
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=256,
+        num_envs=1024,
         env_spacing=50.0,
         replicate_physics=True,
     )
@@ -280,7 +283,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
 
     delay_system_params: DelaySystemKeyParams = DelaySystemKeyParams(
         # === Ego Motion Latency (proprioceptive sensing) ===
-        ego_motion_latency_enabled=False,  # First-order lag only (fast IMU/GPS)
+        ego_motion_latency_enabled=True,  # First-order lag only (fast IMU/GPS)
         ego_motion_fol_tau=0.005,          # 5ms time constant for smoothing
         # === Ego Detection Latency (NN inference) ===
         ego_detection_latency_mean=0.1,   # 100ms mean (GPU inference time)
@@ -320,7 +323,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     delay_system: MultiAgentDelayCfgV3 = None  # type: ignore[assignment]
     """Full delay system configuration (built from delay_system_params in __post_init__)."""
 
-    enable_delay_system: bool = False
+    enable_delay_system: bool = True
     """Enable delay system for observations. Set False for ground-truth testing."""
 
     # ==========================================================================
@@ -422,7 +425,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     - value ~ Uniform(min, min + progress * (max - min))
     """
 
-    enable_initial_states_randomization: bool = False
+    enable_initial_states_randomization: bool = True
     """Enable randomized initial states.
 
     If True, uses InitialStates module for curriculum-driven randomization.
@@ -471,7 +474,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # ==========================================================================
     # Debugging and Testing Flags
     # ==========================================================================
-    debug_initial_step: int = 200000
+    debug_initial_step: int = 0 #200000
     """If > 0, initializes the environment at the specified training step for debugging."""
 
 
