@@ -455,34 +455,60 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 body_ids=self._body_ids[agent_id],
             )
 
-            # Apply gimbal position targets
-            # Add YAW_JOINT_OFFSET (-π/2) to yaw: controller yaw=0 means body +X
-            # (physics forward). The offset shifts the physical joint so the
-            # combined chain (joint + camera offset) points along body +X.
-            gimbal_yaw, gimbal_roll, gimbal_pitch = gimbal_pos_targets
-            gimbal_yaw_joint = gimbal_yaw + YAW_JOINT_OFFSET
-            robot.set_joint_position_target(
-                target=torch.stack([gimbal_pitch, gimbal_yaw_joint, gimbal_roll], dim=-1),
-                joint_ids=[
-                    self.gimbal_joint_idx[agent_id]["pitch"],
-                    self.gimbal_joint_idx[agent_id]["yaw"],
-                    self.gimbal_joint_idx[agent_id]["roll"],
-                ],
-            )
+            use_implicit_gimbal_control = False  # Set to False to bypass implicit control and write joint state directly
+            if use_implicit_gimbal_control:
+                # Apply gimbal position targets
+                # Add YAW_JOINT_OFFSET (-π/2) to yaw: controller yaw=0 means body +X
+                # (physics forward). The offset shifts the physical joint so the
+                # combined chain (joint + camera offset) points along body +X.
+                gimbal_yaw, gimbal_roll, gimbal_pitch = gimbal_pos_targets
+                gimbal_yaw_joint = gimbal_yaw + YAW_JOINT_OFFSET
+                robot.set_joint_position_target(
+                    target=torch.stack([gimbal_pitch, gimbal_yaw_joint, gimbal_roll], dim=-1),
+                    joint_ids=[
+                        self.gimbal_joint_idx[agent_id]["pitch"],
+                        self.gimbal_joint_idx[agent_id]["yaw"],
+                        self.gimbal_joint_idx[agent_id]["roll"],
+                    ],
+                )
 
-            # Apply gimbal velocity feedforward targets
-            # Makes the actuator's damping term assistive during transients:
-            # τ_d = d*(v_target - v) pushes toward the expected velocity
-            # instead of opposing motion (when v_target=0).
-            gimbal_yaw_vel, gimbal_roll_vel, gimbal_pitch_vel = gimbal_vel_targets
-            robot.set_joint_velocity_target(
-                target=torch.stack([gimbal_pitch_vel, gimbal_yaw_vel, gimbal_roll_vel], dim=-1),
-                joint_ids=[
+                # Apply gimbal velocity feedforward targets
+                # Makes the actuator's damping term assistive during transients:
+                # τ_d = d*(v_target - v) pushes toward the expected velocity
+                # instead of opposing motion (when v_target=0).
+                gimbal_yaw_vel, gimbal_roll_vel, gimbal_pitch_vel = gimbal_vel_targets
+                robot.set_joint_velocity_target(
+                    target=torch.stack([gimbal_pitch_vel, gimbal_yaw_vel, gimbal_roll_vel], dim=-1),
+                    joint_ids=[
+                        self.gimbal_joint_idx[agent_id]["pitch"],
+                        self.gimbal_joint_idx[agent_id]["yaw"],
+                        self.gimbal_joint_idx[agent_id]["roll"],
+                    ],
+                )
+            else:
+                # Apply gimbal joint state directly (bypass implicit actuator lag).
+                # write_joint_state_to_sim teleports joints to exact positions at
+                # the start of the physics step. We must ALSO set the actuator
+                # targets to match, otherwise the implicit PD controller (still
+                # active in PhysX) applies force during the step based on stale
+                # targets, pulling joints away from the desired position.
+                # With targets == state, PD force = k*(pos-pos) + d*(vel-vel) = 0.
+                gimbal_yaw, gimbal_roll, gimbal_pitch = gimbal_pos_targets
+                gimbal_yaw_joint = gimbal_yaw + YAW_JOINT_OFFSET
+                gimbal_yaw_vel, gimbal_roll_vel, gimbal_pitch_vel = gimbal_vel_targets
+                gimbal_joint_ids = [
                     self.gimbal_joint_idx[agent_id]["pitch"],
                     self.gimbal_joint_idx[agent_id]["yaw"],
                     self.gimbal_joint_idx[agent_id]["roll"],
-                ],
-            )
+                ]
+                pos_cmd = torch.stack([gimbal_pitch, gimbal_yaw_joint, gimbal_roll], dim=-1)
+                vel_cmd = torch.stack([gimbal_pitch_vel, gimbal_yaw_vel, gimbal_roll_vel], dim=-1)
+                robot.write_joint_state_to_sim(
+                    position=pos_cmd, velocity=vel_cmd, joint_ids=gimbal_joint_ids,
+                )
+                # Match actuator targets so PD applies zero force during step
+                robot.set_joint_position_target(target=pos_cmd, joint_ids=gimbal_joint_ids)
+                robot.set_joint_velocity_target(target=vel_cmd, joint_ids=gimbal_joint_ids)
 
             # Store zoom level for observations
             self.zoom_level[:, idx] = zoom_level

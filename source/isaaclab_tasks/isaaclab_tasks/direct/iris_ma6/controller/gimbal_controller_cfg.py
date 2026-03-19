@@ -23,8 +23,8 @@ class GimbalControllerCfg:
     - Pitch: Nose down positive (looking down)
     - Roll: Left side up positive
 
-    Note: Physical servo dynamics (time constant, bandwidth) are handled by
-    the implicit actuator (stiffness/damping) in the asset config, not here.
+    Note: When using direct joint state setting (write_joint_state_to_sim),
+    set feedback_blend=0.0 since internal state always matches actual state.
     """
 
     max_gimbal_rate: float = 2 * math.pi
@@ -43,10 +43,16 @@ class GimbalControllerCfg:
     auto_stabilize_roll: bool = True
     """Whether to automatically compute roll to keep horizon level."""
 
-    feedback_blend: float = 0.1
+    feedback_blend: float = 0.0
     """Blend factor for closed-loop joint position feedback.
     Corrects internal state drift: state += beta * (actual - state).
-    Range [0.05, 0.2]. Higher values correct faster but may oscillate."""
+    Set to 0.0 when using direct joint state setting (no actuator lag).
+    Use 0.05-0.2 when using implicit actuator PD loop."""
+
+    pointing_gain: float = 10.0
+    """Proportional gain converting pointing error (rad) to angular velocity command (rad/s).
+    Converts body-frame attitude error to a rate command fed through J^{-1}.
+    Range [5.0, 20.0]. Higher = faster convergence but may overshoot."""
 
     initial_yaw: float = 0.0 #-math.radians(90)
     """Initial gimbal yaw angle [rad]. Default -90 deg."""
