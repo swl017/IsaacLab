@@ -1,6 +1,6 @@
 {
   "project": "iris_ma6",
-  "last_updated": "2026-03-18",
+  "last_updated": "2026-03-20",
   "features": [
     {
       "id": "controller",
@@ -42,7 +42,7 @@
       "name": "Curriculum-driven initial state randomization",
       "status": "done",
       "spec": "doc/initial_states_spec.md",
-      "notes": "Cylinder-based agent placement with curriculum progression"
+      "notes": "Cylinder-based placement with curriculum height/orientation/zoom. Tuned for ma5-parity at progress=0 (2026-03-20)"
     },
     {
       "id": "domain-randomization",

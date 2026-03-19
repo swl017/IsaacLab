@@ -86,3 +86,36 @@ Continued:
 Next:
 - Continue environment integration and training runs
 - Monitor gimbal tracking quality during RL training (curriculum may stress edge cases)
+
+----------------------------------------
+2026-03-20 — Initial difficulty tuning (ma5-parity)
+----------------------------------------
+Done:
+- Compared iris_ma5 vs iris_ma6 early-training behavior via tensorboard
+  - ma5 learns bbox centering/sizing rapidly in 0-20k steps
+  - ma6 stalled: agents couldn't learn gimbal control in early training
+- Root-cause analysis: ma6 initial states at progress=0 were much harder than ma5
+  - 20m vertical spread (ma5: planar), random body yaw (ma5: all face target),
+    ±5m target height offset (ma5: ±2m), zoom up to 2x (ma5: 1.0)
+- Applied 6 changes to initial_states module to match ma5 easiness at progress=0:
+  1. Curriculum-controlled vertical spread: cylinder_height_range_min=2.0, _max=10.0
+     (was fixed 20m; now ramps from near-planar to 3D with curriculum)
+  2. New "curriculum" body orientation mode for non-observers:
+     P(face_target) = 1-progress (was always random)
+  3. Target height offset: ±2m (was ±5m)
+  4. Zoom at progress=0: 1.0 (was up to 2.0)
+  5. Agent clearance: 5m, cylinder_diameter_min: 20m (was 10m, 30m)
+  6. Orientation noise std: 0.2 rad (was 0.1, matching ma5)
+- Files modified: initial_states_cfg.py, initial_states_generator.py
+- Plot scripts verified (plot_initial_states.py, plot_target_curriculum.py)
+- Created plot_target_curriculum.py for target motion difficulty visualization
+- Training started: experiment eb0e3dba99_initial_difficulty
+  Command: python3 scripts/reinforcement_learning/skrl/train_mappo_rnn_hydra.py
+           --task Isaac-Iris-MA6-Direct-Test-v0 --headless
+
+Next:
+- Monitor eb0e3dba99_initial_difficulty tensorboard for early bbox metrics
+  (all_invalid_rate, pair_valid_rate, bbox_center, bbox_size)
+- Compare 0-20k step performance against ma5 ablation baselines
+- If early learning improves, verify full curriculum still ramps to hard difficulty
+- Tune curriculum transition rates if needed (too fast/slow ramp)
