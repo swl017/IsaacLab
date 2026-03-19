@@ -34,8 +34,8 @@ TUNED_CONTROLLER_CFG = DroneControllerCfg(
         # Rate PID gains (outputs torque in Nm)
         # Based on PX4 MC_ROLLRATE_P=0.15, MC_ROLLRATE_I=0.2, MC_ROLLRATE_D=0.003
         Kp_rate=(0.15, 0.15, 0.2),
-        Ki_rate=(0.2, 0.2, 0.1),
-        Kd_rate=(0.003, 0.003, 0.0),
+        Ki_rate=(0.2, 0.2, 0.15),
+        Kd_rate=(0.003, 0.003, 0.001),
     ),
 )
 

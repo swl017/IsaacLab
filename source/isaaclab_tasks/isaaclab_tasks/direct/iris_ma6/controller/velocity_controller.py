@@ -69,6 +69,10 @@ class VelocityController:
         # Integral state
         self._vel_integral = torch.zeros((num_envs, 3), dtype=torch.float32, device=self.device)
 
+        # Yaw setpoint state (holds desired yaw angle for heading hold)
+        self._yaw_setpoint = torch.zeros(num_envs, dtype=torch.float32, device=self.device)
+        self._yaw_initialized = torch.zeros(num_envs, dtype=torch.bool, device=self.device)
+
         # Gravity vector in world frame (ENU: +Z is up)
         self._g_vec = torch.tensor([0.0, 0.0, gravity], dtype=torch.float32, device=self.device)
 
@@ -113,6 +117,19 @@ class VelocityController:
         # Total desired acceleration (gravity feedforward)
         a_des = a_des_p + a_des_i + self._g_vec
 
+        # Yaw setpoint hold: lock heading when not commanding yaw
+        yaw_current = self._extract_yaw(q_current)
+        needs_init = ~self._yaw_initialized
+        self._yaw_setpoint[needs_init] = yaw_current[needs_init]
+        self._yaw_initialized[:] = True
+
+        # When yaw rate command is near zero, hold the current setpoint (heading hold)
+        # When commanding yaw, track current yaw (pure feedforward, no position error)
+        commanding_yaw = yaw_rate_des.abs() > 0.01  # ~0.6 deg/s deadzone
+        self._yaw_setpoint = torch.where(
+            commanding_yaw, yaw_current, self._yaw_setpoint
+        )
+
         # Compute desired attitude by aligning body z with a_des
         # This also clamps the attitude to max_tilt
         q_des, tilt_angle = self._compute_attitude_from_accel(a_des, q_current)
@@ -145,7 +162,7 @@ class VelocityController:
         """Compute desired attitude quaternion from desired acceleration.
 
         The desired attitude aligns the body z-axis with the desired
-        acceleration direction, with yaw maintained from current orientation.
+        acceleration direction, with yaw from the held yaw setpoint.
 
         Args:
             a_des: (N, 3) desired acceleration in world frame [m/s^2].
@@ -159,13 +176,9 @@ class VelocityController:
         a_mag = torch.norm(a_des, dim=-1, keepdim=True)
         z_des_world = a_des / (a_mag + 1e-6)  # Avoid division by zero
 
-        # Extract current yaw from quaternion
-        yaw_current = self._extract_yaw(q_current)
-
-        # CRITICAL FIX: Rotate z_des into yaw-aligned frame before computing roll/pitch
-        # This ensures roll/pitch are computed relative to the drone's heading
-        cos_yaw = torch.cos(yaw_current)
-        sin_yaw = torch.sin(yaw_current)
+        # Use yaw setpoint for roll/pitch decomposition — must be consistent with q_des
+        cos_yaw = torch.cos(self._yaw_setpoint)
+        sin_yaw = torch.sin(self._yaw_setpoint)
 
         # Rotate z_des by -yaw around Z axis to get yaw-aligned frame
         # R(-yaw) = [[cos(yaw), sin(yaw), 0], [-sin(yaw), cos(yaw), 0], [0, 0, 1]]
@@ -197,8 +210,8 @@ class VelocityController:
             torch.cos(roll_des) * torch.cos(pitch_des), -1.0, 1.0
         ))
 
-        # Construct desired quaternion with current yaw
-        q_des = quat_from_euler_xyz(roll_des, pitch_des, yaw_current)
+        # Construct desired quaternion with held yaw setpoint
+        q_des = quat_from_euler_xyz(roll_des, pitch_des, self._yaw_setpoint)
 
         return q_des, tilt_angle
 
@@ -229,8 +242,12 @@ class VelocityController:
         """
         if env_ids is None:
             self._vel_integral.zero_()
+            self._yaw_setpoint.zero_()
+            self._yaw_initialized[:] = False
         else:
             self._vel_integral[env_ids] = 0.0
+            self._yaw_setpoint[env_ids] = 0.0
+            self._yaw_initialized[env_ids] = False
 
     def set_gains(
         self,

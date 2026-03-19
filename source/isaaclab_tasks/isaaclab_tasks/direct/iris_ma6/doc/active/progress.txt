@@ -17,3 +17,60 @@ Next:
 - Review and refine CONTEXT.md files as modules evolve
 - Begin curriculum system implementation
 - Continue environment integration and training runs
+
+----------------------------------------
+2026-03-19 — Gimbal stabilization overhaul
+----------------------------------------
+Done:
+- Replaced dual-path gimbal control (J^T pos + J^{-1} vel) with unified J^{-1} law
+- Fixed Shepperd's quaternion conversion (4-branch, handles all rotation magnitudes)
+- Bypassed implicit actuator with direct state setting (write_joint_state_to_sim)
+- Fixed camera shaking bug (stale PD targets causing force during physics step)
+- Wired up feedback_blend for state drift correction
+- Added stability diagnostics to test_gimbal_sim.py (oscillation, divergence detection)
+- Attempted and reverted analytical decomposition approach (decoupled roll)
+- Discovered drone yaw drift: body yaws 173 deg during hover with zero commands
+
+Next:
+- Fix drone yaw drift (see doc/active/gimbal_stabilization_status.md for details)
+- Re-run gimbal stability tests after yaw fix
+- Tune pointing_gain if needed
+
+----------------------------------------
+2026-03-19 — Drone yaw fix + gimbal mode selector
+----------------------------------------
+Done:
+- Fixed drone yaw drift (173 deg → <3 deg):
+  - Removed duplicate yaw_weight (0.4x) from rate_controller.py (was applied in both attitude + rate)
+  - Added yaw setpoint hold in velocity_controller.py (locks heading when yaw_rate_cmd ≈ 0)
+  - Increased yaw rate PID: Kd 0.0→0.001, Ki 0.1→0.15
+- Re-activated analytical gimbal controller (was reverted last session):
+  - Renamed: gimbal_controller_analytical.py (atan2 IK) / gimbal_controller_jacobian.py (J^{-1})
+  - Added factory gimbal_controller.py dispatching on cfg.mode ("analytical" or "jacobian")
+  - Analytical: hover 0.11 deg RMS, cross 7.23 deg RMS
+  - Jacobian:   hover 1.18 deg RMS, cross 13.58 deg RMS
+- Added yaw drift test assertions and "Yaw Hold (dist)" test case to test_gimbal_sim.py
+- All 45 unit tests passing, all 6 sim tests passing (both modes)
+
+Next:
+- Decide on default gimbal mode for training (currently "jacobian" in cfg)
+- Investigate cross vx+vy residual error (7-14 deg) — likely joint limit saturation
+- Continue environment integration and training runs
+
+----------------------------------------
+2026-03-19 — Pointing gain tuning + env config
+----------------------------------------
+Done:
+- Built parallel gain sweep (tune_pointing_gain.py): N envs, each with different K
+- Added enable_tiled_cameras flag to IrisMA6TestEnvCfg (skip camera creation)
+- Increased PhysX GPU buffers for 1024-env runs (gpu_heap_capacity=2**27)
+- Tuning script disables target controller + cameras for speed
+- Fixed gimbal_world_direction formula (wrong rotation order caused noisy metrics)
+- Fixed maneuvers: now command active gimbal slewing (tests tracking, not just stabilization)
+- Ran sweeps: gains 20-60 plateau, error dominated by joint limits at high gimbal amp
+- User exploring gains 90-1000 (beyond theoretical K*dt=1 stability limit at K=100)
+
+Next:
+- Analyze sweep results at gains 90-1000 — check if direct state setting masks oscillations
+- Finalize pointing_gain default based on sweep
+- Update gimbal_controller_cfg.py docstring Range once gain is decided

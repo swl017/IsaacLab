@@ -38,7 +38,6 @@ class RateController:
     - PID control with angular acceleration feedback (not error derivative)
     - Saturation-aware anti-windup (inhibits integral when saturated)
     - Non-linear I-gain reduction for large errors
-    - Yaw deprioritization to prevent roll/pitch interference
     """
 
     def __init__(
@@ -70,7 +69,6 @@ class RateController:
         self._rate_limit = torch.tensor(cfg.rate_limit, dtype=torch.float32, device=self.device)
 
         # Scalar parameters
-        self._yaw_weight = cfg.yaw_weight
         self._antiwindup_limit = cfg.antiwindup_i_factor_limit
         self._thrust_min = cfg.thrust_min
         self._thrust_max = cfg.thrust_max
@@ -124,9 +122,6 @@ class RateController:
             + self._Ki_rate * self._rate_integral
             - self._Kd_rate * angular_accel
         )
-
-        # Apply yaw weight (deprioritize yaw)
-        tau_cmd[:, 2] = tau_cmd[:, 2] * self._yaw_weight
 
         # Saturate moments and track saturation
         is_saturated, tau_cmd = self._saturate_moments(tau_cmd)

@@ -559,41 +559,40 @@ def run_gimbal_tests(results: TestResults, device: torch.device, verbose: bool =
     except Exception as e:
         results.add_fail("Joint limits", traceback.format_exc())
 
-    # Test 4: Rate-based convergence (body-frame targets converge over several steps)
+    # Test 4: Instant analytical tracking (body-frame targets track in one step)
     try:
-        cfg_conv = GimbalControllerCfg(feedback_blend=0.0, pointing_gain=10.0)
-        g_conv = GimbalController(cfg=cfg_conv, num_envs=num_envs, device=device)
-        g_conv.reset()
+        cfg_inst = GimbalControllerCfg(feedback_blend=0.0)
+        g_inst = GimbalController(cfg=cfg_inst, num_envs=num_envs, device=device)
+        g_inst.reset()
         dt = 0.01
         q_body = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=device).expand(num_envs, 4)
-        jp_conv = torch.zeros((num_envs, 3), device=device)
-        jp_conv[:, 1] = YAW_JOINT_OFFSET
+        jp_inst = torch.zeros((num_envs, 3), device=device)
+        jp_inst[:, 1] = YAW_JOINT_OFFSET
 
-        # Set a world-frame target azimuth and step several times
-        g_conv._azimuth_world = torch.full((num_envs,), 0.5, device=device)
+        # Set a world-frame target azimuth and step once
+        g_inst._azimuth_world = torch.full((num_envs,), 0.5, device=device)
 
-        for _ in range(50):
-            g_conv.compute_control(
-                torch.zeros(num_envs, device=device),
-                torch.zeros(num_envs, device=device),
-                q_body, dt, omega_zero, jp_conv,
-            )
+        g_inst.compute_control(
+            torch.zeros(num_envs, device=device),
+            torch.zeros(num_envs, device=device),
+            q_body, dt, omega_zero, jp_inst,
+        )
 
-        # Body-frame yaw should converge to azimuth (identity quat)
-        actual = g_conv.yaw[0].item()
+        # With analytical decomposition, yaw should match azimuth instantly
+        actual = g_inst.yaw[0].item()
         expected = 0.5
 
         if verbose:
-            print(f"    Azimuth=0.5, body yaw after 50 steps={actual:.4f} (expected {expected:.4f})")
+            print(f"    Azimuth=0.5, body yaw={actual:.4f} (expected {expected:.4f})")
 
-        assert abs(actual - expected) < 0.01, (
-            f"Body-frame target should converge: expected {expected:.3f}, got {actual:.3f}"
+        assert abs(actual - expected) < 0.001, (
+            f"Analytical tracking should be instant: expected {expected:.4f}, got {actual:.4f}"
         )
-        results.add_pass("Rate-based convergence (50 steps)")
+        results.add_pass("Instant analytical tracking (1 step)")
     except AssertionError as e:
-        results.add_fail("Rate-based convergence", str(e))
+        results.add_fail("Instant analytical tracking", str(e))
     except Exception as e:
-        results.add_fail("Rate-based convergence", traceback.format_exc())
+        results.add_fail("Instant analytical tracking", traceback.format_exc())
 
     # Test 5: World-frame stabilization (gimbal compensates for drone tilt)
     try:
@@ -794,14 +793,12 @@ def run_gimbal_tests(results: TestResults, device: torch.device, verbose: bool =
         results.add_fail("No swing under abrupt tilt", traceback.format_exc())
 
     # Test 9: Cross-axis coupling at +/-30 deg with first-order actuator model
-    # Simulates the actuator as a first-order lag (tau = d/k = 50/1000 = 0.05s)
-    # receiving both position and velocity targets (now coherent from unified J^{-1}).
-    # actuator_pos += alpha * (pos_target - pos) + vel_target * dt
-    # where alpha = 1 - exp(-dt/tau).
+    # Simulates the actuator as a first-order lag (tau = d/k = 50/1000 = 0.05s).
+    # With decoupled roll, roll saturation should NOT affect LOS pointing accuracy.
     try:
         from isaaclab.utils.math import quat_from_euler_xyz
 
-        cfg_cx = GimbalControllerCfg(feedback_blend=0.1, pointing_gain=10.0)
+        cfg_cx = GimbalControllerCfg(feedback_blend=0.1)
         g_cx = GimbalController(cfg=cfg_cx, num_envs=num_envs, device=device)
         g_cx.reset()
         dt = 0.01
@@ -886,16 +883,15 @@ def run_gimbal_tests(results: TestResults, device: torch.device, verbose: bool =
         if verbose:
             print(f"    Max direction error during +/-30 deg maneuver: {max_error_deg:.2f} deg")
 
-        # With the unified J^{-1} approach, velocity feedforward and position
-        # targets are coherent. The remaining error is dominated by the
-        # first-order actuator lag (tau=0.05s) tracking a 20 deg/s maneuver.
-        # The controller produces correct commands; the actuator can't track
-        # them instantly. Full stabilization quality must be verified in Isaac
-        # Sim with the real implicit actuator (which uses both pos + vel targets).
-        assert max_error_deg < 35.0, (
-            f"Unified control diverged: max error {max_error_deg:.2f} deg exceeds 35 deg limit"
+        # With decoupled roll, roll saturation does not cascade into LOS error.
+        # The analytical position loop gives exact yaw/pitch independent of roll.
+        # Remaining error is only from actuator lag tracking the position targets.
+        # Remaining error is from the simulated first-order actuator lag (tau=0.05s),
+        # not from roll-yaw/pitch coupling (which is now zero by construction).
+        assert max_error_deg < 20.0, (
+            f"Cross-axis error too high: {max_error_deg:.2f} deg exceeds 20 deg limit"
         )
-        results.add_pass(f"Cross-axis +/-30 deg unified control (max err={max_error_deg:.2f} deg)")
+        results.add_pass(f"Cross-axis +/-30 deg decoupled (max err={max_error_deg:.2f} deg)")
     except AssertionError as e:
         results.add_fail("Cross-axis coupling", str(e))
     except Exception as e:
@@ -904,7 +900,7 @@ def run_gimbal_tests(results: TestResults, device: torch.device, verbose: bool =
     # Test 10: Position/velocity coherence
     # Verify that (pos[t+1] - pos[t]) / dt ~ vel[t]
     try:
-        cfg_coh = GimbalControllerCfg(feedback_blend=0.0, pointing_gain=10.0)
+        cfg_coh = GimbalControllerCfg(feedback_blend=0.0)
         g_coh = GimbalController(cfg=cfg_coh, num_envs=num_envs, device=device)
         g_coh.reset()
         dt = 0.01

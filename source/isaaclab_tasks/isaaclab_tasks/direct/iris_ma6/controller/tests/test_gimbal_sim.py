@@ -5,11 +5,10 @@ Tests two gimbal actuation modes:
 1. Direct state: write_joint_state_to_sim (zero lag, kinematic)
 2. Implicit actuator: set_joint_position/velocity_target (PD servo with lag)
 
-Uses the DroneController for flight stabilization while commanding sinusoidal
-velocity inputs. Measures world-frame gimbal pointing error.
-
-All angle measurements use quaternion math (no Euler decomposition).
-Body tilt is measured as the angle between body Z-axis and world Z-axis.
+Detects:
+- Oscillation: high-frequency sign changes in the error derivative
+- Divergence: error growing over time (positive trend)
+- Absolute error: mean, RMS, max pointing error
 
 Usage:
     ./isaaclab.sh -p .../test_gimbal_sim.py
@@ -77,14 +76,76 @@ def gimbal_world_direction(q_body, gimbal_jp, joint_offset):
     return quat_rotate(q_body, fwd_body)
 
 
+def analyze_stability(errors_deg, dt):
+    """Analyze error time series for oscillation and divergence.
+
+    Returns:
+        osc_freq_hz: Dominant oscillation frequency estimated from zero-crossings
+            of the error derivative. High values indicate instability.
+        osc_amplitude: Mean amplitude of oscillation cycles (peak-to-trough / 2).
+        divergence_rate: Linear regression slope of error over time [deg/s].
+            Positive = growing error. Near-zero = stable.
+        trend_r2: R-squared of the linear fit. High R2 + positive slope = clear divergence.
+        second_half_ratio: ratio of mean error in second half to first half.
+            >1.5 indicates growing error; <0.7 indicates settling.
+    """
+    n = len(errors_deg)
+    if n < 10:
+        return 0.0, 0.0, 0.0, 0.0, 1.0
+
+    # -- Oscillation detection via zero-crossings of error derivative --
+    deriv = [errors_deg[i+1] - errors_deg[i] for i in range(n - 1)]
+    sign_changes = sum(1 for i in range(len(deriv) - 1)
+                       if deriv[i] * deriv[i+1] < 0)
+    # Each full oscillation cycle has 2 sign changes
+    duration_s = n * dt
+    osc_freq_hz = sign_changes / (2.0 * duration_s) if duration_s > 0 else 0.0
+
+    # -- Oscillation amplitude: mean of peak-to-trough distances --
+    # Find local extrema
+    peaks = []
+    troughs = []
+    for i in range(1, n - 1):
+        if errors_deg[i] > errors_deg[i-1] and errors_deg[i] > errors_deg[i+1]:
+            peaks.append(errors_deg[i])
+        elif errors_deg[i] < errors_deg[i-1] and errors_deg[i] < errors_deg[i+1]:
+            troughs.append(errors_deg[i])
+
+    if peaks and troughs:
+        osc_amplitude = (sum(peaks) / len(peaks) - sum(troughs) / len(troughs)) / 2.0
+    else:
+        osc_amplitude = 0.0
+
+    # -- Divergence detection via linear regression --
+    # Fit error = a*t + b, compute slope a and R^2
+    t_arr = [i * dt for i in range(n)]
+    t_mean = sum(t_arr) / n
+    e_mean = sum(errors_deg) / n
+
+    ss_tt = sum((t - t_mean)**2 for t in t_arr)
+    ss_te = sum((t - t_mean) * (e - e_mean) for t, e in zip(t_arr, errors_deg))
+    ss_ee = sum((e - e_mean)**2 for e in errors_deg)
+
+    if ss_tt > 1e-12:
+        slope = ss_te / ss_tt  # deg/s
+        ss_res = ss_ee - ss_te**2 / ss_tt
+        r2 = 1.0 - ss_res / (ss_ee + 1e-12)
+    else:
+        slope = 0.0
+        r2 = 0.0
+
+    # -- Second-half ratio: simple growth detection --
+    mid = n // 2
+    first_half_mean = sum(errors_deg[:mid]) / max(mid, 1)
+    second_half_mean = sum(errors_deg[mid:]) / max(n - mid, 1)
+    second_half_ratio = second_half_mean / max(first_half_mean, 0.01)
+
+    return osc_freq_hz, osc_amplitude, slope, max(r2, 0.0), second_half_ratio
+
+
 def run_test(label, v_cmd_func, duration_s, dt, robot, drone_ctrl, gimbal,
              body_id, joint_ids, device, use_direct_state=True):
-    """Run a single stabilization test.
-
-    Args:
-        use_direct_state: If True, use write_joint_state_to_sim (zero lag).
-                          If False, use set_joint_position/velocity_target (implicit actuator).
-    """
+    """Run a single stabilization test with stability analysis."""
     num_steps = int(duration_s / dt)
     settle_steps = int(1.0 / dt)
     sim_dt_decimated = dt * 4  # decimation=4
@@ -127,9 +188,6 @@ def run_test(label, v_cmd_func, duration_s, dt, robot, drone_ctrl, gimbal,
         vel_cmd = torch.stack([g_pitch_v, g_yaw_v, g_roll_v], dim=-1)
 
         if use_direct_state:
-            # Bypass implicit actuator: set joint state directly in PhysX.
-            # Also set targets to match so the PD controller applies zero force
-            # during the step (otherwise stale targets cause shaking).
             robot.write_joint_state_to_sim(
                 position=pos_cmd, velocity=vel_cmd, joint_ids=gimbal_joint_id_list,
             )
@@ -140,7 +198,6 @@ def run_test(label, v_cmd_func, duration_s, dt, robot, drone_ctrl, gimbal,
                 target=vel_cmd, joint_ids=gimbal_joint_id_list,
             )
         else:
-            # Use implicit actuator PD loop
             robot.set_joint_position_target(
                 target=pos_cmd, joint_ids=gimbal_joint_id_list,
             )
@@ -186,7 +243,15 @@ def run_test(label, v_cmd_func, duration_s, dt, robot, drone_ctrl, gimbal,
             errors_deg.append(math.degrees(torch.acos(dot)[0].item()))
 
     if not errors_deg:
-        return {"label": label, "mean": 0, "max": 0, "rms": 0, "tilt_max": 0, "yaw_max": 0}
+        return {
+            "label": label, "mean": 0, "max": 0, "rms": 0,
+            "tilt_max": 0, "yaw_max": 0,
+            "osc_freq_hz": 0, "osc_amplitude": 0,
+            "divergence_rate": 0, "trend_r2": 0, "second_half_ratio": 1.0,
+        }
+
+    # Stability analysis
+    osc_freq, osc_amp, div_rate, trend_r2, sh_ratio = analyze_stability(errors_deg, dt)
 
     return {
         "label": label,
@@ -195,7 +260,49 @@ def run_test(label, v_cmd_func, duration_s, dt, robot, drone_ctrl, gimbal,
         "rms": (sum(e**2 for e in errors_deg) / len(errors_deg)) ** 0.5,
         "tilt_max": max(tilts_deg),
         "yaw_max": max(abs(y) for y in yaws_deg),
+        "osc_freq_hz": osc_freq,
+        "osc_amplitude": osc_amp,
+        "divergence_rate": div_rate,
+        "trend_r2": trend_r2,
+        "second_half_ratio": sh_ratio,
     }
+
+
+def print_stability(r):
+    """Print stability metrics for a test result."""
+    print(f"  Stability:")
+    print(f"    Oscillation: freq={r['osc_freq_hz']:.1f} Hz, amplitude={r['osc_amplitude']:.2f} deg")
+    print(f"    Divergence:  slope={r['divergence_rate']:.2f} deg/s, R2={r['trend_r2']:.3f}")
+    print(f"    2nd-half/1st-half error ratio: {r['second_half_ratio']:.2f}")
+
+
+def check_stability(r, max_osc_freq=5.0, max_osc_amp=5.0, max_div_rate=5.0, max_sh_ratio=2.0):
+    """Check if a test result passes stability criteria.
+
+    Returns:
+        (passed, reasons): tuple of (bool, list of failure reason strings)
+    """
+    reasons = []
+
+    # Oscillation check: high frequency + significant amplitude = instability
+    if r['osc_freq_hz'] > max_osc_freq and r['osc_amplitude'] > max_osc_amp:
+        reasons.append(
+            f"OSCILLATION: {r['osc_freq_hz']:.1f} Hz at {r['osc_amplitude']:.1f} deg amplitude "
+            f"(limit: {max_osc_freq} Hz, {max_osc_amp} deg)")
+
+    # Divergence check: error growing steadily over time
+    if r['divergence_rate'] > max_div_rate and r['trend_r2'] > 0.3:
+        reasons.append(
+            f"DIVERGENCE: {r['divergence_rate']:.1f} deg/s (R2={r['trend_r2']:.2f}) "
+            f"(limit: {max_div_rate} deg/s)")
+
+    # Second-half ratio: error much worse in second half = growing instability
+    if r['second_half_ratio'] > max_sh_ratio:
+        reasons.append(
+            f"GROWING ERROR: 2nd-half/1st-half ratio={r['second_half_ratio']:.2f} "
+            f"(limit: {max_sh_ratio})")
+
+    return len(reasons) == 0, reasons
 
 
 def main():
@@ -246,7 +353,11 @@ def main():
             ("Pure Yaw (yr)",   lambda t: (0, 0, 0, 1.5*math.sin(2*math.pi*freq*t))),
             ("Cross vx+vy",    lambda t: (vel_amp*math.sin(2*math.pi*freq*t),
                                            vel_amp*math.cos(2*math.pi*freq*t), 0, 0)),
+            ("Hover (static)",  lambda t: (0, 0, 0, 0)),
+            ("Yaw Hold (dist)", lambda t: (vel_amp*math.sin(2*math.pi*0.3*t), 0, 0, 0)),
         ]
+
+        all_pass = True
 
         # ============================================================
         # Mode 1: Direct state setting (zero actuator lag)
@@ -273,6 +384,20 @@ def main():
             results_direct.append(r)
             print(f"  Body tilt max: {r['tilt_max']:.1f} deg  yaw max: {r['yaw_max']:.1f} deg")
             print(f"  Gimbal error -- mean:{r['mean']:.2f} deg  RMS:{r['rms']:.2f} deg  max:{r['max']:.2f} deg")
+            print_stability(r)
+
+            passed, reasons = check_stability(r)
+            if not passed:
+                all_pass = False
+                for reason in reasons:
+                    print(f"  ** FAIL: {reason}")
+
+            # Yaw drift check for tests with zero yaw rate command
+            if label in ("Hover (static)", "Yaw Hold (dist)", "Cross vx+vy"):
+                yaw_limit = 10.0
+                if r['yaw_max'] > yaw_limit:
+                    all_pass = False
+                    print(f"  ** FAIL: YAW DRIFT: max yaw = {r['yaw_max']:.1f} deg (limit: {yaw_limit} deg)")
 
         # ============================================================
         # Mode 2: Implicit actuator (PD servo with lag)
@@ -299,6 +424,13 @@ def main():
             results_implicit.append(r)
             print(f"  Body tilt max: {r['tilt_max']:.1f} deg  yaw max: {r['yaw_max']:.1f} deg")
             print(f"  Gimbal error -- mean:{r['mean']:.2f} deg  RMS:{r['rms']:.2f} deg  max:{r['max']:.2f} deg")
+            print_stability(r)
+
+            passed, reasons = check_stability(r)
+            if not passed:
+                for reason in reasons:
+                    print(f"  ** FAIL: {reason}")
+                # Don't fail overall on implicit mode -- it's known to have lag issues
 
         # ============================================================
         # Comparison summary
@@ -307,33 +439,41 @@ def main():
         print("COMPARISON SUMMARY")
         print("=" * 80)
 
-        header = f"{'Test':<22s} {'|':>2s} {'Direct Mean':>11s} {'Direct RMS':>10s} {'Direct Max':>10s} {'|':>2s} {'Implicit Mean':>13s} {'Implicit RMS':>12s} {'Implicit Max':>12s}"
+        header = (f"{'Test':<22s} | {'RMS':>6s} {'Max':>6s} {'OscHz':>6s} {'OscAmp':>7s} "
+                  f"{'Div':>7s} {'R2':>5s} {'2H/1H':>6s} | {'Status':>8s}")
         print(header)
         print("-" * len(header))
-        for rd, ri in zip(results_direct, results_implicit):
+        for r in results_direct:
+            passed, _ = check_stability(r)
+            status = "OK" if passed else "FAIL"
             print(
-                f"{rd['label']:<22s} {'|':>2s} "
-                f"{rd['mean']:10.2f}d {rd['rms']:9.2f}d {rd['max']:9.2f}d {'|':>2s} "
-                f"{ri['mean']:12.2f}d {ri['rms']:11.2f}d {ri['max']:11.2f}d"
+                f"{r['label']:<22s} | {r['rms']:5.2f}d {r['max']:5.2f}d "
+                f"{r['osc_freq_hz']:5.1f}H {r['osc_amplitude']:6.2f}d "
+                f"{r['divergence_rate']:+6.2f} {r['trend_r2']:5.3f} "
+                f"{r['second_half_ratio']:5.2f} | {status:>8s}"
             )
 
-        # Verify direct state mode is strictly better
         print("\n" + "-" * 80)
-        all_pass = True
-        for rd, ri in zip(results_direct, results_implicit):
-            direct_better = rd['rms'] <= ri['rms'] + 0.5  # allow 0.5 deg tolerance
-            status = "PASS" if direct_better else "FAIL"
-            if not direct_better:
-                all_pass = False
-            improvement = ri['rms'] - rd['rms']
-            print(f"  [{status}] {rd['label']}: direct RMS {rd['rms']:.2f} deg vs implicit RMS {ri['rms']:.2f} deg "
-                  f"(improvement: {improvement:+.2f} deg)")
+        # Stability verdict for direct state mode only
+        direct_stable = True
+        for r in results_direct:
+            passed, reasons = check_stability(r)
+            status = "PASS" if passed else "FAIL"
+            if not passed:
+                direct_stable = False
+            print(f"  [{status}] {r['label']}: RMS={r['rms']:.2f} deg, "
+                  f"osc={r['osc_freq_hz']:.1f}Hz/{r['osc_amplitude']:.2f}deg, "
+                  f"div={r['divergence_rate']:+.2f}deg/s")
+            if not passed:
+                for reason in reasons:
+                    print(f"         {reason}")
 
         print("-" * 80)
-        if all_pass:
-            print("RESULT: PASS -- Direct state mode matches or outperforms implicit actuator")
+        if direct_stable:
+            print("RESULT: PASS -- No oscillation or divergence detected in direct state mode")
         else:
-            print("RESULT: FAIL -- Direct state mode worse than implicit on some tests")
+            print("RESULT: FAIL -- Stability issues detected")
+            all_pass = False
         print("=" * 80)
 
     simulation_app.close()

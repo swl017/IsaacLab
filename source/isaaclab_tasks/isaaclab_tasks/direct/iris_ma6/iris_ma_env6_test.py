@@ -89,9 +89,10 @@ class IrisMA6TestEnv(DirectMARLEnv):
             self.agent_robot_cfgs[agent_id] = robot_cfg
 
             # Create and store camera config (attached to pitch_link/gimbal tip)
-            camera_cfg = copy.deepcopy(cfg.camera)
-            camera_cfg.prim_path = camera_cfg.prim_path.format(robot_name=robot_name)
-            self.agent_camera_cfgs[agent_id] = camera_cfg
+            if cfg.enable_tiled_cameras:
+                camera_cfg = copy.deepcopy(cfg.camera)
+                camera_cfg.prim_path = camera_cfg.prim_path.format(robot_name=robot_name)
+                self.agent_camera_cfgs[agent_id] = camera_cfg
 
         # Call parent constructor
         super().__init__(cfg, render_mode, **kwargs)
@@ -348,8 +349,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
         # Create TiledCamera sensors for each agent (attached to gimbal tip/pitch_link)
         # These cameras are aligned with the frustum visualization direction
         self._cameras: Dict[str, TiledCamera] = {}
-        for agent_id, camera_cfg in self.agent_camera_cfgs.items():
-            self._cameras[agent_id] = TiledCamera(camera_cfg)
+        if self.cfg.enable_tiled_cameras:
+            for agent_id, camera_cfg in self.agent_camera_cfgs.items():
+                self._cameras[agent_id] = TiledCamera(camera_cfg)
 
         # Create terrain
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs

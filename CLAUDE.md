@@ -146,6 +146,7 @@ my_module/
 ├── __init__.py
 ├── my_component.py
 ├── other_component.py
+├── doc/
 └── tests/
     ├── __init__.py
     ├── run_tests.py           # Standalone test runner
@@ -1146,7 +1147,6 @@ my_module/
 ```
 my_module/
 ├── doc/
-├    ├── DOCUMENT_INDEX.md                  # Keep track of each documents and provide summary
 ├    └── SOME_PLAN_OR_RECORD_OF_WORK.md     # Organize execution plan / provide the summary to the work done for each task.
 └── tests/
 ```

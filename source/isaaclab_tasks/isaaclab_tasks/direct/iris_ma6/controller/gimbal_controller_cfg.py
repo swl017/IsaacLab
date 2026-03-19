@@ -30,14 +30,14 @@ class GimbalControllerCfg:
     max_gimbal_rate: float = 2 * math.pi
     """Maximum gimbal angular rate [rad/s]. Default 2*pi (360 deg/s)."""
 
-    yaw_limits: tuple[float, float] = (-math.radians(200), math.radians(200))
+    yaw_limits: tuple[float, float] = (-math.radians(160), math.radians(160))
     """Yaw joint limits [min, max] [rad]. Default +-180 deg."""
 
     pitch_limits: tuple[float, float] = (-math.radians(45), math.radians(45))
     """Pitch joint limits [min, max] [rad]. Default -45 to 45 deg.
     Limited to stay away from 90 deg gimbal lock singularity."""
 
-    roll_limits: tuple[float, float] = (-math.pi / 4, math.pi / 4)
+    roll_limits: tuple[float, float] = (-math.radians(45), math.radians(45))
     """Roll joint limits [min, max] [rad]. Default +-45 deg for better stabilization."""
 
     auto_stabilize_roll: bool = True
@@ -49,10 +49,18 @@ class GimbalControllerCfg:
     Set to 0.0 when using direct joint state setting (no actuator lag).
     Use 0.05-0.2 when using implicit actuator PD loop."""
 
-    pointing_gain: float = 10.0
+    pointing_gain: float = 112.24
     """Proportional gain converting pointing error (rad) to angular velocity command (rad/s).
     Converts body-frame attitude error to a rate command fed through J^{-1}.
-    Range [5.0, 20.0]. Higher = faster convergence but may overshoot."""
+    Discrete-time stability limit: K * physics_dt < 1 (K < 100 at dt=0.01s).
+    Sweep results: gains 20-60 perform similarly; values above 100 may oscillate."""
 
-    initial_yaw: float = 0.0 #-math.radians(90)
-    """Initial gimbal yaw angle [rad]. Default -90 deg."""
+    initial_yaw: float = 0.0  # was -math.radians(90) when visual forward = body +Y
+    """Initial gimbal yaw angle [rad]."""
+
+    mode: str = "jacobian"
+    """Gimbal control mode.
+
+    "analytical": Direct atan2 IK — exact, zero-lag, no gain tuning needed.
+    "jacobian":   J^{-1} velocity tracking — uses pointing_gain, has tracking dynamics.
+    """

@@ -45,17 +45,16 @@ class RateControllerCfg:
     Scaled from PX4 defaults which assume different inertia.
     """
 
-    Ki_rate: tuple[float, float, float] = (0.2, 0.2, 0.1)
+    Ki_rate: tuple[float, float, float] = (0.2, 0.2, 0.15)
     """Integral gains [roll, pitch, yaw] [Nm/rad].
 
     Provides steady-state tracking for constant rate commands.
     """
 
-    Kd_rate: tuple[float, float, float] = (0.003, 0.003, 0.0)
+    Kd_rate: tuple[float, float, float] = (0.003, 0.003, 0.001)
     """Derivative gains [roll, pitch, yaw] [Nm/(rad/s^2)].
 
     Acts on angular acceleration (measured), not rate error derivative.
-    Yaw D-gain typically zero to avoid noise amplification.
     """
 
     integral_limit: tuple[float, float, float] = (0.3, 0.3, 0.15)
@@ -68,13 +67,6 @@ class RateControllerCfg:
     """Maximum moment output [roll, pitch, yaw] [Nm].
 
     Conservative limit to prevent actuator saturation.
-    """
-
-    yaw_weight: float = 0.4
-    """Yaw authority weight [0-1].
-
-    Deprioritizes yaw control relative to roll/pitch.
-    Matches PX4 MC_YAW_WEIGHT default.
     """
 
     rate_limit: tuple[float, float, float] = (

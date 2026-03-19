@@ -124,6 +124,9 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     debug_frame_vis: bool = False
     """Enable visualization of coordinate frames for debugging."""
 
+    enable_tiled_cameras: bool = True
+    """Enable TiledCamera sensors in the scene. Disable to skip camera creation for faster headless training."""
+
     # ==========================================================================
     # Simulation
     # ==========================================================================
@@ -143,6 +146,8 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
             gpu_total_aggregate_pairs_capacity=2**23,
             gpu_max_rigid_patch_count=2**23,
             gpu_max_rigid_contact_count=2**23,
+            gpu_heap_capacity=2**27,
+            gpu_temp_buffer_capacity=2**25,
         ),
     )
 

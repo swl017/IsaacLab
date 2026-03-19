@@ -283,10 +283,6 @@ class ParallelTuner:
             - self.Kd_rate * angular_accel
         )
 
-        # Apply yaw weight (deprioritize yaw)
-        yaw_weight = 0.4
-        tau[:, 2] = tau[:, 2] * yaw_weight
-
         # Clamp torque output
         tau = torch.clamp(tau, -5.0, 5.0)
 
