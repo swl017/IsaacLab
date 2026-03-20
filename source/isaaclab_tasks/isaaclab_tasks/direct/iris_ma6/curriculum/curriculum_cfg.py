@@ -28,10 +28,10 @@ class CurriculumCfg:
 
     Step:    0k   20k   40k   60k   80k   100k  130k  160k  200k
              |     |     |     |     |     |     |     |     |
-    Safety:  [=ramp=]full────────────────────────────────────────
     Tracking:[────────────ramp────────────]full───────────────────
     Target:        [────────────ramp────────────]full─────────────
-    Coord:                      [────ramp────]full───────────────
+    Safety:                      [────ramp────]full───────────────
+    Coord:                       [────ramp────]full───────────────
     Noise:                              [─ramp─]full─────────────
     FixDelay:                                   [───ramp───]full─
     RndDelay:                                         [──ramp──]f
@@ -120,13 +120,17 @@ class CurriculumCfg:
     """Step when coordination rewards reach full scale."""
 
     # ==========================================================================
-    # Phase 0: Safety (collision/TTC) should be present from the start
+    # Phase 2: Safety (CBF collision avoidance — after basic tracking is learned)
     # ==========================================================================
 
-    safety_start_step: int = 0
-    """Step to start enforcing safety constraints (collision, TTC)."""
+    safety_start_step: int = 60000
+    """Step to start enforcing safety constraints (CBF penalty).
 
-    safety_end_step: int = 20000
+    Delayed to coordination phase so the agent first learns bbox tracking
+    without CBF penalties dominating the reward signal.
+    """
+
+    safety_end_step: int = 100000
     """Step when safety penalties reach full scale."""
 
     # ==========================================================================

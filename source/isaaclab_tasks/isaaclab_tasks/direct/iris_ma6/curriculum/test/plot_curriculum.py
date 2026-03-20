@@ -75,7 +75,7 @@ GainRandomizationCfg = _gain_mod.GainRandomizationCfg
 # Instantiate configs matching iris_ma_env6_test_cfg.py overrides
 _curr = CurriculumCfg()
 _delay = DelaySystemKeyParams(
-    ego_motion_latency_enabled=False,
+    ego_motion_latency_enabled=True,
     ego_motion_fol_tau=0.005,
     ego_detection_latency_mean=0.1,
     ego_detection_latency_std=0.015,
@@ -88,6 +88,8 @@ _delay = DelaySystemKeyParams(
     noise_position_std=0.1,
     noise_velocity_std=0.05,
     noise_orientation_std=0.01,
+    noise_angular_velocity_std=0.02,
+    noise_acceleration_std=0.1,
     noise_bbox_std=7.0,
     reward_use_delay=True,
     reward_use_noise=False,
@@ -136,6 +138,8 @@ DELAY_PARAMS = dict(
     noise_position_std=_delay.noise_position_std,
     noise_velocity_std=_delay.noise_velocity_std,
     noise_orientation_std=_delay.noise_orientation_std,
+    noise_angular_velocity_std=_delay.noise_angular_velocity_std,
+    noise_acceleration_std=_delay.noise_acceleration_std,
     noise_bbox_std=_delay.noise_bbox_std,
 )
 
@@ -365,6 +369,10 @@ def plot_details(out_dir: Path, dark: bool):
             label=f"Velocity ({D['noise_velocity_std']*100:.0f} cm/s)", color="#2ecc71")
     ax.plot(steps, noise_prog * D["noise_orientation_std"] * (180 / np.pi), lw=2.5,
             label=f"Orientation ({D['noise_orientation_std']*180/np.pi:.2f}\u00b0)", color="#9b59b6")
+    ax.plot(steps, noise_prog * D["noise_angular_velocity_std"] * (180 / np.pi), lw=2.5, ls="--",
+            label=f"Ang vel ({D['noise_angular_velocity_std']*180/np.pi:.1f}\u00b0/s)", color="#1abc9c")
+    ax.plot(steps, noise_prog * D["noise_acceleration_std"] * 100, lw=2.5, ls="-.",
+            label=f"Accel ({D['noise_acceleration_std']*100:.0f} cm/s\u00b2)", color="#e67e22")
     ax2 = ax.twinx()
     ax2.plot(steps, noise_prog * D["noise_bbox_std"], lw=2.5, ls="--",
              color="#e74c3c", label=f"BBox ({D['noise_bbox_std']:.0f} px)")
@@ -375,7 +383,7 @@ def plot_details(out_dir: Path, dark: bool):
     ax.set_title("Observation Noise Ramp", fontsize=15, fontweight="bold")
     h1, l1 = ax.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
-    ax.legend(h1 + h2, l1 + l2, fontsize=11, loc="upper left")
+    ax.legend(h1 + h2, l1 + l2, fontsize=10, loc="upper left")
     _format_step_axis(ax)
     ax.grid(alpha=0.3)
 
@@ -386,9 +394,10 @@ def plot_details(out_dir: Path, dark: bool):
     lo_off, hi_off = PER_AGENT["dropout_offset_range"]
     ax.plot(steps, base_dropout * 100, lw=2.5, color=COLORS["dropout"],
             label="Base dropout rate")
-    ax.fill_between(steps,
-                    (base_dropout + lo_off) * 100,
-                    np.minimum((base_dropout + hi_off) * 100, 100),
+    # Per-agent offset only visible when base dropout > 0
+    per_agent_lo = np.maximum((base_dropout + lo_off * dropout_prog) * 100, 0)
+    per_agent_hi = np.minimum((base_dropout + hi_off * dropout_prog) * 100, 100)
+    ax.fill_between(steps, per_agent_lo, per_agent_hi,
                     alpha=0.25, color=COLORS["dropout"],
                     label=f"Per-agent offset [{lo_off:.0%}, +{hi_off:.0%}]")
     ax.set_ylabel("Dropout rate (%)", fontsize=13)
