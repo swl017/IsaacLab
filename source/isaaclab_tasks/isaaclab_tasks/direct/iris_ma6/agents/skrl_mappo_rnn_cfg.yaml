@@ -83,7 +83,7 @@ agent:
   # Experiment tracking
   experiment:
     directory: iris_ma6
-    experiment_name: "eb0e3dba99_initial_difficulty" 
+    experiment_name: "5ff6c2b6db_initial_difficulty" 
     write_interval: auto
     checkpoint_interval: auto
     store_separately: false
@@ -92,6 +92,6 @@ agent:
 
 # Trainer configuration
 trainer:
-  timesteps: 400000          # Total training timesteps
+  timesteps: 200000          # Total training timesteps
   headless: true
   environment_info: log
