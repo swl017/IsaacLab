@@ -114,7 +114,7 @@ class MultiAgentDelaySystemV3:
 
         # Noise configuration
         self._noise_cfg = cfg.noise
-        self._noise_scale = 1.0
+        self._noise_scale = 0.0  # Start with no noise; curriculum ramps via set_noise_scale()
 
         # Current time
         self._t_current = torch.zeros(num_envs, device=device)

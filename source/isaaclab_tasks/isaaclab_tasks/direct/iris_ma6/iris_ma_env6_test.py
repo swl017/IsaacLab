@@ -925,7 +925,8 @@ class IrisMA6TestEnv(DirectMARLEnv):
         rewards_dict = {}
 
         # Update curriculum progress
-        current_step = self.common_step_counter if not DEBUG_DRAW else self.cfg.debug_initial_step
+        # current_step = self.common_step_counter if not DEBUG_DRAW else self.cfg.debug_initial_step
+        current_step = self.common_step_counter
         curr = self.cfg.curriculum
         self.progress_coord = self._linear_progress(
             curr.coordination_start_step, curr.coordination_end_step, current_step
@@ -948,11 +949,13 @@ class IrisMA6TestEnv(DirectMARLEnv):
             delay_mode = curr.get_delay_mode(current_step)
             if delay_mode == "none":
                 self.progress_delay = 0.0
+                self._delay_system.set_delay_mode("none", progress=0.0)
             elif delay_mode == "fixed":
                 self.progress_delay = curr.get_fixed_delay_progress(current_step)
+                self._delay_system.set_delay_mode("fixed", progress=self.progress_delay)
             else:  # "random"
                 self.progress_delay = curr.get_random_delay_progress(current_step)
-            self._delay_system.set_delay_mode(delay_mode, progress=self.progress_delay)
+                self._delay_system.set_delay_mode("random", progress=self.progress_delay)
 
             # Ramp noise (phase 2: 80k-100k)
             self._delay_system.set_noise_scale(curr.get_noise_progress(current_step))
