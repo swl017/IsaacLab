@@ -83,7 +83,7 @@ agent:
   # Experiment tracking
   experiment:
     directory: iris_ma6
-    experiment_name: "0be8d13f02_obs_dim_delay_noise_fix" 
+    experiment_name: "11af0e2a72_obs_dim_safety_fix" 
     write_interval: auto
     checkpoint_interval: auto
     store_separately: false

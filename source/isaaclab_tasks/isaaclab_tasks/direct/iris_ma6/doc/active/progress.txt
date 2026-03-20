@@ -172,3 +172,44 @@ Next:
 - Monitor early bbox metrics — richer observations should help policy predict gimbal motion
 - Investigate curriculum ramp rate: may need slower progress_moving_target transition
 - Backlog: target-finding task (reset with target out of frame, learn to acquire)
+
+----------------------------------------
+2026-03-20 — CBF penalty diagnosis + safety curriculum fix
+----------------------------------------
+Done:
+- Diagnosed why 24D-obs runs (c34b3854b1, 0be8d13f02) learn 3-5x slower than
+  18D-obs baseline (5ff6c2b6db) in 0-20k steps:
+  - Root cause: CBF penalty is 10-100x larger in 24D runs
+    (0be8: -0.64 vs 5ff6: -0.09 at step 20k)
+  - Safety/collision rate also 2-3x higher in 24D runs at step 2k (0.55 vs 0.26)
+  - The 24D obs include ang_vel_b + lin_acc_b which are initially noisy/large,
+    causing erratic early exploration that triggers more collisions
+  - The massive CBF penalty drowns out bbox_center and bbox_size reward signal
+- Key insight: 5ff6 had safety ramping 0-20k but the lower collision rate meant
+  CBF penalty stayed negligible (-0.01 to -0.09). With noisier 24D obs, the same
+  safety ramp generates penalties 10x larger, dominating the reward.
+- Fix: Moved safety_start_step from 0 → 60k, safety_end_step from 20k → 100k
+  (commit 11af0e2a72). CBF penalty is now zero during the critical 0-60k bbox
+  learning phase, matching the coordination curriculum phase.
+- Updated curriculum plot script with per-agent dropout offset fix
+- Added backlog doc: unified_randomization_architecture.md (declarative config proposal)
+- Experiment runs this session:
+  | Commit     | Experiment ID        | Obs | Safety  | Status           |
+  |------------|----------------------|-----|---------|------------------|
+  | 5ff6c2b6db | initial_difficulty   | 18D | 0-20k   | Good early, collapse 20k+ |
+  | c34b3854b1 | initial_difficulty   | 24D | 0-20k   | Slow early (CBF) |
+  | 0be8d13f02 | obs_dim_delay_noise  | 24D | 0-20k   | Slow early (CBF) |
+  | 11af0e2a72 | obs_dim_safety_fix   | 24D | 60-100k | Running          |
+- Policy std divergence identified: 24D runs hit std=1.3 by 10k steps
+  (5ff6 reaches 1.3 at 30k). Faster entropy increase suggests the policy
+  struggles to extract signal from the noisier observation space.
+
+Next:
+- Monitor 11af0e2a72 tensorboard — expect fast early bbox learning (no CBF drag)
+  and possible collision spike that resolves when safety ramps in at 60k
+- If 11af still slow: the 24D obs noise itself may need curriculum
+  (zero ang_vel/acc noise at start, ramp with noise_start_step)
+- If 11af fast early but collapses at 20-30k: target motion curriculum too aggressive
+  (same issue as eb0e3dba99 but confirmed independent of CBF)
+- Longer term: consider whether 24D obs improves asymptotic performance vs 18D
+  (if not, may revert to 18D + add derived fields later)

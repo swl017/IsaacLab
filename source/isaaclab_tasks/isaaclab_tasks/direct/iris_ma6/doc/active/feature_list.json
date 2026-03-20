@@ -70,14 +70,14 @@
       "name": "Curriculum learning system",
       "status": "in_progress",
       "spec": null,
-      "notes": "Config exists; full curriculum progression logic TBD"
+      "notes": "Safety ramp moved to 60-100k (was 0-20k) to avoid CBF penalty dominating early bbox learning. Backlog: unified randomization architecture (2026-03-20)"
     },
     {
       "id": "env-integration",
       "name": "Full environment integration and training",
       "status": "in_progress",
       "spec": "doc/iris_ma6_env_spec.md",
-      "notes": "iris_ma_env6_test.py — 24D obs (added ang_vel_b, lin_acc_b). Training: eb0e3dba99 collapsed 20-80k, c34b3854b1 in progress"
+      "notes": "24D obs. CBF penalty identified as bottleneck for early learning — fixed by delaying safety to 60k. 11af0e2a72 running (2026-03-20)"
     }
   ]
 }
