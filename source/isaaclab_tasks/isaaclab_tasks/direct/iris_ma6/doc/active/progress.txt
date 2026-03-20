@@ -139,3 +139,36 @@ Done:
 Next:
 - Verify in teleop that AoI reads ~100ms / ~2.5 steps with default config
 - Monitor training runs for correct delay behavior
+
+----------------------------------------
+2026-03-20 — Observation enrichment + noise fixes
+----------------------------------------
+Done:
+- Added body_angular_velocity_b (3D) and body_linear_acceleration_b (3D) to observations
+  - Observation dim: 18 → 24 (ma5 has yaw_rate + lin_acc — ma6 now has full 3-axis equivalents)
+  - New fields populated from robot.data.root_ang_vel_b and body_lin_acc_w (rotated to body frame)
+  - Wired through delay system gt_data, delayed path, and ground truth path
+  - Updated iris_ma_env6_test_cfg.py: observation_spaces and obs_dim
+- Fixed quaternion noise — was additive per-component (broke unit norm), now proper
+  axis-angle perturbation via quat_from_angle_axis + quat_mul
+  - body_orientation_w and camera_orientation_w stored with noise_std=0 in field_storage;
+    rotation noise applied only in _add_noise_to_states()
+- Added separate noise parameters for angular velocity and acceleration:
+  - angular_velocity_std: 0.02 rad/s (was sharing vel_noise 0.05 m/s)
+  - acceleration_std: 0.1 m/s² (was sharing vel_noise 0.05 m/s)
+  - Added to NoiseCfg, DelaySystemKeyParams, create_delay_cfg_from_params, _get_noise_std
+- Increased max_lin_vel: 2.0 → 10.0 m/s
+- Analyzed eb0e3dba99_initial_difficulty tensorboard (0-148k steps):
+  - Good early learning 0-20k (bbox_center 24.1, pair_valid_rate 0.65)
+  - Steady collapse 20-80k (all_invalid_rate 0→0.48, pair_valid_rate 0.65→0.16)
+  - Identified cause: curriculum ramps difficulty faster than policy can adapt
+- Compared ma5 vs ma6 dynamics: gimbal (both RL-controlled), zoom (ma5 instant, ma6 FOL),
+  drone (ma5 holonomic, ma6 realistic cascaded controller)
+- Files modified: delay_cfg_v3.py, multi_agent_wrapper.py, iris_ma_env6_test.py,
+  iris_ma_env6_test_cfg.py
+
+Next:
+- Train c34b3854b1_initial_difficulty with enriched 24D observations + noise fixes
+- Monitor early bbox metrics — richer observations should help policy predict gimbal motion
+- Investigate curriculum ramp rate: may need slower progress_moving_target transition
+- Backlog: target-finding task (reset with target out of frame, learn to acquire)

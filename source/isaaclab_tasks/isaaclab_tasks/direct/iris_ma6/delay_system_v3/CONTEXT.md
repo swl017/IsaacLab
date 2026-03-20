@@ -7,7 +7,8 @@ sensor/communication delays for sim-to-real transfer.
 
 ## Inputs
 - Ground-truth agent states per timestep:
-  - Position `(N, A, 3)`, velocity `(N, A, 3)`
+  - Position `(N, A, 3)`, velocity `(N, A, 3)`, orientation `(N, A, 4)` (wxyz)
+  - Angular velocity `(N, A, 3)` (body frame), linear acceleration `(N, A, 3)` (body frame)
   - Gimbal angles, camera intrinsics
   - Bounding box detections
 
@@ -24,7 +25,7 @@ None (standalone module).
 - `multi_agent_wrapper.py` - Multi-agent orchestration layer
 - `delay_system_v3.py` - Top-level system interface
 - `agent_states.py` - AgentStates dataclass definition
-- `delay_cfg_v3.py` - Delay configuration (latency distributions, dropout rates)
+- `delay_cfg_v3.py` - Delay configuration (latency distributions, dropout rates, noise: position/velocity/orientation/angular_velocity/acceleration/bbox)
 - `sampling_strategies.py` - Latency sampling (uniform, gaussian, constant)
 - `field_storage.py` - Per-field ringbuffer storage
 - `derived_field_computers.py` - Computes derived fields from stored state
