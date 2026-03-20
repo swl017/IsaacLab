@@ -286,9 +286,9 @@ def compute_ray_directions_from_bbox(
         # This is a safety net — the quaternion sanitization and bbox validation
         # fixes above should prevent most NaN propagation, but if any slip through
         # we log a warning and zero the affected rays.
-        logger.warning(
-            f"ray_directions_w NaN/Inf in {len(bad_envs)} envs (zeroed out): {bad_envs[:5]}"
-        )
+        # logger.warning(
+        #     f"ray_directions_w NaN/Inf in {len(bad_envs)} envs (zeroed out): {bad_envs[:5]}"
+        # )
         bad_mask = nan_mask | inf_mask  # [N]
         ray_directions_w[bad_mask] = 0.0
 

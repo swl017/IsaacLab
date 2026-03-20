@@ -145,7 +145,7 @@ class InitialStatesCfg:
     designated_observer_faces_target: bool = True
     """Whether the designated observer's body faces toward target."""
 
-    other_agents_orientation_mode: Literal["random", "face_target", "curriculum"] = "curriculum"
+    other_agents_orientation_mode: Literal["random", "face_target", "curriculum"] = "face_target"
     """Orientation mode for non-designated agents.
 
     - "random": Random yaw orientation
@@ -176,7 +176,7 @@ class InitialStatesCfg:
     gimbal_pitch_max: float = math.radians(45.0)
     """Maximum gimbal pitch angle (radians)."""
 
-    gimbal_curriculum_mode: Literal["gradual", "threshold", "always_pointing"] = "gradual"
+    gimbal_curriculum_mode: Literal["gradual", "threshold", "always_pointing"] = "always_pointing"
     """How non-observers transition from pointing to random gimbal.
 
     - "gradual": With probability (1-progress), agent points at target

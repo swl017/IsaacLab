@@ -93,3 +93,28 @@ Observer-Intercepter
 ## Ontology-based Mission Planning
 
 Mission planning and task allocation
+
+---
+
+## Target Search / Reacquisition
+
+**Priority:** Medium
+**Status:** Deferred — observe if naturally learned first
+
+### Problem
+
+Currently, agents always reset with body yaw facing the target and gimbal pointed at the target.
+This means the policy never needs to *find* a target that is out of frame — it only learns to
+*maintain* tracking of a visible target.
+
+In real deployment, targets may leave the FOV due to occlusion, aggressive maneuvers, or
+communication-based handoff. The agent needs a search/reacquisition strategy.
+
+### Action Items
+
+1. After training converges with always-pointing resets, evaluate whether the trained policy
+   can naturally reacquire a target that leaves the FOV mid-episode (it may learn this from
+   the moving-target curriculum alone).
+2. If not, reintroduce curriculum-based gimbal/yaw randomization at reset as a later
+   curriculum phase (e.g., progress > 0.7), after the agent has mastered tracking.
+3. Consider a dedicated "search spiral" or "last-known-direction" heuristic as a fallback.
