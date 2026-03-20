@@ -639,6 +639,12 @@ if __name__ == "__main__":
 ### 4.1 Input Interface (tensor shapes, value ranges)
 ### 4.2 Output Interface (tensor shapes, value ranges)
 ### 4.3 Dependencies (upstream and downstream modules)
+### 4.4 Calling Contract
+- **Call frequency**: How many times per step each public method should be called
+- **Mutating vs read-only**: Which methods advance internal state (buffers, counters, RNG)
+- **Idempotency**: Which methods are safe to call multiple times at the same sim time
+- **Lifecycle placement**: Which env lifecycle method (`_pre_physics_step`, `_get_observations`, etc.) should call each method
+- **Stateful invariants**: Assumptions about calling order or exclusivity
 
 ## 5. Validation and Testing
 ### 5.1 Unit Tests (categories, criteria)
@@ -700,6 +706,36 @@ if __name__ == "__main__":
 | "Define a new feature before coding" | Spec → then Scaffold when ready |
 | "Wire an existing module into env" | Integration only |
 | "Add parameters to existing module" | Config (update existing `*_cfg.py`) |
+
+### 5.7 Session Progress Update (`/update-progress`)
+
+**When**: End of a work session, or when the user asks to update progress.
+**Reuse**: 100% — identical workflow every time.
+**Skill location**: `.claude/commands/update-progress.md`
+
+This is a Claude Code slash command that automates the end-of-session protocol
+defined in `iris_ma6/CLAUDE.md`. Invoke with `/update-progress`.
+
+**What it does**:
+1. Reads `doc/active/progress.txt`, `doc/active/feature_list.json`, and `ARCHITECTURE.md`
+2. Reviews `git diff` (staged + unstaged) to summarize what changed
+3. Appends a dated entry to `progress.txt` (Done + Next sections)
+4. Updates `feature_list.json` if any feature status changed
+5. Updates `ARCHITECTURE.md` if module dependencies changed
+6. Updates module `CONTEXT.md` files if interfaces changed
+
+**Why a skill**: This workflow is mechanical and identical every session, but
+requires reading multiple files and making coordinated edits. Encoding it as
+a slash command ensures consistency and prevents the agent from forgetting
+steps. It also avoids polluting `CLAUDE.md` with instructions that are only
+needed at session boundaries.
+
+**Design choice — skill vs. hook**: A hook (auto-triggered at session end)
+was considered but rejected. Progress updates require judgment (which changes
+are worth documenting, what the "Next" items should be) and sometimes the
+user wants to skip the update. A user-invoked skill preserves human control.
+
+---
 
 ## 6. Key Takeaways
 

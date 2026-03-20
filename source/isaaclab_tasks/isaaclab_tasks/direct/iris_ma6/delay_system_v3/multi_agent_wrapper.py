@@ -16,6 +16,7 @@ import torch
 from typing import Dict, List, Optional, Tuple, Literal, Any
 
 from isaaclab.envs.common import AgentID
+from isaaclab.utils.math import quat_from_angle_axis, quat_mul
 
 from .delay_cfg_v3 import MultiAgentDelayCfgV3, NoiseCfg
 from .delay_system_v3 import UnifiedDelaySystem
@@ -29,6 +30,8 @@ BODY_FIELDS = [
     ("body_orientation_w", (4,)),  # quaternion wxyz
     ("body_linear_velocity_w", (3,)),
     ("body_angular_velocity_w", (3,)),
+    ("body_angular_velocity_b", (3,)),
+    ("body_linear_acceleration_b", (3,)),
 ]
 
 JOINT_FIELDS = [
@@ -208,12 +211,16 @@ class MultiAgentDelaySystemV3:
         pos_noise = self._get_noise_std("position", agent_id)
         vel_noise = self._get_noise_std("velocity", agent_id)
         ori_noise = self._get_noise_std("orientation", agent_id)
+        ang_vel_noise = self._get_noise_std("angular_velocity", agent_id)
+        acc_noise = self._get_noise_std("acceleration", agent_id)
 
         # Store fields in delay system
         data = states.data
         prefix = f"{agent_id}."
 
         # Body fields with appropriate noise
+        # NOTE: Quaternion orientation stored with noise_std=0 — rotation noise
+        # applied properly via axis-angle perturbation in _add_noise_to_states()
         self._delay_system.store(
             prefix + "body_position_w",
             data.body_position_w,
@@ -222,7 +229,7 @@ class MultiAgentDelaySystemV3:
         self._delay_system.store(
             prefix + "body_orientation_w",
             data.body_orientation_w,
-            noise_std=ori_noise,
+            noise_std=0.0,
         )
         self._delay_system.store(
             prefix + "body_linear_velocity_w",
@@ -232,7 +239,17 @@ class MultiAgentDelaySystemV3:
         self._delay_system.store(
             prefix + "body_angular_velocity_w",
             data.body_angular_velocity_w,
-            noise_std=vel_noise,
+            noise_std=ang_vel_noise,
+        )
+        self._delay_system.store(
+            prefix + "body_angular_velocity_b",
+            data.body_angular_velocity_b,
+            noise_std=ang_vel_noise,
+        )
+        self._delay_system.store(
+            prefix + "body_linear_acceleration_b",
+            data.body_linear_acceleration_b,
+            noise_std=acc_noise,
         )
 
         # Joint fields
@@ -256,7 +273,7 @@ class MultiAgentDelaySystemV3:
         self._delay_system.store(
             prefix + "camera_orientation_w",
             data.camera_orientation_w,
-            noise_std=ori_noise,
+            noise_std=0.0,  # Rotation noise applied in _add_noise_to_states()
         )
         # Zoom level (no noise on discrete camera setting)
         self._delay_system.store(
@@ -281,7 +298,7 @@ class MultiAgentDelaySystemV3:
         """Get noise standard deviation for a field type.
 
         Args:
-            noise_type: Type of noise ("position", "velocity", "orientation", "bbox").
+            noise_type: Type of noise ("position", "velocity", "orientation", "angular_velocity", "acceleration", "bbox").
             agent_id: Optional agent ID for per-agent noise scaling.
 
         Returns:
@@ -296,6 +313,10 @@ class MultiAgentDelaySystemV3:
             base_std = self._noise_cfg.velocity_std.value
         elif noise_type == "orientation":
             base_std = self._noise_cfg.orientation_std.value
+        elif noise_type == "angular_velocity":
+            base_std = self._noise_cfg.angular_velocity_std.value
+        elif noise_type == "acceleration":
+            base_std = self._noise_cfg.acceleration_std.value
         elif noise_type == "bbox":
             base_std = self._noise_cfg.bbox_std.value
         else:
@@ -428,6 +449,16 @@ class MultiAgentDelaySystemV3:
         )
         data.body_angular_velocity_w = ang_vel
 
+        ang_vel_b, _ = self._delay_system.get_delayed(
+            prefix + "body_angular_velocity_b", perspective, use_noise, allow_dropout
+        )
+        data.body_angular_velocity_b = ang_vel_b
+
+        lin_acc_b, _ = self._delay_system.get_delayed(
+            prefix + "body_linear_acceleration_b", perspective, use_noise, allow_dropout
+        )
+        data.body_linear_acceleration_b = lin_acc_b
+
         # Joint states
         joint_pos, _ = self._delay_system.get_delayed(
             prefix + "joint_positions_b", perspective, use_noise, allow_dropout
@@ -533,6 +564,8 @@ class MultiAgentDelaySystemV3:
         dst_data.body_orientation_w = src_data.body_orientation_w.clone()
         dst_data.body_linear_velocity_w = src_data.body_linear_velocity_w.clone()
         dst_data.body_angular_velocity_w = src_data.body_angular_velocity_w.clone()
+        dst_data.body_angular_velocity_b = src_data.body_angular_velocity_b.clone()
+        dst_data.body_linear_acceleration_b = src_data.body_linear_acceleration_b.clone()
 
         # Joint fields
         dst_data.joint_positions_b = src_data.joint_positions_b.clone()
@@ -576,10 +609,14 @@ class MultiAgentDelaySystemV3:
         pos_noise = self._get_noise_std("position", agent_id)
         vel_noise = self._get_noise_std("velocity", agent_id)
         ori_noise = self._get_noise_std("orientation", agent_id)
+        ang_vel_noise = self._get_noise_std("angular_velocity", agent_id)
+        acc_noise = self._get_noise_std("acceleration", agent_id)
 
         data = cloned.data
+        N = data.body_position_w.shape[0]
+        device = data.body_position_w.device
 
-        # Add noise to body fields
+        # Position noise (additive Gaussian)
         if pos_noise > 0:
             data.body_position_w = data.body_position_w + torch.randn_like(
                 data.body_position_w
@@ -588,24 +625,47 @@ class MultiAgentDelaySystemV3:
                 data.camera_position_w
             ) * pos_noise
 
+        # Linear velocity noise (additive Gaussian)
         if vel_noise > 0:
             data.body_linear_velocity_w = data.body_linear_velocity_w + torch.randn_like(
                 data.body_linear_velocity_w
-            ) * vel_noise
-            data.body_angular_velocity_w = data.body_angular_velocity_w + torch.randn_like(
-                data.body_angular_velocity_w
             ) * vel_noise
             data.joint_velocities_b = data.joint_velocities_b + torch.randn_like(
                 data.joint_velocities_b
             ) * vel_noise
 
+        # Angular velocity noise (separate scale, rad/s)
+        if ang_vel_noise > 0:
+            data.body_angular_velocity_w = data.body_angular_velocity_w + torch.randn_like(
+                data.body_angular_velocity_w
+            ) * ang_vel_noise
+            data.body_angular_velocity_b = data.body_angular_velocity_b + torch.randn_like(
+                data.body_angular_velocity_b
+            ) * ang_vel_noise
+
+        # Linear acceleration noise (separate scale, m/s²)
+        if acc_noise > 0:
+            data.body_linear_acceleration_b = data.body_linear_acceleration_b + torch.randn_like(
+                data.body_linear_acceleration_b
+            ) * acc_noise
+
+        # Orientation noise — proper axis-angle perturbation preserving unit quaternion
         if ori_noise > 0:
-            data.body_orientation_w = data.body_orientation_w + torch.randn_like(
-                data.body_orientation_w
-            ) * ori_noise
-            data.camera_orientation_w = data.camera_orientation_w + torch.randn_like(
-                data.camera_orientation_w
-            ) * ori_noise
+            # Body orientation: random small rotation
+            axis = torch.randn(N, 3, device=device)
+            axis = axis / (axis.norm(dim=-1, keepdim=True) + 1e-8)
+            angle = torch.randn(N, device=device) * ori_noise
+            noise_quat = quat_from_angle_axis(angle, axis)
+            data.body_orientation_w = quat_mul(noise_quat, data.body_orientation_w)
+
+            # Camera orientation: independent random small rotation
+            axis_cam = torch.randn(N, 3, device=device)
+            axis_cam = axis_cam / (axis_cam.norm(dim=-1, keepdim=True) + 1e-8)
+            angle_cam = torch.randn(N, device=device) * ori_noise
+            noise_quat_cam = quat_from_angle_axis(angle_cam, axis_cam)
+            data.camera_orientation_w = quat_mul(noise_quat_cam, data.camera_orientation_w)
+
+            # Joint positions: additive (gimbal angles in radians, not quaternions)
             data.joint_positions_b = data.joint_positions_b + torch.randn_like(
                 data.joint_positions_b
             ) * ori_noise

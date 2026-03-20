@@ -119,3 +119,23 @@ Next:
 - Compare 0-20k step performance against ma5 ablation baselines
 - If early learning improves, verify full curriculum still ramps to hard difficulty
 - Tune curriculum transition rates if needed (too fast/slow ramp)
+
+----------------------------------------
+2026-03-20 — Delay system bbox latency fix
+----------------------------------------
+Done:
+- Fixed critical bug: DelayPipelineV3.process() appended to circular buffer on
+  every call, but the same pipeline was called multiple times per sim step
+  (rewards + observations + teleop = 3x). Effective delay was divided by N.
+  - Evidence: 0.1s latency showed ~1 step (expected 2.5); 0.5s showed 4-5 (expected 12.5)
+  - Fix: Added _last_append_time guard in _apply_latency() — only appends when
+    t_current advances (>1e-6 tolerance). Threaded t_current param through.
+  - Reset guard state in both full and per-env reset() paths.
+- All 55 delay_system_v3 unit tests pass after fix.
+- Added BBox AoI (Age-of-Information) display to teleop overlay (yellow text,
+  shows ms and step count).
+- File modified: delay_system_v3/delay_pipeline_v3.py
+
+Next:
+- Verify in teleop that AoI reads ~100ms / ~2.5 steps with default config
+- Monitor training runs for correct delay behavior

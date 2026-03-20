@@ -14,7 +14,7 @@
       "name": "Multi-agent delay/staleness/dropout simulation",
       "status": "done",
       "spec": null,
-      "notes": "Ringbuffer-based with timestamp guarantees and interpolation"
+      "notes": "Ringbuffer-based with timestamp guarantees. Fixed multi-call-per-step buffer corruption (2026-03-20)"
     },
     {
       "id": "cbf-safety",

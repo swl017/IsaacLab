@@ -173,7 +173,21 @@ class NoiseCfg:
             type="constant", value=0.01, min_value=0.0
         )
     )
-    """Standard deviation for orientation noise (radians)."""
+    """Standard deviation for orientation noise (radians). Applied as axis-angle perturbation."""
+
+    angular_velocity_std: DistributionCfg = field(
+        default_factory=lambda: DistributionCfg(
+            type="constant", value=0.02, min_value=0.0
+        )
+    )
+    """Standard deviation for angular velocity noise (rad/s)."""
+
+    acceleration_std: DistributionCfg = field(
+        default_factory=lambda: DistributionCfg(
+            type="constant", value=0.1, min_value=0.0
+        )
+    )
+    """Standard deviation for linear acceleration noise (m/s²)."""
 
     bbox_std: DistributionCfg = field(
         default_factory=lambda: DistributionCfg(
@@ -519,6 +533,12 @@ class DelaySystemKeyParams:
     noise_orientation_std: float = 0.01
     """Standard deviation for orientation noise in radians."""
 
+    noise_angular_velocity_std: float = 0.02
+    """Standard deviation for angular velocity noise in rad/s."""
+
+    noise_acceleration_std: float = 0.1
+    """Standard deviation for linear acceleration noise in m/s²."""
+
     noise_bbox_std: float = 7.0
     """Standard deviation for bounding box noise in pixels.
     Applied to bbox center (x, y) and dimensions (w, h)."""
@@ -622,6 +642,12 @@ def create_delay_cfg_from_params(params: DelaySystemKeyParams) -> MultiAgentDela
     )
     cfg.noise.orientation_std = DistributionCfg(
         type="constant", value=params.noise_orientation_std, min_value=0.0
+    )
+    cfg.noise.angular_velocity_std = DistributionCfg(
+        type="constant", value=params.noise_angular_velocity_std, min_value=0.0
+    )
+    cfg.noise.acceleration_std = DistributionCfg(
+        type="constant", value=params.noise_acceleration_std, min_value=0.0
     )
     cfg.noise.bbox_std = DistributionCfg(
         type="constant", value=params.noise_bbox_std, min_value=0.0

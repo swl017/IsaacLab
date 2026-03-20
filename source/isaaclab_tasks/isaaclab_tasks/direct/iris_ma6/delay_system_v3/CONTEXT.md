@@ -29,5 +29,16 @@ None (standalone module).
 - `field_storage.py` - Per-field ringbuffer storage
 - `derived_field_computers.py` - Computes derived fields from stored state
 
+## Calling Contract
+- `update_ground_truth()`: **WRITE**. Call exactly once per step from `_update_state_cache()`.
+  Appends to ring buffers. Multiple calls at same sim time are guarded but should be avoided.
+- `get_all_states_for_observations()`: **READ**. Safe to call multiple times per step.
+- `get_all_states_for_rewards()`: **READ**. Safe to call multiple times per step.
+- `set_delay_mode()`, `set_noise_scale()`, `set_dropout_rate()`: **CONFIG**. Call from `_get_rewards()` for curriculum.
+- `reset()`: Call from `_reset_idx()`.
+
+**Idempotency**: `DelayPipelineV3.process()` guards buffer appends with `_last_append_time`.
+Multiple calls at the same `t_current` return consistent results but do not advance the buffer.
+
 ## Spec
 None (self-documented via docstrings and `doc/` directory).

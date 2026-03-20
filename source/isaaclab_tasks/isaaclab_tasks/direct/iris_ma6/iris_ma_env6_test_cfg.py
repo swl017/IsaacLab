@@ -115,8 +115,8 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     action_spaces: dict = {"drone_0": 7, "drone_1": 7, "drone_2": 7}
     """Action space dimensions per agent (auto-populated from num_agents)."""
 
-    observation_spaces: dict = {"drone_0": 18, "drone_1": 18, "drone_2": 18}
-    """Observation space dimensions per agent (18D: pos, vel, quat, gimbal_yaw, gimbal_pitch, zoom, bbox, bbox_empty)."""
+    observation_spaces: dict = {"drone_0": 24, "drone_1": 24, "drone_2": 24}
+    """Observation space dimensions per agent (24D: pos, vel, quat, ang_vel_b, lin_acc_b, gimbal_yaw, gimbal_pitch, zoom, bbox, bbox_empty)."""
 
     state_space: int = -1
     """State space dimension. -1 means concatenate all observations."""
@@ -127,7 +127,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     debug_frame_vis: bool = False
     """Enable visualization of coordinate frames for debugging."""
 
-    enable_tiled_cameras: bool = False
+    enable_tiled_cameras: bool = True
     """Enable TiledCamera sensors in the scene. Disable to skip camera creation for faster headless training."""
 
     # ==========================================================================
@@ -248,8 +248,8 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # Motion Limits
     # ==========================================================================
 
-    max_lin_vel: float = 2.0
-    """Maximum linear velocity (m/s). Kept low to avoid saturating attitude controller."""
+    max_lin_vel: float = 10.0
+    """Maximum linear velocity (m/s). High values can saturate the attitude controller."""
 
     max_yaw_rate: float = math.radians(45.0)
     """Maximum yaw rate (rad/s)."""
@@ -491,9 +491,9 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
         self.delay_system = create_delay_cfg_from_params(self.delay_system_params)
 
         # Update observation space based on triangulation
-        # Base: 18D (pos, vel, quat, gimbal_yaw, gimbal_pitch, zoom, bbox, bbox_empty)
+        # Base: 24D (pos, vel, quat, ang_vel_b, lin_acc_b, gimbal_yaw, gimbal_pitch, zoom, bbox, bbox_empty)
         # With triangulation: +6D (triangulated position + std_dev)
-        obs_dim = 18
+        obs_dim = 24
         if self.enable_triangulation:
             obs_dim += 6  # triangulated position (3) + std_dev (3)
         self.observation_spaces = {a: obs_dim for a in self.possible_agents}

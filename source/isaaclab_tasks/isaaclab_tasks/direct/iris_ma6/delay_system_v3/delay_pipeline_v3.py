@@ -89,6 +89,9 @@ class DelayPipelineV3:
         self._data_buffer = CircularBuffer(max_steps, num_envs, device)
         self._timestamp_buffer = CircularBuffer(max_steps, num_envs, device)
         self._buffer_initialized = False
+        # Guard against multiple appends per sim step (bug fix: process() may
+        # be called multiple times at the same t_current for rewards/obs/teleop)
+        self._last_append_time = torch.full((num_envs,), -1.0, device=device)
 
         # =================================================================
         # Staleness Stage
@@ -254,7 +257,7 @@ class DelayPipelineV3:
 
         # Stage 2: Latency
         if self._cfg.latency.enabled:
-            data, timestamp = self._apply_latency(data, timestamp)
+            data, timestamp = self._apply_latency(data, timestamp, t_current)
 
         # Stage 3: Dropout (if allowed)
         if self._cfg.dropout.enabled and allow_dropout:
@@ -318,6 +321,7 @@ class DelayPipelineV3:
         self,
         data: torch.Tensor,
         timestamp: torch.Tensor,
+        t_current: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Apply latency using parallel circular buffers.
 
@@ -325,6 +329,11 @@ class DelayPipelineV3:
         SAME delay, ensuring they stay synchronized.
 
         **KEY**: Parallel buffers maintain the data-timestamp correspondence.
+
+        **GUARD**: Only appends to buffer once per sim step. process() may be
+        called multiple times at the same t_current (rewards, observations,
+        teleop visualization). Without this guard the buffer advances N times
+        per real step, dividing effective delay by N.
         """
         # Flatten data for buffer storage
         flat_data = data.reshape(self._num_envs, -1)
@@ -335,11 +344,15 @@ class DelayPipelineV3:
             # CircularBuffer will fill all slots with this data
             self._data_buffer.append(flat_data)
             self._timestamp_buffer.append(flat_ts)
+            self._last_append_time = t_current.clone()
             self._buffer_initialized = True
 
-        # Append new data to both buffers
-        self._data_buffer.append(flat_data)
-        self._timestamp_buffer.append(flat_ts)
+        # Only append if simulation time has advanced since last append
+        time_advanced = (t_current - self._last_append_time).abs() > 1e-6
+        if time_advanced.any():
+            self._data_buffer.append(flat_data)
+            self._timestamp_buffer.append(flat_ts)
+            self._last_append_time = t_current.clone()
 
         # Retrieve with the same time lag
         time_lags = self._latency_sampler.step_values
@@ -424,6 +437,7 @@ class DelayPipelineV3:
             self._data_buffer.reset()
             self._timestamp_buffer.reset()
             self._buffer_initialized = False
+            self._last_append_time.fill_(-1.0)
 
             # Reset staleness
             self._staleness_held_data.zero_()
@@ -444,6 +458,7 @@ class DelayPipelineV3:
             # Reset specific environments
             self._data_buffer.reset(env_ids)
             self._timestamp_buffer.reset(env_ids)
+            self._last_append_time[env_ids] = -1.0
 
             # Reset staleness for specific envs
             self._staleness_held_data[env_ids] = 0

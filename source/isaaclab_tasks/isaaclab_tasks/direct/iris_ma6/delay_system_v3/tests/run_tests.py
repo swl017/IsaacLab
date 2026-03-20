@@ -960,6 +960,142 @@ def run_curriculum_tests(results: TestResults, device: torch.device, verbose: bo
         results.add_fail("Dropout rate curriculum control", traceback.format_exc())
 
 
+def run_idempotency_tests(results: TestResults, device: torch.device, verbose: bool = False):
+    """Run idempotency tests — verify process() is safe to call multiple times per step.
+
+    This mirrors the real env lifecycle where delay pipeline's process() is called
+    from _get_rewards(), _get_observations(), and potentially teleop visualization.
+    Bug reference: buffer corruption from multiple process() calls at same t_current.
+    """
+    results.set_suite("Idempotency Tests (Multiple Calls Per Step)")
+
+    from isaaclab_tasks.direct.iris_ma6.delay_system_v3.delay_cfg_v3 import (
+        DelayPipelineCfgV3,
+        LatencyCfg,
+        StalenessCfg,
+        DropoutCfg,
+        DistributionCfg,
+    )
+    from isaaclab_tasks.direct.iris_ma6.delay_system_v3.delay_pipeline_v3 import (
+        DelayPipelineV3,
+    )
+
+    num_envs = 8
+    dt = 0.04
+    data_shape = (3,)
+
+    # Test 1: Three calls at same t_current return identical results
+    try:
+        cfg = DelayPipelineCfgV3(
+            latency=LatencyCfg(
+                enabled=True,
+                distribution=DistributionCfg(type="constant", value=0.08),
+                min_steps=2,
+            ),
+            staleness=StalenessCfg(enabled=False),
+            dropout=DropoutCfg(enabled=False),
+        )
+        pipeline = DelayPipelineV3(cfg, num_envs, device, dt, data_shape)
+        pipeline.set_mode("fixed", progress=1.0)
+
+        data = torch.randn(num_envs, 3, device=device)
+        t = torch.full((num_envs,), dt, device=device)
+
+        # Simulate 3 calls at same time (rewards, obs, teleop)
+        r1, ts1 = pipeline.process(data, t, t)
+        r2, ts2 = pipeline.process(data, t, t)
+        r3, ts3 = pipeline.process(data, t, t)
+
+        assert torch.allclose(r1, r2), f"Call 1 vs 2 differ: max diff={( r1 - r2).abs().max().item()}"
+        assert torch.allclose(r2, r3), f"Call 2 vs 3 differ: max diff={(r2 - r3).abs().max().item()}"
+        assert torch.allclose(ts1, ts2) and torch.allclose(ts2, ts3), "Timestamps differ across calls"
+        results.add_pass("Three calls at same t_current return identical results")
+    except Exception as e:
+        results.add_fail("Three calls at same t_current return identical results", traceback.format_exc())
+
+    # Test 2: Effective delay matches config, not config/N
+    try:
+        cfg = DelayPipelineCfgV3(
+            latency=LatencyCfg(
+                enabled=True,
+                distribution=DistributionCfg(type="constant", value=0.08),  # 2 steps
+                min_steps=2,
+            ),
+            staleness=StalenessCfg(enabled=False),
+            dropout=DropoutCfg(enabled=False),
+        )
+        pipeline = DelayPipelineV3(cfg, num_envs, device, dt, data_shape)
+        pipeline.set_mode("fixed", progress=1.0)
+
+        t_current = torch.zeros(num_envs, device=device)
+
+        # Step 0: initial
+        data_0 = torch.zeros(num_envs, 3, device=device)
+        pipeline.process(data_0, t_current.clone(), t_current.clone())
+
+        # Step 1: new data, call 3 times (simulating rewards + obs + teleop)
+        t_current += dt
+        data_1 = torch.ones(num_envs, 3, device=device)
+        pipeline.process(data_1, t_current.clone(), t_current.clone())
+        pipeline.process(data_1, t_current.clone(), t_current.clone())
+        pipeline.process(data_1, t_current.clone(), t_current.clone())
+
+        # Step 2: new data, call 3 times
+        t_current += dt
+        data_2 = torch.ones(num_envs, 3, device=device) * 2.0
+        pipeline.process(data_2, t_current.clone(), t_current.clone())
+        pipeline.process(data_2, t_current.clone(), t_current.clone())
+        pipeline.process(data_2, t_current.clone(), t_current.clone())
+
+        # Step 3: new data, retrieve result — with 2-step delay, should get data_1
+        t_current += dt
+        data_3 = torch.ones(num_envs, 3, device=device) * 3.0
+        result, _ = pipeline.process(data_3, t_current.clone(), t_current.clone())
+
+        # With 2-step latency and proper guarding, result should be data_1 (from 2 steps ago)
+        expected = data_1
+        assert torch.allclose(result, expected, atol=1e-5), (
+            f"Effective delay wrong! Expected data_1={expected[0].tolist()}, "
+            f"got {result[0].tolist()}. Buffer likely advanced multiple times per step."
+        )
+        results.add_pass("Effective delay matches config (not config/N)")
+    except Exception as e:
+        results.add_fail("Effective delay matches config (not config/N)", traceback.format_exc())
+
+    # Test 3: Buffer internal state doesn't advance on repeated calls
+    try:
+        cfg = DelayPipelineCfgV3(
+            latency=LatencyCfg(
+                enabled=True,
+                distribution=DistributionCfg(type="constant", value=0.08),
+                min_steps=2,
+            ),
+            staleness=StalenessCfg(enabled=False),
+            dropout=DropoutCfg(enabled=False),
+        )
+        pipeline = DelayPipelineV3(cfg, num_envs, device, dt, data_shape)
+        pipeline.set_mode("fixed", progress=1.0)
+
+        data = torch.randn(num_envs, 3, device=device)
+        t = torch.full((num_envs,), dt, device=device)
+
+        # First call: should append
+        pipeline.process(data, t, t)
+        last_time_after_first = pipeline._last_append_time.clone()
+
+        # Second and third calls: should NOT append (same t_current)
+        pipeline.process(data, t, t)
+        pipeline.process(data, t, t)
+        last_time_after_third = pipeline._last_append_time.clone()
+
+        assert torch.allclose(last_time_after_first, last_time_after_third), (
+            "Buffer append time changed on repeated calls at same t_current"
+        )
+        results.add_pass("Buffer state unchanged on repeated calls")
+    except Exception as e:
+        results.add_fail("Buffer state unchanged on repeated calls", traceback.format_exc())
+
+
 def main():
     """Main test runner."""
     # Open output file for logging
@@ -994,6 +1130,9 @@ def main():
             # New feature tests
             run_per_agent_randomization_tests(results, device, verbose)
             run_reward_mode_tests(results, device, verbose)
+
+            # Integration / idempotency tests
+            run_idempotency_tests(results, device, verbose)
 
         except Exception as e:
             results.add_error("Test Suite Execution", traceback.format_exc())

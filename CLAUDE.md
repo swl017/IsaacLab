@@ -133,6 +133,18 @@ Each environment supports multiple RL frameworks:
 ## Important Conventions
 - Quaternion: `wxyz` convention
 
+## Stateful Component Rules
+- Any method that advances internal state (buffer append, counter increment, RNG sample)
+  MUST be idempotent within a single sim step. Use a `_last_update_time` guard:
+  ```python
+  if (t_current - self._last_update_time).abs().max().item() < 1e-6:
+      return self._cached_result  # or skip the state mutation
+  ```
+- Distinguish **WRITE** methods (mutate state, call once per step) from **READ** methods (safe to call multiple times).
+  Document this in the module's `CONTEXT.md` under a "Calling Contract" section.
+- When writing spec documents, always include §4.4 "Calling Contract" specifying call frequency,
+  idempotency, lifecycle placement, and stateful invariants for each public method.
+
 ## Generating Tests for Functional Modules
 
 When creating tests for functional modules (e.g., controllers, sensors, safety systems, utilities), follow these guidelines to ensure Isaac Sim compatibility and consistency.

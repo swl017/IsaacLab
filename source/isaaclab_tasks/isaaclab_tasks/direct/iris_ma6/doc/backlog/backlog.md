@@ -84,7 +84,7 @@ Apply domain randomization for sim-to-real transfer including:
 
 ---
 
-## Roll-switching
+## Role-switching
 
 Observer-Intercepter
 
@@ -115,6 +115,4 @@ communication-based handoff. The agent needs a search/reacquisition strategy.
 1. After training converges with always-pointing resets, evaluate whether the trained policy
    can naturally reacquire a target that leaves the FOV mid-episode (it may learn this from
    the moving-target curriculum alone).
-2. If not, reintroduce curriculum-based gimbal/yaw randomization at reset as a later
-   curriculum phase (e.g., progress > 0.7), after the agent has mastered tracking.
-3. Consider a dedicated "search spiral" or "last-known-direction" heuristic as a fallback.
+2. If not, introduce radar-like detection system which gives rough estimates of where the target is.

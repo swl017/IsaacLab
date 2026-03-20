@@ -6,7 +6,7 @@ Device:        cuda
 Torch version: 2.5.1+cu118
 CUDA version:  11.8
 GPU name:      NVIDIA GeForce RTX 3090
-Started:       2026-03-18 00:40:52
+Started:       2026-03-20 18:08:12
 
 ================================================================================
 Configuration Tests
@@ -96,10 +96,17 @@ Reward Mode Configuration Tests
   [PASS] All four modes produce different outputs
 
 ================================================================================
+Idempotency Tests (Multiple Calls Per Step)
+================================================================================
+  [PASS] Three calls at same t_current return identical results
+  [PASS] Effective delay matches config (not config/N)
+  [PASS] Buffer state unchanged on repeated calls
+
+================================================================================
 TEST SUMMARY
 ================================================================================
-Total Tests: 55
-Passed:      55 (100.0%)
+Total Tests: 58
+Passed:      58 (100.0%)
 Failed:      0 (0.0%)
 Errors:      0 (0.0%)
 ================================================================================

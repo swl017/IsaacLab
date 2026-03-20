@@ -24,7 +24,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectMARLEnv
 from isaaclab.sensors import TiledCamera
-from isaaclab.utils.math import quat_mul
+from isaaclab.utils.math import quat_mul, quat_rotate_inverse
 
 from .bbox_raycaster_v2 import BBoxRayCasterV2
 from .bbox_raycaster_v2.utils.projection import create_intrinsic_matrix_tensor
@@ -39,7 +39,17 @@ from .triangulation import TriangulationResult, compute_full_triangulation
 from .visualization import CustomVisualization
 from .visualization.frame_visualizer import FRAME_LINKS
 
-
+DEBUG_DRAW = True
+if DEBUG_DRAW:
+    try:
+        import isaacsim.util.debug_draw._debug_draw as omni_debug_draw
+    except ImportError:
+        try:
+            from omni.isaac.debug_draw import _debug_draw as omni_debug_draw
+        except ImportError:
+            print("Warning: Debug draw module not available. Disabling debug visualization.")
+            DEBUG_DRAW = False
+            omni_debug_draw = None
 class IrisMA6TestEnv(DirectMARLEnv):
     """Simplified test environment for iris_ma6 DroneController validation.
 
@@ -79,6 +89,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
         # Auto-disable tiled cameras when --enable_cameras is not set
         if cfg.enable_tiled_cameras and not int(os.environ.get("ENABLE_CAMERAS", 0)):
             cfg.enable_tiled_cameras = False
+            print("[IrisMA6TestEnv] Tiled cameras disabled (ENABLE_CAMERAS not set)")
+        else:
+            print(f"[IrisMA6TestEnv] Tiled cameras enabled: {cfg.enable_tiled_cameras}")
 
         # Dynamically generate agent-specific robot and camera configs BEFORE super().__init__
         # This is required because the scene setup needs the configs
@@ -171,6 +184,8 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self._root_quat_w: Dict[str, torch.Tensor] = {}
         self._root_lin_vel_w: Dict[str, torch.Tensor] = {}
         self._root_ang_vel_b: Dict[str, torch.Tensor] = {}
+        self._root_lin_acc_w: Dict[str, torch.Tensor] = {}
+        self._root_lin_acc_b: Dict[str, torch.Tensor] = {}
         self._gimbal_joint_pos: Dict[str, torch.Tensor] = {}
         self._target_pos_w: torch.Tensor = torch.zeros(self.num_envs, 3, device=self.device)
         self._target_quat_w: torch.Tensor = torch.zeros(self.num_envs, 4, device=self.device)
@@ -617,6 +632,11 @@ class IrisMA6TestEnv(DirectMARLEnv):
             self._root_quat_w[agent_id] = robot.data.root_quat_w
             self._root_lin_vel_w[agent_id] = robot.data.root_lin_vel_w
             self._root_ang_vel_b[agent_id] = robot.data.root_ang_vel_b
+            # Linear acceleration (world and body frame — mimics IMU accelerometer)
+            self._root_lin_acc_w[agent_id] = robot.data.body_lin_acc_w[:, self._body_ids[agent_id][0]]
+            self._root_lin_acc_b[agent_id] = quat_rotate_inverse(
+                self._root_quat_w[agent_id], self._root_lin_acc_w[agent_id]
+            )
             self._gimbal_joint_pos[agent_id] = torch.stack(
                 [
                     robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["pitch"]],
@@ -694,6 +714,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 gt_data.body_orientation_w = self._root_quat_w[agent_id]
                 gt_data.body_linear_velocity_w = self._root_lin_vel_w[agent_id]
                 gt_data.body_angular_velocity_w = self._root_ang_vel_b[agent_id]
+                gt_data.body_angular_velocity_b = self._root_ang_vel_b[agent_id]
+                gt_data.body_linear_acceleration_w = self._root_lin_acc_w[agent_id]
+                gt_data.body_linear_acceleration_b = self._root_lin_acc_b[agent_id]
 
                 # Joint states (gimbal) - order is pitch, yaw, roll
                 gt_data.joint_positions_b = self._gimbal_joint_pos[agent_id]
@@ -902,7 +925,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
         rewards_dict = {}
 
         # Update curriculum progress
-        current_step = self.common_step_counter if self.cfg.debug_initial_step == 0 else self.cfg.debug_initial_step
+        current_step = self.common_step_counter if not DEBUG_DRAW else self.cfg.debug_initial_step
         curr = self.cfg.curriculum
         self.progress_coord = self._linear_progress(
             curr.coordination_start_step, curr.coordination_end_step, current_step
@@ -1284,6 +1307,8 @@ class IrisMA6TestEnv(DirectMARLEnv):
                         ego_data.body_position_w,  # (N, 3)
                         ego_data.body_linear_velocity_w,  # (N, 3)
                         ego_data.body_orientation_w,  # (N, 4)
+                        ego_data.body_angular_velocity_b,  # (N, 3) — gyro
+                        ego_data.body_linear_acceleration_b,  # (N, 3) — accelerometer
                         gimbal_jp[:, 1:2],  # (N, 1) yaw
                         gimbal_jp[:, 0:1],  # (N, 1) pitch
                         ego_data.camera_zoom_level.unsqueeze(-1),  # (N, 1)
@@ -1303,12 +1328,14 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     self._smoothed_bbox_confidence[:, idx, 0] < self._smoothed_bbox_empty_threshold
                 ).float().unsqueeze(-1)
 
-                # Concatenate observation: pos(3) + vel(3) + quat(4) + gimbal_yaw(1) + gimbal_pitch(1) + zoom(1) + bbox(4) + bbox_empty(1)
+                # Concatenate observation: pos(3) + vel(3) + quat(4) + ang_vel_b(3) + lin_acc_b(3) + gimbal_yaw(1) + gimbal_pitch(1) + zoom(1) + bbox(4) + bbox_empty(1)
                 obs[agent_id] = torch.cat(
                     [
                         self._root_pos_w[agent_id],  # (N, 3)
                         self._root_lin_vel_w[agent_id],  # (N, 3)
                         self._root_quat_w[agent_id],  # (N, 4)
+                        self._root_ang_vel_b[agent_id],  # (N, 3) — gyro
+                        self._root_lin_acc_b[agent_id],  # (N, 3) — accelerometer
                         gimbal_jp[:, 1:2],  # (N, 1) yaw
                         gimbal_jp[:, 0:1],  # (N, 1) pitch
                         self.zoom_level[:, idx : idx + 1],  # (N, 1)

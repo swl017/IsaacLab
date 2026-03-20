@@ -53,18 +53,23 @@ _physics_step()
   └─ Simulation substeps
        │
        ▼
-_post_physics_step()
+_post_physics_step() / _update_state_cache()
   ├─ Read ground-truth state from simulation
-  ├─ DelaySystem.update() → delayed AgentStates
+  ├─ DelaySystem.set_time()              [WRITE — advances sim clock]
+  ├─ DelaySystem.update_ground_truth()   [WRITE — appends to ring buffer, ONCE per step]
   ├─ BBoxRayCasterV2.update() → 2D bboxes + occlusion
   └─ Triangulation on GT and delayed camera rays
        │
        ▼
-_get_observations()                    _get_rewards()
-  ├─ Delayed states (or GT)              ├─ Triangulation covariance quality
-  ├─ Normalized bboxes                   ├─ CBF collision penalty
-  └─ Per-agent obs vector                ├─ Bbox center/size rewards
-                                         └─ Action regularization
+_get_rewards()                         _get_observations()
+  ├─ DelaySystem.set_delay_mode()        ├─ DelaySystem.get_states_for_observations()
+  │   [CONFIG — curriculum control]      │   [READ — safe to call multiple times]
+  ├─ DelaySystem.get_states_for_rewards()├─ Normalized bboxes
+  │   [READ — safe to call multiple times]└─ Per-agent obs vector
+  ├─ Triangulation covariance quality
+  ├─ CBF collision penalty
+  ├─ Bbox center/size rewards
+  └─ Action regularization
        │
        ▼
 _get_dones()
@@ -95,6 +100,12 @@ initial_states, domain_randomization, visualization, curriculum, asset
 
 **Has dependencies**:
 target_controller → controller
+
+## Stateful Mutation Rule
+
+Methods that advance internal state (buffer appends, counter increments, RNG samples) must only be called from **ONE lifecycle hook per step**. Read-only accessors are safe to call from multiple hooks. All stateful methods must be idempotent within a single sim step (guarded by `_last_update_time` or equivalent).
+
+See individual module `CONTEXT.md` files for per-method WRITE/READ/CONFIG annotations.
 
 ## File Conventions
 
