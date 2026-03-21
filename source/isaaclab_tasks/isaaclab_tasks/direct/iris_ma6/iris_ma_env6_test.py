@@ -16,7 +16,6 @@ Control Architecture:
 from __future__ import annotations
 
 import copy
-import os
 import torch
 from typing import Dict
 
@@ -86,12 +85,21 @@ class IrisMA6TestEnv(DirectMARLEnv):
             render_mode: Render mode for visualization.
             **kwargs: Additional arguments passed to DirectMARLEnv.
         """
-        # Auto-disable tiled cameras when --enable_cameras is not set
-        # if cfg.enable_tiled_cameras and not int(os.environ.get("ENABLE_CAMERAS", 0)):
-        #     cfg.enable_tiled_cameras = False
-        #     print("[IrisMA6TestEnv] Tiled cameras disabled (ENABLE_CAMERAS not set)")
-        # else:
-        #     print(f"[IrisMA6TestEnv] Tiled cameras enabled: {cfg.enable_tiled_cameras}")
+        # Auto-disable tiled cameras when rendering is not available.
+        # Check both the ENABLE_CAMERAS env var and carb settings (which reflect
+        # --enable_cameras CLI flag resolved by AppLauncher).
+        if cfg.enable_tiled_cameras:
+            import carb.settings
+            rendering_enabled = carb.settings.get_settings().get_as_bool(
+                "/physics/fabricUpdateTransformations"
+            )
+            if not rendering_enabled:
+                cfg.enable_tiled_cameras = False
+                print("[IrisMA6TestEnv] Tiled cameras disabled (rendering not enabled)")
+            else:
+                print("[IrisMA6TestEnv] Tiled cameras enabled")
+        else:
+            print("[IrisMA6TestEnv] Tiled cameras disabled (config)")
 
         # Dynamically generate agent-specific robot and camera configs BEFORE super().__init__
         # This is required because the scene setup needs the configs
