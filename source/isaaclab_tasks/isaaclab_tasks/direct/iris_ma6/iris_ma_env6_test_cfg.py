@@ -251,7 +251,10 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # ==========================================================================
 
     max_lin_vel: float = 10.0
-    """Maximum linear velocity (m/s). High values can saturate the attitude controller."""
+    """Maximum linear velocity (m/s) at full curriculum."""
+
+    max_lin_vel_min: float = 5.0
+    """Minimum linear velocity (m/s) at curriculum progress=0. Ramps to max_lin_vel with target motion curriculum."""
 
     max_yaw_rate: float = math.radians(45.0)
     """Maximum yaw rate (rad/s)."""
@@ -335,7 +338,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     triangulation: TriangulationCfg = TriangulationCfg()
     """Triangulation module configuration for multi-camera target localization."""
 
-    enable_triangulation: bool = False
+    enable_triangulation: bool = True
     """Enable triangulation-based rewards and observations. Default False for backward compatibility."""
 
     triangulation_reward_scale: float = 5.0
@@ -355,7 +358,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     action_delta_weight: list = [1, 1, 1, 1, 0.5, 0.5, 0.3]
     """Weights for action delta (smoothness) penalty."""
 
-    action_delta_penalty_scale: float = -0.05
+    action_delta_penalty_scale: float = -0.2
     """Penalty scale for action changes (smoothness)."""
 
     bbox_center_reward_scale: float = 60.0

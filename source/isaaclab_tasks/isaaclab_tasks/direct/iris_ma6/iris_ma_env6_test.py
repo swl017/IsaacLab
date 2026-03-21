@@ -1588,8 +1588,10 @@ class IrisMA6TestEnv(DirectMARLEnv):
             self._delay_system.reset(env_ids)
             self._delay_system.randomize_per_agent_params(env_ids)
 
-        # Reset per-env max_lin_vel to nominal before potential randomization
-        self._max_lin_vel[env_ids] = self.cfg.max_lin_vel
+        # Scale max_lin_vel with target-motion curriculum: 5 m/s at progress=0, full at progress=1
+        self._max_lin_vel[env_ids] = self.cfg.max_lin_vel_min + self.progress_moving_target * (
+            self.cfg.max_lin_vel - self.cfg.max_lin_vel_min
+        )
 
         # Randomize controller gains (curriculum-gated to dynamics phase)
         if self.progress_dynamics > 0.0:
