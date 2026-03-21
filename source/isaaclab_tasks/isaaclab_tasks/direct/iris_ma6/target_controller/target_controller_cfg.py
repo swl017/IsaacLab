@@ -131,7 +131,7 @@ class TargetControllerCfg:
     max_speed_end: float = 5.0
     """Maximum speed at curriculum progress 1 [m/s]."""
 
-    max_acceleration: float = 5.0
+    max_acceleration: float = 2.0
     """Maximum acceleration [m/s^2]."""
 
     # ==========================================================================

@@ -129,7 +129,7 @@ class InitialStatesCfg:
     Actual velocity = uniform(0, progress * scale_max) * max_velocity
     """
 
-    target_max_velocity: float = 10.0
+    target_max_velocity: float = 2.0
     """Maximum target initial velocity magnitude (m/s)."""
 
     target_velocity_scale_max: float = 1.0
@@ -194,7 +194,7 @@ class InitialStatesCfg:
     zoom_min: float = 1.0
     """Minimum zoom level."""
 
-    zoom_max: float = 30.0
+    zoom_max: float = 10.0
     """Maximum zoom level."""
 
     zoom_initial_min: float = 1.0
@@ -203,7 +203,7 @@ class InitialStatesCfg:
     zoom_initial_max_start: float = 1.0
     """Maximum initial zoom level at curriculum progress 0."""
 
-    zoom_initial_max_end: float = 10.0
+    zoom_initial_max_end: float = 6.0
     """Maximum initial zoom level at curriculum progress 1."""
 
     # ==========================================================================

@@ -213,3 +213,20 @@ Next:
   (same issue as eb0e3dba99 but confirmed independent of CBF)
 - Longer term: consider whether 24D obs improves asymptotic performance vs 18D
   (if not, may revert to 18D + add derived fields later)
+
+----------------------------------------
+2026-03-21 — Zoom curriculum + target speed + gimbal noise fixes
+----------------------------------------
+Done:
+- Added curriculum-scaled tau_zoom: near-instant at progress=0, full lag at progress=1
+  - tau = max(tau_nominal * progress_dynamics, 1e-4) set at each reset
+  - File: iris_ma_env6_test.py (_reset_idx, after set_zoom)
+- Changed initial gimbal noise from Gaussian to uniform distribution
+  - File: initial_states_generator.py (always_pointing mode)
+- Decreased max zoom level
+  - File: initial_states_cfg.py
+
+Next:
+- Train with these fixes and monitor early bbox metrics
+- Expect faster early convergence: instant zoom + no target motion
+- Monitor collapse point: does it still occur when target starts moving?

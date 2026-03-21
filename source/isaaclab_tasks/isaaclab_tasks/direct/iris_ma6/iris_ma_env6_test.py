@@ -87,11 +87,11 @@ class IrisMA6TestEnv(DirectMARLEnv):
             **kwargs: Additional arguments passed to DirectMARLEnv.
         """
         # Auto-disable tiled cameras when --enable_cameras is not set
-        if cfg.enable_tiled_cameras and not int(os.environ.get("ENABLE_CAMERAS", 0)):
-            cfg.enable_tiled_cameras = False
-            print("[IrisMA6TestEnv] Tiled cameras disabled (ENABLE_CAMERAS not set)")
-        else:
-            print(f"[IrisMA6TestEnv] Tiled cameras enabled: {cfg.enable_tiled_cameras}")
+        # if cfg.enable_tiled_cameras and not int(os.environ.get("ENABLE_CAMERAS", 0)):
+        #     cfg.enable_tiled_cameras = False
+        #     print("[IrisMA6TestEnv] Tiled cameras disabled (ENABLE_CAMERAS not set)")
+        # else:
+        #     print(f"[IrisMA6TestEnv] Tiled cameras enabled: {cfg.enable_tiled_cameras}")
 
         # Dynamically generate agent-specific robot and camera configs BEFORE super().__init__
         # This is required because the scene setup needs the configs
@@ -345,6 +345,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self.progress_tracking = 0.0
         self.progress_moving_target = 0.0
         self.progress_delay = 0.0
+        self.progress_dynamics = 0.0
 
         # Initialize target controller for physics-based target movement
         if self.cfg.enable_target_controller:
@@ -1456,6 +1457,11 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         num_reset = len(env_ids)
 
+        self.progress_dynamics = self._linear_progress(
+            self.cfg.curriculum.dynamics_start_step,
+            self.cfg.curriculum.dynamics_end_step,
+        )
+
         if self._initial_states is not None:
             # Generate randomized initial states via InitialStates module
             result = self._initial_states.generate(
@@ -1534,6 +1540,15 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     result.zoom_levels[:, idx], env_ids
                 )
 
+                # Scale tau_zoom with curriculum: near-instant at progress=0,
+                # ramp to configured value (e.g. 0.1s) at full tracking progress.
+                # This gives MA5-like instant zoom early, realistic lag later.
+                tau_nominal = self.cfg.drone_controller.zoom.tau_zoom
+                tau_scaled = tau_nominal * self.progress_dynamics
+                self._controllers[agent_id]._zoom.set_tau_zoom(
+                    max(tau_scaled, 1e-4)  # avoid division-by-zero in exp(-dt/tau)
+                )
+
             # Apply target states
             target_pos = result.target_positions + self._terrain.env_origins[env_ids]
             target_quat = result.target_orientations
@@ -1569,21 +1584,17 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self._max_lin_vel[env_ids] = self.cfg.max_lin_vel
 
         # Randomize controller gains (curriculum-gated to dynamics phase)
-        dynamics_progress = self._linear_progress(
-            self.cfg.curriculum.dynamics_start_step,
-            self.cfg.curriculum.dynamics_end_step,
-        )
-        if dynamics_progress > 0.0:
+        if self.progress_dynamics > 0.0:
             for agent_id in self.cfg.possible_agents:
                 self._controllers[agent_id].randomize_gains(
-                    env_ids, dynamics_progress, self.cfg.gain_randomization
+                    env_ids, self.progress_dynamics, self.cfg.gain_randomization
                 )
 
             # Randomize max linear velocity (same dynamics curriculum gate)
             gain_cfg = self.cfg.gain_randomization
             if gain_cfg.randomize_max_lin_vel:
-                low = 1.0 - dynamics_progress * (1.0 - gain_cfg.max_lin_vel_scale_range[0])
-                high = 1.0 + dynamics_progress * (gain_cfg.max_lin_vel_scale_range[1] - 1.0)
+                low = 1.0 - self.progress_dynamics * (1.0 - gain_cfg.max_lin_vel_scale_range[0])
+                high = 1.0 + self.progress_dynamics * (gain_cfg.max_lin_vel_scale_range[1] - 1.0)
                 M = len(env_ids)
                 scale = torch.empty(M, device=self.device).uniform_(low, high)
                 self._max_lin_vel[env_ids] = self.cfg.max_lin_vel * scale

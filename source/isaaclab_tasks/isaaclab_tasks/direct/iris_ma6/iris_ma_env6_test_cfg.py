@@ -474,7 +474,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # ==========================================================================
     # Debugging and Testing Flags
     # ==========================================================================
-    debug_initial_step: int = 0 #200000
+    debug_initial_step: int = 0 #20000
     """If > 0, initializes the environment at the specified training step for debugging."""
 
 
