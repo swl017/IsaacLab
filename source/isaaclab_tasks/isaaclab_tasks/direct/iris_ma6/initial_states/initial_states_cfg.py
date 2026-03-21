@@ -110,10 +110,10 @@ class InitialStatesCfg:
     Sampled as: uniform(min, min + progress * (max - min))
     """
 
-    target_height_offset_min: float = -2.0
+    target_height_offset_min: float = 0.0
     """Minimum target height offset from cylinder center (meters)."""
 
-    target_height_offset_max: float = 2.0
+    target_height_offset_max: float = 4.0
     """Maximum target height offset from cylinder center (meters)."""
 
     # ==========================================================================

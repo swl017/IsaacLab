@@ -230,3 +230,25 @@ Next:
 - Train with these fixes and monitor early bbox metrics
 - Expect faster early convergence: instant zoom + no target motion
 - Monitor collapse point: does it still occur when target starts moving?
+
+----------------------------------------
+2026-03-21 — Video recording + viewer improvements
+----------------------------------------
+Done:
+- Added video recording to train_mappo_rnn_hydra.py:
+  - CLI args: --video, --video_length, --video_interval
+  - Diagnosed gymnasium.wrappers.RecordVideo incompatibility with DirectMARLEnv
+    (dict-based terminateds/truncateds breaks RecordVideo's step logic)
+  - Replaced with custom MARLVideoRecorder + VideoRecordingTrainer subclass
+  - MARLVideoRecorder calls env.unwrapped.render() directly, writes mp4 via moviepy
+  - VideoRecordingTrainer overrides multi_agent_train() to inject frame capture
+  - File: scripts/reinforcement_learning/skrl/train_mappo_rnn_hydra.py
+- Added viewer camera lookat-target on episode reset:
+  - Viewer now points at target position at start of each episode (env_index 0)
+  - Computes relative offset from tracked robot to target for lookat
+  - File: iris_ma_env6_test.py (_reset_idx)
+
+Next:
+- Test video recording end-to-end with a short training run (--video --video_interval 500 --video_length 100)
+- Verify viewer camera behavior during teleop/play
+- Continue training runs and monitor curriculum progression

@@ -1648,6 +1648,16 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self._triangulation_result_gt = None
         self._triangulation_result_obs = None
 
+        # Point viewer camera at target when the tracked env resets
+        if self.viewport_camera_controller is not None and self.cfg.viewer.env_index in env_ids:
+            target_pos_w = self.target.data.root_pos_w[self.cfg.viewer.env_index]  # [3]
+            robot_pos_w = self._robots[self.cfg.possible_agents[0]].data.root_pos_w[self.cfg.viewer.env_index]  # [3]
+            lookat_offset = (target_pos_w - robot_pos_w).detach().cpu().numpy() * 1.5
+            import numpy as np
+            angle = np.arctan2(-lookat_offset[1], -lookat_offset[0])
+            eye = np.array([10 * np.cos(angle), 10 * np.sin(angle), 1.0])  # Offset the camera position for better view
+            self.viewport_camera_controller.update_view_location(eye=eye)
+
         # Populate state caches so _get_observations works on first reset
         self._update_state_cache()
 

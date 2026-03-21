@@ -83,7 +83,7 @@ agent:
   # Experiment tracking
   experiment:
     directory: iris_ma6
-    experiment_name: "3c331a5772_slower_target_instant_zoom" 
+    experiment_name: "_test" 
     write_interval: auto
     checkpoint_interval: auto
     store_separately: false

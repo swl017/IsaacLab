@@ -673,8 +673,8 @@ class InitialStatesGenerator:
 
                 elif cfg.gimbal_curriculum_mode == "always_pointing":
                     # All agents point at target
-                    yaw = yaw_pointing + torch.empty(1, device=self.device).uniform_(-cfg.orientation_noise_std, cfg.orientation_noise_std).item()
-                    pitch = pitch_pointing + torch.empty(1, device=self.device).uniform_(-cfg.orientation_noise_std, cfg.orientation_noise_std).item()
+                    yaw = yaw_pointing
+                    pitch = pitch_pointing
 
                 elif cfg.gimbal_curriculum_mode == "gradual":
                     # With probability (1-progress), point at target

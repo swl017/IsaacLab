@@ -38,6 +38,9 @@ parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 # parser.add_argument("--experiment_name", type=str, default="", help="Custom experiment name")
+parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
+parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
+parser.add_argument("--video_interval", type=int, default=2000, help="Interval between video recordings (in steps).")
 parser.add_argument("--headless", action="store_true", default=True, help="Run in headless mode (no GUI).")
 
 # Parse known args (separates our args from Hydra args)
@@ -50,7 +53,7 @@ sys.argv = [sys.argv[0]] + hydra_args
 from isaaclab.app import AppLauncher
 
 # Create minimal AppLauncher args
-app_args = argparse.Namespace(headless=args_cli.headless, device="cuda:0", experience="")
+app_args = argparse.Namespace(headless=args_cli.headless, device="cuda:0", experience="", enable_cameras=args_cli.video)
 app_launcher = AppLauncher(app_args)
 simulation_app = app_launcher.app
 
@@ -78,6 +81,71 @@ from isaaclab.utils.io import dump_pickle, dump_yaml
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
 from isaaclab_rl.skrl import SkrlVecEnvWrapper
+
+
+class MARLVideoRecorder:
+    """Simple video recorder for MARL environments.
+
+    Captures viewport frames at specified intervals and writes mp4 videos using moviepy.
+    Works directly with DirectMARLEnv.render() without gymnasium wrapper compatibility issues.
+    """
+
+    def __init__(self, env, video_folder: str, video_interval: int = 2000, video_length: int = 200):
+        self.env = env
+        self.video_folder = video_folder
+        self.video_interval = video_interval
+        self.video_length = video_length
+        self.step_count = 0
+        self._frames = []
+        self._recording = False
+        self._video_count = 0
+
+        os.makedirs(video_folder, exist_ok=True)
+        print(f"[INFO] Video recorder: folder={video_folder}, interval={video_interval}, length={video_length}")
+
+    def step(self):
+        """Call after each environment step to potentially capture a frame."""
+        self.step_count += 1
+
+        # Start recording at specified intervals
+        if not self._recording and self.step_count % self.video_interval == 0:
+            self._recording = True
+            self._frames = []
+
+        # Capture frame if recording
+        if self._recording:
+            frame = self.env.render()
+            if frame is not None:
+                self._frames.append(frame)
+
+            # Stop recording after video_length frames
+            if len(self._frames) >= self.video_length:
+                self._save_video()
+                self._recording = False
+                self._frames = []
+
+    def close(self):
+        """Save any in-progress recording."""
+        if self._recording and len(self._frames) > 0:
+            self._save_video()
+            self._recording = False
+            self._frames = []
+
+    def _save_video(self):
+        """Write accumulated frames to an mp4 file."""
+        if len(self._frames) == 0:
+            return
+        try:
+            from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
+
+            path = os.path.join(self.video_folder, f"rl-video-step-{self.step_count - len(self._frames)}.mp4")
+            fps = self.env.metadata.get("render_fps", 30) if hasattr(self.env, "metadata") else 30
+            clip = ImageSequenceClip(self._frames, fps=fps)
+            clip.write_videofile(path, logger="bar")
+            print(f"[INFO] Video saved: {path} ({len(self._frames)} frames)")
+            self._video_count += 1
+        except Exception as e:
+            print(f"[WARNING] Failed to save video: {e}")
 
 
 class SingleAgentWrapper:
@@ -124,6 +192,82 @@ class SingleAgentWrapper:
 
     def __getattr__(self, name):
         return getattr(self.env, name)
+
+
+class VideoRecordingTrainer(SequentialTrainer):
+    """SequentialTrainer with video recording support for MARL environments.
+
+    Overrides multi_agent_train to capture viewport frames at specified intervals
+    and write mp4 videos using moviepy, bypassing gymnasium's RecordVideo wrapper
+    which is incompatible with DirectMARLEnv's dict-based step returns.
+    """
+
+    def __init__(self, env, agents, cfg=None, video_recorder=None, **kwargs):
+        super().__init__(env=env, agents=agents, cfg=cfg, **kwargs)
+        self.video_recorder = video_recorder
+
+    def multi_agent_train(self):
+        """Override to inject video recording after each env step."""
+        import sys
+        import tqdm
+
+        assert self.num_simultaneous_agents == 1
+        assert self.env.num_agents > 1
+
+        states, infos = self.env.reset()
+        shared_states = self.env.state()
+
+        for timestep in tqdm.tqdm(
+            range(self.initial_timestep, self.timesteps), disable=self.disable_progressbar, file=sys.stdout
+        ):
+            self.agents.pre_interaction(timestep=timestep, timesteps=self.timesteps)
+
+            with torch.no_grad():
+                actions = self.agents.act(states, timestep=timestep, timesteps=self.timesteps)[0]
+
+                next_states, rewards, terminated, truncated, infos = self.env.step(actions)
+                shared_next_states = self.env.state()
+                infos["shared_states"] = shared_states
+                infos["shared_next_states"] = shared_next_states
+
+                # render scene
+                if not self.headless:
+                    self.env.render()
+
+                # capture video frame
+                if self.video_recorder is not None:
+                    self.video_recorder.step()
+
+                self.agents.record_transition(
+                    states=states,
+                    actions=actions,
+                    rewards=rewards,
+                    next_states=next_states,
+                    terminated=terminated,
+                    truncated=truncated,
+                    infos=infos,
+                    timestep=timestep,
+                    timesteps=self.timesteps,
+                )
+
+                if self.environment_info in infos:
+                    for k, v in infos[self.environment_info].items():
+                        if isinstance(v, torch.Tensor) and v.numel() == 1:
+                            self.agents.track_data(f"Info / {k}", v.item())
+
+            self.agents.post_interaction(timestep=timestep, timesteps=self.timesteps)
+
+            if not self.env.agents:
+                with torch.no_grad():
+                    states, infos = self.env.reset()
+                    shared_states = self.env.state()
+            else:
+                states = next_states
+                shared_states = shared_next_states
+
+        # Save any in-progress recording
+        if self.video_recorder is not None:
+            self.video_recorder.close()
 
 
 def create_models(agent_cfg: dict, env, device, is_multi_agent: bool):
@@ -246,26 +390,6 @@ def main(env_cfg, agent_cfg: dict):
     seed = agent_cfg.get("seed", 42)
     set_seed(seed)
 
-    # Create environment
-    print(f"[INFO] Creating environment: {args_cli.task}")
-    print(f"[INFO] Number of environments: {env_cfg.scene.num_envs}")
-
-    env = gym.make(args_cli.task, cfg=env_cfg)
-    env = SkrlVecEnvWrapper(env)
-    device = env.device
-
-    # Detect multi-agent
-    is_multi_agent = isinstance(env.unwrapped.unwrapped, DirectMARLEnv)
-
-    if is_multi_agent:
-        possible_agents = env.possible_agents
-        print(f"[INFO] Multi-agent environment: {len(possible_agents)} agents")
-    else:
-        print(f"[INFO] Single-agent environment")
-        env = SingleAgentWrapper(env)
-        possible_agents = env.possible_agents
-        is_multi_agent = True
-
     # Validate burn-in
     sequence_length = agent_cfg.get("agent", {}).get("sequence_length", 50)
     burn_in_steps = agent_cfg.get("agent", {}).get("burn_in_steps", 0)
@@ -273,34 +397,18 @@ def main(env_cfg, agent_cfg: dict):
     if burn_in_steps >= sequence_length:
         raise ValueError(f"burn_in_steps ({burn_in_steps}) must be < sequence_length ({sequence_length})")
 
-    # Create models
-    models, memories, shared_observation_spaces, observation_spaces, action_spaces = create_models(
-        agent_cfg, env, device, is_multi_agent
-    )
-
     # Process preprocessor configs
     if "state_preprocessor" in agent_cfg.get("agent", {}):
         if agent_cfg["agent"]["state_preprocessor"] == "RunningStandardScaler":
             agent_cfg["agent"]["state_preprocessor"] = RunningStandardScaler
-        if agent_cfg["agent"].get("state_preprocessor_kwargs") is None:
-            agent_cfg["agent"]["state_preprocessor_kwargs"] = {}
-        agent_cfg["agent"]["state_preprocessor_kwargs"]["size"] = observation_spaces[possible_agents[0]]
-        agent_cfg["agent"]["state_preprocessor_kwargs"]["device"] = device
 
     if "shared_state_preprocessor" in agent_cfg.get("agent", {}):
         if agent_cfg["agent"]["shared_state_preprocessor"] == "RunningStandardScaler":
             agent_cfg["agent"]["shared_state_preprocessor"] = RunningStandardScaler
-        if agent_cfg["agent"].get("shared_state_preprocessor_kwargs") is None:
-            agent_cfg["agent"]["shared_state_preprocessor_kwargs"] = {}
-        agent_cfg["agent"]["shared_state_preprocessor_kwargs"]["size"] = shared_observation_spaces[possible_agents[0]]
-        agent_cfg["agent"]["shared_state_preprocessor_kwargs"]["device"] = device
 
     if "value_preprocessor" in agent_cfg.get("agent", {}):
         if agent_cfg["agent"]["value_preprocessor"] == "RunningStandardScaler":
             agent_cfg["agent"]["value_preprocessor"] = RunningStandardScaler
-        if agent_cfg["agent"].get("value_preprocessor_kwargs") is None:
-            agent_cfg["agent"]["value_preprocessor_kwargs"] = {}
-        agent_cfg["agent"]["value_preprocessor_kwargs"]["device"] = device
 
     if "learning_rate_scheduler" in agent_cfg.get("agent", {}):
         if agent_cfg["agent"]["learning_rate_scheduler"] == "KLAdaptiveLR":
@@ -333,6 +441,60 @@ def main(env_cfg, agent_cfg: dict):
     dump_pickle(os.path.join(log_dir, "params", "env.pkl"), env_cfg)
     dump_pickle(os.path.join(log_dir, "params", "agent.pkl"), agent_cfg)
 
+    # Create environment
+    print(f"[INFO] Creating environment: {args_cli.task}")
+    print(f"[INFO] Number of environments: {env_cfg.scene.num_envs}")
+
+    env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+
+    # Create video recorder (wraps unwrapped env directly, not the gym wrapper chain)
+    video_recorder = None
+    if args_cli.video:
+        video_recorder = MARLVideoRecorder(
+            env=env.unwrapped,
+            video_folder=os.path.join(log_dir, "videos", "train"),
+            video_interval=args_cli.video_interval,
+            video_length=args_cli.video_length,
+        )
+
+    env = SkrlVecEnvWrapper(env)
+    device = env.device
+
+    # Detect multi-agent
+    is_multi_agent = isinstance(env.unwrapped.unwrapped, DirectMARLEnv)
+
+    if is_multi_agent:
+        possible_agents = env.possible_agents
+        print(f"[INFO] Multi-agent environment: {len(possible_agents)} agents")
+    else:
+        print(f"[INFO] Single-agent environment")
+        env = SingleAgentWrapper(env)
+        possible_agents = env.possible_agents
+        is_multi_agent = True
+
+    # Create models
+    models, memories, shared_observation_spaces, observation_spaces, action_spaces = create_models(
+        agent_cfg, env, device, is_multi_agent
+    )
+
+    # Finalize preprocessor kwargs (need device and observation spaces from env)
+    if "state_preprocessor" in agent_cfg.get("agent", {}):
+        if agent_cfg["agent"].get("state_preprocessor_kwargs") is None:
+            agent_cfg["agent"]["state_preprocessor_kwargs"] = {}
+        agent_cfg["agent"]["state_preprocessor_kwargs"]["size"] = observation_spaces[possible_agents[0]]
+        agent_cfg["agent"]["state_preprocessor_kwargs"]["device"] = device
+
+    if "shared_state_preprocessor" in agent_cfg.get("agent", {}):
+        if agent_cfg["agent"].get("shared_state_preprocessor_kwargs") is None:
+            agent_cfg["agent"]["shared_state_preprocessor_kwargs"] = {}
+        agent_cfg["agent"]["shared_state_preprocessor_kwargs"]["size"] = shared_observation_spaces[possible_agents[0]]
+        agent_cfg["agent"]["shared_state_preprocessor_kwargs"]["device"] = device
+
+    if "value_preprocessor" in agent_cfg.get("agent", {}):
+        if agent_cfg["agent"].get("value_preprocessor_kwargs") is None:
+            agent_cfg["agent"]["value_preprocessor_kwargs"] = {}
+        agent_cfg["agent"]["value_preprocessor_kwargs"]["device"] = device
+
     # Create agent
     mappo_cfg = MAPPO_RNN_DEFAULT_CONFIG.copy()
     mappo_cfg.update(agent_cfg.get("agent", {}))
@@ -355,7 +517,10 @@ def main(env_cfg, agent_cfg: dict):
         "environment_info": "log",
     }
 
-    trainer = SequentialTrainer(cfg=trainer_cfg, env=env, agents=agent)
+    if video_recorder is not None:
+        trainer = VideoRecordingTrainer(cfg=trainer_cfg, env=env, agents=agent, video_recorder=video_recorder)
+    else:
+        trainer = SequentialTrainer(cfg=trainer_cfg, env=env, agents=agent)
 
     # Print training info
     print("=" * 80)

@@ -127,7 +127,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     debug_frame_vis: bool = False
     """Enable visualization of coordinate frames for debugging."""
 
-    enable_tiled_cameras: bool = True
+    enable_tiled_cameras: bool = False
     """Enable TiledCamera sensors in the scene. Disable to skip camera creation for faster headless training."""
 
     # ==========================================================================
@@ -176,10 +176,12 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     """Target rigid object configuration with gravity enabled."""
 
     viewer: ViewerCfg = ViewerCfg(
-        eye=(18.0, 15.0, 16.0),
+        eye=(-10.0, 0.0, 1.0),
         lookat=(0.0, 0.0, 0.0),
-        origin_type="env",
+        origin_type="asset_body",
         env_index=0,
+        asset_name="Robot_0",
+        body_name="body",
     )
 
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
