@@ -335,7 +335,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     triangulation: TriangulationCfg = TriangulationCfg()
     """Triangulation module configuration for multi-camera target localization."""
 
-    enable_triangulation: bool = True
+    enable_triangulation: bool = False
     """Enable triangulation-based rewards and observations. Default False for backward compatibility."""
 
     triangulation_reward_scale: float = 5.0

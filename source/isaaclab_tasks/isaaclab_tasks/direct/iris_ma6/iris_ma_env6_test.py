@@ -988,6 +988,17 @@ class IrisMA6TestEnv(DirectMARLEnv):
         else:
             reward_states = self._build_gt_states()
 
+        # Track detection dropout statistics
+        # bbox_valid per agent for target 0: count how many agents see the target
+        num_valid_detections = torch.zeros(self.num_envs, device=self.device)
+        for agent_id in self.cfg.possible_agents:
+            bbox_raw = reward_states[agent_id].data.bboxes_2d[:, 0, :]  # [N, 4]
+            agent_valid = bbox_raw.abs().sum(dim=-1) > 1e-6  # [N]
+            num_valid_detections += agent_valid.float()
+        self._detection_stats["total_steps"] += 1.0
+        self._detection_stats["invalid_all_agents"] += (num_valid_detections == 0).float()
+        self._detection_stats["pair_valid_count"] += (num_valid_detections >= 2).float()
+
         # Compute triangulation for all active task reward levels
         if self.cfg.enable_triangulation:
             task_level = self.cfg.task_reward_level
@@ -996,17 +1007,6 @@ class IrisMA6TestEnv(DirectMARLEnv):
             self._triangulation_result_gt = self._compute_triangulation(
                 states=reward_states, use_gt_target=True
             )
-
-            # Track detection dropout statistics
-            # bbox_valid per agent for target 0: count how many agents see the target
-            num_valid_detections = torch.zeros(self.num_envs, device=self.device)
-            for agent_id in self.cfg.possible_agents:
-                bbox_raw = reward_states[agent_id].data.bboxes_2d[:, 0, :]  # [N, 4]
-                agent_valid = bbox_raw.abs().sum(dim=-1) > 1e-6  # [N]
-                num_valid_detections += agent_valid.float()
-            self._detection_stats["total_steps"] += 1.0
-            self._detection_stats["invalid_all_agents"] += (num_valid_detections == 0).float()
-            self._detection_stats["pair_valid_count"] += (num_valid_detections >= 2).float()
 
             # Level 2 (GT-anchored estimation error): triangulate with GT drone positions
             if task_level >= 2 or self.cfg.curriculum_task_levels:
