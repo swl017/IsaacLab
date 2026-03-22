@@ -9,7 +9,7 @@ sensor/communication delays for sim-to-real transfer.
 - Ground-truth agent states per timestep:
   - Position `(N, A, 3)`, velocity `(N, A, 3)`, orientation `(N, A, 4)` (wxyz)
   - Angular velocity `(N, A, 3)` (body frame), linear acceleration `(N, A, 3)` (body frame)
-  - Gimbal angles, camera intrinsics
+  - Gimbal joint angles, world-frame gimbal azimuth/elevation/rates, camera intrinsics
   - Bounding box detections
 
 ## Outputs

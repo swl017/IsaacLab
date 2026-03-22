@@ -92,6 +92,6 @@ agent:
 
 # Trainer configuration
 trainer:
-  timesteps: 200000          # Total training timesteps
+  timesteps: 200500          # Total training timesteps
   headless: true
   environment_info: log

@@ -23,7 +23,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectMARLEnv
 from isaaclab.sensors import TiledCamera
-from isaaclab.utils.math import quat_mul, quat_rotate_inverse
+from isaaclab.utils.math import quat_mul, quat_rotate, quat_rotate_inverse
 
 from .bbox_raycaster_v2 import BBoxRayCasterV2
 from .bbox_raycaster_v2.utils.projection import create_intrinsic_matrix_tensor
@@ -49,6 +49,41 @@ if DEBUG_DRAW:
             print("Warning: Debug draw module not available. Disabling debug visualization.")
             DEBUG_DRAW = False
             omni_debug_draw = None
+
+
+def body_to_world_gimbal_angles(
+    yaw_body: torch.Tensor,
+    pitch_body: torch.Tensor,
+    q_body: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Convert body-frame gimbal yaw/pitch to world-frame azimuth/elevation.
+
+    Mirrors GimbalController._body_to_world_angles() math.
+
+    Args:
+        yaw_body: (N,) body-frame gimbal yaw (rad). Must already have YAW_JOINT_OFFSET subtracted.
+        pitch_body: (N,) body-frame gimbal pitch (rad).
+        q_body: (N, 4) body orientation quaternion (wxyz).
+
+    Returns:
+        Tuple of (azimuth_world, elevation_world), each (N,) in radians.
+    """
+    cos_p = torch.cos(pitch_body)
+    dir_body = torch.stack(
+        [
+            cos_p * torch.cos(yaw_body),
+            cos_p * torch.sin(yaw_body),
+            -torch.sin(pitch_body),
+        ],
+        dim=-1,
+    )
+    dir_world = quat_rotate(q_body, dir_body)
+    azimuth = torch.atan2(dir_world[..., 1], dir_world[..., 0])
+    xy_dist = torch.sqrt(dir_world[..., 0] ** 2 + dir_world[..., 1] ** 2)
+    elevation = torch.atan2(dir_world[..., 2], xy_dist)
+    return azimuth, elevation
+
+
 class IrisMA6TestEnv(DirectMARLEnv):
     """Simplified test environment for iris_ma6 DroneController validation.
 
@@ -57,15 +92,24 @@ class IrisMA6TestEnv(DirectMARLEnv):
     - Simple distance-based rewards
     - Minimal observations for testing
 
-    Observation space per agent: 18D
+    Observation space per agent: 26D ego + 13D per other agent [+ 6D triangulation]
+        Ego (26D):
         - pos (3): World position
         - vel (3): World velocity
         - quat (4): Orientation quaternion (wxyz)
-        - gimbal_yaw (1): Current gimbal yaw angle
-        - gimbal_pitch (1): Current gimbal pitch angle
+        - ang_vel_b (3): Body angular velocity (gyro)
+        - lin_acc_b (3): Body linear acceleration (accelerometer)
+        - gimbal_azimuth_world (1): World-frame gimbal azimuth
+        - gimbal_elevation_world (1): World-frame gimbal elevation
+        - gimbal_azimuth_rate (1): World-frame gimbal azimuth rate
+        - gimbal_elevation_rate (1): World-frame gimbal elevation rate
         - zoom (1): Current zoom level
         - bbox (4): Primary target normalized bbox (cx, cy, w, h)
         - bbox_empty (1): 1 if bbox is empty, 0 otherwise
+        Inter-agent (13D per other agent):
+        - position (3), linear_velocity (3), gimbal_azimuth_world (1),
+          gimbal_elevation_world (1), gimbal_azimuth_rate (1),
+          gimbal_elevation_rate (1), bbox_empty (1), data_age (1), bbox_age (1)
 
     Action space per agent: 7D
         - vx, vy, vz (3): Velocity commands in world frame
@@ -97,6 +141,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 cfg.enable_tiled_cameras = False
                 print("[IrisMA6TestEnv] Tiled cameras disabled (rendering not enabled)")
             else:
+                cfg.enable_tiled_cameras = True
                 print("[IrisMA6TestEnv] Tiled cameras enabled")
         else:
             print("[IrisMA6TestEnv] Tiled cameras disabled (config)")
@@ -733,6 +778,20 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     self._gimbal_joint_pos[agent_id]
                 )
 
+                # Gimbal world-frame angles (from joint positions + body orientation)
+                az, el = body_to_world_gimbal_angles(
+                    yaw_body=gt_data.joint_positions_b[:, 1] - YAW_JOINT_OFFSET,
+                    pitch_body=gt_data.joint_positions_b[:, 0],
+                    q_body=gt_data.body_orientation_w,
+                )
+                gt_data.gimbal_azimuth_world = az
+                gt_data.gimbal_elevation_world = el
+
+                # Gimbal world-frame rates (from action commands)
+                max_rate = self.cfg.max_gimbal_rate
+                gt_data.gimbal_azimuth_rate = self.cmd_vel[:, idx, 4] * max_rate
+                gt_data.gimbal_elevation_rate = self.cmd_vel[:, idx, 5] * max_rate
+
                 # Camera geometry
                 cam_pos_w, cam_ori_w = camera_poses[agent_id]
                 gt_data.camera_position_w = cam_pos_w
@@ -812,6 +871,23 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
             # Joint states
             data.joint_positions_b = self._gimbal_joint_pos[agent_id]
+
+            # Gimbal world-frame angles
+            az, el = body_to_world_gimbal_angles(
+                yaw_body=data.joint_positions_b[:, 1] - YAW_JOINT_OFFSET,
+                pitch_body=data.joint_positions_b[:, 0],
+                q_body=data.body_orientation_w,
+            )
+            data.gimbal_azimuth_world = az
+            data.gimbal_elevation_world = el
+
+            # Gimbal world-frame rates (from action commands)
+            max_rate = self.cfg.max_gimbal_rate
+            data.gimbal_azimuth_rate = self.cmd_vel[:, idx, 4] * max_rate
+            data.gimbal_elevation_rate = self.cmd_vel[:, idx, 5] * max_rate
+
+            # Body velocity (needed for inter-agent obs in GT path)
+            data.body_linear_velocity_w = self._root_lin_vel_w[agent_id]
 
             # Camera geometry
             robot = self._robots[agent_id]
@@ -1275,14 +1351,17 @@ class IrisMA6TestEnv(DirectMARLEnv):
         When delay system is enabled, observations use delayed states.
         Otherwise, uses ground truth states directly.
 
-        When triangulation is enabled, appends triangulation tail (6D):
-        - Triangulated position (3D) - uses midpoint method, not GT
-        - Standard deviation (3D) - from covariance diagonal
+        Observation structure per agent:
+        - Ego (26D): pos(3), vel(3), quat(4), ang_vel_b(3), lin_acc_b(3),
+          gimbal_az_w(1), gimbal_el_w(1), gimbal_az_rate(1), gimbal_el_rate(1),
+          zoom(1), bbox(4), bbox_empty(1)
+        - Inter-agent (13D per other): pos(3), vel(3), gimbal_az_w(1),
+          gimbal_el_w(1), gimbal_az_rate(1), gimbal_el_rate(1),
+          bbox_empty(1), data_age(1), bbox_age(1)
+        - Optional triangulation tail (6D): tri_pos(3), tri_std(3)
 
         Returns:
             Dictionary mapping agent_id to observation tensor.
-            - Base: 18D (pos, vel, quat, gimbal_yaw, gimbal_pitch, zoom, bbox, bbox_empty)
-            - With triangulation: 24D (+6D triangulation tail)
         """
         obs = {}
 
@@ -1298,9 +1377,6 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 ego_states = delayed_states[agent_id]
                 ego_data = ego_states.data
 
-                # Joint positions (pitch, yaw, roll)
-                gimbal_jp = ego_data.joint_positions_b
-
                 # Bbox from delayed states (shape: N, T, 4) - pixel format
                 bbox_pixel = ego_data.bboxes_2d[:, 0, :]  # First target
                 bbox_empty = (bbox_pixel.abs().sum(dim=-1) < 1e-6).float().unsqueeze(-1)
@@ -1313,49 +1389,125 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 bbox[:, 2] /= img_w  # width
                 bbox[:, 3] /= img_h  # height
 
-                # Build observation
-                obs[agent_id] = torch.cat(
+                # Build ego observation (26D)
+                ego_obs = torch.cat(
                     [
                         ego_data.body_position_w,  # (N, 3)
                         ego_data.body_linear_velocity_w,  # (N, 3)
                         ego_data.body_orientation_w,  # (N, 4)
                         ego_data.body_angular_velocity_b,  # (N, 3) — gyro
                         ego_data.body_linear_acceleration_b,  # (N, 3) — accelerometer
-                        gimbal_jp[:, 1:2],  # (N, 1) yaw
-                        gimbal_jp[:, 0:1],  # (N, 1) pitch
+                        ego_data.gimbal_azimuth_world.unsqueeze(-1),  # (N, 1)
+                        ego_data.gimbal_elevation_world.unsqueeze(-1),  # (N, 1)
+                        ego_data.gimbal_azimuth_rate.unsqueeze(-1),  # (N, 1)
+                        ego_data.gimbal_elevation_rate.unsqueeze(-1),  # (N, 1)
                         ego_data.camera_zoom_level.unsqueeze(-1),  # (N, 1)
                         bbox,  # (N, 4) - normalized
                         bbox_empty,  # (N, 1)
                     ],
                     dim=-1,
                 )
+
+                # Build inter-agent observations (13D per other agent)
+                other_obs_parts = []
+                for other_id in self.cfg.possible_agents:
+                    if other_id == agent_id:
+                        continue
+                    other_data = delayed_states[other_id].data
+
+                    # Other agent's bbox_empty
+                    other_bbox_pixel = other_data.bboxes_2d[:, 0, :]
+                    other_bbox_empty = (
+                        other_bbox_pixel.abs().sum(dim=-1) < 1e-6
+                    ).float().unsqueeze(-1)
+
+                    # Age of Information
+                    data_age = (self._sim_time - other_data.timestamp_motion).unsqueeze(-1)
+                    bbox_age = (self._sim_time - other_data.timestamp_detection).unsqueeze(-1)
+
+                    other_obs_parts.append(
+                        torch.cat(
+                            [
+                                other_data.body_position_w,  # (N, 3)
+                                other_data.body_linear_velocity_w,  # (N, 3)
+                                other_data.gimbal_azimuth_world.unsqueeze(-1),  # (N, 1)
+                                other_data.gimbal_elevation_world.unsqueeze(-1),  # (N, 1)
+                                other_data.gimbal_azimuth_rate.unsqueeze(-1),  # (N, 1)
+                                other_data.gimbal_elevation_rate.unsqueeze(-1),  # (N, 1)
+                                other_bbox_empty,  # (N, 1)
+                                data_age,  # (N, 1)
+                                bbox_age,  # (N, 1)
+                            ],
+                            dim=-1,
+                        )
+                    )
+
+                obs[agent_id] = torch.cat([ego_obs] + other_obs_parts, dim=-1)
+
         else:
             # Use ground truth states directly
-            for idx, agent_id in enumerate(self.cfg.possible_agents):
-                gimbal_jp = self._gimbal_joint_pos[agent_id]  # (N, 3) = [pitch, yaw, roll]
+            # Build GT states for inter-agent access
+            gt_all = self._build_gt_states()
 
+            for idx, agent_id in enumerate(self.cfg.possible_agents):
                 bbox = self.bbox_raycaster_v2.data.bboxes_normalized[:, idx, 0, :]
                 # Use smoothed confidence for bbox_empty to prevent oscillation
                 smoothed_empty = (
                     self._smoothed_bbox_confidence[:, idx, 0] < self._smoothed_bbox_empty_threshold
                 ).float().unsqueeze(-1)
 
-                # Concatenate observation: pos(3) + vel(3) + quat(4) + ang_vel_b(3) + lin_acc_b(3) + gimbal_yaw(1) + gimbal_pitch(1) + zoom(1) + bbox(4) + bbox_empty(1)
-                obs[agent_id] = torch.cat(
+                ego_gt = gt_all[agent_id].data
+
+                # Ego observation (26D)
+                ego_obs = torch.cat(
                     [
                         self._root_pos_w[agent_id],  # (N, 3)
                         self._root_lin_vel_w[agent_id],  # (N, 3)
                         self._root_quat_w[agent_id],  # (N, 4)
                         self._root_ang_vel_b[agent_id],  # (N, 3) — gyro
                         self._root_lin_acc_b[agent_id],  # (N, 3) — accelerometer
-                        gimbal_jp[:, 1:2],  # (N, 1) yaw
-                        gimbal_jp[:, 0:1],  # (N, 1) pitch
+                        ego_gt.gimbal_azimuth_world.unsqueeze(-1),  # (N, 1)
+                        ego_gt.gimbal_elevation_world.unsqueeze(-1),  # (N, 1)
+                        ego_gt.gimbal_azimuth_rate.unsqueeze(-1),  # (N, 1)
+                        ego_gt.gimbal_elevation_rate.unsqueeze(-1),  # (N, 1)
                         self.zoom_level[:, idx : idx + 1],  # (N, 1)
                         bbox,  # (N, 4)
                         smoothed_empty,  # (N, 1)
                     ],
                     dim=-1,
                 )
+
+                # Inter-agent observations (13D per other, GT = no delay, ages = 0)
+                other_obs_parts = []
+                zero_age = torch.zeros(self.num_envs, 1, device=self.device)
+                for other_idx, other_id in enumerate(self.cfg.possible_agents):
+                    if other_id == agent_id:
+                        continue
+                    other_gt = gt_all[other_id].data
+
+                    other_bbox = self.bbox_raycaster_v2.data.bboxes_normalized[:, other_idx, 0, :]
+                    other_bbox_empty = (
+                        self._smoothed_bbox_confidence[:, other_idx, 0] < self._smoothed_bbox_empty_threshold
+                    ).float().unsqueeze(-1)
+
+                    other_obs_parts.append(
+                        torch.cat(
+                            [
+                                other_gt.body_position_w,  # (N, 3)
+                                other_gt.body_linear_velocity_w,  # (N, 3)
+                                other_gt.gimbal_azimuth_world.unsqueeze(-1),  # (N, 1)
+                                other_gt.gimbal_elevation_world.unsqueeze(-1),  # (N, 1)
+                                other_gt.gimbal_azimuth_rate.unsqueeze(-1),  # (N, 1)
+                                other_gt.gimbal_elevation_rate.unsqueeze(-1),  # (N, 1)
+                                other_bbox_empty,  # (N, 1)
+                                zero_age,  # (N, 1) — GT, no delay
+                                zero_age,  # (N, 1) — GT, no delay
+                            ],
+                            dim=-1,
+                        )
+                    )
+
+                obs[agent_id] = torch.cat([ego_obs] + other_obs_parts, dim=-1)
 
         # Append triangulation tail if enabled (observation pipeline uses triangulated position)
         if self.cfg.enable_triangulation:

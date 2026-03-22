@@ -252,3 +252,62 @@ Next:
 - Test video recording end-to-end with a short training run (--video --video_interval 500 --video_length 100)
 - Verify viewer camera behavior during teleop/play
 - Continue training runs and monitor curriculum progression
+
+----------------------------------------
+2026-03-22 — World-frame gimbal obs + inter-agent observations
+----------------------------------------
+Done:
+- Replaced body-frame gimbal yaw/pitch (2D) with world-frame azimuth, elevation, and their rates (4D)
+  - Added body_to_world_gimbal_angles() utility (mirrors GimbalController._body_to_world_angles math)
+  - Computed from joint_positions_b + body_orientation_w; rates from action commands * max_gimbal_rate
+- Added inter-agent observation fields (13D per other agent):
+  position(3), linear_velocity(3), gimbal_azimuth_world(1), gimbal_elevation_world(1),
+  gimbal_azimuth_rate(1), gimbal_elevation_rate(1), bbox_empty(1), data_age(1), bbox_age(1)
+- Added 4 new fields to AgentStatesData: gimbal_azimuth_world, gimbal_elevation_world,
+  gimbal_azimuth_rate, gimbal_elevation_rate
+- Full delay pipeline integration: register, store, retrieve, clone, noise for new fields
+- Observation dim formula: 26 + 13*(num_agents-1) [+6 tri] (3 agents: 52D or 58D with tri)
+- Files modified: agent_states.py, multi_agent_wrapper.py, iris_ma_env6_test.py, iris_ma_env6_test_cfg.py
+
+Next:
+- Run smoke test to verify observation dimensions and value correctness
+- Train with new obs structure and compare learning curves against 24D baseline
+- Monitor inter-agent obs impact on coordination metrics (pair_valid_rate, triangulation quality)
+- Update SKRL config if network architecture needs adjustment for larger obs space
+
+----------------------------------------
+2026-03-23 — Experiments module implementation
+----------------------------------------
+Done:
+- Wrote experiments_spec.md (doc/experiments_spec.md):
+  - Full spec for experiment infrastructure adapted from iris_ma5
+  - 7 experiment groups: A1 (Delay), A3 (Reward Path), A4 (Covariance),
+    A5 (CBF Safety), A6 (Controller), A7 (Task Reward Levels), baselines/sweeps
+  - Validated all override paths against IrisMA6TestEnvCfg
+- Implemented complete experiments/ module (13 files):
+  - experiment_cfg.py: ExperimentCfg, ExperimentSuiteCfg (dropped MLP fields from ma5)
+  - experiment_registry.py: 42 experiments across 7 groups + 4 suites
+  - env_overrides.py: dotted-path override utilities (ported from ma5)
+  - run_experiment.py: single experiment training CLI (RNN only, no MLP path)
+  - run_suite.py: batch runner via subprocess
+  - evaluate.py: evaluation pipeline using iris_ma6 interfaces
+    (_triangulation_result_gt/obs, cbf_manager, _root_pos_w, _target_pos_w)
+  - metrics/metric_tracker.py: 12 metrics including cbf_violation_rate + min_separation
+  - metrics/timeseries_tracker.py: per-timestep stats with cbf_penalty field
+  - metrics/trajectory_recorder.py: XYZ + gimbal_yaw/pitch + zoom recording
+  - baselines/greedy_policy.py: equiangular orbit with gimbal tracking (7D actions)
+  - scripts/eval_standard.sh: wrapper for standard metric evaluation
+  - scripts/eval_trajectory.sh: wrapper for trajectory recording
+- Key differences from iris_ma5:
+  - Dropped A2 (MLP vs RNN) — RNN only
+  - A3 simplified to 4 combos: delay(on/off) x noise(on/off)
+  - Added A5 (8 CBF experiments), A6 (5 controller), A7 (10 task reward levels)
+  - Metric collection uses iris_ma6 env attributes directly
+  - Greedy baseline adds gimbal tracking (pointing at target)
+- Smoke tests pass for env_overrides, MetricTracker, TimeseriesTracker, TrajectoryRecorder
+
+Next:
+- End-to-end test: run eval_standard.sh with a trained checkpoint
+- End-to-end test: run_experiment.py --list to verify registry loads in Isaac Sim
+- Add frame_stack_wrapper.py if MLP experiments are needed later
+- Register experiments module in iris_ma6 ARCHITECTURE.md as new dependency

@@ -51,6 +51,12 @@ class AgentStatesData:
     joint_velocities_b: torch.Tensor  # [N, J]
     joint_accelerations_b: torch.Tensor  # [N, J]
 
+    # Gimbal world-frame angles (derived from joint positions + body orientation)
+    gimbal_azimuth_world: torch.Tensor  # [N] world-frame azimuth (rad)
+    gimbal_elevation_world: torch.Tensor  # [N] world-frame elevation (rad)
+    gimbal_azimuth_rate: torch.Tensor  # [N] world-frame azimuth rate (rad/s)
+    gimbal_elevation_rate: torch.Tensor  # [N] world-frame elevation rate (rad/s)
+
     # Camera geometry (derived from body + gimbal)
     camera_offset_position_b: torch.Tensor  # [N, 3]
     camera_offset_rotation_b: torch.Tensor  # [N, 4] (w, x, y, z)
@@ -122,6 +128,12 @@ class AgentStates:
         self.data.joint_positions_b = torch.zeros(N, J, device=device)
         self.data.joint_velocities_b = torch.zeros(N, J, device=device)
         self.data.joint_accelerations_b = torch.zeros(N, J, device=device)
+
+        # Gimbal world-frame angles
+        self.data.gimbal_azimuth_world = torch.zeros(N, device=device)
+        self.data.gimbal_elevation_world = torch.zeros(N, device=device)
+        self.data.gimbal_azimuth_rate = torch.zeros(N, device=device)
+        self.data.gimbal_elevation_rate = torch.zeros(N, device=device)
 
         # Camera geometry
         self.data.camera_offset_position_b = torch.zeros(N, 3, device=device)

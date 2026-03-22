@@ -45,6 +45,13 @@ CAMERA_FIELDS = [
     ("camera_zoom_level", (1,)),  # zoom level scalar per env
 ]
 
+GIMBAL_WORLD_FIELDS = [
+    ("gimbal_azimuth_world", (1,)),
+    ("gimbal_elevation_world", (1,)),
+    ("gimbal_azimuth_rate", (1,)),
+    ("gimbal_elevation_rate", (1,)),
+]
+
 DETECTION_FIELDS = [
     ("bboxes_2d", None),  # Shape depends on num_targets: (num_targets, 4)
 ]
@@ -148,6 +155,11 @@ class MultiAgentDelaySystemV3:
             for field_name, _ in JOINT_FIELDS:
                 key = f"{agent_id}.{field_name}"
                 shape = (self._num_joints,)
+                self._delay_system.register_field(key, shape)
+
+            # Gimbal world-frame fields
+            for field_name, shape in GIMBAL_WORLD_FIELDS:
+                key = f"{agent_id}.{field_name}"
                 self._delay_system.register_field(key, shape)
 
             # Camera fields
@@ -261,6 +273,28 @@ class MultiAgentDelaySystemV3:
         self._delay_system.store(
             prefix + "joint_velocities_b",
             data.joint_velocities_b,
+            noise_std=vel_noise,
+        )
+
+        # Gimbal world-frame fields
+        self._delay_system.store(
+            prefix + "gimbal_azimuth_world",
+            data.gimbal_azimuth_world.unsqueeze(-1),
+            noise_std=ori_noise,
+        )
+        self._delay_system.store(
+            prefix + "gimbal_elevation_world",
+            data.gimbal_elevation_world.unsqueeze(-1),
+            noise_std=ori_noise,
+        )
+        self._delay_system.store(
+            prefix + "gimbal_azimuth_rate",
+            data.gimbal_azimuth_rate.unsqueeze(-1),
+            noise_std=vel_noise,
+        )
+        self._delay_system.store(
+            prefix + "gimbal_elevation_rate",
+            data.gimbal_elevation_rate.unsqueeze(-1),
             noise_std=vel_noise,
         )
 
@@ -470,6 +504,27 @@ class MultiAgentDelaySystemV3:
         )
         data.joint_velocities_b = joint_vel
 
+        # Gimbal world-frame angles
+        az, _ = self._delay_system.get_delayed(
+            prefix + "gimbal_azimuth_world", perspective, use_noise, allow_dropout
+        )
+        data.gimbal_azimuth_world = az.squeeze(-1)
+
+        el, _ = self._delay_system.get_delayed(
+            prefix + "gimbal_elevation_world", perspective, use_noise, allow_dropout
+        )
+        data.gimbal_elevation_world = el.squeeze(-1)
+
+        az_rate, _ = self._delay_system.get_delayed(
+            prefix + "gimbal_azimuth_rate", perspective, use_noise, allow_dropout
+        )
+        data.gimbal_azimuth_rate = az_rate.squeeze(-1)
+
+        el_rate, _ = self._delay_system.get_delayed(
+            prefix + "gimbal_elevation_rate", perspective, use_noise, allow_dropout
+        )
+        data.gimbal_elevation_rate = el_rate.squeeze(-1)
+
         # Camera states
         cam_pos, _ = self._delay_system.get_delayed(
             prefix + "camera_position_w", perspective, use_noise, allow_dropout
@@ -571,6 +626,12 @@ class MultiAgentDelaySystemV3:
         dst_data.joint_positions_b = src_data.joint_positions_b.clone()
         dst_data.joint_velocities_b = src_data.joint_velocities_b.clone()
 
+        # Gimbal world-frame fields
+        dst_data.gimbal_azimuth_world = src_data.gimbal_azimuth_world.clone()
+        dst_data.gimbal_elevation_world = src_data.gimbal_elevation_world.clone()
+        dst_data.gimbal_azimuth_rate = src_data.gimbal_azimuth_rate.clone()
+        dst_data.gimbal_elevation_rate = src_data.gimbal_elevation_rate.clone()
+
         # Camera fields
         dst_data.camera_position_w = src_data.camera_position_w.clone()
         dst_data.camera_orientation_w = src_data.camera_orientation_w.clone()
@@ -669,6 +730,23 @@ class MultiAgentDelaySystemV3:
             data.joint_positions_b = data.joint_positions_b + torch.randn_like(
                 data.joint_positions_b
             ) * ori_noise
+
+            # Gimbal world-frame angles: additive noise (radians)
+            data.gimbal_azimuth_world = data.gimbal_azimuth_world + torch.randn(
+                N, device=device
+            ) * ori_noise
+            data.gimbal_elevation_world = data.gimbal_elevation_world + torch.randn(
+                N, device=device
+            ) * ori_noise
+
+        # Gimbal world-frame rates: additive noise (use velocity noise scale)
+        if vel_noise > 0:
+            data.gimbal_azimuth_rate = data.gimbal_azimuth_rate + torch.randn(
+                N, device=device
+            ) * vel_noise
+            data.gimbal_elevation_rate = data.gimbal_elevation_rate + torch.randn(
+                N, device=device
+            ) * vel_noise
 
         return cloned
 

@@ -115,8 +115,8 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     action_spaces: dict = {"drone_0": 7, "drone_1": 7, "drone_2": 7}
     """Action space dimensions per agent (auto-populated from num_agents)."""
 
-    observation_spaces: dict = {"drone_0": 24, "drone_1": 24, "drone_2": 24}
-    """Observation space dimensions per agent (24D: pos, vel, quat, ang_vel_b, lin_acc_b, gimbal_yaw, gimbal_pitch, zoom, bbox, bbox_empty)."""
+    observation_spaces: dict = {"drone_0": 52, "drone_1": 52, "drone_2": 52}
+    """Observation space dimensions per agent. 26D ego + 13D*(num_agents-1) inter-agent [+6D triangulation]."""
 
     state_space: int = -1
     """State space dimension. -1 means concatenate all observations."""
@@ -358,7 +358,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     action_delta_weight: list = [1, 1, 1, 1, 0.5, 0.5, 0.3]
     """Weights for action delta (smoothness) penalty."""
 
-    action_delta_penalty_scale: float = -0.2
+    action_delta_penalty_scale: float = -1.0
     """Penalty scale for action changes (smoothness)."""
 
     bbox_center_reward_scale: float = 60.0
@@ -479,7 +479,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # ==========================================================================
     # Debugging and Testing Flags
     # ==========================================================================
-    debug_initial_step: int = 0 #20000
+    debug_initial_step: int = 0 #200000
     """If > 0, initializes the environment at the specified training step for debugging."""
 
 
@@ -495,10 +495,13 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
         # Build delay system from key parameters
         self.delay_system = create_delay_cfg_from_params(self.delay_system_params)
 
-        # Update observation space based on triangulation
-        # Base: 24D (pos, vel, quat, ang_vel_b, lin_acc_b, gimbal_yaw, gimbal_pitch, zoom, bbox, bbox_empty)
-        # With triangulation: +6D (triangulated position + std_dev)
-        obs_dim = 24
+        # Update observation space:
+        # Ego: 26D (pos, vel, quat, ang_vel_b, lin_acc_b, gimbal_az_w, gimbal_el_w,
+        #           gimbal_az_rate, gimbal_el_rate, zoom, bbox, bbox_empty)
+        # Inter-agent: 13D per other agent (pos, vel, gimbal_az_w, gimbal_el_w,
+        #              gimbal_az_rate, gimbal_el_rate, bbox_empty, data_age, bbox_age)
+        # Optional: +6D triangulation (tri_pos + tri_std)
+        obs_dim = 26 + 13 * (self.num_agents - 1)
         if self.enable_triangulation:
             obs_dim += 6  # triangulated position (3) + std_dev (3)
         self.observation_spaces = {a: obs_dim for a in self.possible_agents}

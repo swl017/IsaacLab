@@ -23,6 +23,11 @@ controller       _v2                            randomization
                    ▼              ▼
               visualization    curriculum
               (debug only)     (config only)
+
+                   ▼
+              experiments/
+              (registry, training, evaluation)
+              Uses: env, cbf_safety, delay_system_v3, triangulation
 ```
 
 ## Directed Dependencies
@@ -100,6 +105,7 @@ initial_states, domain_randomization, visualization, curriculum, asset
 
 **Has dependencies**:
 target_controller → controller
+experiments → env (iris_ma_env6_test), cbf_safety, delay_system_v3, triangulation
 
 ## Stateful Mutation Rule
 
