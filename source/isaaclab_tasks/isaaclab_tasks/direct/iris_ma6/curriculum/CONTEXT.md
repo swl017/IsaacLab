@@ -11,6 +11,7 @@ randomization intensity) scale with training progress.
 ## Outputs
 - Curriculum progress: `float` in [0.0, 1.0] consumed by other modules
 - Parameter schedules for initial_states, target_controller, domain_randomization
+- Agent velocity progress (decoupled from target motion): `get_agent_velocity_progress()`
 
 ## Dependencies
 None (minimal module, orchestrated by the environment).

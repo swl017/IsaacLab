@@ -416,6 +416,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
         # Curriculum progress tracking (updated externally, used by initial_states)
         self.progress_tracking = 0.0
         self.progress_moving_target = 0.0
+        self.progress_agent_velocity = 0.0
         self.progress_delay = 0.0
         self.progress_dynamics = 0.0
 
@@ -1075,6 +1076,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self.progress_moving_target = curr.get_progress(
             current_step, curr.moving_target_start_step, curr.moving_target_end_step
         )
+        self.progress_agent_velocity = curr.get_agent_velocity_progress(current_step)
 
         # Update delay system curriculum (none → fixed → random, noise/dropout ramp)
         if self._delay_system is not None:
@@ -1823,8 +1825,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
             self._delay_system.reset(env_ids)
             self._delay_system.randomize_per_agent_params(env_ids)
 
-        # Scale max_lin_vel with target-motion curriculum: 5 m/s at progress=0, full at progress=1
-        self._max_lin_vel[env_ids] = self.cfg.max_lin_vel_min + self.progress_moving_target * (
+        # Scale max_lin_vel with agent velocity curriculum (decoupled from target motion):
+        # 3 m/s at progress=0, full (10 m/s) at progress=1
+        self._max_lin_vel[env_ids] = self.cfg.max_lin_vel_min + self.progress_agent_velocity * (
             self.cfg.max_lin_vel - self.cfg.max_lin_vel_min
         )
 

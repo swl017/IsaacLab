@@ -238,7 +238,7 @@ class LatencySampler(ParameterSampler):
         num_envs: int,
         device: torch.device,
         dt: float,
-        min_steps: int = 2,
+        min_steps: int = 0,
     ):
         """Initialize latency sampler.
 
@@ -248,7 +248,9 @@ class LatencySampler(ParameterSampler):
             num_envs: Number of parallel environments.
             device: Torch device.
             dt: Simulation time step.
-            min_steps: Minimum delay steps (for CircularBuffer warmup).
+            min_steps: Minimum delay steps. Default 0: time_lag=0 returns
+                the most-recently appended data (verified safe with CircularBuffer).
+                The previous default of 2 caused a 2×dt latency cliff at curriculum start.
         """
         super().__init__(distribution_cfg, sampling_cfg, num_envs, device)
         self._dt = dt

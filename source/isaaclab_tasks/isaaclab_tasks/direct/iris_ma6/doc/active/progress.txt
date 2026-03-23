@@ -456,3 +456,31 @@ Next:
 - Tune flight_scene_offset to center landscape on env_0
 - Per-agent randomization for noise scale, dropout rate, and max_lin_vel
 - First full training run
+
+----------------------------------------
+2026-03-24 — Curriculum redesign: decouple velocity from target motion
+----------------------------------------
+Done:
+- Diagnosed pair_valid_rate collapse at 20k steps in MA6 vs MA5:
+  - Root cause: tilt-tracking coupling — MA6's tilt dynamics disrupt gimbal when
+    pursuing fast targets; MA5's holonomic control has no such coupling
+  - Agent velocity ramp was coupled to target motion (both at 20k), so the agent
+    had to learn tilt compensation and fast-target tracking simultaneously
+  - Noise/delay phases overlapped with still-ramping target motion (multi-axis difficulty)
+- Verified reward structure is correct: all channels (bbox_center, bbox_size,
+  FIM, estimation_error) properly guarded by bbox_valid / is_valid masks
+- Implemented curriculum redesign (3 changes):
+  1. Decoupled agent velocity ramp: new phase 0k→40k ramping max_lin_vel 3→10 m/s
+     (was coupled to moving_target at 20k→80k with min 5 m/s)
+  2. Extended target motion ramp: 30k→130k (was 20k→80k, now 100k steps vs 60k)
+  3. Pushed observability phases after target mastery (strict sequential):
+     noise 130k→150k, fixed_delay 150k→170k, random_delay 170k→190k,
+     dropout 190k→200k, dynamics 190k→200k
+     (was noise 80k, delay 100k — overlapping with target ramp)
+- Files modified: curriculum/curriculum_cfg.py, iris_ma_env6_test.py, iris_ma_env6_test_cfg.py
+
+Next:
+- Training run with redesigned curriculum, monitor pair_valid_rate at 20-40k
+- Key metric: pair_valid_rate should NOT collapse when target starts moving (30k)
+- If dropout/dynamics 10k ramp is too short, may need to extend total training budget
+- Per-agent randomization for noise scale, dropout rate, and max_lin_vel

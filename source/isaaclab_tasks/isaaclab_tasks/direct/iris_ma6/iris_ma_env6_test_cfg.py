@@ -272,8 +272,8 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     max_lin_vel: float = 10.0
     """Maximum linear velocity (m/s) at full curriculum."""
 
-    max_lin_vel_min: float = 5.0
-    """Minimum linear velocity (m/s) at curriculum progress=0. Ramps to max_lin_vel with target motion curriculum."""
+    max_lin_vel_min: float = 3.0
+    """Minimum linear velocity (m/s) at curriculum progress=0. Ramps to max_lin_vel with agent velocity curriculum."""
 
     max_yaw_rate: float = math.radians(45.0)
     """Maximum yaw rate (rad/s)."""
