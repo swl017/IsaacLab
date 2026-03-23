@@ -3,15 +3,21 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Delay pipeline V3 with timestamp guarantees.
+"""Delay pipeline V3 with timestamp guarantees and advance/query split.
 
 This module implements the core delay pipeline with the fundamental invariant:
 **Timestamp always travels with its associated data through all stages.**
 
-Pipeline stages:
+Pipeline stages (in advance order):
 1. Staleness (FPS limiting) - holds data and timestamp together
 2. Latency (communication delay) - parallel buffers for data and timestamp
-3. Dropout (missed detections) - holds both data and timestamp together
+3. First-order lag (smoothing) - filters channel signal before dropout
+4. Dropout (missed detections) - holds both data and timestamp together
+
+Calling contract:
+- advance(): WRITE — runs all stateful stages once. Idempotent within a sim step.
+- query(): READ — returns cached output. Safe to call multiple times.
+- process(): Convenience wrapper (advance + query). Backward compatible.
 
 Key design principle: Data and timestamp are ALWAYS processed together,
 ensuring AoI (Age-of-Information) = t_current - timestamp is always correct.
@@ -137,6 +143,15 @@ class DelayPipelineV3:
         self._lag_output = torch.zeros(num_envs, *data_shape, device=device)
         self._lag_initialized = False
 
+        # =================================================================
+        # Advance/query cache (ensures idempotent multi-call per step)
+        # =================================================================
+        self._last_advance_time = torch.full((num_envs,), -1.0, device=device)
+        self._cached_data_with_dropout = torch.zeros(num_envs, *data_shape, device=device)
+        self._cached_ts_with_dropout = torch.zeros(num_envs, device=device)
+        self._cached_data_no_dropout = torch.zeros(num_envs, *data_shape, device=device)
+        self._cached_ts_no_dropout = torch.zeros(num_envs, device=device)
+
         # Initialize samplers
         self._latency_sampler.initialize()
         self._staleness_sampler.initialize()
@@ -218,6 +233,85 @@ class DelayPipelineV3:
         """
         self._dropout_sampler.set_rate(rate)
 
+    def advance(
+        self,
+        data: torch.Tensor,
+        timestamp: torch.Tensor,
+        t_current: torch.Tensor,
+    ) -> None:
+        """Advance all stateful pipeline stages. WRITE — call once per sim step.
+
+        Idempotent: if called again at the same t_current, skips all state mutation
+        and keeps the previously cached results.
+
+        Pipeline order: staleness → latency → FOL → dropout.
+        FOL is placed before dropout so the sensor filter operates on the channel
+        signal before packet-loss masking. This avoids needing separate FOL states
+        for the with/without-dropout query paths.
+
+        Args:
+            data: Input data tensor of shape (num_envs, ...).
+            timestamp: Capture timestamp of shape (num_envs,).
+            t_current: Current simulation time of shape (num_envs,).
+        """
+        data = data.to(self._device)
+        timestamp = timestamp.to(self._device)
+        t_current = t_current.to(self._device)
+
+        # Idempotency guard — skip if already advanced at this time
+        time_advanced = (t_current - self._last_advance_time).abs() > 1e-6
+        if not time_advanced.any():
+            return
+        self._last_advance_time = t_current.clone()
+
+        # "none" mode: only FOL
+        if self._mode == "none":
+            if self._lag_enabled:
+                data = self._apply_first_order_lag(data)
+            self._cached_data_no_dropout = data.clone()
+            self._cached_ts_no_dropout = timestamp.clone()
+            self._cached_data_with_dropout = data.clone()
+            self._cached_ts_with_dropout = timestamp.clone()
+            return
+
+        # Stage 1: Staleness (only in random mode)
+        if self._cfg.staleness.enabled and self._mode == "random":
+            data, timestamp = self._apply_staleness(data, timestamp, t_current)
+
+        # Stage 2: Latency (buffer append guarded internally)
+        if self._cfg.latency.enabled:
+            data, timestamp = self._apply_latency(data, timestamp, t_current)
+
+        # Stage 3: FOL (before dropout — smooths channel signal)
+        if self._lag_enabled:
+            data = self._apply_first_order_lag(data)
+
+        # Cache pre-dropout result (used by reward queries with allow_dropout=False)
+        self._cached_data_no_dropout = data.clone()
+        self._cached_ts_no_dropout = timestamp.clone()
+
+        # Stage 4: Dropout (mask sampled once per step)
+        if self._cfg.dropout.enabled:
+            data, timestamp = self._apply_dropout(data, timestamp)
+
+        self._cached_data_with_dropout = data.clone()
+        self._cached_ts_with_dropout = timestamp.clone()
+
+    def query(self, allow_dropout: bool = True) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return cached pipeline output. READ — safe to call multiple times.
+
+        Args:
+            allow_dropout: If True, return post-dropout data.
+                          If False, return pre-dropout data (for rewards).
+
+        Returns:
+            Tuple of (delayed_data, delayed_timestamp).
+        """
+        if allow_dropout:
+            return self._cached_data_with_dropout.clone(), self._cached_ts_with_dropout.clone()
+        else:
+            return self._cached_data_no_dropout.clone(), self._cached_ts_no_dropout.clone()
+
     def process(
         self,
         data: torch.Tensor,
@@ -225,7 +319,10 @@ class DelayPipelineV3:
         t_current: torch.Tensor,
         allow_dropout: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Process data through the delay pipeline.
+        """Process data through the delay pipeline (advance + query).
+
+        Backward-compatible convenience wrapper. advance() is idempotent,
+        so multiple process() calls at the same t_current only advance once.
 
         **CRITICAL INVARIANT**: The returned timestamp is ALWAYS the capture
         time of the returned data.
@@ -234,40 +331,13 @@ class DelayPipelineV3:
             data: Input data tensor of shape (num_envs, ...).
             timestamp: Capture timestamp of shape (num_envs,).
             t_current: Current simulation time of shape (num_envs,).
-            allow_dropout: Whether to apply dropout this step.
+            allow_dropout: Whether to return post-dropout data.
 
         Returns:
             Tuple of (delayed_data, delayed_timestamp).
         """
-        # Ensure tensors are on correct device
-        data = data.to(self._device)
-        timestamp = timestamp.to(self._device)
-        t_current = t_current.to(self._device)
-
-        # In "none" mode, just pass through (minimal delay)
-        if self._mode == "none":
-            # Still need first-order lag if enabled
-            if self._lag_enabled:
-                data = self._apply_first_order_lag(data)
-            return data.clone(), timestamp.clone()
-
-        # Stage 1: Staleness (only in random mode)
-        if self._cfg.staleness.enabled and self._mode == "random":
-            data, timestamp = self._apply_staleness(data, timestamp, t_current)
-
-        # Stage 2: Latency
-        if self._cfg.latency.enabled:
-            data, timestamp = self._apply_latency(data, timestamp, t_current)
-
-        # Stage 3: Dropout (if allowed)
-        if self._cfg.dropout.enabled and allow_dropout:
-            data, timestamp = self._apply_dropout(data, timestamp)
-
-        # Stage 4: First-order lag (optional)
-        if self._lag_enabled:
-            data = self._apply_first_order_lag(data)
-
-        return data, timestamp
+        self.advance(data, timestamp, t_current)
+        return self.query(allow_dropout=allow_dropout)
 
     def _apply_staleness(
         self,
@@ -454,6 +524,13 @@ class DelayPipelineV3:
             self._lag_output.zero_()
             self._lag_initialized = False
 
+            # Reset advance/query cache
+            self._last_advance_time.fill_(-1.0)
+            self._cached_data_with_dropout.zero_()
+            self._cached_ts_with_dropout.zero_()
+            self._cached_data_no_dropout.zero_()
+            self._cached_ts_no_dropout.zero_()
+
         else:
             # Reset specific environments
             self._data_buffer.reset(env_ids)
@@ -471,6 +548,13 @@ class DelayPipelineV3:
 
             # Reset lag for specific envs
             self._lag_output[env_ids] = 0
+
+            # Reset advance/query cache for specific envs
+            self._last_advance_time[env_ids] = -1.0
+            self._cached_data_with_dropout[env_ids] = 0
+            self._cached_ts_with_dropout[env_ids] = 0
+            self._cached_data_no_dropout[env_ids] = 0
+            self._cached_ts_no_dropout[env_ids] = 0
 
         # Resample parameters for reset environments
         self._latency_sampler.reset(env_ids)

@@ -14,7 +14,7 @@
       "name": "Multi-agent delay/staleness/dropout simulation",
       "status": "done",
       "spec": null,
-      "notes": "Ringbuffer-based with timestamp guarantees. Added gimbal world-frame angles + rates to delay pipeline (2026-03-22)"
+      "notes": "Ringbuffer-based with timestamp guarantees. Fixed calling contract: advance/query split ensures idempotent multi-call per step. Stage order: staleness→latency→FOL→dropout. (2026-03-23)"
     },
     {
       "id": "cbf-safety",

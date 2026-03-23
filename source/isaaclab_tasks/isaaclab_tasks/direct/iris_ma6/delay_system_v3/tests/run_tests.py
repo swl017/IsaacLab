@@ -1095,6 +1095,119 @@ def run_idempotency_tests(results: TestResults, device: torch.device, verbose: b
     except Exception as e:
         results.add_fail("Buffer state unchanged on repeated calls", traceback.format_exc())
 
+    # Test 4: FOL idempotency — multiple process() calls don't over-smooth
+    try:
+        from isaaclab_tasks.direct.iris_ma6.delay_system_v3.delay_cfg_v3 import FirstOrderLagCfg
+
+        cfg = DelayPipelineCfgV3(
+            latency=LatencyCfg(enabled=False),
+            staleness=StalenessCfg(enabled=False),
+            dropout=DropoutCfg(enabled=False),
+            first_order_lag=FirstOrderLagCfg(enabled=True, tau=0.1),
+        )
+        pipeline = DelayPipelineV3(cfg, num_envs, device, dt, data_shape)
+        pipeline.set_mode("none")
+
+        # Feed initial data to initialize FOL
+        data_init = torch.zeros(num_envs, 3, device=device)
+        t0 = torch.zeros(num_envs, device=device)
+        pipeline.process(data_init, t0, t0)
+
+        # Feed new data and call process() 3 times at same t_current
+        data_new = torch.ones(num_envs, 3, device=device) * 10.0
+        t1 = torch.full((num_envs,), dt, device=device)
+        r1, _ = pipeline.process(data_new, t1, t1)
+        r2, _ = pipeline.process(data_new, t1, t1)
+        r3, _ = pipeline.process(data_new, t1, t1)
+
+        assert torch.allclose(r1, r2, atol=1e-6), (
+            f"FOL not idempotent: call 1 vs 2 differ by {(r1 - r2).abs().max().item()}"
+        )
+        assert torch.allclose(r2, r3, atol=1e-6), (
+            f"FOL not idempotent: call 2 vs 3 differ by {(r2 - r3).abs().max().item()}"
+        )
+        # Verify FOL actually did something (not just passthrough)
+        assert not torch.allclose(r1, data_new, atol=1e-3), (
+            "FOL should partially smooth, not pass through unchanged"
+        )
+        results.add_pass("FOL idempotency — multiple calls don't over-smooth")
+    except Exception as e:
+        results.add_fail("FOL idempotency — multiple calls don't over-smooth", traceback.format_exc())
+
+    # Test 5: Dropout consistency — same mask across multiple calls at same t_current
+    try:
+        cfg = DelayPipelineCfgV3(
+            latency=LatencyCfg(
+                enabled=True,
+                distribution=DistributionCfg(type="constant", value=0.04),
+                min_steps=1,
+            ),
+            staleness=StalenessCfg(enabled=False),
+            dropout=DropoutCfg(enabled=True, probability=0.5),  # 50% dropout
+        )
+        pipeline = DelayPipelineV3(cfg, num_envs, device, dt, data_shape)
+        pipeline.set_mode("fixed", progress=1.0)
+
+        # Warm up pipeline
+        for i in range(5):
+            t = torch.full((num_envs,), dt * i, device=device)
+            data = torch.ones(num_envs, 3, device=device) * float(i)
+            pipeline.process(data, t, t, allow_dropout=True)
+
+        # Now call process() 3 times at same t_current with dropout enabled
+        t_now = torch.full((num_envs,), dt * 5, device=device)
+        data_now = torch.ones(num_envs, 3, device=device) * 5.0
+        r1, ts1 = pipeline.process(data_now, t_now, t_now, allow_dropout=True)
+        r2, ts2 = pipeline.process(data_now, t_now, t_now, allow_dropout=True)
+        r3, ts3 = pipeline.process(data_now, t_now, t_now, allow_dropout=True)
+
+        assert torch.allclose(r1, r2), (
+            f"Dropout inconsistent: call 1 vs 2 max diff={( r1 - r2).abs().max().item()}"
+        )
+        assert torch.allclose(r2, r3), (
+            f"Dropout inconsistent: call 2 vs 3 max diff={(r2 - r3).abs().max().item()}"
+        )
+        results.add_pass("Dropout consistency — same mask across calls at same t_current")
+    except Exception as e:
+        results.add_fail("Dropout consistency — same mask across calls at same t_current", traceback.format_exc())
+
+    # Test 6: Rewards (no dropout) vs obs (with dropout) query paths
+    try:
+        cfg = DelayPipelineCfgV3(
+            latency=LatencyCfg(
+                enabled=True,
+                distribution=DistributionCfg(type="constant", value=0.04),
+                min_steps=1,
+            ),
+            staleness=StalenessCfg(enabled=False),
+            dropout=DropoutCfg(enabled=True, probability=0.5),
+            first_order_lag=FirstOrderLagCfg(enabled=True, tau=0.05),
+        )
+        pipeline = DelayPipelineV3(cfg, num_envs, device, dt, data_shape)
+        pipeline.set_mode("fixed", progress=1.0)
+
+        # Warm up
+        for i in range(5):
+            t = torch.full((num_envs,), dt * i, device=device)
+            data = torch.ones(num_envs, 3, device=device) * float(i)
+            pipeline.process(data, t, t, allow_dropout=True)
+
+        # At new step: first call with allow_dropout=False (rewards), then True (obs)
+        t_now = torch.full((num_envs,), dt * 5, device=device)
+        data_now = torch.ones(num_envs, 3, device=device) * 5.0
+        r_reward, _ = pipeline.process(data_now, t_now, t_now, allow_dropout=False)
+        r_obs, _ = pipeline.process(data_now, t_now, t_now, allow_dropout=True)
+
+        # Repeat calls should be consistent
+        r_reward2, _ = pipeline.process(data_now, t_now, t_now, allow_dropout=False)
+        r_obs2, _ = pipeline.process(data_now, t_now, t_now, allow_dropout=True)
+
+        assert torch.allclose(r_reward, r_reward2), "Reward path not idempotent"
+        assert torch.allclose(r_obs, r_obs2), "Observation path not idempotent"
+        results.add_pass("Reward vs obs query paths are independently consistent")
+    except Exception as e:
+        results.add_fail("Reward vs obs query paths are independently consistent", traceback.format_exc())
+
 
 def main():
     """Main test runner."""

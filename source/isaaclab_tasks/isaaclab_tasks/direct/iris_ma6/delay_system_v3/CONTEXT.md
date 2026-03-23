@@ -31,15 +31,29 @@ None (standalone module).
 - `derived_field_computers.py` - Computes derived fields from stored state
 
 ## Calling Contract
+
+### MultiAgentDelaySystemV3 (wrapper)
 - `update_ground_truth()`: **WRITE**. Call exactly once per step from `_update_state_cache()`.
-  Appends to ring buffers. Multiple calls at same sim time are guarded but should be avoided.
+  Pushes GT snapshots to field storage. Multiple calls create duplicate noise — avoid.
 - `get_all_states_for_observations()`: **READ**. Safe to call multiple times per step.
 - `get_all_states_for_rewards()`: **READ**. Safe to call multiple times per step.
 - `set_delay_mode()`, `set_noise_scale()`, `set_dropout_rate()`: **CONFIG**. Call from `_get_rewards()` for curriculum.
 - `reset()`: Call from `_reset_idx()`.
 
-**Idempotency**: `DelayPipelineV3.process()` guards buffer appends with `_last_append_time`.
-Multiple calls at the same `t_current` return consistent results but do not advance the buffer.
+### DelayPipelineV3 (per-field pipeline)
+- `advance(data, timestamp, t_current)`: **WRITE**. Runs all stateful stages
+  (staleness, latency buffer append, FOL filter, dropout mask sample) exactly once.
+  Idempotent within a sim step via `_last_advance_time` guard.
+- `query(allow_dropout)`: **READ**. Returns cached output from last advance().
+  `allow_dropout=False` returns pre-dropout data (for rewards).
+  Safe to call any number of times.
+- `process(data, timestamp, t_current, allow_dropout)`: Convenience wrapper —
+  calls advance() then query(). Backward compatible. Safe for multi-call patterns.
+
+**Pipeline stage order**: staleness → latency → FOL → dropout.
+FOL is placed before dropout so the sensor filter operates on the channel signal
+before packet-loss masking (physically correct: filter runs on received data,
+dropout holds previously-filtered value on dropped steps).
 
 ## Spec
 None (self-documented via docstrings and `doc/` directory).

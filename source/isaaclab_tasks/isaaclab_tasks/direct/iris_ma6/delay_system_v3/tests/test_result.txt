@@ -6,7 +6,7 @@ Device:        cuda
 Torch version: 2.5.1+cu118
 CUDA version:  11.8
 GPU name:      NVIDIA GeForce RTX 3090
-Started:       2026-03-20 18:08:12
+Started:       2026-03-23 15:26:35
 
 ================================================================================
 Configuration Tests
@@ -88,7 +88,8 @@ Reward Mode Configuration Tests
   [PASS] RewardStateCfg default values
   [PASS] Pure GT mode (use_delay=False, use_noise=False)
   [PASS] Delayed clean mode (use_delay=True, use_noise=False)
-  [PASS] GT with noise mode (use_delay=False, use_noise=True)
+  [FAIL] GT with noise mode (use_delay=False, use_noise=True)
+    GT+noise mode should add noise, but max difference was 0.0
   [PASS] Full noisy delayed mode (use_delay=True, use_noise=True)
   [PASS] Reward states differ from observation states
   [PASS] Noise scale affects reward noise
@@ -101,14 +102,24 @@ Idempotency Tests (Multiple Calls Per Step)
   [PASS] Three calls at same t_current return identical results
   [PASS] Effective delay matches config (not config/N)
   [PASS] Buffer state unchanged on repeated calls
+  [PASS] FOL idempotency — multiple calls don't over-smooth
+  [PASS] Dropout consistency — same mask across calls at same t_current
+  [PASS] Reward vs obs query paths are independently consistent
 
 ================================================================================
 TEST SUMMARY
 ================================================================================
-Total Tests: 58
-Passed:      58 (100.0%)
-Failed:      0 (0.0%)
+Total Tests: 61
+Passed:      60 (98.4%)
+Failed:      1 (1.6%)
 Errors:      0 (0.0%)
+
+--------------------------------------------------------------------------------
+FAILED TESTS:
+--------------------------------------------------------------------------------
+
+Reward Mode Configuration Tests::GT with noise mode (use_delay=False, use_noise=True):
+  GT+noise mode should add noise, but max difference was 0.0
 ================================================================================
 
 Results written to: /home/usrg/IsaacPX4/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/delay_system_v3/tests/test_result.txt

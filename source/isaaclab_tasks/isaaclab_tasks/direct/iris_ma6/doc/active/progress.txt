@@ -311,3 +311,29 @@ Next:
 - End-to-end test: run_experiment.py --list to verify registry loads in Isaac Sim
 - Add frame_stack_wrapper.py if MLP experiments are needed later
 - Register experiments module in iris_ma6 ARCHITECTURE.md as new dependency
+
+----------------------------------------
+2026-03-23 — Delay pipeline calling contract fix (advance/query split)
+----------------------------------------
+Done:
+- Diagnosed calling contract violation: process() called 5× per step
+  (1× rewards + 3× obs per agent + 1× triangulation), mutating FOL and dropout
+  - FOL double-advance: obs path saw extra-smoothed data vs rewards path
+    (confirmed symptom: _triangulation_result_obs steadier than _gt)
+  - Dropout re-sampling: new random mask each call, rewards/obs saw different patterns
+- Fixed via advance/query split in DelayPipelineV3:
+  - advance(data, timestamp, t_current): WRITE, idempotent via _last_advance_time guard
+  - query(allow_dropout): READ, returns cached pre- or post-dropout result
+  - process(): backward-compatible wrapper (advance + query)
+- Reordered pipeline stages: staleness → latency → FOL → dropout (was FOL after dropout)
+  - FOL smooths channel signal before packet-loss masking (physically correct)
+  - Avoids needing two FOL states for with/without-dropout paths
+- Added 3 new idempotency tests: FOL multi-call, dropout consistency, reward-vs-obs paths
+- All 60/61 tests pass (1 pre-existing failure: GT+noise mode at noise_scale=0)
+- Files modified: delay_pipeline_v3.py, CONTEXT.md, tests/run_tests.py
+
+Next:
+- Visual verification in teleop: _triangulation_result_gt and _obs should show
+  similar jitter levels (obs no longer artificially smoother)
+- Short training run to verify reward/obs signal consistency
+- Investigate curriculum-controlled tau_zoom effect on gimbal violence during play
