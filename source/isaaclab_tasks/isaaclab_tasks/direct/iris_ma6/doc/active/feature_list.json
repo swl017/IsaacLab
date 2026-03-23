@@ -70,7 +70,7 @@
       "name": "Curriculum learning system",
       "status": "in_progress",
       "spec": null,
-      "notes": "Safety ramp moved to 60-100k (was 0-20k) to avoid CBF penalty dominating early bbox learning. Backlog: unified randomization architecture (2026-03-20)"
+      "notes": "Anti-forgetting: tau_zoom (0.01-1.0×) and max_lin_vel (0.5-1.2×) wide-range randomization. Spec: doc/curriculum_spec.md. Backlog: per-agent noise/dropout/max_lin_vel (2026-03-23)"
     },
     {
       "id": "env-integration",

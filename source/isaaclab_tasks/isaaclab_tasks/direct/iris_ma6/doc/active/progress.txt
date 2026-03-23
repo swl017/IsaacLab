@@ -418,3 +418,22 @@ Done:
 Next:
 - Teleop verification: GT ellipsoid should be stable, obs ellipsoid may jitter (normal)
 - First full training run with all obs redesign changes
+
+----------------------------------------
+2026-03-23 — Catastrophic forgetting prevention
+----------------------------------------
+Done:
+- Audited all curriculum-gated parameters for forgetting risk
+- Added zoom_scale_range (0.01, 1.0) to GainRandomizationCfg for tau_zoom
+  so near-instant zoom (early training) is still sampled at full progress
+- Widened max_lin_vel_scale_range from (0.8, 1.2) to (0.5, 1.2)
+  so 5 m/s (early training) is still sampled at full dynamics progress
+- Wrote curriculum_spec.md documenting anti-forgetting principle and per-parameter status
+- Files modified: controller/gain_randomization_cfg.py, controller/drone_controller.py,
+  doc/curriculum_spec.md, doc/active/todo.md
+
+Next:
+- Per-agent randomization for noise scale, dropout rate, and max_lin_vel
+  (requires API changes: set_noise_scale/set_dropout_rate to accept per-agent values,
+  _max_lin_vel shape from (N,) to (N, num_agents))
+- First full training run

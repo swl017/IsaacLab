@@ -57,5 +57,10 @@ class GainRandomizationCfg:
     randomize_max_lin_vel: bool = True
     """Randomize max linear velocity (action scaling)."""
 
-    max_lin_vel_scale_range: tuple[float, float] = (0.8, 1.2)
-    """Multiplicative scale range for max_lin_vel at full curriculum progress."""
+    max_lin_vel_scale_range: tuple[float, float] = (0.5, 1.2)
+    """Multiplicative scale range for max_lin_vel at full curriculum progress.
+
+    Wide range (0.5–1.2) prevents catastrophic forgetting: at full dynamics
+    curriculum, max_lin_vel is sampled from [5, 12] m/s (assuming nominal 10),
+    preserving the easy 5 m/s regime from early training.
+    """

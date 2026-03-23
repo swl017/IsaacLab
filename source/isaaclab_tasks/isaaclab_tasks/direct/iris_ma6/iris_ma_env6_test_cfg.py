@@ -430,7 +430,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     - value ~ Uniform(min, min + progress * (max - min))
     """
 
-    enable_initial_states_randomization: bool = False
+    enable_initial_states_randomization: bool = True
     """Enable randomized initial states.
 
     If True, uses InitialStates module for curriculum-driven randomization.
@@ -479,7 +479,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # ==========================================================================
     # Debugging and Testing Flags
     # ==========================================================================
-    debug_initial_step: int = 200000
+    debug_initial_step: int = 0 #200000
     """If > 0, initializes the environment at the specified training step for debugging."""
 
 
