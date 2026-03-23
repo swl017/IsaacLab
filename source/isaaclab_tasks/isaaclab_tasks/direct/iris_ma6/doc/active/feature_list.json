@@ -77,7 +77,7 @@
       "name": "Full environment integration and training",
       "status": "in_progress",
       "spec": "doc/iris_ma6_env_spec.md",
-      "notes": "Obs upgraded: 26D ego + 14D*(N-1) inter-agent [+6D tri]. Added zoom to inter-agent obs. World-frame gimbal angles replace body-frame joints. (2026-03-23)"
+      "notes": "Obs redesigned for MA5 parity: 31D ego (body-frame joints, ray_direction_w, combined_ang_vel_w, bbox_aoi) + 16D*(N-1) inter-agent (ray_dir, combined_ang_vel) [+6D tri]. (2026-03-23)"
     },
     {
       "id": "experiments",

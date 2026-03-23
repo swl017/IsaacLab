@@ -32,6 +32,7 @@ from .controller import DroneController
 from .controller.gimbal_controller import YAW_JOINT_OFFSET
 from .delay_system_v3 import MultiAgentDelaySystemV3, AgentStates
 from .initial_states import InitialStates
+from .delay_system_v3.derived_field_computers import compute_combined_angular_velocity
 from .iris_ma_env6_test_cfg import IrisMA6TestEnvCfg
 from .target_controller import TargetController
 from .triangulation import TriangulationResult, compute_full_triangulation
@@ -68,6 +69,28 @@ def body_to_world_gimbal_angles(
     Returns:
         Tuple of (azimuth_world, elevation_world), each (N,) in radians.
     """
+    dir_world = gimbal_ray_direction_world(yaw_body, pitch_body, q_body)
+    azimuth = torch.atan2(dir_world[..., 1], dir_world[..., 0])
+    xy_dist = torch.sqrt(dir_world[..., 0] ** 2 + dir_world[..., 1] ** 2)
+    elevation = torch.atan2(dir_world[..., 2], xy_dist)
+    return azimuth, elevation
+
+
+def gimbal_ray_direction_world(
+    yaw_body: torch.Tensor,
+    pitch_body: torch.Tensor,
+    q_body: torch.Tensor,
+) -> torch.Tensor:
+    """Compute world-frame camera ray direction from body-frame gimbal angles.
+
+    Args:
+        yaw_body: (N,) body-frame gimbal yaw (rad). Must already have YAW_JOINT_OFFSET subtracted.
+        pitch_body: (N,) body-frame gimbal pitch (rad).
+        q_body: (N, 4) body orientation quaternion (wxyz).
+
+    Returns:
+        (N, 3) unit direction vector in world frame.
+    """
     cos_p = torch.cos(pitch_body)
     dir_body = torch.stack(
         [
@@ -77,11 +100,7 @@ def body_to_world_gimbal_angles(
         ],
         dim=-1,
     )
-    dir_world = quat_rotate(q_body, dir_body)
-    azimuth = torch.atan2(dir_world[..., 1], dir_world[..., 0])
-    xy_dist = torch.sqrt(dir_world[..., 0] ** 2 + dir_world[..., 1] ** 2)
-    elevation = torch.atan2(dir_world[..., 2], xy_dist)
-    return azimuth, elevation
+    return quat_rotate(q_body, dir_body)
 
 
 class IrisMA6TestEnv(DirectMARLEnv):
@@ -132,7 +151,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
         # Auto-disable tiled cameras when rendering is not available.
         # Check both the ENABLE_CAMERAS env var and carb settings (which reflect
         # --enable_cameras CLI flag resolved by AppLauncher).
-        if cfg.enable_tiled_cameras:
+        try:
             import carb.settings
             rendering_enabled = carb.settings.get_settings().get_as_bool(
                 "/physics/fabricUpdateTransformations"
@@ -143,7 +162,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
             else:
                 cfg.enable_tiled_cameras = True
                 print("[IrisMA6TestEnv] Tiled cameras enabled")
-        else:
+        except ImportError:
             print("[IrisMA6TestEnv] Tiled cameras disabled (config)")
 
         # Dynamically generate agent-specific robot and camera configs BEFORE super().__init__
@@ -774,9 +793,22 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
                 # Joint states (gimbal) - order is pitch, yaw, roll
                 gt_data.joint_positions_b = self._gimbal_joint_pos[agent_id]
-                gt_data.joint_velocities_b = torch.zeros_like(
-                    self._gimbal_joint_pos[agent_id]
+                # Joint velocities from commanded gimbal rates [pitch_rate, yaw_rate, 0]
+                joint_vel = torch.zeros_like(self._gimbal_joint_pos[agent_id])
+                joint_vel[:, 0] = self.cmd_vel[:, idx, 5] * self.cfg.max_gimbal_rate  # pitch rate
+                joint_vel[:, 1] = self.cmd_vel[:, idx, 4] * self.cfg.max_gimbal_rate  # yaw rate
+                gt_data.joint_velocities_b = joint_vel
+
+                # Combined angular velocity (body + gimbal)
+                combined_w, combined_b = compute_combined_angular_velocity(
+                    body_angular_velocity_w=self._root_ang_vel_b[agent_id],  # Note: currently stored as body-frame
+                    body_angular_velocity_b=self._root_ang_vel_b[agent_id],
+                    joint_velocities_b=joint_vel,
+                    body_orientation_w=self._root_quat_w[agent_id],
+                    joint_positions_b=self._gimbal_joint_pos[agent_id],
                 )
+                gt_data.body_combined_angular_velocity_w = combined_w
+                gt_data.body_combined_angular_velocity_b = combined_b
 
                 # Gimbal world-frame angles (from joint positions + body orientation)
                 az, el = body_to_world_gimbal_angles(
@@ -1010,8 +1042,8 @@ class IrisMA6TestEnv(DirectMARLEnv):
         rewards_dict = {}
 
         # Update curriculum progress
-        # current_step = self.common_step_counter if not DEBUG_DRAW else self.cfg.debug_initial_step
-        current_step = self.common_step_counter
+        current_step = self.common_step_counter if not DEBUG_DRAW else self.cfg.debug_initial_step
+        # current_step = self.common_step_counter
         curr = self.cfg.curriculum
         self.progress_coord = self._linear_progress(
             curr.coordination_start_step, curr.coordination_end_step, current_step
@@ -1389,7 +1421,20 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 bbox[:, 2] /= img_w  # width
                 bbox[:, 3] /= img_h  # height
 
-                # Build ego observation (26D)
+                # Ego gimbal body-frame joints (yaw=0 means forward)
+                ego_gimbal_yaw_body = (ego_data.joint_positions_b[:, 1] - YAW_JOINT_OFFSET).unsqueeze(-1)
+                ego_gimbal_pitch_body = ego_data.joint_positions_b[:, 0:1]
+                # Ego camera ray direction in world frame
+                ego_ray_w = gimbal_ray_direction_world(
+                    ego_gimbal_yaw_body.squeeze(-1),
+                    ego_gimbal_pitch_body.squeeze(-1),
+                    ego_data.body_orientation_w,
+                )
+
+                # Ego bbox age-of-information
+                ego_bbox_aoi = (self._sim_time - ego_data.timestamp_detection).unsqueeze(-1)
+
+                # Build ego observation (31D)
                 ego_obs = torch.cat(
                     [
                         ego_data.body_position_w,  # (N, 3)
@@ -1397,10 +1442,11 @@ class IrisMA6TestEnv(DirectMARLEnv):
                         ego_data.body_orientation_w,  # (N, 4)
                         ego_data.body_angular_velocity_b,  # (N, 3) — gyro
                         ego_data.body_linear_acceleration_b,  # (N, 3) — accelerometer
-                        ego_data.gimbal_azimuth_world.unsqueeze(-1),  # (N, 1)
-                        ego_data.gimbal_elevation_world.unsqueeze(-1),  # (N, 1)
-                        ego_data.gimbal_azimuth_rate.unsqueeze(-1),  # (N, 1)
-                        ego_data.gimbal_elevation_rate.unsqueeze(-1),  # (N, 1)
+                        ego_gimbal_yaw_body,  # (N, 1) — body-frame, 0=forward
+                        ego_gimbal_pitch_body,  # (N, 1) — body-frame
+                        ego_ray_w,  # (N, 3) — world-frame camera pointing direction
+                        ego_data.body_combined_angular_velocity_w,  # (N, 3) — camera sweep rate
+                        ego_bbox_aoi,  # (N, 1) — bbox age-of-information
                         ego_data.camera_zoom_level.unsqueeze(-1),  # (N, 1)
                         bbox,  # (N, 4) - normalized
                         bbox_empty,  # (N, 1)
@@ -1408,7 +1454,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     dim=-1,
                 )
 
-                # Build inter-agent observations (14D per other agent)
+                # Build inter-agent observations (13D per other agent)
                 other_obs_parts = []
                 for other_id in self.cfg.possible_agents:
                     if other_id == agent_id:
@@ -1425,15 +1471,20 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     data_age = (self._sim_time - other_data.timestamp_motion).unsqueeze(-1)
                     bbox_age = (self._sim_time - other_data.timestamp_detection).unsqueeze(-1)
 
+                    # Other agent's camera ray direction in world frame
+                    other_ray_w = gimbal_ray_direction_world(
+                        other_data.joint_positions_b[:, 1] - YAW_JOINT_OFFSET,
+                        other_data.joint_positions_b[:, 0],
+                        other_data.body_orientation_w,
+                    )
+
                     other_obs_parts.append(
                         torch.cat(
                             [
                                 other_data.body_position_w,  # (N, 3)
                                 other_data.body_linear_velocity_w,  # (N, 3)
-                                other_data.gimbal_azimuth_world.unsqueeze(-1),  # (N, 1)
-                                other_data.gimbal_elevation_world.unsqueeze(-1),  # (N, 1)
-                                other_data.gimbal_azimuth_rate.unsqueeze(-1),  # (N, 1)
-                                other_data.gimbal_elevation_rate.unsqueeze(-1),  # (N, 1)
+                                other_ray_w,  # (N, 3) — world-frame camera pointing
+                                other_data.body_combined_angular_velocity_w,  # (N, 3) — camera sweep rate
                                 other_data.camera_zoom_level.unsqueeze(-1),  # (N, 1)
                                 other_bbox_empty,  # (N, 1)
                                 data_age,  # (N, 1)
@@ -1459,7 +1510,17 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
                 ego_gt = gt_all[agent_id].data
 
-                # Ego observation (26D)
+                # Ego gimbal body-frame joints (yaw=0 means forward)
+                ego_gimbal_yaw_body = (ego_gt.joint_positions_b[:, 1] - YAW_JOINT_OFFSET).unsqueeze(-1)
+                ego_gimbal_pitch_body = ego_gt.joint_positions_b[:, 0:1]
+                # Ego camera ray direction in world frame
+                ego_ray_w = gimbal_ray_direction_world(
+                    ego_gimbal_yaw_body.squeeze(-1),
+                    ego_gimbal_pitch_body.squeeze(-1),
+                    self._root_quat_w[agent_id],
+                )
+
+                # Ego observation (31D) — GT path: bbox AoI = 0 (no delay)
                 ego_obs = torch.cat(
                     [
                         self._root_pos_w[agent_id],  # (N, 3)
@@ -1467,10 +1528,11 @@ class IrisMA6TestEnv(DirectMARLEnv):
                         self._root_quat_w[agent_id],  # (N, 4)
                         self._root_ang_vel_b[agent_id],  # (N, 3) — gyro
                         self._root_lin_acc_b[agent_id],  # (N, 3) — accelerometer
-                        ego_gt.gimbal_azimuth_world.unsqueeze(-1),  # (N, 1)
-                        ego_gt.gimbal_elevation_world.unsqueeze(-1),  # (N, 1)
-                        ego_gt.gimbal_azimuth_rate.unsqueeze(-1),  # (N, 1)
-                        ego_gt.gimbal_elevation_rate.unsqueeze(-1),  # (N, 1)
+                        ego_gimbal_yaw_body,  # (N, 1) — body-frame, 0=forward
+                        ego_gimbal_pitch_body,  # (N, 1) — body-frame
+                        ego_ray_w,  # (N, 3) — world-frame camera pointing direction
+                        ego_gt.body_combined_angular_velocity_w,  # (N, 3) — camera sweep rate
+                        torch.zeros(self.num_envs, 1, device=self.device),  # (N, 1) — bbox AoI (GT = 0)
                         self.zoom_level[:, idx : idx + 1],  # (N, 1)
                         bbox,  # (N, 4)
                         smoothed_empty,  # (N, 1)
@@ -1478,7 +1540,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     dim=-1,
                 )
 
-                # Inter-agent observations (14D per other, GT = no delay, ages = 0)
+                # Inter-agent observations (13D per other, GT = no delay, ages = 0)
                 other_obs_parts = []
                 zero_age = torch.zeros(self.num_envs, 1, device=self.device)
                 for other_idx, other_id in enumerate(self.cfg.possible_agents):
@@ -1491,15 +1553,20 @@ class IrisMA6TestEnv(DirectMARLEnv):
                         self._smoothed_bbox_confidence[:, other_idx, 0] < self._smoothed_bbox_empty_threshold
                     ).float().unsqueeze(-1)
 
+                    # Other agent's camera ray direction in world frame
+                    other_ray_w = gimbal_ray_direction_world(
+                        other_gt.joint_positions_b[:, 1] - YAW_JOINT_OFFSET,
+                        other_gt.joint_positions_b[:, 0],
+                        other_gt.body_orientation_w,
+                    )
+
                     other_obs_parts.append(
                         torch.cat(
                             [
                                 other_gt.body_position_w,  # (N, 3)
                                 other_gt.body_linear_velocity_w,  # (N, 3)
-                                other_gt.gimbal_azimuth_world.unsqueeze(-1),  # (N, 1)
-                                other_gt.gimbal_elevation_world.unsqueeze(-1),  # (N, 1)
-                                other_gt.gimbal_azimuth_rate.unsqueeze(-1),  # (N, 1)
-                                other_gt.gimbal_elevation_rate.unsqueeze(-1),  # (N, 1)
+                                other_ray_w,  # (N, 3) — world-frame camera pointing
+                                other_gt.body_combined_angular_velocity_w,  # (N, 3) — camera sweep rate
                                 self.zoom_level[:, other_idx : other_idx + 1],  # (N, 1)
                                 other_bbox_empty,  # (N, 1)
                                 zero_age,  # (N, 1) — GT, no delay
@@ -1530,12 +1597,11 @@ class IrisMA6TestEnv(DirectMARLEnv):
             result = self._triangulation_result_obs
             is_valid = result.is_valid[:, 0]  # [N]
 
-            # Triangulated position (use first agent's position as fallback when invalid)
-            first_agent_id = self.cfg.possible_agents[0]
+            # Triangulated position (zero fallback when invalid, matching MA5)
             tri_pos = torch.where(
                 is_valid.unsqueeze(-1).expand(-1, 3),
                 result.position[:, 0, :],  # [N, 3] - triangulated
-                self._root_pos_w[first_agent_id],  # fallback to first agent's position
+                torch.zeros(self.num_envs, 3, device=self.device),  # zero fallback
             )
 
             # Standard deviation from covariance diagonal (or -1 as invalid marker)
@@ -1702,14 +1768,14 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     result.zoom_levels[:, idx], env_ids
                 )
 
-                # Scale tau_zoom with curriculum: near-instant at progress=0,
-                # ramp to configured value (e.g. 0.1s) at full tracking progress.
-                # This gives MA5-like instant zoom early, realistic lag later.
-                tau_nominal = self.cfg.drone_controller.zoom.tau_zoom
-                tau_scaled = tau_nominal * self.progress_dynamics
-                self._controllers[agent_id]._zoom.set_tau_zoom(
-                    max(tau_scaled, 1e-4)  # avoid division-by-zero in exp(-dt/tau)
+                # Curriculum-scaled tau_zoom: near-instant at progress=0,
+                # ramp to configured value at full dynamics progress.
+                # When progress > 0, randomize_gains() will overwrite with
+                # per-env randomized values centered on this nominal.
+                tau_zoom_curriculum = max(
+                    self.cfg.drone_controller.zoom.tau_zoom * self.progress_dynamics, 1e-4
                 )
+                self._controllers[agent_id]._zoom.set_tau_zoom(tau_zoom_curriculum)
 
             # Apply target states
             target_pos = result.target_positions + self._terrain.env_origins[env_ids]
@@ -1749,9 +1815,13 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         # Randomize controller gains (curriculum-gated to dynamics phase)
         if self.progress_dynamics > 0.0:
+            tau_zoom_curriculum = max(
+                self.cfg.drone_controller.zoom.tau_zoom * self.progress_dynamics, 1e-4
+            )
             for agent_id in self.cfg.possible_agents:
                 self._controllers[agent_id].randomize_gains(
-                    env_ids, self.progress_dynamics, self.cfg.gain_randomization
+                    env_ids, self.progress_dynamics, self.cfg.gain_randomization,
+                    tau_zoom_nominal=tau_zoom_curriculum,
                 )
 
             # Randomize max linear velocity (same dynamics curriculum gate)
@@ -1947,10 +2017,12 @@ class IrisMA6TestEnv(DirectMARLEnv):
             self._visualization.update_frames(link_poses)
 
         # Draw covariance ellipsoids for triangulation uncertainty
+        # GT path: center on actual target position (not midpoint triangulation)
+        # Covariance is evaluated at GT position, so ellipsoid shows uncertainty there
         if self.cfg.enable_triangulation and self._triangulation_result_gt is not None:
             result = self._triangulation_result_gt
             self._visualization.update_covariance_ellipsoids(
-                translations=result.position[:, 0, :],  # [N, 3] - first target
+                translations=self._target_pos_w,  # GT target position — stable
                 covariance=result.covariance[:, 0, :, :],  # [N, 3, 3] - first target
                 is_valid=result.is_valid[:, 0],  # [N] - first target
             )

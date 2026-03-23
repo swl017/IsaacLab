@@ -32,6 +32,7 @@ BODY_FIELDS = [
     ("body_angular_velocity_w", (3,)),
     ("body_angular_velocity_b", (3,)),
     ("body_linear_acceleration_b", (3,)),
+    ("body_combined_angular_velocity_w", (3,)),
 ]
 
 JOINT_FIELDS = [
@@ -263,6 +264,11 @@ class MultiAgentDelaySystemV3:
             data.body_linear_acceleration_b,
             noise_std=acc_noise,
         )
+        self._delay_system.store(
+            prefix + "body_combined_angular_velocity_w",
+            data.body_combined_angular_velocity_w,
+            noise_std=ang_vel_noise,
+        )
 
         # Joint fields
         self._delay_system.store(
@@ -488,6 +494,11 @@ class MultiAgentDelaySystemV3:
         )
         data.body_angular_velocity_b = ang_vel_b
 
+        combined_ang_vel_w, _ = self._delay_system.get_delayed(
+            prefix + "body_combined_angular_velocity_w", perspective, use_noise, allow_dropout
+        )
+        data.body_combined_angular_velocity_w = combined_ang_vel_w
+
         lin_acc_b, _ = self._delay_system.get_delayed(
             prefix + "body_linear_acceleration_b", perspective, use_noise, allow_dropout
         )
@@ -621,6 +632,7 @@ class MultiAgentDelaySystemV3:
         dst_data.body_angular_velocity_w = src_data.body_angular_velocity_w.clone()
         dst_data.body_angular_velocity_b = src_data.body_angular_velocity_b.clone()
         dst_data.body_linear_acceleration_b = src_data.body_linear_acceleration_b.clone()
+        dst_data.body_combined_angular_velocity_w = src_data.body_combined_angular_velocity_w.clone()
 
         # Joint fields
         dst_data.joint_positions_b = src_data.joint_positions_b.clone()
@@ -709,6 +721,12 @@ class MultiAgentDelaySystemV3:
             data.body_linear_acceleration_b = data.body_linear_acceleration_b + torch.randn_like(
                 data.body_linear_acceleration_b
             ) * acc_noise
+
+        # Combined angular velocity noise (same scale as angular velocity)
+        if ang_vel_noise > 0:
+            data.body_combined_angular_velocity_w = data.body_combined_angular_velocity_w + torch.randn(
+                N, 3, device=device
+            ) * ang_vel_noise
 
         # Orientation noise — proper axis-angle perturbation preserving unit quaternion
         if ori_noise > 0:

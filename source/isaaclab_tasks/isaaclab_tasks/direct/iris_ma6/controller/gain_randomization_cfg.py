@@ -46,6 +46,14 @@ class GainRandomizationCfg:
     randomize_zoom: bool = True
     """Randomize zoom dynamics (tau_zoom, max_zoom_rate)."""
 
+    zoom_scale_range: tuple[float, float] = (0.01, 1.0)
+    """Multiplicative scale range for tau_zoom at full curriculum progress.
+
+    Wide range (0.01–1.0) prevents catastrophic forgetting: even at full
+    dynamics curriculum, some envs get near-instant zoom (like early training)
+    while others get realistic lag. At progress=0 the range collapses to (1,1).
+    """
+
     randomize_max_lin_vel: bool = True
     """Randomize max linear velocity (action scaling)."""
 

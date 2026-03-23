@@ -338,6 +338,7 @@ class DroneController:
         env_ids: torch.Tensor,
         progress: float,
         cfg: GainRandomizationCfg,
+        tau_zoom_nominal: float | None = None,
     ):
         """Randomize controller gains for specified environments.
 
@@ -446,7 +447,15 @@ class DroneController:
             self._motor.set_tau_motor(new_tau)
 
         if cfg.randomize_zoom:
-            scale = torch.empty(M, device=self.device).uniform_(low, high)
+            # Update nominal if curriculum override provided
+            if tau_zoom_nominal is not None:
+                self._nominal_gains["tau_zoom"][env_ids] = tau_zoom_nominal
+
+            # Zoom uses its own wider scale range to prevent catastrophic forgetting
+            z_low = 1.0 - progress * (1.0 - cfg.zoom_scale_range[0])
+            z_high = 1.0 + progress * (cfg.zoom_scale_range[1] - 1.0)
+
+            scale = torch.empty(M, device=self.device).uniform_(z_low, z_high)
             new_tau_z = self._nominal_gains["tau_zoom"].clone()
             new_tau_z[env_ids] = self._nominal_gains["tau_zoom"][env_ids] * scale
             self._zoom.set_tau_zoom(new_tau_z)

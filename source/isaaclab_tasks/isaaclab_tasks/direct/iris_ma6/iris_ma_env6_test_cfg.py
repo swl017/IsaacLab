@@ -115,8 +115,8 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     action_spaces: dict = {"drone_0": 7, "drone_1": 7, "drone_2": 7}
     """Action space dimensions per agent (auto-populated from num_agents)."""
 
-    observation_spaces: dict = {"drone_0": 52, "drone_1": 52, "drone_2": 52}
-    """Observation space dimensions per agent. 26D ego + 14D*(num_agents-1) inter-agent [+6D triangulation]."""
+    observation_spaces: dict = {"drone_0": 63, "drone_1": 63, "drone_2": 63}
+    """Observation space dimensions per agent. 31D ego + 16D*(num_agents-1) inter-agent [+6D triangulation]."""
 
     state_space: int = -1
     """State space dimension. -1 means concatenate all observations."""
@@ -430,7 +430,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     - value ~ Uniform(min, min + progress * (max - min))
     """
 
-    enable_initial_states_randomization: bool = True
+    enable_initial_states_randomization: bool = False
     """Enable randomized initial states.
 
     If True, uses InitialStates module for curriculum-driven randomization.
@@ -479,7 +479,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # ==========================================================================
     # Debugging and Testing Flags
     # ==========================================================================
-    debug_initial_step: int = 0 #200000
+    debug_initial_step: int = 200000
     """If > 0, initializes the environment at the specified training step for debugging."""
 
 
@@ -496,12 +496,12 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
         self.delay_system = create_delay_cfg_from_params(self.delay_system_params)
 
         # Update observation space:
-        # Ego: 26D (pos, vel, quat, ang_vel_b, lin_acc_b, gimbal_az_w, gimbal_el_w,
-        #           gimbal_az_rate, gimbal_el_rate, zoom, bbox, bbox_empty)
-        # Inter-agent: 14D per other agent (pos, vel, gimbal_az_w, gimbal_el_w,
-        #              gimbal_az_rate, gimbal_el_rate, zoom, bbox_empty, data_age, bbox_age)
+        # Ego: 31D (pos, vel, quat, ang_vel_b, lin_acc_b, gimbal_yaw_body, gimbal_pitch_body,
+        #           ray_direction_w, combined_ang_vel_w, bbox_aoi, zoom, bbox, bbox_empty)
+        # Inter-agent: 16D per other agent (pos, vel, ray_direction_w, combined_ang_vel_w,
+        #              zoom, bbox_empty, data_age, bbox_age)
         # Optional: +6D triangulation (tri_pos + tri_std)
-        obs_dim = 26 + 14 * (self.num_agents - 1)
+        obs_dim = 31 + 16 * (self.num_agents - 1)
         if self.enable_triangulation:
             obs_dim += 6  # triangulated position (3) + std_dev (3)
         self.observation_spaces = {a: obs_dim for a in self.possible_agents}

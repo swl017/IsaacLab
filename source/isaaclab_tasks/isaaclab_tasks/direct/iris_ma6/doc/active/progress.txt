@@ -350,3 +350,71 @@ Done:
 
 Next:
 - Verify obs shape in a short training run (expected: 54D for 3 agents, no tri)
+
+----------------------------------------
+2026-03-23 — Observation redesign (MA5 parity + ray direction)
+----------------------------------------
+Done:
+- Systematic MA5 vs MA6 observation comparison identified 3 issues:
+  1. World-frame gimbal azi/elev can't encode joint limits (shifts with body orientation)
+  2. Gimbal rates redundant (derived from own action output)
+  3. Missing: combined_angular_velocity (body+gimbal), ego bbox AoI
+- Replaced world-frame gimbal azi/elev (2D) + rates (2D) with:
+  - Body-frame gimbal yaw/pitch joints (2D) — direct joint limit awareness
+  - World-frame camera ray direction (3D) — direct geometric pointing signal
+- Added combined_angular_velocity_w (3D) to ego + inter-agent obs
+  - Computed via compute_combined_angular_velocity() from derived_field_computers.py
+  - Registered in delay system: store, retrieve, clone, noise paths
+  - Joint velocities now populated from commanded gimbal rates (was zeros)
+- Added ego bbox age-of-information (1D) — missing vs MA5
+- New helper: gimbal_ray_direction_world() extracted from body_to_world_gimbal_angles()
+- Delay pipeline calling contract fix (advance/query split):
+  - FOL, dropout, staleness now idempotent within a sim step
+  - 3 new tests pass (FOL multi-call, dropout consistency, reward-vs-obs)
+  - Reordered stages: staleness→latency→FOL→dropout (was FOL after dropout)
+- Obs dimensions: ego 31D, inter-agent 16D (was 26D/14D)
+  - 3 agents no tri: 63D, with tri: 69D
+- Files modified: iris_ma_env6_test.py, iris_ma_env6_test_cfg.py,
+  delay_system_v3/multi_agent_wrapper.py, delay_system_v3/delay_pipeline_v3.py,
+  delay_system_v3/CONTEXT.md, delay_system_v3/tests/run_tests.py
+
+Next:
+- Training run with triangulation enabled to verify 69D obs shape
+- Compare early learning curves against MA5 baseline (should converge faster
+  with body-frame joints + ray direction + combined_ang_vel)
+- Monitor whether combined_ang_vel improves coordination metrics (pair_valid_rate)
+
+----------------------------------------
+2026-03-23 — Fix tau_zoom per-agent randomization
+----------------------------------------
+Done:
+- Fixed tau_zoom curriculum scaling being overwritten by randomize_gains()
+  (manual set at line 1772 was dead code — randomize_gains ran after and used original nominal)
+- Added tau_zoom_nominal parameter to DroneController.randomize_gains()
+  so per-env randomization centers on the curriculum-scaled value
+- Flow: per-agent loop sets baseline tau_zoom (handles progress=0), then
+  randomize_gains() applies ±20% per-env scaling around curriculum-scaled nominal
+- Files modified: controller/drone_controller.py, iris_ma_env6_test.py
+
+Next:
+- Verify per-env tau_zoom variation in training run
+- First full training run with obs redesign + correct tau_zoom randomization
+
+----------------------------------------
+2026-03-23 — Triangulation visualization + fallback fix
+----------------------------------------
+Done:
+- Fixed GT triangulation ellipsoid jumping (MA5 parity):
+  - Root cause: visualization drew ellipsoid at X_tri (noisy midpoint triangulation)
+  - Fix: draw at self._target_pos_w (GT target position, stable)
+  - Covariance is already evaluated at GT position (use_gt_target=True), so ellipsoid
+    correctly shows uncertainty around the true target
+- Fixed obs triangulation fallback position:
+  - Was: self._root_pos_w[first_agent_id] (agent 0's position — wrong)
+  - Now: zeros (matching MA5 behavior)
+  - Policy already has bbox_empty and tri_std to detect invalid triangulation
+- Files modified: iris_ma_env6_test.py
+
+Next:
+- Teleop verification: GT ellipsoid should be stable, obs ellipsoid may jitter (normal)
+- First full training run with all obs redesign changes
