@@ -151,19 +151,19 @@ class IrisMA6TestEnv(DirectMARLEnv):
         # Auto-disable tiled cameras when rendering is not available.
         # Check both the ENABLE_CAMERAS env var and carb settings (which reflect
         # --enable_cameras CLI flag resolved by AppLauncher).
-        try:
-            import carb.settings
-            rendering_enabled = carb.settings.get_settings().get_as_bool(
-                "/physics/fabricUpdateTransformations"
-            )
-            if not rendering_enabled:
-                cfg.enable_tiled_cameras = False
-                print("[IrisMA6TestEnv] Tiled cameras disabled (rendering not enabled)")
-            else:
-                cfg.enable_tiled_cameras = True
-                print("[IrisMA6TestEnv] Tiled cameras enabled")
-        except ImportError:
-            print("[IrisMA6TestEnv] Tiled cameras disabled (config)")
+        # try:
+        #     import carb.settings
+        #     rendering_enabled = carb.settings.get_settings().get_as_bool(
+        #         "/physics/fabricUpdateTransformations"
+        #     )
+        #     if not rendering_enabled:
+        #         cfg.enable_tiled_cameras = False
+        #         print("[IrisMA6TestEnv] Tiled cameras disabled (rendering not enabled)")
+        #     else:
+        #         cfg.enable_tiled_cameras = True
+        #         print("[IrisMA6TestEnv] Tiled cameras enabled")
+        # except ImportError:
+        #     print("[IrisMA6TestEnv] Tiled cameras disabled (config)")
 
         # Dynamically generate agent-specific robot and camera configs BEFORE super().__init__
         # This is required because the scene setup needs the configs

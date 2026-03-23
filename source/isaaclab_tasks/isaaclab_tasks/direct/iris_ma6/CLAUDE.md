@@ -29,6 +29,7 @@ iris_ma6/
 ├── doc/
 │   ├── active/           # Multi-session tracking (feature_list.json, progress.txt)
 │   ├── backlog/          # Low-urgency future tasks and research
+│   ├── experiments/      # Per-run training analysis (what was learned)
 │   └── *_spec.md         # Authoritative specs
 ├── <module>/
 │   ├── CONTEXT.md        # Module routing contract

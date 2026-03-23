@@ -557,3 +557,4 @@ def main(env_cfg, agent_cfg: dict):
 
 if __name__ == "__main__":
     main()
+    simulation_app.close()
