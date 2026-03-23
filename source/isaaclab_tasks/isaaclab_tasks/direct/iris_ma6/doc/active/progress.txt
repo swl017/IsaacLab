@@ -437,3 +437,22 @@ Next:
   (requires API changes: set_noise_scale/set_dropout_rate to accept per-agent values,
   _max_lin_vel shape from (N,) to (N, num_agents))
 - First full training run
+
+----------------------------------------
+2026-03-24 — Aesthetic Flight scene integration
+----------------------------------------
+Done:
+- Added configurable Flight scene overlay to env (visual-only, no physics):
+  - use_flight_scene toggle, flight_scene_usd path, flight_scene_scale, flight_scene_offset
+  - Loads USD under /World/FlightScene Xform with -90° X rotation (Y-up → Z-up) + uniform scale
+  - Default scale=0.001 (scene is in cm with huge coordinates)
+- Inspected Flight USD variants for collision suitability:
+  - Only 1 mesh (Iceland_A_low_95) has PhysicsCollisionAPI; rest is visual-only
+  - metersPerUnit=0.01, coordinates in hundreds of thousands — not suitable for physics ground
+  - Decision: keep TerrainImporterCfg plane for collisions, Flight scene for aesthetics only
+- Files modified: iris_ma_env6_test_cfg.py, iris_ma_env6_test.py
+
+Next:
+- Tune flight_scene_offset to center landscape on env_0
+- Per-agent randomization for noise scale, dropout rate, and max_lin_vel
+- First full training run

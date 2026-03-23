@@ -489,6 +489,21 @@ class IrisMA6TestEnv(DirectMARLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
+        # Optionally load aesthetic Flight scene (Y-up USD, rotated 90° around X to Z-up)
+        if self.cfg.use_flight_scene:
+            import omni.usd
+            from pxr import UsdGeom, Gf
+
+            stage = omni.usd.get_context().get_stage()
+            xform = UsdGeom.Xform.Define(stage, "/World/FlightScene")
+            # Order matters: USD applies ops top-to-bottom → translate, rotate, scale
+            ox, oy, oz = self.cfg.flight_scene_offset
+            xform.AddTranslateOp().Set(Gf.Vec3d(ox, oy, oz))
+            xform.AddRotateXOp().Set(90.0)  # USD in Y-up convention → Rotate the USD to match Z-up
+            s = self.cfg.flight_scene_scale
+            xform.AddScaleOp().Set(Gf.Vec3f(s, s, s))
+            xform.GetPrim().GetReferences().AddReference(self.cfg.flight_scene_usd)
+
     def _pre_physics_step(self, actions: Dict[str, torch.Tensor]):
         """Pre-process actions for all agents before physics step.
 
@@ -1881,7 +1896,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
             lookat_offset = (target_pos_w - robot_pos_w).detach().cpu().numpy() * 1.5
             import numpy as np
             angle = np.arctan2(-lookat_offset[1], -lookat_offset[0])
-            eye = np.array([10 * np.cos(angle), 10 * np.sin(angle), 1.0])  # Offset the camera position for better view
+            eye = np.array([10 * np.cos(angle), 10 * np.sin(angle), 1.0])
             self.viewport_camera_controller.update_view_location(eye=eye)
 
         # Populate state caches so _get_observations works on first reset

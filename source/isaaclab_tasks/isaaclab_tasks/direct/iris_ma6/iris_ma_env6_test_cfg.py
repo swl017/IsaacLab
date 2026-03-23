@@ -121,15 +121,6 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     state_space: int = -1
     """State space dimension. -1 means concatenate all observations."""
 
-    debug_vis: bool = True
-    """Enable debug visualization."""
-
-    debug_frame_vis: bool = False
-    """Enable visualization of coordinate frames for debugging."""
-
-    enable_tiled_cameras: bool = False
-    """Enable TiledCamera sensors in the scene. Disable to skip camera creation for faster headless training."""
-
     # ==========================================================================
     # Simulation
     # ==========================================================================
@@ -167,6 +158,34 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
         ),
         debug_vis=False,
     )
+
+    # ==========================================================================
+    # Aesthetic Scene
+    # ==========================================================================
+
+    debug_vis: bool = True
+    """Enable debug visualization."""
+
+    debug_frame_vis: bool = False
+    """Enable visualization of coordinate frames for debugging."""
+
+    enable_tiled_cameras: bool = False
+    """Enable TiledCamera sensors in the scene. Disable to skip camera creation for faster headless training."""
+
+    use_flight_scene: bool = False # Enable for visualization/testing, disable for faster headless training.
+    """Toggle to replace the flat ground plane with the Flight aesthetic scene (Y-up USD, auto-rotated to Z-up)."""
+
+    flight_scene_usd: str = "/home/usrg/IsaacPX4/world/Flight/Flight_original.usd"
+    """Path to the Flight scene USD file."""
+
+    flight_scene_scale: float = 0.001
+    """Uniform scale applied to the Flight scene.
+    The USD is in centimeters (metersPerUnit=0.01) with coordinates in the hundreds of thousands. 
+    (~600k, ~1.4M in native units), 0.01 converts cm->m 
+    adjust further if needed to fit the environment."""
+
+    flight_scene_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    """Translation offset (x, y, z) in meters applied after scaling, to center the scene on the environment."""
 
     # ==========================================================================
     # Assets
