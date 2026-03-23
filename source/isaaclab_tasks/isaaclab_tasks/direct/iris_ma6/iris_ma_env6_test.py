@@ -92,7 +92,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
     - Simple distance-based rewards
     - Minimal observations for testing
 
-    Observation space per agent: 26D ego + 13D per other agent [+ 6D triangulation]
+    Observation space per agent: 26D ego + 14D per other agent [+ 6D triangulation]
         Ego (26D):
         - pos (3): World position
         - vel (3): World velocity
@@ -106,10 +106,10 @@ class IrisMA6TestEnv(DirectMARLEnv):
         - zoom (1): Current zoom level
         - bbox (4): Primary target normalized bbox (cx, cy, w, h)
         - bbox_empty (1): 1 if bbox is empty, 0 otherwise
-        Inter-agent (13D per other agent):
+        Inter-agent (14D per other agent):
         - position (3), linear_velocity (3), gimbal_azimuth_world (1),
           gimbal_elevation_world (1), gimbal_azimuth_rate (1),
-          gimbal_elevation_rate (1), bbox_empty (1), data_age (1), bbox_age (1)
+          gimbal_elevation_rate (1), zoom (1), bbox_empty (1), data_age (1), bbox_age (1)
 
     Action space per agent: 7D
         - vx, vy, vz (3): Velocity commands in world frame
@@ -1355,9 +1355,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
         - Ego (26D): pos(3), vel(3), quat(4), ang_vel_b(3), lin_acc_b(3),
           gimbal_az_w(1), gimbal_el_w(1), gimbal_az_rate(1), gimbal_el_rate(1),
           zoom(1), bbox(4), bbox_empty(1)
-        - Inter-agent (13D per other): pos(3), vel(3), gimbal_az_w(1),
+        - Inter-agent (14D per other): pos(3), vel(3), gimbal_az_w(1),
           gimbal_el_w(1), gimbal_az_rate(1), gimbal_el_rate(1),
-          bbox_empty(1), data_age(1), bbox_age(1)
+          zoom(1), bbox_empty(1), data_age(1), bbox_age(1)
         - Optional triangulation tail (6D): tri_pos(3), tri_std(3)
 
         Returns:
@@ -1408,7 +1408,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     dim=-1,
                 )
 
-                # Build inter-agent observations (13D per other agent)
+                # Build inter-agent observations (14D per other agent)
                 other_obs_parts = []
                 for other_id in self.cfg.possible_agents:
                     if other_id == agent_id:
@@ -1434,6 +1434,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                                 other_data.gimbal_elevation_world.unsqueeze(-1),  # (N, 1)
                                 other_data.gimbal_azimuth_rate.unsqueeze(-1),  # (N, 1)
                                 other_data.gimbal_elevation_rate.unsqueeze(-1),  # (N, 1)
+                                other_data.camera_zoom_level.unsqueeze(-1),  # (N, 1)
                                 other_bbox_empty,  # (N, 1)
                                 data_age,  # (N, 1)
                                 bbox_age,  # (N, 1)
@@ -1477,7 +1478,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     dim=-1,
                 )
 
-                # Inter-agent observations (13D per other, GT = no delay, ages = 0)
+                # Inter-agent observations (14D per other, GT = no delay, ages = 0)
                 other_obs_parts = []
                 zero_age = torch.zeros(self.num_envs, 1, device=self.device)
                 for other_idx, other_id in enumerate(self.cfg.possible_agents):
@@ -1499,6 +1500,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                                 other_gt.gimbal_elevation_world.unsqueeze(-1),  # (N, 1)
                                 other_gt.gimbal_azimuth_rate.unsqueeze(-1),  # (N, 1)
                                 other_gt.gimbal_elevation_rate.unsqueeze(-1),  # (N, 1)
+                                self.zoom_level[:, other_idx : other_idx + 1],  # (N, 1)
                                 other_bbox_empty,  # (N, 1)
                                 zero_age,  # (N, 1) — GT, no delay
                                 zero_age,  # (N, 1) — GT, no delay

@@ -116,7 +116,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     """Action space dimensions per agent (auto-populated from num_agents)."""
 
     observation_spaces: dict = {"drone_0": 52, "drone_1": 52, "drone_2": 52}
-    """Observation space dimensions per agent. 26D ego + 13D*(num_agents-1) inter-agent [+6D triangulation]."""
+    """Observation space dimensions per agent. 26D ego + 14D*(num_agents-1) inter-agent [+6D triangulation]."""
 
     state_space: int = -1
     """State space dimension. -1 means concatenate all observations."""
@@ -498,10 +498,10 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
         # Update observation space:
         # Ego: 26D (pos, vel, quat, ang_vel_b, lin_acc_b, gimbal_az_w, gimbal_el_w,
         #           gimbal_az_rate, gimbal_el_rate, zoom, bbox, bbox_empty)
-        # Inter-agent: 13D per other agent (pos, vel, gimbal_az_w, gimbal_el_w,
-        #              gimbal_az_rate, gimbal_el_rate, bbox_empty, data_age, bbox_age)
+        # Inter-agent: 14D per other agent (pos, vel, gimbal_az_w, gimbal_el_w,
+        #              gimbal_az_rate, gimbal_el_rate, zoom, bbox_empty, data_age, bbox_age)
         # Optional: +6D triangulation (tri_pos + tri_std)
-        obs_dim = 26 + 13 * (self.num_agents - 1)
+        obs_dim = 26 + 14 * (self.num_agents - 1)
         if self.enable_triangulation:
             obs_dim += 6  # triangulated position (3) + std_dev (3)
         self.observation_spaces = {a: obs_dim for a in self.possible_agents}

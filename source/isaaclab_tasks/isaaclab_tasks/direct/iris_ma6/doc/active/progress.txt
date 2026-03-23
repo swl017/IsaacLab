@@ -337,3 +337,16 @@ Next:
   similar jitter levels (obs no longer artificially smoother)
 - Short training run to verify reward/obs signal consistency
 - Investigate curriculum-controlled tau_zoom effect on gimbal violence during play
+
+----------------------------------------
+2026-03-23 — Add zoom level to inter-agent observations
+----------------------------------------
+Done:
+- Added camera_zoom_level to inter-agent obs in both delayed and GT paths
+- Inter-agent obs: 13D → 14D per other agent (zoom inserted after gimbal_elevation_rate)
+- Updated obs_dim calculation in cfg: 26 + 14*(N-1) [+6D tri]
+- Updated all docstrings and comments to reflect 14D
+- Files modified: iris_ma_env6_test.py, iris_ma_env6_test_cfg.py
+
+Next:
+- Verify obs shape in a short training run (expected: 54D for 3 agents, no tri)
