@@ -51,6 +51,40 @@ To implement visual-only propeller spinning without physics interference, the US
 
 ---
 
+## Adaptive Lagrangian for CBF Penalty
+
+**Priority:** Medium
+**Status:** Planned
+**Related files:** `cbf_safety/cbf_cfg.py`, `cbf_safety/cbf_manager.py`, `iris_ma_env6_test.py`
+
+### Problem
+
+Fixed `lambda_cbf` becomes mismatched as task reward evolves during training. At
+different curriculum phases the optimal penalty-to-reward ratio shifts, making a
+static weight either too weak (collisions) or too dominant (over-conservative).
+
+### Proposed Solution
+
+Replace fixed `lambda_cbf` with a learned Lagrange multiplier updated via dual
+gradient ascent (MAPPO-Lagrangian / MACPO approach):
+
+```python
+lambda_cbf += lr_lambda * (collision_cost - threshold)
+lambda_cbf = max(lambda_cbf, 0)
+```
+
+- Initialize at `lambda_cbf = 1.0`
+- `lr_lambda ~ 0.001–0.01` (PID Lagrangian recommends this range, Stooke et al. ICML 2020)
+- `threshold = 0` (zero tolerance for violations)
+
+### References
+
+- MACPO / MAPPO-Lagrangian (Gu et al., 2021, arxiv 2110.02793)
+- PID Lagrangian (Stooke et al., ICML 2020)
+- Barrier Functions Inspired Reward Shaping (arxiv 2403.01410)
+
+---
+
 ## Per-agent Randomization
 
 Add per-agent randomization layer on top of per-episode, per-env, per-step randomization

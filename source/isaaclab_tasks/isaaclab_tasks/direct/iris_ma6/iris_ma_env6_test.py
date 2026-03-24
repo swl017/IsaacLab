@@ -23,7 +23,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectMARLEnv
 from isaaclab.sensors import TiledCamera
-from isaaclab.utils.math import quat_mul, quat_rotate, quat_rotate_inverse
+from isaaclab.utils.math import euler_xyz_from_quat, quat_mul, quat_rotate, quat_rotate_inverse, wrap_to_pi
 
 from .bbox_raycaster_v2 import BBoxRayCasterV2
 from .bbox_raycaster_v2.utils.projection import create_intrinsic_matrix_tensor
@@ -373,6 +373,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     "bbox_size",
                     "triangulation",
                     "cbf_penalty",
+                    "collision",
                     "est_error_gt",
                     "est_error_e2e",
                 ]
@@ -1159,6 +1160,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
         cmd_velocities = self.cmd_vel[:, :, 0:3]
         dt = self.cfg.sim.dt * self.cfg.decimation
 
+        # Check collisions for sharp penalty (complements continuous CPA + termination)
+        collided = self.cbf_manager.check_collisions(gt_positions)  # (E,) bool
+
         # Compute CBF penalty from GT state
         cbf_penalty_all = self.cbf_manager.compute_training_penalty(
             gt_positions=gt_positions,
@@ -1271,7 +1275,12 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     * step_dt
                     * self.progress_coord
                 ),
-                "cbf_penalty": -self.cbf_manager.lambda_cbf * cbf_penalty_all * self.progress_safety,
+                "cbf_penalty": (
+                    -self.cbf_manager.lambda_cbf
+                    * cbf_penalty_all
+                    * self.progress_safety
+                ),
+                "collision": collided.float() * self.cfg.collision_penalty_scale * step_dt,
                 "est_error_gt": est_error_gt_reward,
                 "est_error_e2e": est_error_e2e_reward,
             }
@@ -1451,12 +1460,12 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 # Ego bbox age-of-information
                 ego_bbox_aoi = (self._sim_time - ego_data.timestamp_detection).unsqueeze(-1)
 
-                # Build ego observation (31D)
+                # Build ego observation (30D)
                 ego_obs = torch.cat(
                     [
                         ego_data.body_position_w,  # (N, 3)
                         ego_data.body_linear_velocity_w,  # (N, 3)
-                        ego_data.body_orientation_w,  # (N, 4)
+                        wrap_to_pi(torch.stack(euler_xyz_from_quat(ego_data.body_orientation_w), dim=-1)),  # (N, 3) roll, pitch, yaw in [-pi, pi]
                         ego_data.body_angular_velocity_b,  # (N, 3) — gyro
                         ego_data.body_linear_acceleration_b,  # (N, 3) — accelerometer
                         ego_gimbal_yaw_body,  # (N, 1) — body-frame, 0=forward
@@ -1520,10 +1529,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
             for idx, agent_id in enumerate(self.cfg.possible_agents):
                 bbox = self.bbox_raycaster_v2.data.bboxes_normalized[:, idx, 0, :]
-                # Use smoothed confidence for bbox_empty to prevent oscillation
-                smoothed_empty = (
-                    self._smoothed_bbox_confidence[:, idx, 0] < self._smoothed_bbox_empty_threshold
-                ).float().unsqueeze(-1)
+                bbox_empty = (bbox.abs().sum(dim=-1) < 1e-6).float().unsqueeze(-1)
 
                 ego_gt = gt_all[agent_id].data
 
@@ -1537,12 +1543,12 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     self._root_quat_w[agent_id],
                 )
 
-                # Ego observation (31D) — GT path: bbox AoI = 0 (no delay)
+                # Ego observation (30D) — GT path: bbox AoI = 0 (no delay)
                 ego_obs = torch.cat(
                     [
                         self._root_pos_w[agent_id],  # (N, 3)
                         self._root_lin_vel_w[agent_id],  # (N, 3)
-                        self._root_quat_w[agent_id],  # (N, 4)
+                        wrap_to_pi(torch.stack(euler_xyz_from_quat(self._root_quat_w[agent_id]), dim=-1)),  # (N, 3) roll, pitch, yaw in [-pi, pi]
                         self._root_ang_vel_b[agent_id],  # (N, 3) — gyro
                         self._root_lin_acc_b[agent_id],  # (N, 3) — accelerometer
                         ego_gimbal_yaw_body,  # (N, 1) — body-frame, 0=forward
@@ -1552,7 +1558,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                         torch.zeros(self.num_envs, 1, device=self.device),  # (N, 1) — bbox AoI (GT = 0)
                         self.zoom_level[:, idx : idx + 1],  # (N, 1)
                         bbox,  # (N, 4)
-                        smoothed_empty,  # (N, 1)
+                        bbox_empty,  # (N, 1)
                     ],
                     dim=-1,
                 )
@@ -1566,9 +1572,8 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     other_gt = gt_all[other_id].data
 
                     other_bbox = self.bbox_raycaster_v2.data.bboxes_normalized[:, other_idx, 0, :]
-                    other_bbox_empty = (
-                        self._smoothed_bbox_confidence[:, other_idx, 0] < self._smoothed_bbox_empty_threshold
-                    ).float().unsqueeze(-1)
+                    other_bbox_empty = (other_bbox.abs().sum(dim=-1) < 1e-6).float().unsqueeze(-1)
+
 
                     # Other agent's camera ray direction in world frame
                     other_ray_w = gimbal_ray_direction_world(
@@ -1876,8 +1881,11 @@ class IrisMA6TestEnv(DirectMARLEnv):
             self._detection_stats["pair_valid_count"][env_ids] / total_steps
         )
 
-        # Log collision rate (total collision steps / episode length)
-        all_extras["Safety/collision"] = torch.mean(self._collision_count[env_ids])
+        # Log collision count and fraction (collision steps / episode length)
+        all_extras["Safety/collision_per_env"] = torch.mean(self._collision_count[env_ids])
+        all_extras["Safety/collision_fraction"] = torch.mean(
+            self._collision_count[env_ids] / total_steps
+        )
 
         # Reset detection stats and collision count for these envs
         for key in self._detection_stats:

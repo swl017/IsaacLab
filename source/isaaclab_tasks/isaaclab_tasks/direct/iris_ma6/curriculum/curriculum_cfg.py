@@ -145,7 +145,7 @@ class CurriculumCfg:
     safety_start_step: int = 0
     """Step to start enforcing safety constraints (CBF penalty)."""
 
-    safety_end_step: int = 20000
+    safety_end_step: int = 40000
     """Step when safety penalties reach full scale."""
 
     # ==========================================================================

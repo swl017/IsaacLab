@@ -484,3 +484,38 @@ Next:
 - Key metric: pair_valid_rate should NOT collapse when target starts moving (30k)
 - If dropout/dynamics 10k ramp is too short, may need to extend total training budget
 - Per-agent randomization for noise scale, dropout rate, and max_lin_vel
+
+----------------------------------------
+2026-03-24 — Tilt-gimbal analysis + euler obs + CBF tuning
+----------------------------------------
+Done:
+- Deep analysis of pair_valid_rate cliff at ~20k steps across all MA6 experiments:
+  - Compared e36e8ca123 (curriculum_update), 67dfcdf4ce (obs_redesign),
+    0004dcd9df (max_lin_vel_curriculum), 11af0e2a72 (obs_dim_safety_fix)
+  - Also compared against iris_ma5 (no cliff despite same curriculum timing)
+  - Root cause: tilt-gimbal saturation — MA6's non-holonomic dynamics tilt body
+    up to 45 deg during lateral flight; gimbal pitch limits are also +-45 deg,
+    leaving zero margin for camera pointing at high speed. MA5 is holonomic (no tilt).
+  - Disproved velocity-curriculum hypothesis (11af0e2a72 has no vel curriculum but
+    still shows cliff) and tracking-curriculum hypothesis (MA5 has same tracking
+    curriculum but no cliff)
+- Replaced quaternion (4D) with explicit euler angles (3D) in ego observation:
+  - euler_xyz_from_quat returns [0, 2*pi]; wrapped to [-pi, pi] via wrap_to_pi
+  - Makes body tilt directly observable so policy can learn speed/tilt tradeoff
+  - Ego obs: 31D → 30D; obs_dim formula updated in cfg
+  - Both delayed-state and GT fallback paths updated
+- Added collision penalty (sharp spike at collision moment, scale=-100):
+  - Complements continuous CPA barrier and episode termination
+  - Added "collision" to episode reward tracking
+- CBF parameter tuning: T=1→3s, lambda_cbf=1→10
+- Extended safety_end_step: 20k→40k (longer ramp for safety penalty)
+- Removed smoothed_bbox_confidence in GT obs path (was causing oscillation)
+- Analyzed tensorboard loss curves (entropy, policy, value) for all experiments
+- Files modified: iris_ma_env6_test.py, iris_ma_env6_test_cfg.py,
+  curriculum/curriculum_cfg.py, cbf_safety/cbf_cfg.py
+
+Next:
+- Training run with euler obs to verify tilt-gimbal coupling is now learnable
+- Key metric: pair_valid_rate should show softer decline (policy moderates speed)
+- Monitor if collision penalty + CBF tuning improves safety metrics
+- Per-agent randomization for noise scale, dropout rate, and max_lin_vel

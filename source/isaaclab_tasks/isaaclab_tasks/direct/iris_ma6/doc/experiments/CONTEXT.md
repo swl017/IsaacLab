@@ -4,7 +4,8 @@
 Post-training analysis of individual experiment runs. Each file documents what was learned from a training run: metrics, failure modes, hyperparameter insights, and decisions for the next iteration.
 
 ## Inputs
-- Training logs (TensorBoard, checkpoints) from `logs/skrl/`
+- Training logs (TensorBoard, checkpoints) from `logs/skrl/iris_ma6`.
+- Optionally compare to iris_ma5 from `logs/skrl/iris_ma5_ablations_2026-02-28/2026-02-24_00-45-58_a1_with_aoi_seed42`
 - Experiment definition from `experiments/experiment_registry.py`
 - Curriculum and reward specs from `doc/*_spec.md`
 

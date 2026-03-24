@@ -91,7 +91,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     This is a simplified test environment to validate the DroneController
     integration with 3 agents.
 
-    Observation space per agent: 18D (pos, vel, quat, gimbal_yaw, gimbal_pitch, zoom, bbox, bbox_empty)
+    Observation space per agent: 30D ego (pos, vel, rpy, ang_vel_b, lin_acc_b, gimbal, ray, sweep, aoi, zoom, bbox, bbox_empty)
     Action space per agent: 7D (vx, vy, vz, yaw_rate, gimbal_yaw_rate, gimbal_pitch_rate, zoom_rate)
     """
 
@@ -115,8 +115,8 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     action_spaces: dict = {"drone_0": 7, "drone_1": 7, "drone_2": 7}
     """Action space dimensions per agent (auto-populated from num_agents)."""
 
-    observation_spaces: dict = {"drone_0": 63, "drone_1": 63, "drone_2": 63}
-    """Observation space dimensions per agent. 31D ego + 16D*(num_agents-1) inter-agent [+6D triangulation]."""
+    observation_spaces: dict = {"drone_0": 62, "drone_1": 62, "drone_2": 62}
+    """Observation space dimensions per agent. 30D ego + 16D*(num_agents-1) inter-agent [+6D triangulation]."""
 
     state_space: int = -1
     """State space dimension. -1 means concatenate all observations."""
@@ -386,6 +386,11 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     bbox_size_reward_scale: float = 60.0
     """Reward scale for appropriate bbox size (~20% of image area)."""
 
+    collision_penalty_scale: float = -100.0
+    """Penalty applied at the moment of collision (sharp spike).
+    Provides immediate, localized gradient signal complementing the
+    continuous CPA barrier and episode termination."""
+
     # ==========================================================================
     # Curriculum Configuration
     # ==========================================================================
@@ -515,12 +520,12 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
         self.delay_system = create_delay_cfg_from_params(self.delay_system_params)
 
         # Update observation space:
-        # Ego: 31D (pos, vel, quat, ang_vel_b, lin_acc_b, gimbal_yaw_body, gimbal_pitch_body,
+        # Ego: 30D (pos, vel, rpy, ang_vel_b, lin_acc_b, gimbal_yaw_body, gimbal_pitch_body,
         #           ray_direction_w, combined_ang_vel_w, bbox_aoi, zoom, bbox, bbox_empty)
         # Inter-agent: 16D per other agent (pos, vel, ray_direction_w, combined_ang_vel_w,
         #              zoom, bbox_empty, data_age, bbox_age)
         # Optional: +6D triangulation (tri_pos + tri_std)
-        obs_dim = 31 + 16 * (self.num_agents - 1)
+        obs_dim = 30 + 16 * (self.num_agents - 1)
         if self.enable_triangulation:
             obs_dim += 6  # triangulated position (3) + std_dev (3)
         self.observation_spaces = {a: obs_dim for a in self.possible_agents}
