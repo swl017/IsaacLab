@@ -172,7 +172,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     enable_tiled_cameras: bool = False
     """Enable TiledCamera sensors in the scene. Disable to skip camera creation for faster headless training."""
 
-    use_flight_scene: bool = False # Enable for visualization/testing, disable for faster headless training.
+    use_flight_scene: bool = True # Enable for visualization/testing, disable for faster headless training.
     """Toggle to replace the flat ground plane with the Flight aesthetic scene (Y-up USD, auto-rotated to Z-up)."""
 
     flight_scene_usd: str = "/home/usrg/IsaacPX4/world/Flight/Flight_original.usd"

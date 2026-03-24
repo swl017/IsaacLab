@@ -19,7 +19,7 @@ unsafe actions
 
 ## 3. Results
 
-### 3.1 Training Curves
+### 3.1 Training Curves(aborted at 160k)
 **Metric: `pair_valid_rate`**
 - Slightly outperforms `67dfcdf4ce_obs_redesign` 
 - The metric maxes out at around 24k, decrease until around 76k, starts to regain performance from around 80k.
@@ -41,7 +41,7 @@ the reward decreases(penalty increases) monotonically in `67dfcdf4ce_obs_redesig
 - Significantly underforms(<330 steps out of 500) than `67dfcdf4ce_obs_redesign` (~495 steps out of 500)
 
 ### 3.2 Behavior Observations
-Not tested yet.(Training still in process)
+Not tested yet.
 
 ## 4. Analysis / Open question
 - `pair_valid_rate` and `action_sum` both peaks at 20k. What is causing the dramatic change in the trend, especially same trend for `pair_valid_rate` across multiple experiments(`2026-03-23_17-33-02_mappo_rnn_torch_67dfcdf4ce_obs_redesign`, `2026-03-21_21-20-19_mappo_rnn_torch_0004dcd9df_max_lin_vel_curriculum`)? 

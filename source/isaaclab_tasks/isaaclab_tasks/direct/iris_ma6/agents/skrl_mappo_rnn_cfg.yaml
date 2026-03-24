@@ -83,7 +83,7 @@ agent:
   # Experiment tracking
   experiment:
     directory: iris_ma6
-    experiment_name: "e36e8ca123_curriculum_update" 
+    experiment_name: "5d2b8f8eca_rpy_instead_of_quat" 
     write_interval: auto
     checkpoint_interval: auto
     store_separately: false
