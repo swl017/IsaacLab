@@ -83,7 +83,7 @@ agent:
   # Experiment tracking
   experiment:
     directory: iris_ma6
-    experiment_name: "5d2b8f8eca_rpy_instead_of_quat" 
+    experiment_name: "4dc2f44b42_tilt_limit_30deg" 
     write_interval: auto
     checkpoint_interval: auto
     store_separately: false
