@@ -4,3 +4,4 @@
 - [ ] Complete the first successful train run. (added on 2026-03-19)
 - [ ] Add gimbal stability/responsiveness to curriculum/randomization after first successful train run. (added on 2026-03-19)
 - [ ] Integrate domain randomization to the env after first successful train run. (added on 2026-03-19)
+- [ ] Implement False Positive and False Negative to bbox_raycaster_v2, or maybe we could even integrate the YOLO network to the policy.
