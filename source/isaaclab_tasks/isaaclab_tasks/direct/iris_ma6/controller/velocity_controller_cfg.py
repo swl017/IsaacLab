@@ -28,7 +28,7 @@ class VelocityControllerCfg:
     integral_limit: tuple[float, float, float] = (4.0, 4.0, 2.0)
     """Integral anti-windup limits [x, y, z] [m/s equivalent]."""
 
-    max_tilt: float = 45.0
+    max_tilt: float = 30.0
     """Maximum tilt angle [deg]. Limits roll/pitch commands."""
 
     max_lin_vel: float = 30.0
