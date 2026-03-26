@@ -1,6 +1,6 @@
 {
   "project": "iris_ma6",
-  "last_updated": "2026-03-24",
+  "last_updated": "2026-03-27",
   "features": [
     {
       "id": "controller",
@@ -77,7 +77,7 @@
       "name": "Full environment integration and training",
       "status": "in_progress",
       "spec": "doc/iris_ma6_env_spec.md",
-      "notes": "Obs: 30D ego (pos, vel, rpy, ang_vel_b, lin_acc_b, gimbal joints, ray_dir_w, combined_ang_vel_w, bbox_aoi, zoom, bbox) + 16D*(N-1) inter-agent [+6D tri]. Quat→euler(rpy) for tilt-gimbal observability (2026-03-24)"
+      "notes": "Obs: 30D ego (pos, vel, rpy, ang_vel_b, lin_acc_b, gimbal joints, ray_dir_w, combined_ang_vel_w, bbox_aoi, zoom, bbox) + 16D*(N-1) inter-agent [+6D tri]. ray_w fixed: bbox-based (camera→target) not gimbal pointing (2026-03-27)"
     },
     {
       "id": "experiments",

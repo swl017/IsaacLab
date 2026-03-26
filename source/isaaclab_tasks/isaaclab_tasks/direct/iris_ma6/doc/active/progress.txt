@@ -519,3 +519,18 @@ Next:
 - Key metric: pair_valid_rate should show softer decline (policy moderates speed)
 - Monitor if collision penalty + CBF tuning improves safety metrics
 - Per-agent randomization for noise scale, dropout rate, and max_lin_vel
+
+----------------------------------------
+2026-03-27 — Fix ray_w observation (bbox-based, not gimbal pointing)
+----------------------------------------
+Done:
+- Fixed ray_w in observations: was gimbal pointing direction (gimbal_ray_direction_world),
+  now bbox-based ray from camera to target (camera_ray_directions_w[:, 0, :]) matching iris_ma5
+- Updated all 4 observation paths: delayed ego, delayed other, GT ego, GT other
+- Added camera_orientation_w and camera_ray_directions_w computation to env-level _build_gt_states()
+- Imported compute_ray_directions_from_bbox from delay_system_v3.derived_field_computers
+- Files modified: iris_ma_env6_test.py
+
+Next:
+- Training run to verify corrected ray_w improves policy's target tracking
+- Monitor triangulation quality — bbox-based rays should improve convergence

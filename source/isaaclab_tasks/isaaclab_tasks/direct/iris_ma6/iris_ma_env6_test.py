@@ -32,7 +32,7 @@ from .controller import DroneController
 from .controller.gimbal_controller import YAW_JOINT_OFFSET
 from .delay_system_v3 import MultiAgentDelaySystemV3, AgentStates
 from .initial_states import InitialStates
-from .delay_system_v3.derived_field_computers import compute_combined_angular_velocity
+from .delay_system_v3.derived_field_computers import compute_combined_angular_velocity, compute_ray_directions_from_bbox
 from .iris_ma_env6_test_cfg import IrisMA6TestEnvCfg
 from .target_controller import TargetController
 from .triangulation import TriangulationResult, compute_full_triangulation
@@ -943,11 +943,20 @@ class IrisMA6TestEnv(DirectMARLEnv):
             robot = self._robots[agent_id]
             pitch_link_idx = self._frame_link_ids[agent_id]["pitch_link"]
             data.camera_position_w = robot.data.body_pos_w[:, pitch_link_idx]
+            data.camera_orientation_w = robot.data.body_quat_w[:, pitch_link_idx]
             data.camera_base_intrinsics = self._camera_intrinsics_base.clone()
             data.camera_zoom_level = self.zoom_level[:, idx]
 
             # Detection - use pixel bboxes (not normalized) for triangulation
             data.bboxes_2d = self.bbox_raycaster_v2.data.bboxes[:, idx, :, :]
+
+            # Ray directions from bbox (camera-to-target through bbox center)
+            data.camera_ray_directions_w = compute_ray_directions_from_bbox(
+                camera_orientation_w=data.camera_orientation_w,
+                camera_base_intrinsics=data.camera_base_intrinsics,
+                camera_zoom_level=data.camera_zoom_level,
+                bboxes_2d=data.bboxes_2d,
+            )
 
             gt_states[agent_id] = states
         return gt_states
@@ -1456,12 +1465,8 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 # Ego gimbal body-frame joints (yaw=0 means forward)
                 ego_gimbal_yaw_body = (ego_data.joint_positions_b[:, 1] - YAW_JOINT_OFFSET).unsqueeze(-1)
                 ego_gimbal_pitch_body = ego_data.joint_positions_b[:, 0:1]
-                # Ego camera ray direction in world frame
-                ego_ray_w = gimbal_ray_direction_world(
-                    ego_gimbal_yaw_body.squeeze(-1),
-                    ego_gimbal_pitch_body.squeeze(-1),
-                    ego_data.body_orientation_w,
-                )
+                # Ego camera ray direction in world frame (bbox-based, from camera to target)
+                ego_ray_w = ego_data.camera_ray_directions_w[:, 0, :]
 
                 # Ego bbox age-of-information
                 ego_bbox_aoi = (self._sim_time - ego_data.timestamp_detection).unsqueeze(-1)
@@ -1476,7 +1481,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                         ego_data.body_linear_acceleration_b,  # (N, 3) — accelerometer
                         ego_gimbal_yaw_body,  # (N, 1) — body-frame, 0=forward
                         ego_gimbal_pitch_body,  # (N, 1) — body-frame
-                        ego_ray_w,  # (N, 3) — world-frame camera pointing direction
+                        ego_ray_w,  # (N, 3) — world-frame ray to target through bbox center
                         ego_data.body_combined_angular_velocity_w,  # (N, 3) — camera sweep rate
                         ego_bbox_aoi,  # (N, 1) — bbox age-of-information
                         ego_data.camera_zoom_level.unsqueeze(-1),  # (N, 1)
@@ -1503,19 +1508,15 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     data_age = (self._sim_time - other_data.timestamp_motion).unsqueeze(-1)
                     bbox_age = (self._sim_time - other_data.timestamp_detection).unsqueeze(-1)
 
-                    # Other agent's camera ray direction in world frame
-                    other_ray_w = gimbal_ray_direction_world(
-                        other_data.joint_positions_b[:, 1] - YAW_JOINT_OFFSET,
-                        other_data.joint_positions_b[:, 0],
-                        other_data.body_orientation_w,
-                    )
+                    # Other agent's camera ray direction in world frame (bbox-based)
+                    other_ray_w = other_data.camera_ray_directions_w[:, 0, :]
 
                     other_obs_parts.append(
                         torch.cat(
                             [
                                 other_data.body_position_w,  # (N, 3)
                                 other_data.body_linear_velocity_w,  # (N, 3)
-                                other_ray_w,  # (N, 3) — world-frame camera pointing
+                                other_ray_w,  # (N, 3) — world-frame ray to target
                                 other_data.body_combined_angular_velocity_w,  # (N, 3) — camera sweep rate
                                 other_data.camera_zoom_level.unsqueeze(-1),  # (N, 1)
                                 other_bbox_empty,  # (N, 1)
@@ -1542,12 +1543,8 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 # Ego gimbal body-frame joints (yaw=0 means forward)
                 ego_gimbal_yaw_body = (ego_gt.joint_positions_b[:, 1] - YAW_JOINT_OFFSET).unsqueeze(-1)
                 ego_gimbal_pitch_body = ego_gt.joint_positions_b[:, 0:1]
-                # Ego camera ray direction in world frame
-                ego_ray_w = gimbal_ray_direction_world(
-                    ego_gimbal_yaw_body.squeeze(-1),
-                    ego_gimbal_pitch_body.squeeze(-1),
-                    self._root_quat_w[agent_id],
-                )
+                # Ego camera ray direction in world frame (bbox-based, from camera to target)
+                ego_ray_w = ego_gt.camera_ray_directions_w[:, 0, :]
 
                 # Ego observation (30D) — GT path: bbox AoI = 0 (no delay)
                 ego_obs = torch.cat(
@@ -1559,7 +1556,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                         self._root_lin_acc_b[agent_id],  # (N, 3) — accelerometer
                         ego_gimbal_yaw_body,  # (N, 1) — body-frame, 0=forward
                         ego_gimbal_pitch_body,  # (N, 1) — body-frame
-                        ego_ray_w,  # (N, 3) — world-frame camera pointing direction
+                        ego_ray_w,  # (N, 3) — world-frame ray to target through bbox center
                         ego_gt.body_combined_angular_velocity_w,  # (N, 3) — camera sweep rate
                         torch.zeros(self.num_envs, 1, device=self.device),  # (N, 1) — bbox AoI (GT = 0)
                         self.zoom_level[:, idx : idx + 1],  # (N, 1)
@@ -1581,19 +1578,15 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     other_bbox_empty = (other_bbox.abs().sum(dim=-1) < 1e-6).float().unsqueeze(-1)
 
 
-                    # Other agent's camera ray direction in world frame
-                    other_ray_w = gimbal_ray_direction_world(
-                        other_gt.joint_positions_b[:, 1] - YAW_JOINT_OFFSET,
-                        other_gt.joint_positions_b[:, 0],
-                        other_gt.body_orientation_w,
-                    )
+                    # Other agent's camera ray direction in world frame (bbox-based)
+                    other_ray_w = other_gt.camera_ray_directions_w[:, 0, :]
 
                     other_obs_parts.append(
                         torch.cat(
                             [
                                 other_gt.body_position_w,  # (N, 3)
                                 other_gt.body_linear_velocity_w,  # (N, 3)
-                                other_ray_w,  # (N, 3) — world-frame camera pointing
+                                other_ray_w,  # (N, 3) — world-frame ray to target
                                 other_gt.body_combined_angular_velocity_w,  # (N, 3) — camera sweep rate
                                 self.zoom_level[:, other_idx : other_idx + 1],  # (N, 1)
                                 other_bbox_empty,  # (N, 1)
