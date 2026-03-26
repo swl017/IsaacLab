@@ -83,7 +83,7 @@ agent:
   # Experiment tracking
   experiment:
     directory: iris_ma6
-    experiment_name: "2b380a0537_z_action_tuning" 
+    experiment_name: "3db8ff3985_altitude_penalty" 
     write_interval: auto
     checkpoint_interval: auto
     store_separately: false

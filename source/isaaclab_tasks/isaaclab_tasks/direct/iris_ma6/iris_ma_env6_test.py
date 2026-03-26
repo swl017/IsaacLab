@@ -374,6 +374,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     "triangulation",
                     "cbf_penalty",
                     "collision",
+                    "altitude",
                     "est_error_gt",
                     "est_error_e2e",
                 ]
