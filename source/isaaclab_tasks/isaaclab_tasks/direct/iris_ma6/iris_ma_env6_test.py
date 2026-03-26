@@ -1690,7 +1690,13 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self._collision_count += collided.float()
 
         for agent_id in self.cfg.possible_agents:
-            terminated[agent_id] = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+            # Terminate if drone goes too low (crashed) OR collision
+            pos_z = self._root_pos_w[agent_id][:, 2]
+            crashed = pos_z < 0.5
+            # died = crashed | collided
+            died = crashed
+
+            terminated[agent_id] = died
             truncated[agent_id] = time_out & ~terminated[agent_id]
 
         return terminated, truncated
