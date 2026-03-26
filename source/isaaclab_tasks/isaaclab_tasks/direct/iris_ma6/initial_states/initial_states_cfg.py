@@ -64,7 +64,7 @@ class InitialStatesCfg:
     Sampled as: uniform(min, min + progress * (max - min))
     """
 
-    cylinder_height_min: float = 10.0
+    cylinder_height_min: float = 20.0
     """Minimum cylinder base height above ground (meters)."""
 
     cylinder_height_max: float = 50.0
