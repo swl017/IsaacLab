@@ -83,7 +83,7 @@ agent:
   # Experiment tracking
   experiment:
     directory: iris_ma6
-    experiment_name: "3da98de790_no_collision_termination" 
+    experiment_name: "820eb7a554_z_action_tuning" 
     write_interval: auto
     checkpoint_interval: auto
     store_separately: false
