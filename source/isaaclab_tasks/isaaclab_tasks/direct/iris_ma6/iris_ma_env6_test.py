@@ -1263,6 +1263,10 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 est_error_gt_reward = torch.zeros(self.num_envs, device=self.device)
                 est_error_e2e_reward = torch.zeros(self.num_envs, device=self.device)
 
+            # Altitude penalty: penalize flying below threshold
+            pos_z = self._root_pos_w[agent_id][:, 2]
+            too_low = (pos_z < self.cfg.altitude_min_threshold).float()
+
             step_dt = self.cfg.sim.dt * self.cfg.decimation
             rewards = {
                 "action_sum": action_sum * self.cfg.action_sum_penalty_scale * step_dt,
@@ -1281,6 +1285,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     * self.progress_safety
                 ),
                 "collision": collided.float() * self.cfg.collision_penalty_scale * step_dt,
+                "altitude": too_low * self.cfg.altitude_penalty_scale * step_dt,
                 "est_error_gt": est_error_gt_reward,
                 "est_error_e2e": est_error_e2e_reward,
             }
@@ -1684,13 +1689,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self._collision_count += collided.float()
 
         for agent_id in self.cfg.possible_agents:
-            # Terminate if drone goes too low (crashed) OR collision
-            pos_z = self._root_pos_w[agent_id][:, 2]
-            crashed = pos_z < 2.0
-            # died = crashed | collided
-            died = crashed
-
-            terminated[agent_id] = died
+            terminated[agent_id] = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
             truncated[agent_id] = time_out & ~terminated[agent_id]
 
         return terminated, truncated

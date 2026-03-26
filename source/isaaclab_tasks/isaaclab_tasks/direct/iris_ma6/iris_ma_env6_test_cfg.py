@@ -371,7 +371,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     """Penalty scale for total action magnitude."""
 
     # [0 vx, 1 vy, 2 vz, 3 yaw_rate, 4 gimbal_yaw_rate, 5 gimbal_pitch_rate, 6 zoom_rate]
-    action_weight: list = [1, 1, 1, 1, 0.5, 0.5, 0.3]
+    action_weight: list = [1, 1, 5, 1, 0.5, 0.5, 0.3]
     """Weights for each action dimension in penalty computation."""
 
     action_delta_weight: list = [1, 1, 1, 1, 0.5, 0.5, 0.3]
@@ -390,6 +390,12 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     """Penalty applied at the moment of collision (sharp spike).
     Provides immediate, localized gradient signal complementing the
     continuous CPA barrier and episode termination."""
+
+    altitude_penalty_scale: float = -100.0
+    """Penalty applied when drone altitude drops below altitude_min_threshold."""
+
+    altitude_min_threshold: float = 2.0
+    """Minimum altitude (m) below which the altitude penalty is applied."""
 
     # ==========================================================================
     # Curriculum Configuration
