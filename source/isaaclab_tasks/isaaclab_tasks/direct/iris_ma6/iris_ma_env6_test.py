@@ -1687,7 +1687,8 @@ class IrisMA6TestEnv(DirectMARLEnv):
             # Terminate if drone goes too low (crashed) OR collision
             pos_z = self._root_pos_w[agent_id][:, 2]
             crashed = pos_z < 2.0
-            died = crashed | collided
+            # died = crashed | collided
+            died = crashed
 
             terminated[agent_id] = died
             truncated[agent_id] = time_out & ~terminated[agent_id]

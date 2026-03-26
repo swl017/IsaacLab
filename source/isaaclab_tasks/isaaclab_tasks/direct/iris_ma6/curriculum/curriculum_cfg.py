@@ -55,7 +55,7 @@ class CurriculumCfg:
     tracking_start_step: int = 0
     """Step to start increasing formation/initialization difficulty."""
 
-    tracking_end_step: int = 150000
+    tracking_end_step: int = 60000
     """Step when formation/initialization difficulty reaches maximum."""
 
     # ==========================================================================

@@ -1,4 +1,4 @@
-# iris_ma6 — Multi-Agent Drone Observation Environment
+# {{PROJECT_NAME}} — {{PROJECT_DESCRIPTION}}
 
 ## Architecture
 See [ARCHITECTURE.md](ARCHITECTURE.md) for module dependency graph and data flow.
@@ -23,22 +23,18 @@ Authoritative specifications live in `doc/*_spec.md`. These define *what* to bui
 
 ## Folder Semantics
 ```
-iris_ma6/
+{{PROJECT_NAME}}/
 ├── ARCHITECTURE.md       # Module dependency graph
 ├── CLAUDE.md             # This file (session workflow)
 ├── doc/
 │   ├── active/           # Multi-session tracking (feature_list.json, progress.txt)
 │   ├── backlog/          # Low-urgency future tasks and research
-│   ├── experiments/      # Per-run training analysis (what was learned)
 │   └── *_spec.md         # Authoritative specs
 ├── <module>/
 │   ├── CONTEXT.md        # Module routing contract
 │   └── tests/            # Per-module test suite
-└── iris_ma_env6_test.py  # Main environment (integrates all modules)
+└── {{ENV_FILE}}          # Main environment (integrates all modules)
 ```
-
-## Templates
-Reusable scaffolds for new modules and projects live in `doc/template/`. See `doc/template/README.md` for usage guide and pattern selection.
 
 ## Rationale
 For background on why this workflow exists, see `doc/ai_workflow.md`.

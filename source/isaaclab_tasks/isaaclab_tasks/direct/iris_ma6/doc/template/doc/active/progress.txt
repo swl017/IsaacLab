@@ -1,0 +1,14 @@
+========================================
+SESSION LOG — {{PROJECT_NAME}}
+========================================
+Append to this file at the end of each session.
+Format: date, what was done, what's next.
+
+----------------------------------------
+YYYY-MM-DD — Session description
+----------------------------------------
+Done:
+- What was accomplished
+
+Next:
+- What should be done in the next session

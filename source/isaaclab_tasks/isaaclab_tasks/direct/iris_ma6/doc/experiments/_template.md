@@ -22,11 +22,23 @@ Key overrides from the base config (not the full config — only what changed).
 ## 3. Results
 
 ### 3.1 Training Curves
-Summary of key metrics at convergence (or at failure point):
-- Episode reward (mean, std)
-- Episode length
-- Policy loss / value loss
-- Key reward components
+Metric: `pair_valid_rate`
+
+Metric: `all_invalid_rate`
+
+Metric: `Total timesteps (mean)`
+
+Metric: `drone_0_triangulation`
+
+Metric: `drone_0_bbox_center`
+
+Metric: `collision_per_env`
+
+Metric: `drone_0_cbf_penalty`
+
+Metric: `drone_0_action_sum`
+
+Metric: `drone_0_action_delta`
 
 ### 3.2 Behavior Observations
 What the agents actually did — qualitative notes from video/teleoperation review.

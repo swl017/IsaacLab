@@ -308,6 +308,8 @@ class InitialStatesGenerator:
             cfg.cylinder_height_range_max - cfg.cylinder_height_range_min
         )
 
+        # NOTE: Python for-loop is acceptable here — rejection sampling with
+        # sequential clearance checks cannot be easily vectorized.
         for env_idx in range(num_envs):
             center = centers[env_idx]
             radius = diameters[env_idx] / 2.0
@@ -516,52 +518,46 @@ class InitialStatesGenerator:
         cfg = self.cfg
         num_envs = agent_positions.shape[0]
 
-        orientations = torch.zeros(num_envs, self.num_agents, 4, device=self.device)
+        # Compute yaw toward target for all agents: [num_envs, num_agents]
+        to_target = target_positions.unsqueeze(1) - agent_positions  # [E, A, 3]
+        yaw_to_target = torch.atan2(to_target[:, :, 1], to_target[:, :, 0])  # [E, A]
 
-        for env_idx in range(num_envs):
-            observer_idx = designated_observer_idx[env_idx].item()
+        # Add noise to target-facing yaw
+        noise = torch.randn(num_envs, self.num_agents, device=self.device) * cfg.orientation_noise_std
+        yaw_facing = yaw_to_target + noise
 
-            for agent_idx in range(self.num_agents):
-                agent_pos = agent_positions[env_idx, agent_idx]
-                target_pos = target_positions[env_idx]
+        # Random yaw for all agents
+        yaw_random = (torch.rand(num_envs, self.num_agents, device=self.device) * 2 - 1) * math.pi
 
-                is_observer = agent_idx == observer_idx
+        # Build observer mask: [num_envs, num_agents] bool
+        agent_indices = torch.arange(self.num_agents, device=self.device).unsqueeze(0)  # [1, A]
+        is_observer = agent_indices == designated_observer_idx.unsqueeze(1)  # [E, A]
 
-                if is_observer and cfg.designated_observer_faces_target:
-                    # Face toward target
-                    to_target = target_pos - agent_pos
-                    yaw = torch.atan2(to_target[1], to_target[0]).item()
-                    # Add noise
-                    yaw += torch.randn(1, device=self.device).item() * cfg.orientation_noise_std
+        # Start with random yaw, then apply rules
+        yaw = yaw_random.clone()
 
-                elif cfg.other_agents_orientation_mode == "face_target":
-                    # Non-observer also faces target
-                    to_target = target_pos - agent_pos
-                    yaw = torch.atan2(to_target[1], to_target[0]).item()
-                    yaw += torch.randn(1, device=self.device).item() * cfg.orientation_noise_std
+        if cfg.other_agents_orientation_mode == "face_target":
+            # All non-observers face target
+            yaw = yaw_facing
+        elif cfg.other_agents_orientation_mode == "curriculum":
+            # With probability (1-progress), face target; otherwise random
+            face_mask = torch.rand(num_envs, self.num_agents, device=self.device) < (1.0 - progress)
+            yaw = torch.where(face_mask, yaw_facing, yaw_random)
+        # else: "random" — yaw stays random
 
-                elif cfg.other_agents_orientation_mode == "curriculum":
-                    # Gradual transition: face target at progress=0, random at progress=1
-                    if torch.rand(1, device=self.device).item() < (1.0 - progress):
-                        to_target = target_pos - agent_pos
-                        yaw = torch.atan2(to_target[1], to_target[0]).item()
-                        yaw += torch.randn(1, device=self.device).item() * cfg.orientation_noise_std
-                    else:
-                        yaw = (torch.rand(1, device=self.device).item() * 2 - 1) * math.pi
+        # Observer always faces target (if configured)
+        if cfg.designated_observer_faces_target:
+            yaw = torch.where(is_observer, yaw_facing, yaw)
 
-                else:
-                    # Random yaw
-                    yaw = (torch.rand(1, device=self.device).item() * 2 - 1) * math.pi
+        # Convert to quaternions (roll=0, pitch=0, yaw)
+        zeros = torch.zeros(num_envs * self.num_agents, device=self.device)
+        orientations = quat_from_euler_xyz(
+            zeros,
+            zeros,
+            yaw.reshape(-1),
+        )  # [E*A, 4]
 
-                # Convert to quaternion (roll=0, pitch=0, yaw)
-                quat = quat_from_euler_xyz(
-                    torch.tensor([0.0], device=self.device),
-                    torch.tensor([0.0], device=self.device),
-                    torch.tensor([yaw], device=self.device),
-                )
-                orientations[env_idx, agent_idx] = quat[0]
-
-        return orientations
+        return orientations.reshape(num_envs, self.num_agents, 4)
 
     # ==========================================================================
     # Agent Velocities
@@ -586,21 +582,15 @@ class InitialStatesGenerator:
         """
         cfg = self.cfg
 
-        # Linear velocity
-        linear_vel = torch.zeros(num_envs, self.num_agents, 3, device=self.device)
+        # Linear velocity — random direction and per-agent random magnitude
+        direction = torch.randn(num_envs, self.num_agents, 3, device=self.device)
+        direction = direction / (direction.norm(dim=-1, keepdim=True) + 1e-8)
 
-        for env_idx in range(num_envs):
-            scale = velocity_scales[env_idx].item()
-
-            for agent_idx in range(self.num_agents):
-                # Random direction
-                direction = torch.randn(3, device=self.device)
-                direction = direction / (direction.norm() + 1e-8)
-
-                # Magnitude
-                mag = scale * cfg.agent_max_velocity
-
-                linear_vel[env_idx, agent_idx] = direction * mag
+        # Per-agent random magnitude in [0, scale * max_vel]
+        magnitudes = torch.rand(num_envs, self.num_agents, device=self.device) * (
+            velocity_scales.unsqueeze(-1) * cfg.agent_max_velocity
+        )
+        linear_vel = direction * magnitudes.unsqueeze(-1)
 
         # Angular velocity (only yaw rate, scaled by progress)
         angular_vel = torch.zeros(num_envs, self.num_agents, 3, device=self.device)
@@ -642,86 +632,70 @@ class InitialStatesGenerator:
         cfg = self.cfg
         num_envs = agent_positions.shape[0]
 
-        # Output: [yaw, roll, pitch] per agent
+        # Compute pointing angles for all agents (vectorized)
+        # Flatten to [E*A, ...] for _compute_gimbal_angles_to_target
+        flat_pos = agent_positions.reshape(-1, 3)  # [E*A, 3]
+        flat_quat = agent_orientations.reshape(-1, 4)  # [E*A, 4]
+        flat_target = target_positions.unsqueeze(1).expand(
+            -1, self.num_agents, -1
+        ).reshape(-1, 3)  # [E*A, 3]
+
+        yaw_pointing, pitch_pointing = self._compute_gimbal_angles_to_target(
+            flat_pos, flat_quat, flat_target
+        )
+        yaw_pointing = yaw_pointing.reshape(num_envs, self.num_agents)  # [E, A]
+        pitch_pointing = pitch_pointing.reshape(num_envs, self.num_agents)  # [E, A]
+
+        # Random gimbal angles
+        yaw_random = (
+            torch.rand(num_envs, self.num_agents, device=self.device)
+            * (cfg.gimbal_yaw_max - cfg.gimbal_yaw_min)
+            + cfg.gimbal_yaw_min
+        )
+        pitch_random = (
+            torch.rand(num_envs, self.num_agents, device=self.device)
+            * (cfg.gimbal_pitch_max - cfg.gimbal_pitch_min)
+            + cfg.gimbal_pitch_min
+        )
+
+        # Observer mask: [E, A]
+        agent_indices = torch.arange(self.num_agents, device=self.device).unsqueeze(0)
+        is_observer = agent_indices == designated_observer_idx.unsqueeze(1)
+
+        # Apply curriculum mode for non-observers
+        if cfg.gimbal_curriculum_mode == "always_pointing":
+            yaw = yaw_pointing.clone()
+            pitch = pitch_pointing.clone()
+
+        elif cfg.gimbal_curriculum_mode == "gradual":
+            # With probability (1-progress), point at target; otherwise random
+            point_mask = torch.rand(num_envs, self.num_agents, device=self.device) < (1 - progress)
+            yaw = torch.where(point_mask, yaw_pointing, yaw_random)
+            pitch = torch.where(point_mask, pitch_pointing, pitch_random)
+
+        elif cfg.gimbal_curriculum_mode == "threshold":
+            if progress < cfg.gimbal_randomization_threshold:
+                yaw = yaw_pointing.clone()
+                pitch = pitch_pointing.clone()
+            else:
+                yaw = yaw_random
+                pitch = pitch_random
+
+        else:
+            raise ValueError(f"Unknown gimbal mode: {cfg.gimbal_curriculum_mode}")
+
+        # Designated observer always points at target
+        yaw = torch.where(is_observer, yaw_pointing, yaw)
+        pitch = torch.where(is_observer, pitch_pointing, pitch)
+
+        # Clamp to limits
+        yaw = yaw.clamp(cfg.gimbal_yaw_min, cfg.gimbal_yaw_max)
+        pitch = pitch.clamp(cfg.gimbal_pitch_min, cfg.gimbal_pitch_max)
+
+        # Assemble: [yaw, roll=0, pitch]
         gimbal_positions = torch.zeros(num_envs, self.num_agents, 3, device=self.device)
-
-        # Compute pointing angles for all agents
-        for env_idx in range(num_envs):
-            observer_idx = designated_observer_idx[env_idx].item()
-
-            for agent_idx in range(self.num_agents):
-                agent_pos = agent_positions[env_idx, agent_idx]
-                agent_quat = agent_orientations[env_idx, agent_idx]
-                target_pos = target_positions[env_idx]
-
-                is_observer = agent_idx == observer_idx
-
-                # Compute angles to point at target
-                yaw_pointing, pitch_pointing = self._compute_gimbal_angles_to_target(
-                    agent_pos.unsqueeze(0),
-                    agent_quat.unsqueeze(0),
-                    target_pos.unsqueeze(0),
-                )
-                yaw_pointing = yaw_pointing.item()
-                pitch_pointing = pitch_pointing.item()
-
-                # Determine actual angles based on curriculum
-                if is_observer:
-                    # Designated observer always points at target
-                    yaw = yaw_pointing
-                    pitch = pitch_pointing
-
-                elif cfg.gimbal_curriculum_mode == "always_pointing":
-                    # All agents point at target
-                    yaw = yaw_pointing
-                    pitch = pitch_pointing
-
-                elif cfg.gimbal_curriculum_mode == "gradual":
-                    # With probability (1-progress), point at target
-                    if torch.rand(1, device=self.device).item() < (1 - progress):
-                        yaw = yaw_pointing
-                        pitch = pitch_pointing
-                    else:
-                        # Random gimbal angles
-                        yaw = (
-                            torch.rand(1, device=self.device).item()
-                            * (cfg.gimbal_yaw_max - cfg.gimbal_yaw_min)
-                            + cfg.gimbal_yaw_min
-                        )
-                        pitch = (
-                            torch.rand(1, device=self.device).item()
-                            * (cfg.gimbal_pitch_max - cfg.gimbal_pitch_min)
-                            + cfg.gimbal_pitch_min
-                        )
-
-                elif cfg.gimbal_curriculum_mode == "threshold":
-                    # Point at target until threshold, then random
-                    if progress < cfg.gimbal_randomization_threshold:
-                        yaw = yaw_pointing
-                        pitch = pitch_pointing
-                    else:
-                        yaw = (
-                            torch.rand(1, device=self.device).item()
-                            * (cfg.gimbal_yaw_max - cfg.gimbal_yaw_min)
-                            + cfg.gimbal_yaw_min
-                        )
-                        pitch = (
-                            torch.rand(1, device=self.device).item()
-                            * (cfg.gimbal_pitch_max - cfg.gimbal_pitch_min)
-                            + cfg.gimbal_pitch_min
-                        )
-
-                else:
-                    raise ValueError(f"Unknown gimbal mode: {cfg.gimbal_curriculum_mode}")
-
-                # Clamp to limits
-                yaw = max(cfg.gimbal_yaw_min, min(cfg.gimbal_yaw_max, yaw))
-                pitch = max(cfg.gimbal_pitch_min, min(cfg.gimbal_pitch_max, pitch))
-
-                # Store: [yaw, roll, pitch]
-                gimbal_positions[env_idx, agent_idx, 0] = yaw
-                gimbal_positions[env_idx, agent_idx, 1] = 0.0  # roll = 0 (auto-stabilized)
-                gimbal_positions[env_idx, agent_idx, 2] = pitch
+        gimbal_positions[:, :, 0] = yaw
+        gimbal_positions[:, :, 2] = pitch
 
         return gimbal_positions
 

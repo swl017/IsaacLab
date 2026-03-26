@@ -40,7 +40,7 @@ class CPARewardShaperCfg:
     """CPA look-ahead horizon in seconds. Set approximately D_s / v_max.
     Predictions beyond this are clamped to avoid extrapolation artifacts."""
 
-    lambda_cbf: float = 10.0
+    lambda_cbf: float = 1.0
     """Penalty weight for reward composition. Tune so that at a mildly concerning
     configuration the penalty roughly equals one timestep of task reward."""
 

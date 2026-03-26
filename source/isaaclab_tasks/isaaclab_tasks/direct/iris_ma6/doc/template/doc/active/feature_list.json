@@ -1,0 +1,13 @@
+{
+  "project": "{{PROJECT_NAME}}",
+  "last_updated": "YYYY-MM-DD",
+  "features": [
+    {
+      "id": "example-feature",
+      "name": "Example feature description",
+      "status": "not_started",
+      "spec": "doc/example_spec.md",
+      "notes": "Replace this with your first feature"
+    }
+  ]
+}
