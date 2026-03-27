@@ -322,7 +322,7 @@ class InitialStatesGenerator:
                 # Sample random position in cylinder (uniform in disk)
                 r = torch.sqrt(torch.rand(1, device=self.device)) * radius
                 theta = torch.rand(1, device=self.device) * 2 * math.pi
-                z_offset = torch.rand(1, device=self.device) * height_range
+                z_offset = (2 * torch.rand(1, device=self.device) - 1) * height_range
 
                 x = center[0] + r * torch.cos(theta)
                 y = center[1] + r * torch.sin(theta)

@@ -64,10 +64,10 @@ class InitialStatesCfg:
     Sampled as: uniform(min, min + progress * (max - min))
     """
 
-    cylinder_height_min: float = 20.0
+    cylinder_height_min: float = 10.0
     """Minimum cylinder base height above ground (meters)."""
 
-    cylinder_height_max: float = 50.0
+    cylinder_height_max: float = 30.0
     """Maximum cylinder base height above ground (meters)."""
 
     cylinder_height_range_min: float = 2.0
@@ -77,7 +77,7 @@ class InitialStatesCfg:
     at early training for easier gimbal learning.
     """
 
-    cylinder_height_range_max: float = 10.0
+    cylinder_height_range_max: float = 5.0
     """Vertical spread at curriculum progress=1 (meters).
 
     Agents are distributed within [center_z, center_z + height_range].

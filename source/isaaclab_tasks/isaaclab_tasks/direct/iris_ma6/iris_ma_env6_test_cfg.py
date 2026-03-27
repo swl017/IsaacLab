@@ -392,10 +392,25 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     continuous CPA barrier and episode termination."""
 
     altitude_penalty_scale: float = -100.0
-    """Penalty applied when drone altitude drops below altitude_min_threshold."""
+    """Penalty per metre of altitude deficit below altitude_min_threshold.
+    Continuous: reward = clamp(threshold - z, 0) * scale * dt."""
 
     altitude_min_threshold: float = 2.0
-    """Minimum altitude (m) below which the altitude penalty is applied."""
+    """Minimum altitude (m). Below this, a continuous penalty ramps linearly with deficit."""
+
+    # ==========================================================================
+    # Tracking-Lost Truncation
+    # ==========================================================================
+
+    enable_tracking_truncation: bool = True
+    """Truncate episode when all agents lose detection for tracking_lost_timeout_s."""
+
+    tracking_lost_timeout_s: float = 3.0
+    """Seconds of all-agents-blind before truncation."""
+
+    tracking_truncation_grace_steps: int = 50
+    """Steps after reset before the tracking-lost counter starts.
+    Gives the delay system time to propagate initial detections."""
 
     # ==========================================================================
     # Curriculum Configuration

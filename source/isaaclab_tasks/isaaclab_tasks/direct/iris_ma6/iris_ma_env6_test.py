@@ -392,6 +392,14 @@ class IrisMA6TestEnv(DirectMARLEnv):
         # Collision event counter (per-episode)
         self._collision_count = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
+        # Tracking-lost truncation: consecutive steps with zero valid detections
+        self._all_lost_counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._tracking_lost_count = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self._num_valid_detections = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self._tracking_lost_timeout_steps = int(
+            self.cfg.tracking_lost_timeout_s / (self.cfg.sim.dt * self.cfg.decimation)
+        )
+
         # Curriculum progress factors (updated each step in _get_rewards)
         self.progress_coord = 0.0
         self.progress_safety = 0.0
@@ -1070,6 +1078,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         # Update curriculum progress
         # current_step = self.common_step_counter if not DEBUG_DRAW else self.cfg.debug_initial_step
+        # current_step = self.cfg.debug_initial_step
         current_step = self.common_step_counter
         curr = self.cfg.curriculum
         self.progress_coord = self._linear_progress(
@@ -1131,6 +1140,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
             bbox_raw = reward_states[agent_id].data.bboxes_2d[:, 0, :]  # [N, 4]
             agent_valid = bbox_raw.abs().sum(dim=-1) > 1e-6  # [N]
             num_valid_detections += agent_valid.float()
+        self._num_valid_detections = num_valid_detections
         self._detection_stats["total_steps"] += 1.0
         self._detection_stats["invalid_all_agents"] += (num_valid_detections == 0).float()
         self._detection_stats["pair_valid_count"] += (num_valid_detections >= 2).float()
@@ -1273,9 +1283,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 est_error_gt_reward = torch.zeros(self.num_envs, device=self.device)
                 est_error_e2e_reward = torch.zeros(self.num_envs, device=self.device)
 
-            # Altitude penalty: penalize flying below threshold
+            # Altitude penalty: continuous penalty proportional to how far below threshold
             pos_z = self._root_pos_w[agent_id][:, 2]
-            too_low = (pos_z < self.cfg.altitude_min_threshold).float()
+            altitude_deficit = torch.clamp(self.cfg.altitude_min_threshold - pos_z, min=0.0)
 
             step_dt = self.cfg.sim.dt * self.cfg.decimation
             rewards = {
@@ -1295,7 +1305,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     * self.progress_safety
                 ),
                 "collision": collided.float() * self.cfg.collision_penalty_scale * step_dt,
-                "altitude": too_low * self.cfg.altitude_penalty_scale * step_dt,
+                "altitude": altitude_deficit * self.cfg.altitude_penalty_scale * step_dt,
                 "est_error_gt": est_error_gt_reward,
                 "est_error_e2e": est_error_e2e_reward,
             }
@@ -1661,8 +1671,11 @@ class IrisMA6TestEnv(DirectMARLEnv):
         """Get termination and truncation flags for all agents.
 
         Termination conditions:
-        - Crashed: drone goes below z=2.0m
-        - Collision: inter-agent distance < collision_distance (GT-based)
+        - Crashed: drone goes below z=0.5m
+
+        Truncation conditions:
+        - Timeout: episode_length >= max_episode_length
+        - Tracking lost: all agents blind for tracking_lost_timeout_s (consecutive)
 
         Returns:
             Tuple of (terminated, truncated) dictionaries.
@@ -1682,15 +1695,28 @@ class IrisMA6TestEnv(DirectMARLEnv):
         # Track collision events per episode
         self._collision_count += collided.float()
 
-        for agent_id in self.cfg.possible_agents:
-            # Terminate if drone goes too low (crashed) OR collision
-            pos_z = self._root_pos_w[agent_id][:, 2]
-            crashed = pos_z < 0.5
-            # died = crashed | collided
-            died = crashed
+        # Tracking-lost truncation: consecutive steps with zero detections
+        tracking_lost = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        if self.cfg.enable_tracking_truncation:
+            all_blind = self._num_valid_detections == 0
+            in_grace = self.episode_length_buf < self.cfg.tracking_truncation_grace_steps
+            self._all_lost_counter = torch.where(
+                all_blind & ~in_grace,
+                self._all_lost_counter + 1,
+                torch.zeros_like(self._all_lost_counter),
+            )
+            tracking_lost = self._all_lost_counter >= self._tracking_lost_timeout_steps
+            self._tracking_lost_count += tracking_lost.float()
 
-            terminated[agent_id] = died
-            truncated[agent_id] = time_out & ~terminated[agent_id]
+        # Any termination/truncation applies to all agents (cooperative MARL)
+        any_crashed = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        for agent_id in self.cfg.possible_agents:
+            pos_z = self._root_pos_w[agent_id][:, 2]
+            any_crashed |= pos_z < 0.5
+
+        for agent_id in self.cfg.possible_agents:
+            terminated[agent_id] = any_crashed
+            truncated[agent_id] = (time_out | tracking_lost) & ~terminated[agent_id]
 
         return terminated, truncated
 
@@ -1887,10 +1913,17 @@ class IrisMA6TestEnv(DirectMARLEnv):
             self._collision_count[env_ids] / total_steps
         )
 
-        # Reset detection stats and collision count for these envs
+        # Log tracking-lost truncation statistics
+        all_extras["Termination/tracking_lost_fraction"] = torch.mean(
+            self._tracking_lost_count[env_ids].clamp(max=1.0)
+        )
+
+        # Reset detection stats, collision count, and tracking-lost counter
         for key in self._detection_stats:
             self._detection_stats[key][env_ids] = 0.0
         self._collision_count[env_ids] = 0.0
+        self._all_lost_counter[env_ids] = 0
+        self._tracking_lost_count[env_ids] = 0.0
 
         if "log" not in self.extras:
             self.extras["log"] = {}
