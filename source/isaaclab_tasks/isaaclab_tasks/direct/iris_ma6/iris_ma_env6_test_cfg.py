@@ -169,7 +169,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     debug_frame_vis: bool = False
     """Enable visualization of coordinate frames for debugging."""
 
-    enable_tiled_cameras: bool = False
+    enable_tiled_cameras: bool = True
     """Enable TiledCamera sensors in the scene. Disable to skip camera creation for faster headless training."""
 
     use_flight_scene: bool = True # Enable for visualization/testing, disable for faster headless training.

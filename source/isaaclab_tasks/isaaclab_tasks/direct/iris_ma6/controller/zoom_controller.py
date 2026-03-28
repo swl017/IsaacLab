@@ -68,8 +68,8 @@ class ZoomController:
         # Scale rate command (supports per-env _max_zoom_rate)
         zoom_rate = zoom_rate_cmd * self._max_zoom_rate
 
-        # Integrate to get target zoom
-        self._zoom_target = self._zoom_target + zoom_rate * dt
+        # Target = current actual zoom + rate * dt (no accumulated drift)
+        self._zoom_target = self._zoom + zoom_rate * dt
 
         # Clamp target to valid range
         self._zoom_target = torch.clamp(

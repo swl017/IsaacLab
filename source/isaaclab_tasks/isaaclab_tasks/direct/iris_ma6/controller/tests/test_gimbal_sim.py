@@ -364,7 +364,7 @@ def main():
         # ============================================================
         print("\n" + "=" * 80)
         print("MODE 1: DIRECT STATE (write_joint_state_to_sim)")
-        print("  feedback_blend=0.0 (no actuator drift to correct)")
+        print("  (reads actual joint state from sim each step)")
         print("=" * 80)
 
         drone_ctrl = DroneController(
@@ -372,7 +372,7 @@ def main():
             num_envs=1, device=device,
         )
         gimbal_direct = GimbalController(
-            cfg=GimbalControllerCfg(feedback_blend=0.0), num_envs=1, device=device,
+            cfg=GimbalControllerCfg(), num_envs=1, device=device,
         )
 
         results_direct = []
@@ -404,7 +404,7 @@ def main():
         # ============================================================
         print("\n" + "=" * 80)
         print("MODE 2: IMPLICIT ACTUATOR (set_joint_position/velocity_target)")
-        print("  feedback_blend=0.1 (corrects actuator tracking drift)")
+        print("  (reads actual joint state from sim each step)")
         print("=" * 80)
 
         drone_ctrl2 = DroneController(
@@ -412,7 +412,7 @@ def main():
             num_envs=1, device=device,
         )
         gimbal_implicit = GimbalController(
-            cfg=GimbalControllerCfg(feedback_blend=0.05), num_envs=1, device=device,
+            cfg=GimbalControllerCfg(), num_envs=1, device=device,
         )
 
         results_implicit = []

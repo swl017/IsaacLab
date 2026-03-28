@@ -153,17 +153,14 @@ class GimbalController:
             pos_targets: (yaw, roll, pitch) joint position targets [rad].
             vel_targets: (yaw, roll, pitch) joint velocity targets [rad/s].
         """
-        # -- 1. Feedback blend: correct internal state drift from actual joints --
-        if self.cfg.feedback_blend > 0.0:
-            actual_pitch = joint_positions_actual[:, 0]
-            actual_yaw = joint_positions_actual[:, 1] - YAW_JOINT_OFFSET
-            actual_roll = joint_positions_actual[:, 2]
-            beta = self.cfg.feedback_blend
-            self._yaw = self._yaw + beta * (actual_yaw - self._yaw)
-            self._roll = self._roll + beta * (actual_roll - self._roll)
-            self._pitch = self._pitch + beta * (actual_pitch - self._pitch)
+        # -- 1. Read actual joint state from simulation --
+        actual_pitch = joint_positions_actual[:, 0]
+        actual_yaw = joint_positions_actual[:, 1] - YAW_JOINT_OFFSET
+        actual_roll = joint_positions_actual[:, 2]
 
-        # -- 2. World-frame rate integration --
+        # -- 2. Integrate world-frame LOS target (persistent setpoint) --
+        # The world-frame target must persist across steps so the gimbal has a
+        # fixed reference to stabilize against when the drone body tilts.
         azimuth_rate = gimbal_yaw_rate_cmd * self.cfg.max_gimbal_rate
         elevation_rate = gimbal_pitch_rate_cmd * self.cfg.max_gimbal_rate
 
@@ -182,8 +179,8 @@ class GimbalController:
             self._azimuth_world, self._elevation_world, q_body
         )
 
-        # -- 4. Current gimbal quaternion from joint angles --
-        q_current = self._gimbal_joints_to_quat(self._yaw, self._roll, self._pitch)
+        # -- 4. Current gimbal quaternion from actual joint angles --
+        q_current = self._gimbal_joints_to_quat(actual_yaw, actual_roll, actual_pitch)
 
         # -- 5. Quaternion error -> body-frame angular error --
         #   q_err = q_desired^{-1} * q_current
@@ -200,13 +197,13 @@ class GimbalController:
         #   q_dot_ref = J^{-1} * (omega_cmd - omega_body)
         omega_combined = omega_cmd - omega_body
         qdot_ref = self._compute_jacobian_inverse_times_omega(
-            omega_combined, self._yaw, self._roll
+            omega_combined, actual_yaw, actual_roll
         )
 
-        # -- 8. Integrate joint rates to get position targets --
-        self._yaw = self._yaw + qdot_ref[:, 0] * dt
-        self._roll = self._roll + qdot_ref[:, 1] * dt
-        self._pitch = self._pitch + qdot_ref[:, 2] * dt
+        # -- 8. Position targets = actual + joint rates * dt --
+        self._yaw = actual_yaw + qdot_ref[:, 0] * dt
+        self._roll = actual_roll + qdot_ref[:, 1] * dt
+        self._pitch = actual_pitch + qdot_ref[:, 2] * dt
 
         # -- 9. Clamp to joint limits --
         self._yaw = torch.clamp(self._yaw, self._yaw_limits[0], self._yaw_limits[1])

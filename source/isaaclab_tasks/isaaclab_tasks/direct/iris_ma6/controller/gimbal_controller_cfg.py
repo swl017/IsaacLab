@@ -23,8 +23,8 @@ class GimbalControllerCfg:
     - Pitch: Nose down positive (looking down)
     - Roll: Left side up positive
 
-    Note: When using direct joint state setting (write_joint_state_to_sim),
-    set feedback_blend=0.0 since internal state always matches actual state.
+    Controllers read actual joint state from simulation each step rather than
+    maintaining parallel integrated state.
     """
 
     max_gimbal_rate: float = 1.0 * math.pi
@@ -42,12 +42,6 @@ class GimbalControllerCfg:
 
     auto_stabilize_roll: bool = True
     """Whether to automatically compute roll to keep horizon level."""
-
-    feedback_blend: float = 0.05
-    """Blend factor for closed-loop joint position feedback.
-    Corrects internal state drift: state += beta * (actual - state).
-    Set to 0.0 when using direct joint state setting (no actuator lag).
-    Use 0.05-0.2 when using implicit actuator PD loop."""
 
     pointing_gain: float = 32.5
     """Proportional gain converting pointing error (rad) to angular velocity command (rad/s).

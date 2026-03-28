@@ -132,17 +132,17 @@ class GimbalController:
             pos_targets: (yaw, roll, pitch) joint position targets [rad].
             vel_targets: (yaw, roll, pitch) joint velocity targets [rad/s].
         """
-        # -- 1. Feedback blend: correct internal state drift from actual joints --
-        if self.cfg.feedback_blend > 0.0:
-            actual_pitch = joint_positions_actual[:, 0]
-            actual_yaw = joint_positions_actual[:, 1] - YAW_JOINT_OFFSET
-            actual_roll = joint_positions_actual[:, 2]
-            beta = self.cfg.feedback_blend
-            self._yaw = self._yaw + beta * (actual_yaw - self._yaw)
-            self._roll = self._roll + beta * (actual_roll - self._roll)
-            self._pitch = self._pitch + beta * (actual_pitch - self._pitch)
+        # -- 1. Read actual joint state from simulation --
+        actual_pitch = joint_positions_actual[:, 0]
+        actual_yaw = joint_positions_actual[:, 1] - YAW_JOINT_OFFSET
+        actual_roll = joint_positions_actual[:, 2]
+        self._yaw = actual_yaw
+        self._roll = actual_roll
+        self._pitch = actual_pitch
 
-        # -- 2. World-frame rate integration --
+        # -- 2. Integrate world-frame LOS target (persistent setpoint) --
+        # The world-frame target must persist across steps so the gimbal has a
+        # fixed reference to stabilize against when the drone body tilts.
         azimuth_rate = gimbal_yaw_rate_cmd * self.cfg.max_gimbal_rate
         elevation_rate = gimbal_pitch_rate_cmd * self.cfg.max_gimbal_rate
 

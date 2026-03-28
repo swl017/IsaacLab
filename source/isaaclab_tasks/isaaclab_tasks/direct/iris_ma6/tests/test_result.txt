@@ -4,7 +4,7 @@ LOS RATE COMPUTATION TEST SUITE
 Device:        cuda
 Torch version: 2.5.1+cu118
 GPU name:      NVIDIA GeForce RTX 3090
-Started:       2026-03-28 19:02:13
+Started:       2026-03-28 20:03:47
 
 ================================================================================
 Test 1: Spherical Decomposition Formula Correctness
@@ -53,21 +53,21 @@ Test 3: End-to-End LOS Rate Pipeline
 ================================================================================
 
   Simplified model LOS rate errors (vs numerical ground truth):
-    az_rate: mean=0.0052, max=0.0105 rad/s
-    el_rate: mean=0.0013, max=0.0028 rad/s
+    az_rate: mean=0.0067, max=0.0126 rad/s
+    el_rate: mean=0.0018, max=0.0074 rad/s
 
   True Jacobian LOS rate errors (vs numerical ground truth):
-    az_rate: mean=0.005250, max=0.010534 rad/s
-    el_rate: mean=0.001332, max=0.002805 rad/s
+    az_rate: mean=0.006694, max=0.012590 rad/s
+    el_rate: mean=0.001816, max=0.007421 rad/s
 
   Combined omega_w error (simplified vs true):
     mean=0.0000, max=0.0000 rad/s
   ✓ True Jacobian LOS rates match numerical ground truth
 
-  Simplified max LOS rate error: 0.0105 rad/s
-  True Jacobian max LOS rate error: 0.010534 rad/s
+  Simplified max LOS rate error: 0.0126 rad/s
+  True Jacobian max LOS rate error: 0.012590 rad/s
   Ratio: 1.0x worse
-  ✓ Simplified model LOS rate accuracy (max err=0.0105)
+  ✓ Simplified model LOS rate accuracy (max err=0.0126)
 
 ================================================================================
 Test 4: Jacobian Self-Consistency (body_ang_vel_w Reference)

@@ -561,7 +561,7 @@ def run_gimbal_tests(results: TestResults, device: torch.device, verbose: bool =
 
     # Test 4: Instant analytical tracking (body-frame targets track in one step)
     try:
-        cfg_inst = GimbalControllerCfg(feedback_blend=0.0)
+        cfg_inst = GimbalControllerCfg()
         g_inst = GimbalController(cfg=cfg_inst, num_envs=num_envs, device=device)
         g_inst.reset()
         dt = 0.01
@@ -668,7 +668,7 @@ def run_gimbal_tests(results: TestResults, device: torch.device, verbose: bool =
     try:
         dt = 0.01
         zero_rate = torch.zeros(num_envs, device=device)
-        cfg_rot = GimbalControllerCfg(feedback_blend=0.0)
+        cfg_rot = GimbalControllerCfg()
         g_rot = GimbalController(cfg=cfg_rot, num_envs=num_envs, device=device)
         g_rot.reset()
 
@@ -700,7 +700,7 @@ def run_gimbal_tests(results: TestResults, device: torch.device, verbose: bool =
 
     # Test 7: Feedback corrects internal state drift
     try:
-        cfg_fb = GimbalControllerCfg(feedback_blend=0.1)
+        cfg_fb = GimbalControllerCfg()
         g_fb = GimbalController(cfg=cfg_fb, num_envs=num_envs, device=device)
         g_fb.reset()
         dt = 0.01
@@ -744,7 +744,7 @@ def run_gimbal_tests(results: TestResults, device: torch.device, verbose: bool =
 
     # Test 8: No swing under abrupt tilt change
     try:
-        cfg_ns = GimbalControllerCfg(feedback_blend=0.0)
+        cfg_ns = GimbalControllerCfg()
         g_ns = GimbalController(cfg=cfg_ns, num_envs=num_envs, device=device)
         g_ns.reset()
         dt = 0.01
@@ -798,7 +798,7 @@ def run_gimbal_tests(results: TestResults, device: torch.device, verbose: bool =
     try:
         from isaaclab.utils.math import quat_from_euler_xyz
 
-        cfg_cx = GimbalControllerCfg(feedback_blend=0.1)
+        cfg_cx = GimbalControllerCfg()
         g_cx = GimbalController(cfg=cfg_cx, num_envs=num_envs, device=device)
         g_cx.reset()
         dt = 0.01
@@ -900,7 +900,7 @@ def run_gimbal_tests(results: TestResults, device: torch.device, verbose: bool =
     # Test 10: Position/velocity coherence
     # Verify that (pos[t+1] - pos[t]) / dt ~ vel[t]
     try:
-        cfg_coh = GimbalControllerCfg(feedback_blend=0.0)
+        cfg_coh = GimbalControllerCfg()
         g_coh = GimbalController(cfg=cfg_coh, num_envs=num_envs, device=device)
         g_coh.reset()
         dt = 0.01
