@@ -396,6 +396,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self._all_lost_counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._tracking_lost_count = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self._num_valid_detections = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self._detection_reacquire_counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._tracking_lost_timeout_steps = int(
             self.cfg.tracking_lost_timeout_s / (self.cfg.sim.dt * self.cfg.decimation)
         )
@@ -1695,16 +1696,39 @@ class IrisMA6TestEnv(DirectMARLEnv):
         # Track collision events per episode
         self._collision_count += collided.float()
 
-        # Tracking-lost truncation: consecutive steps with zero detections
+        # Tracking-lost truncation with debounced reset.
+        # Requires tracking_reacquire_steps consecutive valid frames to reset
+        # the lost counter, preventing noise-induced single valid frames from
+        # defeating the timeout.
         tracking_lost = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         if self.cfg.enable_tracking_truncation:
             all_blind = self._num_valid_detections == 0
             in_grace = self.episode_length_buf < self.cfg.tracking_truncation_grace_steps
-            self._all_lost_counter = torch.where(
-                all_blind & ~in_grace,
-                self._all_lost_counter + 1,
-                torch.zeros_like(self._all_lost_counter),
+
+            # Reacquire counter: counts consecutive valid frames; resets on blind/grace
+            self._detection_reacquire_counter = torch.where(
+                all_blind | in_grace,
+                torch.zeros_like(self._detection_reacquire_counter),
+                self._detection_reacquire_counter + 1,
             )
+
+            # Lost counter: increments on blind, holds on sporadic valid frames,
+            # resets only after sustained reacquisition
+            reacquired = self._detection_reacquire_counter >= self.cfg.tracking_reacquire_steps
+            self._all_lost_counter = torch.where(
+                in_grace,
+                torch.zeros_like(self._all_lost_counter),
+                torch.where(
+                    all_blind,
+                    self._all_lost_counter + 1,
+                    torch.where(
+                        reacquired,
+                        torch.zeros_like(self._all_lost_counter),
+                        self._all_lost_counter,
+                    ),
+                ),
+            )
+
             tracking_lost = self._all_lost_counter >= self._tracking_lost_timeout_steps
             self._tracking_lost_count += tracking_lost.float()
 
@@ -1923,6 +1947,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
             self._detection_stats[key][env_ids] = 0.0
         self._collision_count[env_ids] = 0.0
         self._all_lost_counter[env_ids] = 0
+        self._detection_reacquire_counter[env_ids] = 0
         self._tracking_lost_count[env_ids] = 0.0
 
         if "log" not in self.extras:
@@ -1933,15 +1958,15 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self._triangulation_result_gt = None
         self._triangulation_result_obs = None
 
-        # Point viewer camera at target when the tracked env resets
-        if self.viewport_camera_controller is not None and self.cfg.viewer.env_index in env_ids:
-            target_pos_w = self.target.data.root_pos_w[self.cfg.viewer.env_index]  # [3]
-            robot_pos_w = self._robots[self.cfg.possible_agents[0]].data.root_pos_w[self.cfg.viewer.env_index]  # [3]
-            lookat_offset = (target_pos_w - robot_pos_w).detach().cpu().numpy() * 1.5
-            import numpy as np
-            angle = np.arctan2(-lookat_offset[1], -lookat_offset[0])
-            eye = np.array([10 * np.cos(angle), 10 * np.sin(angle), 1.0])
-            self.viewport_camera_controller.update_view_location(eye=eye)
+        # # Point viewer camera at target when the tracked env resets
+        # if self.viewport_camera_controller is not None and self.cfg.viewer.env_index in env_ids:
+        #     target_pos_w = self.target.data.root_pos_w[self.cfg.viewer.env_index]  # [3]
+        #     robot_pos_w = self._robots[self.cfg.possible_agents[0]].data.root_pos_w[self.cfg.viewer.env_index]  # [3]
+        #     lookat_offset = (target_pos_w - robot_pos_w).detach().cpu().numpy() * 1.5
+        #     import numpy as np
+        #     angle = np.arctan2(-lookat_offset[1], -lookat_offset[0])
+        #     eye = np.array([10 * np.cos(angle), 10 * np.sin(angle), 1.0])
+        #     self.viewport_camera_controller.update_view_location(eye=eye)
 
         # Populate state caches so _get_observations works on first reset
         self._update_state_cache()

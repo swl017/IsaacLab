@@ -45,7 +45,7 @@ class CurriculumCfg:
     # Global Curriculum Settings
     # ==========================================================================
 
-    all_end_step: int = 200000
+    all_end_step: int = 280000
     """Step at which all curriculum factors reach their final values."""
 
     # ==========================================================================
@@ -93,7 +93,7 @@ class CurriculumCfg:
     fixed_delay_start_step: int = 140000
     """Step to start introducing fixed (deterministic) delay."""
 
-    fixed_delay_end_step: int = 160000
+    fixed_delay_end_step: int = 180000
     """Step when fixed delay reaches maximum value (uses config latency means)."""
 
     # NOTE: Fixed delay magnitude uses existing detection_latency_mean and
@@ -103,10 +103,10 @@ class CurriculumCfg:
     # Phase 4: Random Delay + Staleness
     # ==========================================================================
 
-    random_delay_start_step: int = 160000
+    random_delay_start_step: int = 180000
     """Step to transition from fixed to random delay."""
 
-    random_delay_end_step: int = 180000
+    random_delay_end_step: int = 220000
     """Step when random delay variance reaches maximum."""
 
     # NOTE: Random delay uses existing latency_std parameters from config.
@@ -115,10 +115,10 @@ class CurriculumCfg:
     # Phase 5: Dropout (after delay phases)
     # ==========================================================================
 
-    dropout_start_step: int = 180000
+    dropout_start_step: int = 220000
     """Step to start introducing dropout."""
 
-    dropout_end_step: int = 200000
+    dropout_end_step: int = 240000
     """Step when dropout reaches maximum rate."""
 
     # Legacy alias for backward compatibility
@@ -169,10 +169,10 @@ class CurriculumCfg:
     # Phase 3+: Robot/Camera Dynamics Randomization (last)
     # ==========================================================================
 
-    dynamics_start_step: int = 180000
+    dynamics_start_step: int = 240000
     """Step to start dynamics randomization (mass, inertia)."""
 
-    dynamics_end_step: int = 200000
+    dynamics_end_step: int = 280000
     """Step when dynamics randomization reaches full range."""
 
     # ==========================================================================

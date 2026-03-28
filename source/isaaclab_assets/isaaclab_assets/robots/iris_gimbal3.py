@@ -48,39 +48,42 @@ IRIS_GIMBAL3_CFG = ArticulationCfg(
             "joint3": 0.0,
         },
         joint_vel={
-            # Gimbal joints - keep at zero
+            # Gimbal joints
             "pitch_joint": 0.0,
             "roll_joint": 0.0,
             "yaw_joint": 0.0,
-            # Propeller joints - ZERO instead of 200 rad/s to avoid gyroscopic coupling
-            "joint0": 0.0,
-            "joint1": 0.0,
-            "joint2": 0.0,
-            "joint3": 0.0,
+            # Propeller joints
+            "joint0": 200.0,
+            "joint1": -200.0,
+            "joint2": 200.0,
+            "joint3": -200.0,
         },
     ),
     actuators={
-        # KEEP gimbal actuators - these are real servo motors for gimbal control
+        # Gimbal servo actuators — tuned for tau = c/k = 0.05s time constant.
+        # With k=1000, c=50: critically/overdamped response settling in ~50ms.
+        # Effort limit generous to avoid saturation during fast transients.
+        # Velocity limit 6*pi ≈ 18.85 rad/s (~1080 deg/s) for fast slewing.
         "roll": ImplicitActuatorCfg(
             joint_names_expr=["yaw_joint"],
             effort_limit_sim=200.0,
-            velocity_limit_sim=3.14 * 3,
-            stiffness=2e3,
-            damping=1e1,
+            velocity_limit_sim=6.0 * math.pi,
+            stiffness=1e3,
+            damping=5e1,
         ),
         "pitch": ImplicitActuatorCfg(
             joint_names_expr=["roll_joint"],
             effort_limit_sim=200.0,
-            velocity_limit_sim=3.14 * 3,
-            stiffness=2e3,
-            damping=1e1,
+            velocity_limit_sim=6.0 * math.pi,
+            stiffness=1e3,
+            damping=5e1,
         ),
         "yaw": ImplicitActuatorCfg(
             joint_names_expr=["pitch_joint"],
             effort_limit_sim=200.0,
-            velocity_limit_sim=3.14 * 3,  # ~9.42 rad/s max velocity
-            stiffness=2e3,
-            damping=1e1,
+            velocity_limit_sim=6.0 * math.pi,
+            stiffness=1e3,
+            damping=5e1,
         ),
         # Propeller joints - no physics actuators (visual spinning only)
         # Joint state is written directly from environment for visual effect

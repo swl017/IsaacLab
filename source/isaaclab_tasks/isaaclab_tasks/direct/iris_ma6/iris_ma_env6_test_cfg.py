@@ -194,13 +194,17 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     target_cfg: RigidObjectCfg = IRIS_TARGET_CFG
     """Target rigid object configuration with gravity enabled."""
 
+    # viewer: ViewerCfg = ViewerCfg(
+    #     eye=(-10.0, 0.0, 1.0),
+    #     lookat=(0.0, 0.0, 0.0),
+    #     origin_type="asset_body",
+    #     env_index=0,
+    #     asset_name="Robot_0",
+    #     body_name="body",
+    # )
     viewer: ViewerCfg = ViewerCfg(
-        eye=(-10.0, 0.0, 1.0),
-        lookat=(0.0, 0.0, 0.0),
-        origin_type="asset_body",
-        env_index=0,
-        asset_name="Robot_0",
-        body_name="body",
+        eye=(120.0, 120.0, 95.0),
+        lookat=(0.0, 0.0, 32.0),
     )
 
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
@@ -411,6 +415,11 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     tracking_truncation_grace_steps: int = 50
     """Steps after reset before the tracking-lost counter starts.
     Gives the delay system time to propagate initial detections."""
+
+    tracking_reacquire_steps: int = 5
+    """Consecutive valid-detection frames required to reset the lost counter.
+    Prevents noise-induced single valid frames from resetting the timer.
+    At decimation=4, dt=0.01: 5 steps ~ 0.2s of sustained reacquisition."""
 
     # ==========================================================================
     # Curriculum Configuration

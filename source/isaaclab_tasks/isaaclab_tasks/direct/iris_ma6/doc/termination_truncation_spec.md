@@ -46,18 +46,20 @@ steps. A "valid detection" means the delayed bounding box for target 0 is non-ze
 | `enable_tracking_termination` | `bool` | `True` | Master switch |
 | `tracking_lost_timeout_s` | `float` | `1.0` | Seconds of all-agents-blind before termination |
 | `tracking_termination_grace_steps` | `int` | `50` | Steps after reset before the counter starts (lets policy establish initial detections) |
+| `tracking_reacquire_steps` | `int` | `5` | Consecutive valid-detection frames required to reset the lost counter. Prevents noise-induced single valid frames from defeating the timeout. |
 
 Derived: `tracking_lost_timeout_steps = int(tracking_lost_timeout_s / (sim_dt * decimation))`
 At default config (dt=0.01, decimation=4): `1.0 / 0.04 = 25 steps`.
 
 ### 3.3 State
 
-New per-environment counter in `__init__`:
+New per-environment counters in `__init__`:
 ```
-_all_lost_counter: Tensor[num_envs]  # consecutive steps with zero detections
+_all_lost_counter:             Tensor[num_envs]  # consecutive steps with zero detections
+_detection_reacquire_counter:  Tensor[num_envs]  # consecutive steps with >=1 valid detection
 ```
 
-Reset to 0 in `_reset_idx()`.
+Both reset to 0 in `_reset_idx()`.
 
 ### 3.4 Logic (in `_get_dones`)
 
@@ -68,10 +70,21 @@ all_blind = (num_valid_detections == 0)
 # Grace period: don't count during first N steps after reset
 in_grace = (episode_length_buf < tracking_termination_grace_steps)
 
-# Update counter
-_all_lost_counter = where(all_blind & ~in_grace,
-                          _all_lost_counter + 1,
-                          0)
+# Reacquire counter: consecutive valid frames; resets on blind or grace
+_detection_reacquire_counter = where(all_blind | in_grace,
+                                     0,
+                                     _detection_reacquire_counter + 1)
+
+# Lost counter with debounced reset:
+#   - in_grace:                           held at 0
+#   - all_blind (past grace):             +1
+#   - valid, reacquire < threshold:       unchanged (holds value)
+#   - valid, reacquire >= threshold:      reset to 0 (true reacquisition)
+reacquired = (_detection_reacquire_counter >= tracking_reacquire_steps)
+_all_lost_counter = where(in_grace, 0,
+                     where(all_blind, _all_lost_counter + 1,
+                       where(reacquired, 0,
+                         _all_lost_counter)))
 
 # Truncate
 tracking_lost = (_all_lost_counter >= tracking_lost_timeout_steps)
@@ -111,21 +124,23 @@ Add to the safety/termination section:
 enable_tracking_termination: bool = True
 tracking_lost_timeout_s: float = 1.0
 tracking_termination_grace_steps: int = 50
+tracking_reacquire_steps: int = 5
 ```
 
 ### 4.2 Environment (`iris_ma_env6_test.py`)
 
-**`__init__`**: Initialize `_all_lost_counter` tensor.
+**`__init__`**: Initialize `_all_lost_counter` and `_detection_reacquire_counter` tensors.
 
 **`_get_rewards`**: Expose `num_valid_detections` as `self._num_valid_detections`
 so `_get_dones` can read it without recomputing.
 
-**`_get_dones`**: Add tracking-lost check after existing crash/collision checks.
-Apply as `truncated[agent_id] |= tracking_lost` for all agents (if any one
-agent's episode is over, all are over in this cooperative MARL setup).
-Ensure mutual exclusion: `truncated &= ~terminated` (crash takes priority).
+**`_get_dones`**: Add tracking-lost check with debounced reset after existing
+crash/collision checks. Apply as `truncated[agent_id] |= tracking_lost` for all
+agents (if any one agent's episode is over, all are over in this cooperative MARL
+setup). Ensure mutual exclusion: `truncated &= ~terminated` (crash takes priority).
 
-**`_reset_idx`**: Reset `_all_lost_counter[env_ids] = 0`.
+**`_reset_idx`**: Reset `_all_lost_counter[env_ids] = 0` and
+`_detection_reacquire_counter[env_ids] = 0`.
 
 ### 4.3 Logging
 
@@ -138,8 +153,8 @@ Log to extras at episode end:
 
 | Method | Type | Frequency | Notes |
 |--------|------|-----------|-------|
-| Counter update in `_get_dones` | WRITE | Once per step | Uses `_num_valid_detections` set by `_get_rewards` in the same step. `_get_rewards` is always called before `_get_dones`. |
-| Counter reset in `_reset_idx` | WRITE | On reset | Must zero counter for reset env_ids |
+| Counter update in `_get_dones` | WRITE | Once per step | Updates both `_all_lost_counter` and `_detection_reacquire_counter`. Uses `_num_valid_detections` set by `_get_rewards` in the same step. `_get_rewards` is always called before `_get_dones`. |
+| Counter reset in `_reset_idx` | WRITE | On reset | Must zero both `_all_lost_counter` and `_detection_reacquire_counter` for reset env_ids |
 
 ## 5. Design Decisions
 
@@ -169,3 +184,13 @@ correctly even when curriculum is disabled (e.g., evaluation). It also handles
 the cold-start naturally: gimbals start pointed at target, so detections are
 typically valid from step 1. The 50-step grace is a safety margin for the delay
 system to propagate initial detections.
+
+**Why debounced reset (`tracking_reacquire_steps`)?**
+Experiment `395280af3d` (2026-03-27) revealed that after observation noise is
+introduced (~120k steps), intermittent noise-induced "valid" bounding boxes reset
+the consecutive lost counter on random single frames. The counter never reaches
+the timeout threshold, so tracking-lost truncation drops to 0% and never fires.
+Requiring N consecutive valid frames (default 5 ≈ 0.2s) to reset the counter
+filters out sporadic noise artifacts while still allowing genuine reacquisition
+to reset the timer promptly. With `tracking_reacquire_steps=1`, behavior is
+identical to the original (pre-debounce) implementation.
