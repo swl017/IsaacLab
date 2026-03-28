@@ -14,7 +14,7 @@ being delayed independently.
 from __future__ import annotations
 import logging
 import torch
-from isaaclab.utils.math import quat_mul, quat_rotate_inverse, matrix_from_quat
+from isaaclab.utils.math import quat_mul, quat_rotate, quat_rotate_inverse, matrix_from_quat
 
 logger = logging.getLogger(__name__)
 
@@ -317,40 +317,37 @@ def compute_combined_angular_velocity(
         combined_angular_velocity_b: Combined velocity in body frame [N, 3]
     """
 
-    # Extract gimbal velocities using [pitch, yaw, roll] convention
-    pitch_rate = joint_velocities_b[:, 0] if joint_velocities_b.shape[1] > 0 else torch.zeros(
-        body_angular_velocity_b.shape[0], device=body_angular_velocity_b.device
-    )  # pitch_rate is at index 0
-    yaw_rate = joint_velocities_b[:, 1] if joint_velocities_b.shape[1] > 1 else torch.zeros_like(pitch_rate)  # yaw_rate is at index 1
+    # Extract joint velocities: [pitch, yaw, roll] convention
+    N = body_angular_velocity_b.shape[0]
+    dev = body_angular_velocity_b.device
+    pitch_rate = joint_velocities_b[:, 0] if joint_velocities_b.shape[1] > 0 else torch.zeros(N, device=dev)
+    yaw_rate = joint_velocities_b[:, 1] if joint_velocities_b.shape[1] > 1 else torch.zeros_like(pitch_rate)
+    roll_rate = joint_velocities_b[:, 2] if joint_velocities_b.shape[1] > 2 else torch.zeros_like(pitch_rate)
 
-    # Gimbal angular velocity in body frame
-    # Assuming gimbal axes: yaw around body Z, pitch around body Y
-    #
-    # SIMPLIFICATION: This treats gimbal joint rates as if they contribute directly
-    # to body-frame angular velocity components. This is a valid approximation when:
-    # 1. Gimbal angles are small (linearization around zero)
-    # 2. The gimbal axes are approximately aligned with body axes
-    #
-    # For large gimbal angles, the actual angular velocity would require proper
-    # gimbal kinematics (e.g., using the gimbal Jacobian matrix).
-    #
-    # Current mapping:
-    #   - yaw_rate (joint[1]) -> body Z-axis rotation
-    #   - pitch_rate (joint[0]) -> body Y-axis rotation
-    #
-    # NOTE: At large yaw angles (e.g., yaw = -pi/2), the pitch axis is no longer
-    # aligned with body Y, so pitch_rate would contribute to body X (roll).
+    # Extract joint positions for Jacobian computation
+    yaw_pos = joint_positions_b[:, 1] if joint_positions_b.shape[1] > 1 else torch.zeros_like(pitch_rate)
+    roll_pos = joint_positions_b[:, 2] if joint_positions_b.shape[1] > 2 else torch.zeros_like(pitch_rate)
+
+    # Gimbal Jacobian for ZXY chain (yaw → roll → pitch).
+    # The gimbal kinematic chain rotates: yaw around body Z, then roll around
+    # the rotated X, then pitch around the further-rotated Y. This gives:
+    #   omega_gimbal_body = yaw_rate * [0, 0, 1]
+    #                     + roll_rate * R_z(yaw) @ [1, 0, 0]
+    #                     + pitch_rate * R_z(yaw) @ R_x(roll) @ [0, 1, 0]
+    cy, sy = torch.cos(yaw_pos), torch.sin(yaw_pos)
+    cr, sr = torch.cos(roll_pos), torch.sin(roll_pos)
+
     gimbal_angular_velocity_b = torch.stack([
-        torch.zeros_like(pitch_rate),  # X (no direct contribution in simplified model)
-        pitch_rate,                     # Y (pitch axis assumed aligned with body Y)
-        yaw_rate,                       # Z (yaw axis fixed to body Z)
+        -sy * cr * pitch_rate + cy * roll_rate,   # X
+         cy * cr * pitch_rate + sy * roll_rate,   # Y
+         sr * pitch_rate + yaw_rate,               # Z
     ], dim=-1)  # [N, 3]
 
     # Combined angular velocity in body frame
     # Angular velocities add linearly when expressed in the same frame
     combined_angular_velocity_b = body_angular_velocity_b + gimbal_angular_velocity_b
 
-    # Transform to world frame
-    combined_angular_velocity_w = quat_rotate_inverse(body_orientation_w, combined_angular_velocity_b)
+    # Transform body → world frame
+    combined_angular_velocity_w = quat_rotate(body_orientation_w, combined_angular_velocity_b)
 
     return combined_angular_velocity_w, combined_angular_velocity_b

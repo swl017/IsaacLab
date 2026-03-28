@@ -1,0 +1,94 @@
+================================================================================
+LOS RATE COMPUTATION TEST SUITE
+================================================================================
+Device:        cuda
+Torch version: 2.5.1+cu118
+GPU name:      NVIDIA GeForce RTX 3090
+Started:       2026-03-28 19:02:13
+
+================================================================================
+Test 1: Spherical Decomposition Formula Correctness
+================================================================================
+  ✓ Spherical decomposition: Small angles, pure yaw rotation (omega_z only)
+  ✓ Spherical decomposition: Small angles, pure pitch rotation (omega_y only)
+  ✓ Spherical decomposition: Non-zero az/el, mixed omega
+  ✓ Spherical decomposition: Near-forward direction with random omega
+  ✓ Spherical decomposition: Large azimuth range (near +-pi)
+
+================================================================================
+Test 2: Simplified Model vs True Gimbal Jacobian
+================================================================================
+  YAW_JOINT_OFFSET = -1.5708 rad (-90.0 deg)
+
+  Logical yaw=0 (physical yaw=-pi/2, nominal forward):
+    Physical yaw: -1.5708 rad (-90.0 deg)
+    Simplified omega_w: [1.0000, -0.0000, 0.0000]
+    True omega_w:       [1.0000, 0.0000, 0.0000]
+    Error:              [0.0000, 0.0000, 0.0000]  max=0.0000
+  ✓ Jacobian match: Logical yaw=0 (physical yaw=-pi/2, nominal forward) (error=4.3711e-08)
+
+  Logical yaw=pi/4 (physical yaw=-pi/4):
+    Physical yaw: -0.7854 rad (-45.0 deg)
+    Simplified omega_w: [0.7071, 0.7071, 0.0000]
+    True omega_w:       [0.7071, 0.7071, 0.0000]
+    Error:              [0.0000, 0.0000, 0.0000]  max=0.0000
+  ✓ Jacobian match: Logical yaw=pi/4 (physical yaw=-pi/4) (error=5.9605e-08)
+
+  Logical yaw=0, physical yaw=0 (if offset were 0):
+    Physical yaw: 0.0000 rad (0.0 deg)
+    Simplified omega_w: [0.0000, 1.0000, 0.0000]
+    True omega_w:       [0.0000, 1.0000, 0.0000]
+    Error:              [0.0000, 0.0000, 0.0000]  max=0.0000
+  ✓ Jacobian match: Logical yaw=0, physical yaw=0 (if offset were 0) (error=0.0000e+00)
+
+  Physical yaw=-pi/3:
+    Physical yaw: -1.0472 rad (-60.0 deg)
+    Simplified omega_w: [0.8660, 0.5000, 0.0000]
+    True omega_w:       [0.8660, 0.5000, 0.0000]
+    Error:              [0.0000, 0.0000, 0.0000]  max=0.0000
+  ✓ Jacobian match: Physical yaw=-pi/3 (error=5.9605e-08)
+
+================================================================================
+Test 3: End-to-End LOS Rate Pipeline
+================================================================================
+
+  Simplified model LOS rate errors (vs numerical ground truth):
+    az_rate: mean=0.0052, max=0.0105 rad/s
+    el_rate: mean=0.0013, max=0.0028 rad/s
+
+  True Jacobian LOS rate errors (vs numerical ground truth):
+    az_rate: mean=0.005250, max=0.010534 rad/s
+    el_rate: mean=0.001332, max=0.002805 rad/s
+
+  Combined omega_w error (simplified vs true):
+    mean=0.0000, max=0.0000 rad/s
+  ✓ True Jacobian LOS rates match numerical ground truth
+
+  Simplified max LOS rate error: 0.0105 rad/s
+  True Jacobian max LOS rate error: 0.010534 rad/s
+  Ratio: 1.0x worse
+  ✓ Simplified model LOS rate accuracy (max err=0.0105)
+
+================================================================================
+Test 4: Jacobian Self-Consistency (body_ang_vel_w Reference)
+================================================================================
+  Body ang vel (body):    [0.10000000149011612, -0.05000000074505806, 0.20000000298023224]
+  Gimbal omega (body):    [0.30343323945999146, -0.01980617083609104, -0.09400039911270142]
+  Camera omega (body):    [0.403433233499527, -0.06980617344379425, 0.10599960386753082]
+  Camera omega (world):   [0.4154222309589386, 0.049981310963630676, 0.06159069016575813]
+  ^ This is what robot.data.body_ang_vel_w[:, pitch_link_idx] should give
+
+  Simplified camera omega (body):  [0.40343326330184937, -0.06980618089437485, 0.10599960386753082]
+  Simplified camera omega (world): [0.415422260761261, 0.04998131841421127, 0.061590686440467834]
+  Body-frame error:  [2.9802322387695312e-08, 7.450580596923828e-09, 0.0]  max=0.0000
+  World-frame error: [2.9802322387695312e-08, 7.450580596923828e-09, 3.725290298461914e-09]  max=0.0000
+  ✓ Simplified model matches body_ang_vel_w reference
+
+================================================================================
+TEST SUMMARY
+================================================================================
+Total Tests: 12
+Passed:      12 (100.0%)
+Failed:      0 (0.0%)
+Errors:      0 (0.0%)
+================================================================================

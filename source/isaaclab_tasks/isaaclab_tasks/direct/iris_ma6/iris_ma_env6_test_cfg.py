@@ -282,7 +282,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     max_yaw_rate: float = math.radians(45.0)
     """Maximum yaw rate (rad/s)."""
 
-    max_gimbal_rate: float = math.radians(360.0)
+    max_gimbal_rate: float = math.radians(180.0)
     """Maximum gimbal rate (rad/s)."""
 
     max_zoom_rate: float = 1.0

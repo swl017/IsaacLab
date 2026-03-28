@@ -27,7 +27,7 @@ class GimbalControllerCfg:
     set feedback_blend=0.0 since internal state always matches actual state.
     """
 
-    max_gimbal_rate: float = 2 * math.pi
+    max_gimbal_rate: float = 1.0 * math.pi
     """Maximum gimbal angular rate [rad/s]. Default 2*pi (360 deg/s)."""
 
     yaw_limits: tuple[float, float] = (-math.radians(160), math.radians(160))

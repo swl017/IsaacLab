@@ -259,6 +259,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self._root_lin_acc_w: Dict[str, torch.Tensor] = {}
         self._root_lin_acc_b: Dict[str, torch.Tensor] = {}
         self._gimbal_joint_pos: Dict[str, torch.Tensor] = {}
+        self._gimbal_joint_vel: Dict[str, torch.Tensor] = {}
+        self._gimbal_az_rate_world: Dict[str, torch.Tensor] = {}
+        self._gimbal_el_rate_world: Dict[str, torch.Tensor] = {}
         self._target_pos_w: torch.Tensor = torch.zeros(self.num_envs, 3, device=self.device)
         self._target_quat_w: torch.Tensor = torch.zeros(self.num_envs, 4, device=self.device)
 
@@ -745,6 +748,14 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 ],
                 dim=-1,
             )
+            self._gimbal_joint_vel[agent_id] = torch.stack(
+                [
+                    robot.data.joint_vel[:, self.gimbal_joint_idx[agent_id]["pitch"]],
+                    robot.data.joint_vel[:, self.gimbal_joint_idx[agent_id]["yaw"]],
+                    robot.data.joint_vel[:, self.gimbal_joint_idx[agent_id]["roll"]],
+                ],
+                dim=-1,
+            )
 
             root_pos = self._root_pos_w[agent_id]
             root_quat = self._root_quat_w[agent_id]
@@ -820,17 +831,14 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
                 # Joint states (gimbal) - order is pitch, yaw, roll
                 gt_data.joint_positions_b = self._gimbal_joint_pos[agent_id]
-                # Joint velocities from commanded gimbal rates [pitch_rate, yaw_rate, 0]
-                joint_vel = torch.zeros_like(self._gimbal_joint_pos[agent_id])
-                joint_vel[:, 0] = self.cmd_vel[:, idx, 5] * self.cfg.max_gimbal_rate  # pitch rate
-                joint_vel[:, 1] = self.cmd_vel[:, idx, 4] * self.cfg.max_gimbal_rate  # yaw rate
-                gt_data.joint_velocities_b = joint_vel
+                # Actual joint velocities from simulation (not from policy LOS rate commands)
+                gt_data.joint_velocities_b = self._gimbal_joint_vel[agent_id]
 
                 # Combined angular velocity (body + gimbal)
                 combined_w, combined_b = compute_combined_angular_velocity(
                     body_angular_velocity_w=self._root_ang_vel_b[agent_id],  # Note: currently stored as body-frame
                     body_angular_velocity_b=self._root_ang_vel_b[agent_id],
-                    joint_velocities_b=joint_vel,
+                    joint_velocities_b=self._gimbal_joint_vel[agent_id],
                     body_orientation_w=self._root_quat_w[agent_id],
                     joint_positions_b=self._gimbal_joint_pos[agent_id],
                 )
@@ -846,10 +854,20 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 gt_data.gimbal_azimuth_world = az
                 gt_data.gimbal_elevation_world = el
 
-                # Gimbal world-frame rates (from action commands)
-                max_rate = self.cfg.max_gimbal_rate
-                gt_data.gimbal_azimuth_rate = self.cmd_vel[:, idx, 4] * max_rate
-                gt_data.gimbal_elevation_rate = self.cmd_vel[:, idx, 5] * max_rate
+                # Gimbal world-frame LOS rates derived from combined angular velocity
+                # (body rate + joint rates via kinematics, preserving independent noise sources)
+                # For spherical coords: d/dt(az) = omega_z - tan(el)*(omega_x*cos(az) + omega_y*sin(az))
+                #                        d/dt(el) = omega_x*sin(az) - omega_y*cos(az)
+                omega = combined_w  # (N, 3) total camera angular velocity in world frame
+                gt_data.gimbal_azimuth_rate = (
+                    omega[:, 2]
+                    - torch.tan(el) * (omega[:, 0] * torch.cos(az) + omega[:, 1] * torch.sin(az))
+                )
+                gt_data.gimbal_elevation_rate = (
+                    omega[:, 0] * torch.sin(az) - omega[:, 1] * torch.cos(az)
+                )
+                self._gimbal_az_rate_world[agent_id] = gt_data.gimbal_azimuth_rate
+                self._gimbal_el_rate_world[agent_id] = gt_data.gimbal_elevation_rate
 
                 # Camera geometry
                 cam_pos_w, cam_ori_w = camera_poses[agent_id]
@@ -940,10 +958,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
             data.gimbal_azimuth_world = az
             data.gimbal_elevation_world = el
 
-            # Gimbal world-frame rates (from action commands)
-            max_rate = self.cfg.max_gimbal_rate
-            data.gimbal_azimuth_rate = self.cmd_vel[:, idx, 4] * max_rate
-            data.gimbal_elevation_rate = self.cmd_vel[:, idx, 5] * max_rate
+            # Gimbal world-frame rates (pre-computed via finite difference in _update_state_cache)
+            data.gimbal_azimuth_rate = self._gimbal_az_rate_world[agent_id]
+            data.gimbal_elevation_rate = self._gimbal_el_rate_world[agent_id]
 
             # Body velocity (needed for inter-agent obs in GT path)
             data.body_linear_velocity_w = self._root_lin_vel_w[agent_id]
