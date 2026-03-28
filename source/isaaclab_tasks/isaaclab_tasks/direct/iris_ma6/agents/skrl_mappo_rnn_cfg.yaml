@@ -83,7 +83,7 @@ agent:
   # Experiment tracking
   experiment:
     directory: iris_ma6
-    experiment_name: "395280af3d_tracking_lost_truncation" 
+    experiment_name: "4f7d9d0c34_gimbal_controller_fix" 
     write_interval: auto
     checkpoint_interval: auto
     store_separately: false
