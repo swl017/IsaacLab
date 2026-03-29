@@ -402,6 +402,14 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     altitude_min_threshold: float = 2.0
     """Minimum altitude (m). Below this, a continuous penalty ramps linearly with deficit."""
 
+    target_proximity_penalty_scale: float = -50.0
+    """Penalty per metre of proximity deficit below target_proximity_threshold.
+    Continuous: reward = clamp(threshold - dist_to_target, 0) * scale * dt.
+    Gated by progress_safety curriculum."""
+
+    target_proximity_threshold: float = 7.0
+    """Minimum distance (m) from target. Below this, a continuous penalty ramps linearly."""
+
     # ==========================================================================
     # Tracking-Lost Truncation
     # ==========================================================================
@@ -409,17 +417,17 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     enable_tracking_truncation: bool = True
     """Truncate episode when all agents lose detection for tracking_lost_timeout_s."""
 
-    tracking_lost_timeout_s: float = 3.0
+    tracking_lost_timeout_s: float = 2.0
     """Seconds of all-agents-blind before truncation."""
 
     tracking_truncation_grace_steps: int = 50
     """Steps after reset before the tracking-lost counter starts.
     Gives the delay system time to propagate initial detections."""
 
-    tracking_reacquire_steps: int = 5
+    tracking_reacquire_steps: int = 50
     """Consecutive valid-detection frames required to reset the lost counter.
     Prevents noise-induced single valid frames from resetting the timer.
-    At decimation=4, dt=0.01: 5 steps ~ 0.2s of sustained reacquisition."""
+    At decimation=4, dt=0.01: 50 steps ~ 2.0s of sustained reacquisition."""
 
     # ==========================================================================
     # Curriculum Configuration

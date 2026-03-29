@@ -378,6 +378,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     "cbf_penalty",
                     "collision",
                     "altitude",
+                    "target_proximity",
                     "est_error_gt",
                     "est_error_e2e",
                 ]
@@ -1096,8 +1097,8 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         # Update curriculum progress
         # current_step = self.common_step_counter if not DEBUG_DRAW else self.cfg.debug_initial_step
-        # current_step = self.cfg.debug_initial_step
-        current_step = self.common_step_counter
+        current_step = self.cfg.debug_initial_step
+        # current_step = self.common_step_counter
         curr = self.cfg.curriculum
         self.progress_coord = self._linear_progress(
             curr.coordination_start_step, curr.coordination_end_step, current_step
@@ -1305,6 +1306,14 @@ class IrisMA6TestEnv(DirectMARLEnv):
             pos_z = self._root_pos_w[agent_id][:, 2]
             altitude_deficit = torch.clamp(self.cfg.altitude_min_threshold - pos_z, min=0.0)
 
+            # Target proximity penalty: continuous penalty for flying too close to target
+            dist_to_target = torch.norm(
+                self._root_pos_w[agent_id][:, :3] - self._target_pos_w[:, :3], dim=-1
+            )
+            target_proximity_deficit = torch.clamp(
+                self.cfg.target_proximity_threshold - dist_to_target, min=0.0
+            )
+
             step_dt = self.cfg.sim.dt * self.cfg.decimation
             rewards = {
                 "action_sum": action_sum * self.cfg.action_sum_penalty_scale * step_dt,
@@ -1324,6 +1333,12 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 ),
                 "collision": collided.float() * self.cfg.collision_penalty_scale * step_dt,
                 "altitude": altitude_deficit * self.cfg.altitude_penalty_scale * step_dt,
+                "target_proximity": (
+                    target_proximity_deficit
+                    * self.cfg.target_proximity_penalty_scale
+                    * step_dt
+                    * self.progress_safety
+                ),
                 "est_error_gt": est_error_gt_reward,
                 "est_error_e2e": est_error_e2e_reward,
             }

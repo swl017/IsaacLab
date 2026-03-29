@@ -77,7 +77,7 @@ class ZoomController:
         )
 
         # Apply first-order lag dynamics with exact discretization
-        alpha = 1.0 - torch.exp(torch.tensor(-dt / self._tau_zoom, device=self.device))
+        alpha = 1.0 - torch.exp(torch.as_tensor(-dt / self._tau_zoom, device=self.device))
         self._zoom = self._zoom + alpha * (self._zoom_target - self._zoom)
 
         # Clamp output

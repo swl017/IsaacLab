@@ -17,7 +17,7 @@ EVALUATE="$SCRIPT_DIR/../evaluate.py"
 
 EXPERIMENT="${1:?Usage: $0 <experiment> <checkpoint> [num_envs] [num_episodes]}"
 CHECKPOINT="${2:-}"
-NUM_ENVS="${3:-4096}"
+NUM_ENVS="${3:-1024}"
 NUM_EPISODES="${4:-1}"
 
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"

@@ -69,17 +69,41 @@ parser.add_argument("--verbose", action="store_true", default=False)
 # Trajectory recording
 parser.add_argument("--record-trajectory", action="store_true", default=True)
 parser.add_argument("--trajectory-envs", type=int, default=8)
+# Video recording
+parser.add_argument("--record-video", type=str, default=None,
+                    help="Output path for video (e.g., demo.mp4)")
+parser.add_argument("--camera-mode", type=str, default="overhead",
+                    choices=["overhead", "chase", "side", "orbit",
+                             "formation", "closeup", "wide", "isometric"],
+                    help="Camera preset mode")
+parser.add_argument("--camera-smoothing", type=float, default=0.08,
+                    help="Camera smoothing factor 0-1 (lower=smoother)")
+parser.add_argument("--video-fps", type=int, default=30, help="Video frame rate")
+parser.add_argument("--video-resolution", type=int, nargs=2, default=[1920, 1080],
+                    metavar=("WIDTH", "HEIGHT"), help="Video resolution")
 args_cli, hydra_args = parser.parse_known_args()
 
 sys.argv = [sys.argv[0]] + hydra_args
 
 from isaaclab.app import AppLauncher
 
+# Video recording: headless mode with offscreen camera
+_headless_video = args_cli.record_video is not None and args_cli.headless
+_enable_cameras = args_cli.enable_cameras
+if _headless_video and not _enable_cameras:
+    _enable_cameras = True
+    print("[EVAL] Auto-enabling cameras for headless video recording")
+if args_cli.record_video is not None:
+    if _headless_video:
+        print("[EVAL] Video recording: using offscreen camera (headless mode)")
+    else:
+        print("[EVAL] Video recording: using viewport capture (GUI mode)")
+
 app_args = argparse.Namespace(
     headless=args_cli.headless,
     device="cuda:0",
     experience="",
-    enable_cameras=args_cli.enable_cameras,
+    enable_cameras=_enable_cameras,
 )
 app_launcher = AppLauncher(app_args)
 simulation_app = app_launcher.app
@@ -103,6 +127,11 @@ from isaaclab_tasks.direct.iris_ma6.experiments import (
     apply_agent_overrides,
 )
 from isaaclab_tasks.direct.iris_ma6.experiments.metrics import MetricTracker, TimeseriesTracker
+
+if args_cli.record_video is not None:
+    from isaaclab_tasks.direct.iris_ma5.video_recording import (
+        SmoothCameraController, VideoRecorder, VideoRecorderCfg, get_preset,
+    )
 
 # Add skrl scripts dir to path
 _skrl_scripts_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..", "..",
@@ -469,6 +498,31 @@ def main(env_cfg, agent_cfg: dict):
     else:
         traj_recorder = None
 
+    # Video recorder
+    if args_cli.record_video is not None:
+        camera_cfg = get_preset(args_cli.camera_mode)
+        camera_cfg.smoothing_factor = args_cli.camera_smoothing
+
+        smooth_camera = SmoothCameraController(
+            viewport_controller=None if _headless_video else getattr(unwrapped, "viewport_camera_controller", None),
+            cfg=camera_cfg,
+            env_index=0,
+        )
+        video_recorder = VideoRecorder(
+            cfg=VideoRecorderCfg(
+                output_path=args_cli.record_video,
+                fps=args_cli.video_fps,
+                resolution=tuple(args_cli.video_resolution),
+                headless=_headless_video,
+            )
+        )
+        video_recorder.start()
+        if _headless_video:
+            video_recorder.setup_offscreen_camera(unwrapped)
+    else:
+        smooth_camera = None
+        video_recorder = None
+
     # Load policy
     is_greedy = (args_cli.experiment == "baseline_greedy")
     if is_greedy:
@@ -512,11 +566,26 @@ def main(env_cfg, agent_cfg: dict):
             actions = policy.compute_actions(agent_positions, target_pos, agent_orientations)
         else:
             with torch.no_grad():
-                actions, _, _ = policy.act(obs, 0, 0)
+                actions, _, outputs = policy.act(obs, 0, 0)
+                # Use mean actions for deterministic evaluation
+                for agent_id in possible_agents:
+                    actions[agent_id] = outputs[agent_id]["mean_actions"]
 
         step_count += 1
 
         obs, rewards, terminated, truncated, info = env_wrapped.step(actions)
+
+        # Record video frame
+        if video_recorder is not None:
+            _vid_agents = torch.stack(
+                [unwrapped._root_pos_w[aid][0, :3] for aid in possible_agents], dim=0
+            )
+            _vid_target = unwrapped.target.data.root_pos_w[0, :3]
+            smooth_camera.update(_vid_agents, _vid_target, dt=unwrapped.step_dt)
+            if _headless_video:
+                _eye, _lookat = smooth_camera.get_current_pose()
+                video_recorder.set_camera_pose(_eye, _lookat)
+            video_recorder.capture_frame(unwrapped)
 
         # Detect done envs
         first_agent = possible_agents[0]
@@ -618,6 +687,10 @@ def main(env_cfg, agent_cfg: dict):
         with open(output_path, "w") as f:
             json.dump(results, f, indent=2)
         print(f"\nResults saved to: {output_path}")
+
+    if video_recorder is not None:
+        video_recorder.stop()
+        print(f"Video saved to: {args_cli.record_video}")
 
     env.close()
     simulation_app.close()
