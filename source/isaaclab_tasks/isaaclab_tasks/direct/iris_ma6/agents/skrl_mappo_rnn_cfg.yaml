@@ -83,7 +83,7 @@ agent:
   # Experiment tracking
   experiment:
     directory: iris_ma6
-    experiment_name: "compressed_curriculum_target_proximity"
+    experiment_name: "a07987a412_compressed_curriculum_target_proximity"
     write_interval: auto
     checkpoint_interval: auto
     store_separately: false
