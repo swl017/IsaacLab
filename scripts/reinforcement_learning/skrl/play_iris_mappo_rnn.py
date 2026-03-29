@@ -28,6 +28,10 @@ parser.add_argument("--num_envs", type=int, default=16, help="Number of play env
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during play")
 parser.add_argument("--video_length", type=int, default=200, help="Length of recorded video (in steps)")
 parser.add_argument("--real_time", action="store_true", default=False, help="Run in real-time")
+parser.add_argument("--deterministic", action="store_true", default=True,
+                    help="Use deterministic (mean) actions instead of sampling (default: True)")
+parser.add_argument("--stochastic", action="store_true", default=False,
+                    help="Use stochastic (sampled) actions instead of deterministic")
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
@@ -445,11 +449,15 @@ def main():
     episode_rewards = {agent_id: 0.0 for agent_id in possible_agents}
     episode_count = 0
     
+    # Resolve deterministic mode (--stochastic overrides --deterministic)
+    use_deterministic = args_cli.deterministic and not args_cli.stochastic
+
     print("[INFO] Starting evaluation...")
     print(f"[INFO] Number of environments: {args_cli.num_envs}")
     print(f"[INFO] Real-time mode: {args_cli.real_time}")
     print(f"[INFO] Recording video: {args_cli.video}")
     print(f"[INFO] Shared policy: {using_shared_policy}")
+    print(f"[INFO] Deterministic actions: {use_deterministic}")
     print(f"[INFO] RNN sequence length: {sequence_length}")
     
     # Main play loop
@@ -460,7 +468,12 @@ def main():
         with torch.inference_mode():
             # Get actions from agent
             actions, log_probs, outputs = agent.act(states, timestep=timestep, timesteps=10000)
-            
+
+            # Use mean actions for deterministic evaluation
+            if use_deterministic:
+                for agent_id in possible_agents:
+                    actions[agent_id] = outputs[agent_id]["mean_actions"]
+
             # Step the environment
             next_states, rewards, terminated, truncated, infos = env.step(actions)
             
