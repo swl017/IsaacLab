@@ -1097,8 +1097,8 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         # Update curriculum progress
         # current_step = self.common_step_counter if not DEBUG_DRAW else self.cfg.debug_initial_step
-        current_step = self.cfg.debug_initial_step
-        # current_step = self.common_step_counter
+        # current_step = self.cfg.debug_initial_step
+        current_step = self.common_step_counter
         curr = self.cfg.curriculum
         self.progress_coord = self._linear_progress(
             curr.coordination_start_step, curr.coordination_end_step, current_step

@@ -52,20 +52,20 @@ class CurriculumCfg:
     # Phase 0/1: Geometry + Formation (clean observations, static target)
     # ==========================================================================
 
-    tracking_start_step: int = 0
+    tracking_start_step: int = 20000
     """Step to start increasing formation/initialization difficulty."""
 
-    tracking_end_step: int = 40000
+    tracking_end_step: int = 60000
     """Step when formation/initialization difficulty reaches maximum."""
 
     # ==========================================================================
     # Phase 0: Agent Velocity Ramp (learn tilt dynamics on slow target)
     # ==========================================================================
 
-    agent_velocity_start_step: int = 0
+    agent_velocity_start_step: int = 20000
     """Step to start ramping agent max linear velocity."""
 
-    agent_velocity_end_step: int = 20000
+    agent_velocity_end_step: int = 40000
     """Step when agent velocity reaches its configured maximum.
 
     Decoupled from target motion so the agent learns tilt compensation
@@ -76,24 +76,24 @@ class CurriculumCfg:
     # Phase 2: Noise Introduction (before delay)
     # ==========================================================================
 
-    noise_start_step: int = 80000
+    noise_start_step: int = 100000
     """Step to start introducing observation noise.
 
     Starts after target motion ramp completes so the agent masters
     fast-target tracking with clean observations first.
     """
 
-    noise_end_step: int = 100000
+    noise_end_step: int = 120000
     """Step when noise reaches maximum realistic values."""
 
     # ==========================================================================
     # Phase 3: Fixed Delay (Deterministic Latency)
     # ==========================================================================
 
-    fixed_delay_start_step: int = 100000
+    fixed_delay_start_step: int = 120000
     """Step to start introducing fixed (deterministic) delay."""
 
-    fixed_delay_end_step: int = 120000
+    fixed_delay_end_step: int = 140000
     """Step when fixed delay reaches maximum value (uses config latency means)."""
 
     # NOTE: Fixed delay magnitude uses existing detection_latency_mean and
@@ -103,10 +103,10 @@ class CurriculumCfg:
     # Phase 4: Random Delay + Staleness
     # ==========================================================================
 
-    random_delay_start_step: int = 120000
+    random_delay_start_step: int = 140000
     """Step to transition from fixed to random delay."""
 
-    random_delay_end_step: int = 140000
+    random_delay_end_step: int = 160000
     """Step when random delay variance reaches maximum."""
 
     # NOTE: Random delay uses existing latency_std parameters from config.
@@ -115,51 +115,51 @@ class CurriculumCfg:
     # Phase 5: Dropout (after delay phases)
     # ==========================================================================
 
-    dropout_start_step: int = 140000
+    dropout_start_step: int = 160000
     """Step to start introducing dropout."""
 
-    dropout_end_step: int = 160000
+    dropout_end_step: int = 180000
     """Step when dropout reaches maximum rate."""
 
     # Legacy alias for backward compatibility
-    delay_start_step: int = 80000
+    delay_start_step: int = 120000
     """[DEPRECATED] Use noise_start_step, fixed_delay_start_step, etc."""
 
-    delay_end_step: int = 120000
+    delay_end_step: int = 160000
     """[DEPRECATED] Use random_delay_end_step."""
 
     # ==========================================================================
     # Phase 0: Multi-Agent Coupling (triangulation geometry)
     # ==========================================================================
 
-    coordination_start_step: int = 40000
+    coordination_start_step: int = 60000
     """Step to start rewarding coordination (triangulation)."""
 
-    coordination_end_step: int = 80000
+    coordination_end_step: int = 100000
     """Step when coordination rewards reach full scale."""
 
     # ==========================================================================
     # Phase 2: Safety (CBF collision avoidance — after basic tracking is learned)
     # ==========================================================================
 
-    safety_start_step: int = 0
+    safety_start_step: int = 20000
     """Step to start enforcing safety constraints (CBF penalty)."""
 
-    safety_end_step: int = 20000
+    safety_end_step: int = 40000
     """Step when safety penalties reach full scale."""
 
     # ==========================================================================
     # Phase 1: Target Dynamics (still clean observations)
     # ==========================================================================
 
-    moving_target_start_step: int = 20000
+    moving_target_start_step: int = 40000
     """Step to start introducing target motion.
 
     Starts after agent velocity ramp completes (20k end),
     so the agent has learned tilt compensation before tracking fast targets.
     """
 
-    moving_target_end_step: int = 60000
+    moving_target_end_step: int = 80000
     """Step when target reaches maximum speed/maneuverability.
 
     40k-step ramp gives time to learn tilt-coupled tracking.
@@ -169,10 +169,10 @@ class CurriculumCfg:
     # Phase 3+: Robot/Camera Dynamics Randomization (last)
     # ==========================================================================
 
-    dynamics_start_step: int = 160000
+    dynamics_start_step: int = 180000
     """Step to start dynamics randomization (mass, inertia)."""
 
-    dynamics_end_step: int = 180000
+    dynamics_end_step: int = 200000
     """Step when dynamics randomization reaches full range."""
 
     # ==========================================================================
