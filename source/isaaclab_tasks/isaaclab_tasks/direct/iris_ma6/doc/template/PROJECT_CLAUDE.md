@@ -37,4 +37,4 @@ Authoritative specifications live in `doc/*_spec.md`. These define *what* to bui
 ```
 
 ## Rationale
-For background on why this workflow exists, see `doc/ai_workflow.md`.
+For background on why this workflow exists, see `doc/harness_rationale.md`. For the stage-gated development workflow (QRISPY), see `doc/qrispy_workflow.md`.

@@ -41,4 +41,4 @@ iris_ma6/
 Reusable scaffolds for new modules and projects live in `doc/template/`. See `doc/template/README.md` for usage guide and pattern selection.
 
 ## Rationale
-For background on why this workflow exists, see `doc/ai_workflow.md`.
+For background on why this workflow exists, see `doc/harness_rationale.md`. For the stage-gated development workflow (QRISPY), see `doc/qrispy_workflow.md`.

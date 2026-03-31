@@ -1,6 +1,6 @@
 # Workflow Templates
 
-Reusable scaffolds for bootstrapping the harness engineering workflow described in `doc/ai_workflow.md`.
+Reusable scaffolds for bootstrapping the harness engineering workflow described in `doc/qrispy_workflow.md`.
 
 ## Quick Start
 
@@ -28,7 +28,7 @@ Reusable scaffolds for bootstrapping the harness engineering workflow described 
 | Add a new module | `module/` scaffold + `MODULE_CONTEXT.md` + `SPEC.md` |
 | Add tests to existing module | `module/tests/` only |
 | Define a feature before coding | `SPEC.md` first, then `module/` when ready |
-| Wire an existing module into env | None — follow the integration checklist in `ai_workflow.md` Section 5.5 |
+| Wire an existing module into env | None — follow the integration checklist in `qrispy_workflow.md` Appendix B.5 |
 | Add parameters to existing module | None — update existing `*_cfg.py` |
 
 ## Placeholder Tokens
@@ -55,4 +55,4 @@ All templates use `{{TOKEN}}` syntax for project-specific values:
 
 ## Reference
 
-For the rationale behind this workflow, see `doc/ai_workflow.md`.
+For the rationale behind this workflow, see `doc/harness_rationale.md`. For the operational stage-gated workflow, see `doc/qrispy_workflow.md`.
