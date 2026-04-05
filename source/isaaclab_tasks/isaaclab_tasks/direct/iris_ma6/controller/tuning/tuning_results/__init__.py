@@ -18,25 +18,20 @@ from isaaclab_tasks.direct.iris_ma6.controller.velocity_controller_cfg import Ve
 from isaaclab_tasks.direct.iris_ma6.controller.attitude_controller_cfg import AttitudeControllerCfg
 from isaaclab_tasks.direct.iris_ma6.controller.rate_controller_cfg import RateControllerCfg
 
-# Default configuration using PX4-style gains
 TUNED_CONTROLLER_CFG = DroneControllerCfg(
     velocity=VelocityControllerCfg(
-        # Velocity PI gains (adjusted for our drone mass/inertia)
-        Kp_vel=(1.5, 1.5, 3.0),
-        Ki_vel=(0.25, 0.25, 0.3),
+        Kp_vel=(2.0416, 2.0416, 1.5355),
+        Ki_vel=(1.3005, 1.3005, 0.7767),
     ),
     attitude=AttitudeControllerCfg(
-        # Attitude P gains (outputs rate setpoint in rad/s per rad error)
-        # Based on PX4 MC_ROLL_P=6.5, MC_PITCH_P=6.5, MC_YAW_P=2.8
-        Kp_att=(6.5, 6.5, 2.8),
+        Kp_att=(5.2060, 5.2060, 1.9334),
     ),
     rate=RateControllerCfg(
-        # Rate PID gains (outputs torque in Nm)
-        # Based on PX4 MC_ROLLRATE_P=0.15, MC_ROLLRATE_I=0.2, MC_ROLLRATE_D=0.003
-        Kp_rate=(0.15, 0.15, 0.2),
-        Ki_rate=(0.2, 0.2, 0.15),
-        Kd_rate=(0.003, 0.003, 0.001),
+        Kp_rate=(0.3932, 0.3932, 0.3956),
+        Ki_rate=(0.1805, 0.1805, 0.0900),
+        Kd_rate=(0.01451, 0.01451, 0.00000),
     ),
 )
+
 
 __all__ = ["TUNED_CONTROLLER_CFG"]

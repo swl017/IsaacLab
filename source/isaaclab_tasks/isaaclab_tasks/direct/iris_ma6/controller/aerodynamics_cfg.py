@@ -21,11 +21,11 @@ class AerodynamicsCfg:
     - Level 3: Level 2 + Rotor effects (H-force, blade flapping)
     """
 
-    fidelity_level: int = 0
+    fidelity_level: int = 3
     """Aerodynamic fidelity level (0-3). Default 0 (disabled)."""
 
     # Level 1: Basic drag parameters
-    C_d: float = 1.0
+    C_d: float = 0.03
     """Drag coefficient [-]."""
 
     A: float = 0.1
@@ -38,7 +38,7 @@ class AerodynamicsCfg:
     v_wind_mean: tuple[float, float, float] = (0.0, 0.0, 0.0)
     """Mean wind velocity in world frame [m/s]."""
 
-    sigma_gust: float = 2.0
+    sigma_gust: float = 0.0
     """Gust standard deviation [m/s]."""
 
     gust_bandwidth: float = 0.5
