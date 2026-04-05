@@ -251,6 +251,14 @@ class IrisMA6TestEnv(DirectMARLEnv):
         num_agents = len(cfg.possible_agents)
         self.cmd_vel = torch.zeros(self.num_envs, num_agents, 7, device=self.device)
 
+        # Action smoothness tracking (per-dimension RMS of action deltas)
+        num_action_dims = len(self.cfg.action_weight)
+        self._action_delta_sq_acc: Dict[str, torch.Tensor] = {
+            agent_id: torch.zeros(self.num_envs, num_action_dims, device=self.device)
+            for agent_id in cfg.possible_agents
+        }
+        self._action_smoothness_steps = torch.zeros(self.num_envs, device=self.device)
+
         # State caches (populated in _apply_action, consumed by rewards/dones/obs)
         self._root_pos_w: Dict[str, torch.Tensor] = {}
         self._root_quat_w: Dict[str, torch.Tensor] = {}
@@ -1097,8 +1105,8 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         # Update curriculum progress
         # current_step = self.common_step_counter if not DEBUG_DRAW else self.cfg.debug_initial_step
-        # current_step = self.cfg.debug_initial_step
-        current_step = self.common_step_counter
+        current_step = self.cfg.debug_initial_step if self.cfg.use_debug_initial_step else self.common_step_counter
+        # current_step = self.common_step_counter
         curr = self.cfg.curriculum
         self.progress_coord = self._linear_progress(
             curr.coordination_start_step, curr.coordination_end_step, current_step
@@ -1217,13 +1225,14 @@ class IrisMA6TestEnv(DirectMARLEnv):
             action_sum = torch.sum(
                 torch.square(self.action_weight * self._actions[agent_id]), dim=1
             )
-            action_delta = torch.sum(
-                torch.square(
-                    self.action_delta_weight
-                    * (self._actions[agent_id] - self._last_actions[agent_id])
-                ),
-                dim=1,
-            )
+            action_delta_per_dim = torch.square(
+                self.action_delta_weight
+                * (self._actions[agent_id] - self._last_actions[agent_id])
+            )  # [N, 7]
+            action_delta = torch.sum(action_delta_per_dim, dim=1)
+
+            # Accumulate per-dimension squared deltas for RMS logging
+            self._action_delta_sq_acc[agent_id] += action_delta_per_dim
 
             # ---- BBox rewards (using delayed/observed state) ----
             bbox_center_raw = delayed_state.data.bboxes_2d[:, 0, 0:2]  # [N, 2] pixel center
@@ -1368,6 +1377,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
             # Update last actions
             self._last_actions[agent_id] = self._actions[agent_id].clone()
+
+        # Increment smoothness step counter (once per step, outside agent loop)
+        self._action_smoothness_steps += 1.0
 
         return rewards_dict
 
@@ -1789,9 +1801,11 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         num_reset = len(env_ids)
 
+        current_step = self.cfg.debug_initial_step if self.cfg.use_debug_initial_step else self.common_step_counter
         self.progress_dynamics = self._linear_progress(
             self.cfg.curriculum.dynamics_start_step,
             self.cfg.curriculum.dynamics_end_step,
+            current_step,
         )
 
         if self._initial_states is not None:
@@ -1953,6 +1967,20 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     episodic_sum_avg / self.max_episode_length_s
                 )
                 self._episode_sums[agent_id][key][env_ids] = 0.0
+
+        # Log action delta RMS and reset accumulators
+        smoothness_steps = torch.clamp(self._action_smoothness_steps[env_ids], min=1.0)
+        for agent_id in self.cfg.possible_agents:
+            per_dim_rms = torch.sqrt(
+                self._action_delta_sq_acc[agent_id][env_ids]
+                / smoothness_steps.unsqueeze(-1)
+            )  # [len(env_ids), 7]
+            # Log aggregate RMS only (per-dim available via parity eval)
+            all_extras[f"Action_Smoothness/{agent_id}_total_rms"] = torch.mean(
+                torch.norm(per_dim_rms, dim=-1)
+            )
+            self._action_delta_sq_acc[agent_id][env_ids] = 0.0
+        self._action_smoothness_steps[env_ids] = 0.0
 
         # Log detection dropout statistics
         total_steps = torch.clamp(self._detection_stats["total_steps"][env_ids], min=1.0)

@@ -66,8 +66,15 @@ parser.add_argument("--detection-dropout-override", type=float, default=None,
 parser.add_argument("--no-timeseries", action="store_true", default=False,
                     help="Disable per-timestep timeseries collection")
 parser.add_argument("--verbose", action="store_true", default=False)
+parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+parser.add_argument("--target-trajectory-mode", type=str, default=None,
+                    choices=["linear", "circular"],
+                    help="Force target trajectory mode (overrides linear_weight)")
+parser.add_argument("--policy-combo", type=str, default="default",
+                    choices=["default", "a0a0", "a0a1", "a1a1"],
+                    help="Policy weight assignment: which drone's weights each agent uses")
 # Trajectory recording
-parser.add_argument("--record-trajectory", action="store_true", default=True)
+parser.add_argument("--record-trajectory", action=argparse.BooleanOptionalAction, default=True)
 parser.add_argument("--trajectory-envs", type=int, default=8)
 # Video recording
 parser.add_argument("--record-video", type=str, default=None,
@@ -159,7 +166,10 @@ def _collect_step_metrics(
     if tri_gt is not None:
         cov = tri_gt.covariance[:, 0, :, :]  # (N, 3, 3)
         trace_sigma = torch.diagonal(cov, dim1=-2, dim2=-1).sum(dim=-1)  # (N,)
-        tri_valid_gt = tri_gt.is_valid[:, 0]  # (N,)
+        # NaN/Inf from ill-conditioned FIM — mark as invalid
+        bad_trace = torch.isnan(trace_sigma) | torch.isinf(trace_sigma)
+        trace_sigma = torch.where(bad_trace, torch.zeros_like(trace_sigma), trace_sigma)
+        tri_valid_gt = tri_gt.is_valid[:, 0] & ~bad_trace  # (N,)
     else:
         trace_sigma = torch.ones(env.num_envs, device=env.device) * 999.0
         tri_valid_gt = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
@@ -172,7 +182,9 @@ def _collect_step_metrics(
         tri_valid_obs = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
 
     # Use obs path validity for metric gating (what the agent actually sees)
+    # Also require GT path validity for covariance metrics
     tri_valid = tri_valid_obs
+    tri_valid_with_cov = tri_valid_obs & tri_valid_gt
 
     # Ground truth target position
     gt_target_pos = env._target_pos_w  # (N, 3)
@@ -233,6 +245,10 @@ def _collect_step_metrics(
     if ts_tracker is not None:
         rmse = torch.norm(tri_pos - gt_target_pos, dim=-1)  # (N,)
         sqrt_trace = torch.sqrt(trace_sigma.clamp(min=0))  # (N,)
+        # Zero out sqrt_trace where GT covariance is invalid to prevent NaN poisoning
+        sqrt_trace = torch.where(
+            tri_valid_with_cov, sqrt_trace, torch.zeros_like(sqrt_trace)
+        )
         visibility = bbox_valid_mask.float().mean(dim=-1)  # (N,)
         tri_valid_float = tri_valid.float()  # (N,)
 
@@ -269,13 +285,23 @@ def _collect_step_metrics(
             target_speed=tgt_speed,
             viewing_angle=viewing_angle,
             active_mask=active_mask,
-            tri_valid_mask=tri_valid,
+            tri_valid_mask=tri_valid_with_cov,
             cbf_penalty=cbf_penalty,
         )
 
 
-def _load_rnn_policy(checkpoint_path, env, agent_cfg, possible_agents):
-    """Load a trained MAPPO-RNN policy from checkpoint."""
+def _load_rnn_policy(checkpoint_path, env, agent_cfg, possible_agents, policy_combo="default"):
+    """Load a trained MAPPO-RNN policy from checkpoint.
+
+    Args:
+        checkpoint_path: Path to .pt checkpoint file.
+        env: Wrapped environment.
+        agent_cfg: Agent configuration dict.
+        possible_agents: List of agent IDs.
+        policy_combo: Policy weight assignment. "default" uses the checkpoint as-is.
+            "a0a0" loads drone_0 weights for both agents, "a0a1" loads drone_0/drone_1
+            respectively, "a1a1" loads drone_1 for both.
+    """
     from mappo_rnn import MAPPO_RNN, MAPPO_RNN_DEFAULT_CONFIG, MAPPORNNPolicy, MAPPORNNValue
     from skrl.memories.torch import RandomMemory
     from skrl.resources.preprocessors.torch import RunningStandardScaler
@@ -294,34 +320,55 @@ def _load_rnn_policy(checkpoint_path, env, agent_cfg, possible_agents):
         shared_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(obs_shape,), dtype=np.float32)
         shared_observation_spaces = {agent_id: shared_space for agent_id in possible_agents}
 
-    shared_policy = MAPPORNNPolicy(
-        observation_space=env.observation_spaces[possible_agents[0]],
-        action_space=env.action_spaces[possible_agents[0]],
-        device=device,
-        hidden_size=policy_cfg.get("hidden_size", 64),
-        gru_num_layers=policy_cfg.get("gru_num_layers", 1),
-        gru_hidden_size=policy_cfg.get("gru_hidden_size", 64),
-        num_envs=env.num_envs,
-        initial_log_std=policy_cfg.get("initial_log_std", -0.5),
-        min_log_std=policy_cfg.get("min_log_std", -5.0),
-        max_log_std=policy_cfg.get("max_log_std", 0.7),
-        sequence_length=sequence_length,
-    )
-    shared_value = MAPPORNNValue(
-        observation_space=shared_observation_spaces[possible_agents[0]],
-        action_space=env.action_spaces[possible_agents[0]],
-        device=device,
-        hidden_size=value_cfg.get("hidden_size", 64),
-        gru_num_layers=value_cfg.get("gru_num_layers", 1),
-        gru_hidden_size=value_cfg.get("gru_hidden_size", 64),
-        num_envs=env.num_envs,
-        sequence_length=sequence_length,
-    )
+    def _make_policy():
+        return MAPPORNNPolicy(
+            observation_space=env.observation_spaces[possible_agents[0]],
+            action_space=env.action_spaces[possible_agents[0]],
+            device=device,
+            hidden_size=policy_cfg.get("hidden_size", 64),
+            gru_num_layers=policy_cfg.get("gru_num_layers", 1),
+            gru_hidden_size=policy_cfg.get("gru_hidden_size", 64),
+            num_envs=env.num_envs,
+            initial_log_std=policy_cfg.get("initial_log_std", -0.5),
+            min_log_std=policy_cfg.get("min_log_std", -5.0),
+            max_log_std=policy_cfg.get("max_log_std", 0.7),
+            sequence_length=sequence_length,
+        )
 
-    models = {}
+    def _make_value():
+        return MAPPORNNValue(
+            observation_space=shared_observation_spaces[possible_agents[0]],
+            action_space=env.action_spaces[possible_agents[0]],
+            device=device,
+            hidden_size=value_cfg.get("hidden_size", 64),
+            gru_num_layers=value_cfg.get("gru_num_layers", 1),
+            gru_hidden_size=value_cfg.get("gru_hidden_size", 64),
+            num_envs=env.num_envs,
+            sequence_length=sequence_length,
+        )
+
+    # Build policy combo mapping: agent_id -> checkpoint drone key
+    _COMBO_MAP = {
+        "a0a0": {"drone_0": "drone_0", "drone_1": "drone_0"},
+        "a0a1": {"drone_0": "drone_0", "drone_1": "drone_1"},
+        "a1a1": {"drone_0": "drone_1", "drone_1": "drone_1"},
+    }
+    use_separate = policy_combo != "default" and policy_combo in _COMBO_MAP
+    combo_map = _COMBO_MAP.get(policy_combo, {})
+
+    if use_separate:
+        # Create separate policy/value instances per agent
+        models = {}
+        for agent_id in possible_agents:
+            models[agent_id] = {"policy": _make_policy(), "value": _make_value()}
+    else:
+        # Shared policy (default behavior)
+        shared_policy = _make_policy()
+        shared_value = _make_value()
+        models = {aid: {"policy": shared_policy, "value": shared_value} for aid in possible_agents}
+
     memories = {}
     for agent_id in possible_agents:
-        models[agent_id] = {"policy": shared_policy, "value": shared_value}
         memories[agent_id] = RandomMemory(
             memory_size=agent_cfg.get("agent", {}).get("rollouts", 32),
             num_envs=env.num_envs,
@@ -370,10 +417,34 @@ def _load_rnn_policy(checkpoint_path, env, agent_cfg, possible_agents):
 
     # Load checkpoint
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    if "drone_0" in ckpt:
+
+    if use_separate and "drone_0" in ckpt:
+        # Policy combo: load per-agent weights from mapped drone keys
+        for agent_id in possible_agents:
+            src_key = combo_map[agent_id]
+            src_data = ckpt[src_key]
+            models[agent_id]["policy"].load_state_dict(src_data["policy"])
+            models[agent_id]["value"].load_state_dict(src_data["value"])
+        # Load preprocessor states via agent.load first, then overwrite model weights
+        agent.load(checkpoint_path)
+        for agent_id in possible_agents:
+            src_key = combo_map[agent_id]
+            src_data = ckpt[src_key]
+            models[agent_id]["policy"].load_state_dict(src_data["policy"])
+            models[agent_id]["value"].load_state_dict(src_data["value"])
+            # Load preprocessor states from mapped drone
+            for pp_key in ("state_preprocessor", "shared_state_preprocessor", "value_preprocessor"):
+                pp_dict = getattr(agent, f"_{pp_key}", None)
+                if isinstance(pp_dict, dict) and agent_id in pp_dict and pp_key in src_data:
+                    pp_dict[agent_id].load_state_dict(src_data[pp_key])
+        print(f"[EVAL] Loaded checkpoint with policy combo '{policy_combo}': "
+              f"{{{', '.join(f'{aid}<-{combo_map[aid]}' for aid in possible_agents)}}}")
+    elif "drone_0" in ckpt:
         agent.load(checkpoint_path)
         print(f"[EVAL] Loaded checkpoint (best_agent.pt SKRL): {checkpoint_path}")
     elif "policy_state_dict" in ckpt:
+        shared_policy = models[possible_agents[0]]["policy"]
+        shared_value = models[possible_agents[0]]["value"]
         shared_policy.load_state_dict(ckpt["policy_state_dict"])
         shared_value.load_state_dict(ckpt["value_state_dict"])
         print(f"[EVAL] Loaded checkpoint (final.pt): {checkpoint_path}")
@@ -439,6 +510,20 @@ def main(env_cfg, agent_cfg: dict):
         env_cfg.delay_system_params.dropout_prob = args_cli.detection_dropout_override
         print(f"[EVAL] Detection dropout override: {args_cli.detection_dropout_override:.2f}")
 
+    # Apply seed
+    torch.manual_seed(args_cli.seed)
+    env_cfg.seed = args_cli.seed
+    print(f"[EVAL] Seed: {args_cli.seed}")
+
+    # Apply target trajectory mode override
+    if args_cli.target_trajectory_mode is not None:
+        if args_cli.target_trajectory_mode == "linear":
+            env_cfg.target_controller.linear_weight = 1.0
+        else:  # circular
+            env_cfg.target_controller.linear_weight = 0.0
+        print(f"[EVAL] Target trajectory mode: {args_cli.target_trajectory_mode} "
+              f"(linear_weight={env_cfg.target_controller.linear_weight})")
+
     # Set eval params
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.episode_length_s = 20.0
@@ -462,6 +547,8 @@ def main(env_cfg, agent_cfg: dict):
     env_cfg.curriculum.dropout_end_step = 0
     env_cfg.curriculum.dynamics_start_step = 0
     env_cfg.curriculum.dynamics_end_step = 0
+    env_cfg.curriculum.agent_velocity_start_step = 0
+    env_cfg.curriculum.agent_velocity_end_step = 0
 
     # Create environment
     env = gym.make(args_cli.task, cfg=env_cfg)
@@ -536,7 +623,10 @@ def main(env_cfg, agent_cfg: dict):
     else:
         if args_cli.checkpoint is None:
             raise ValueError("--checkpoint required for trained policy evaluation")
-        policy = _load_rnn_policy(args_cli.checkpoint, env_wrapped, agent_cfg, possible_agents)
+        policy = _load_rnn_policy(
+            args_cli.checkpoint, env_wrapped, agent_cfg, possible_agents,
+            policy_combo=args_cli.policy_combo,
+        )
 
     # Run evaluation
     completed = 0
@@ -630,6 +720,23 @@ def main(env_cfg, agent_cfg: dict):
 
             _traj_rmse = torch.norm(_traj_tri_pos - _traj_target_pos, dim=-1)
 
+            # Extract gimbal angles and zoom levels
+            _traj_gimbal_angles = {}
+            _traj_zoom_levels = {}
+            for _i, aid in enumerate(possible_agents):
+                gimbal = unwrapped._controllers[aid]._gimbal
+                _traj_gimbal_angles[aid] = torch.stack(
+                    [gimbal._yaw, gimbal._pitch], dim=-1
+                )  # (N, 2)
+                _traj_zoom_levels[aid] = unwrapped.zoom_level[:, _i]  # (N,)
+
+            # Extract velocities
+            _traj_agent_vel = {
+                aid: unwrapped._root_lin_vel_w[aid]
+                for aid in possible_agents
+            }
+            _traj_target_vel = unwrapped.target.data.root_lin_vel_w[:, :3]
+
             traj_recorder.step(
                 agent_positions=_traj_agent_pos,
                 target_pos=_traj_target_pos,
@@ -638,6 +745,10 @@ def main(env_cfg, agent_cfg: dict):
                 rmse=_traj_rmse,
                 viewing_angle=_traj_viewing_angle,
                 env_origins=unwrapped._terrain.env_origins,
+                gimbal_angles=_traj_gimbal_angles,
+                zoom_levels=_traj_zoom_levels,
+                agent_velocities=_traj_agent_vel,
+                target_vel=_traj_target_vel,
             )
 
         # Handle episode completions

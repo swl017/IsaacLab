@@ -228,6 +228,7 @@ class DroneController:
             q_current=q_body,
             dt=sim_dt,
         )
+        self._last_q_des = q_des  # Stored for external oscillation analysis
 
         # =====================================================================
         # INNER LOOPS: Run at higher rate for stability

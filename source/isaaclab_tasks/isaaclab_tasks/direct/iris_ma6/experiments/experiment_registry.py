@@ -535,6 +535,37 @@ for _speed, _min_speed in [(3, 2), (5, 3), (10, 5)]:
 
 
 # ===========================================================================
+# A8: Action Smoothness (Weight Tuning)
+# ===========================================================================
+
+register_experiment(ExperimentCfg(
+    name="a8_weight_config_a",
+    description="Conservative 5x action penalty increase, zoom weight 1.0 (new defaults)",
+    group="A8",
+    total_timesteps=150000,
+    env_overrides={
+        "action_sum_penalty_scale": -10.0,
+        "action_delta_penalty_scale": -5.0,
+        "action_weight": [1, 1, 5, 1, 0.5, 0.5, 1.0],
+        "action_delta_weight": [1, 1, 1, 1, 0.5, 0.5, 1.0],
+    },
+))
+
+register_experiment(ExperimentCfg(
+    name="a8_weight_config_b",
+    description="Aggressive 15x action penalty increase, zoom weight 1.0",
+    group="A8",
+    total_timesteps=150000,
+    env_overrides={
+        "action_sum_penalty_scale": -30.0,
+        "action_delta_penalty_scale": -15.0,
+        "action_weight": [1, 1, 5, 1, 0.5, 0.5, 1.0],
+        "action_delta_weight": [1, 1, 1, 1, 0.5, 0.5, 1.0],
+    },
+))
+
+
+# ===========================================================================
 # Experiment Suites
 # ===========================================================================
 

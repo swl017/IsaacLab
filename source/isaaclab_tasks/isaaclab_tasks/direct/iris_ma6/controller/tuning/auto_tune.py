@@ -22,10 +22,12 @@ from isaaclab.app import AppLauncher
 
 parser = argparse.ArgumentParser(description="Auto-tune DroneController parameters")
 AppLauncher.add_app_launcher_args(parser)
-parser.add_argument("--num-envs", type=int, default=1024, help="Number of parallel environments")
 parser.add_argument("--search-mode", type=str, default="random", choices=["grid", "random"])
-parser.add_argument("--num-trials", type=int, default=100, help="Number of trials (random mode)")
+parser.add_argument("--num-trials", type=int, default=100, help="Number of trials (random mode). Each trial gets its own parallel env.")
 parser.add_argument("--output-dir", type=str, default="tuning_results", help="Output directory")
+parser.add_argument("--top-k", type=int, default=10, help="Number of top results to plot step responses for")
+parser.add_argument("--aero-level", type=int, default=0, choices=[0, 1, 2, 3],
+                    help="Aerodynamic fidelity level (0=off, 1=drag, 2=drag+wind, 3=drag+wind+rotor)")
 parser.set_defaults(headless=True)
 args_cli = parser.parse_args()
 
@@ -34,8 +36,9 @@ simulation_app = app_launcher.app
 
 import itertools
 import json
+import math
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -44,6 +47,7 @@ import torch
 
 import gymnasium as gym
 import isaaclab_tasks  # noqa: F401
+from isaaclab.utils.math import quat_from_euler_xyz
 from isaaclab_tasks.utils import parse_env_cfg
 
 
@@ -77,6 +81,70 @@ class ParameterSet:
 
 
 @dataclass
+class OscillationMetrics:
+    """Oscillation characterization for a single signal.
+
+    Computed from the error signal after 95% settling time.
+    """
+    damping_ratio: float = 1.0
+    """Damping ratio from logarithmic decrement. 0=undamped, 1=critically damped."""
+
+    zero_crossings: int = 0
+    """Number of sign changes in the error signal after settling."""
+
+    ss_amplitude: float = 0.0
+    """Peak-to-peak amplitude in the steady-state window."""
+
+    frequency: float = 0.0
+    """Dominant oscillation frequency estimated from zero-crossing intervals [Hz]."""
+
+
+@dataclass
+class TuningScoreWeights:
+    """Configurable weights for the combined tuning score (lower is better).
+
+    Design: velocity tracking quality and oscillation are the primary
+    discriminators. Attitude recovery is secondary — a 20° perturbation
+    with drag doesn't fully recover in 3s for any gain set, so it mostly
+    adds a constant offset. Hover is easy for all controllers.
+
+    Approximate score breakdown for a "good" trial (score ~15-25):
+        hover:       ~0.1  (negligible — all controllers hover well)
+        velocity:    ~5-10 (settling + ss_error + overshoot — main differentiator)
+        attitude:    ~3-6  (recovery time + final error — secondary)
+        oscillation: ~5-10 (damping + amplitude — main differentiator)
+    """
+    # Hover (small contribution — all controllers hover well)
+    hover_drift_mean: float = 1.0
+    hover_drift_max: float = 0.5
+    # Velocity tracking (primary: this is what we're tuning for)
+    vel_settling_time: float = 3.0
+    """Penalty per second of settling time. Fast response matters."""
+    vel_overshoot: float = 0.5
+    """Penalty per % overshoot. Increased from 0.1 — overshoot indicates underdamping."""
+    vel_ss_error: float = 8.0
+    """Penalty per m/s of steady-state error. Tracking accuracy is critical."""
+    # Attitude recovery (secondary: harsh test conditions make full recovery unlikely)
+    att_recovery_time: float = 1.0
+    """Reduced from 3.0 — recovery time has less variance across gain sets."""
+    att_max_error: float = 0.02
+    """Reduced from 0.1 — initial transient is similar across all trials."""
+    att_final_error: float = 0.3
+    """Reduced from 2.0 — partial recovery (14° from 30°) is expected with drag."""
+    # Oscillation penalties (primary: this is the ticket's core concern)
+    oscillation_damping: float = 10.0
+    """Penalty per (1 - damping_ratio). Doubled from 5.0 — underdamping is the main issue."""
+    oscillation_zero_crossings: float = 0.5
+    """Penalty per zero-crossing count. Increased — more crossings = more oscillatory."""
+    oscillation_ss_amplitude: float = 5.0
+    """Penalty per peak-to-peak steady-state amplitude [m/s or rad/s]. Increased from 3.0."""
+
+
+def _default_osc() -> OscillationMetrics:
+    return OscillationMetrics()
+
+
+@dataclass
 class TuningMetrics:
     """Evaluation metrics."""
     hover_drift_mean: float = 0.0
@@ -91,6 +159,106 @@ class TuningMetrics:
     att_recovered: bool = True
     is_stable: bool = True
     score: float = 0.0
+    # Oscillation metrics
+    vel_osc_5: OscillationMetrics = field(default_factory=_default_osc)
+    """Velocity error oscillation at 5 m/s target."""
+    vel_osc_10: OscillationMetrics = field(default_factory=_default_osc)
+    """Velocity error oscillation at 10 m/s target."""
+    att_osc: OscillationMetrics = field(default_factory=_default_osc)
+    """Attitude error oscillation during attitude recovery test."""
+    rate_osc_vel5: OscillationMetrics = field(default_factory=_default_osc)
+    """Rate error oscillation during 5 m/s velocity test."""
+    rate_osc_vel10: OscillationMetrics = field(default_factory=_default_osc)
+    """Rate error oscillation during 10 m/s velocity test."""
+    rate_osc_att: OscillationMetrics = field(default_factory=_default_osc)
+    """Rate error oscillation during attitude recovery test."""
+
+
+def compute_oscillation_metrics(
+    error_signal: torch.Tensor,
+    settling_idx: int,
+    dt: float,
+) -> OscillationMetrics:
+    """Compute oscillation metrics from an error signal after settling.
+
+    Analyzes the portion of the error signal after the 95% settling index
+    to characterize residual oscillation.
+
+    Args:
+        error_signal: (T,) 1D error signal (e.g. velocity error along one axis).
+        settling_idx: Index at which the signal first reaches 95% of target.
+            Steady-state analysis starts from this index.
+        dt: Timestep between samples [s].
+
+    Returns:
+        OscillationMetrics with damping ratio, zero-crossing count,
+        steady-state amplitude, and dominant frequency.
+    """
+    T = error_signal.shape[0]
+
+    # Ensure settling_idx is within bounds, leave at least 4 samples for analysis
+    settling_idx = max(0, min(settling_idx, T - 4))
+    ss_signal = error_signal[settling_idx:]
+
+    if ss_signal.shape[0] < 4:
+        return OscillationMetrics()
+
+    # Move to CPU for scalar analysis
+    ss = ss_signal.detach().cpu().float()
+
+    # --- Zero crossings ---
+    signs = torch.sign(ss)
+    # Remove exact zeros (treat as previous sign)
+    for i in range(1, len(signs)):
+        if signs[i] == 0:
+            signs[i] = signs[i - 1]
+    sign_changes = (signs[1:] * signs[:-1]) < 0
+    zero_crossings = int(sign_changes.sum().item())
+
+    # --- Peak-to-peak steady-state amplitude ---
+    ss_amplitude = float((ss.max() - ss.min()).item())
+
+    # --- Damping ratio via logarithmic decrement ---
+    damping_ratio = 1.0  # Default: critically damped (no oscillation detected)
+
+    # Find peaks (local maxima) in absolute error
+    abs_ss = ss.abs()
+    peaks = []
+    for i in range(1, len(abs_ss) - 1):
+        if abs_ss[i] > abs_ss[i - 1] and abs_ss[i] > abs_ss[i + 1]:
+            peaks.append((i, abs_ss[i].item()))
+
+    if len(peaks) >= 2:
+        # Use first two peaks for logarithmic decrement
+        peak1_val = peaks[0][1]
+        peak2_val = peaks[1][1]
+
+        if peak1_val > 1e-8 and peak2_val > 1e-8 and peak1_val > peak2_val:
+            log_dec = math.log(peak1_val / peak2_val)
+            damping_ratio = log_dec / math.sqrt(4.0 * math.pi**2 + log_dec**2)
+            damping_ratio = min(max(damping_ratio, 0.0), 1.0)
+        elif peak1_val > 1e-8 and peak2_val >= peak1_val:
+            # Growing or constant oscillation — undamped
+            damping_ratio = 0.0
+
+    # --- Dominant frequency from zero-crossing intervals ---
+    frequency = 0.0
+    if zero_crossings >= 2:
+        crossing_indices = sign_changes.nonzero(as_tuple=False).squeeze(-1)
+        if crossing_indices.dim() == 0:
+            crossing_indices = crossing_indices.unsqueeze(0)
+        if len(crossing_indices) >= 2:
+            intervals = (crossing_indices[1:] - crossing_indices[:-1]).float() * dt
+            mean_half_period = intervals.mean().item()
+            if mean_half_period > 1e-8:
+                frequency = 1.0 / (2.0 * mean_half_period)
+
+    return OscillationMetrics(
+        damping_ratio=damping_ratio,
+        zero_crossings=zero_crossings,
+        ss_amplitude=ss_amplitude,
+        frequency=frequency,
+    )
 
 
 @dataclass
@@ -100,10 +268,12 @@ class AttitudeTestConfig:
     Uses fixed extreme attitudes for consistent, reproducible characterization
     of step response across different parameter sets.
     """
-    # Fixed initial attitudes for step response (deterministic)
-    roll_deg: float = 45.0   # Initial roll perturbation
-    pitch_deg: float = 45.0  # Initial pitch perturbation
-    yaw_deg: float = 30.0    # Initial yaw perturbation
+    # Fixed initial attitudes for step response (deterministic).
+    # Must be within the real controller's recovery envelope (max_tilt=45°
+    # leaves zero margin at 45°; 20° gives a realistic step with headroom).
+    roll_deg: float = 20.0   # Initial roll perturbation
+    pitch_deg: float = 20.0  # Initial pitch perturbation
+    yaw_deg: float = 15.0    # Initial yaw perturbation
     # Initial angular rates (zero for clean step response)
     roll_rate: float = 0.0   # rad/s
     pitch_rate: float = 0.0  # rad/s
@@ -113,13 +283,14 @@ class AttitudeTestConfig:
 
 
 class ParallelTuner:
-    """Parallel parameter tuner using Isaac Sim.
+    """Parallel parameter tuner using Isaac Sim and the real DroneController.
 
     Tests N different parameter sets simultaneously in N parallel environments.
+    Each env gets its own per-env gains set on the shared DroneController.
     """
 
-    def __init__(self, num_envs: int, device: str = "cuda:0"):
-        """Initialize tuner with Isaac Sim environment."""
+    def __init__(self, num_envs: int, device: str = "cuda:0", aero_level: int = 0):
+        """Initialize tuner with Isaac Sim environment and real DroneController."""
         self.num_envs = num_envs
         self.device = device
 
@@ -134,9 +305,8 @@ class ParallelTuner:
         agent_id = self.unwrapped.cfg.possible_agents[0]
         self.robot = self.unwrapped._robots[agent_id]
         self.sim = self.unwrapped.sim
-        self.decimation = self.unwrapped.cfg.decimation
         self.physics_dt = self.unwrapped.cfg.sim.dt  # Single physics step dt
-        self.dt = self.physics_dt * self.decimation  # Policy dt
+        self.dt = self.physics_dt  # Step at physics rate for maximum resolution
 
         # Find the correct body ID for force application
         body_ids, _ = self.robot.find_bodies("body")
@@ -149,296 +319,135 @@ class ParallelTuner:
         self.mass = per_env_mass if per_env_mass > 0.1 else 1.5
         print(f"Environment: {num_envs} envs, dt={self.dt:.3f}s, mass={self.mass:.2f}kg", flush=True)
 
-        # Per-env parameters (set by _setup_batch)
-        self.Kp_vel = None  # (N, 3) Velocity P-gain
-        self.Ki_vel = None  # (N, 3) Velocity I-gain
-        self.Kp_att = None  # (N, 3) Attitude P-gain (outputs rate setpoint)
-        self.Kp_rate = None  # (N, 3) Rate P-gain
-        self.Ki_rate = None  # (N, 3) Rate I-gain
-        self.Kd_rate = None  # (N, 3) Rate D-gain
-        self.vel_integral = None  # (N, 3) Velocity integral state
-        self.rate_integral = None  # (N, 3) Rate integral state
-        self.prev_omega = None  # (N, 3) Previous omega for angular accel
-        self.batch_size = 0
+        # Create the real DroneController (batched over all envs)
+        from isaaclab_tasks.direct.iris_ma6.controller import DroneController, DroneControllerCfg
+        from isaaclab_tasks.direct.iris_ma6.controller.velocity_controller_cfg import VelocityControllerCfg
+        cfg = DroneControllerCfg(
+            velocity=VelocityControllerCfg(
+                # Raise integral limit so Ki up to 2.0 can fully compensate drag at 10 m/s
+                # Required: Ki * limit > F_drag/m = 3.78 m/s². With Ki=2.0, limit=4 gives 8.0.
+                # But lower Ki (e.g. 0.5) with limit=4 gives only 2.0 — not enough.
+                # Raise limit to 8.0 so Ki=0.5 can reach 4.0 m/s².
+                integral_limit=(8.0, 8.0, 4.0),
+            ),
+        )
+        self.controller = DroneController(
+            cfg=cfg,
+            mass=self.mass,
+            gravity=9.81,
+            num_envs=num_envs,
+            device=device,
+        )
+        self.controller.set_aerodynamic_level(aero_level)
+        if aero_level > 0:
+            print(f"Aerodynamics enabled: level {aero_level}", flush=True)
 
     def _setup_batch(self, params_list: list):
-        """Setup per-environment parameter tensors for 4-loop architecture."""
-        self.batch_size = len(params_list)
+        """Set per-environment gains on the real DroneController.
 
-        # Velocity controller gains (PI)
-        self.Kp_vel = torch.stack([
-            torch.tensor([p.Kp_vel_xy, p.Kp_vel_xy, p.Kp_vel_z], dtype=torch.float32)
-            for p in params_list
-        ]).to(self.device)
-
-        self.Ki_vel = torch.stack([
-            torch.tensor([p.Ki_vel_xy, p.Ki_vel_xy, p.Ki_vel_z], dtype=torch.float32)
-            for p in params_list
-        ]).to(self.device)
-
-        # Attitude controller gains (P-only, outputs rate setpoint)
-        self.Kp_att = torch.stack([
-            torch.tensor([p.Kp_att_rp, p.Kp_att_rp, p.Kp_att_y], dtype=torch.float32)
-            for p in params_list
-        ]).to(self.device)
-
-        # Rate controller gains (PID)
-        self.Kp_rate = torch.stack([
-            torch.tensor([p.Kp_rate_rp, p.Kp_rate_rp, p.Kp_rate_y], dtype=torch.float32)
-            for p in params_list
-        ]).to(self.device)
-
-        self.Ki_rate = torch.stack([
-            torch.tensor([p.Ki_rate_rp, p.Ki_rate_rp, p.Ki_rate_y], dtype=torch.float32)
-            for p in params_list
-        ]).to(self.device)
-
-        self.Kd_rate = torch.stack([
-            torch.tensor([p.Kd_rate_rp, p.Kd_rate_rp, p.Kd_rate_y], dtype=torch.float32)
-            for p in params_list
-        ]).to(self.device)
-
-        # State variables
-        self.vel_integral = torch.zeros(self.batch_size, 3, device=self.device)
-        self.rate_integral = torch.zeros(self.batch_size, 3, device=self.device)
-        self.prev_omega = torch.zeros(self.batch_size, 3, device=self.device)
-
-    def _compute_control(self, v_des: torch.Tensor) -> tuple:
-        """Compute control with per-environment parameters using 4-loop cascade.
-
-        Architecture:
-            Velocity (PI) -> Attitude (P) -> Rate (PID) -> Torque
-
-        Args:
-            v_des: Desired velocity (N, 3)
-
-        Returns:
-            F_body: Force in body frame (N, 3)
-            tau_body: Torque in body frame (N, 3)
+        Builds (N, 3) gain tensors from the params_list and calls the
+        sub-controller set_gains() APIs. len(params_list) must equal num_envs.
         """
-        N = self.batch_size
+        assert len(params_list) == self.num_envs, (
+            f"params_list length ({len(params_list)}) must equal num_envs ({self.num_envs})"
+        )
+        # All envs are active — one param set per env
 
-        # Get state
-        vel = self.robot.data.root_lin_vel_w[:N]
-        quat = self.robot.data.root_quat_w[:N]
-        omega = self.robot.data.root_ang_vel_b[:N]
-
-        # =====================================================================
-        # LOOP 1: Velocity Control (PI) -> desired acceleration -> q_des + thrust
-        # =====================================================================
-        vel_error = v_des - vel
-        self.vel_integral = torch.clamp(self.vel_integral + vel_error * self.dt, -2.0, 2.0)
-
-        # Per-env gains: (N,3) * (N,3) = (N,3)
-        a_des = self.Kp_vel * vel_error + self.Ki_vel * self.vel_integral
-        a_des[:, 2] += 9.81  # Gravity compensation
-
-        # Clamp desired acceleration magnitude to prevent runaway
-        a_des_norm = torch.norm(a_des, dim=-1, keepdim=True)
-        max_accel = 20.0  # Max 2g acceleration
-        a_des = a_des * torch.clamp(max_accel / (a_des_norm + 1e-6), max=1.0)
-
-        # Thrust magnitude (clamped to reasonable range)
-        thrust = self.mass * torch.norm(a_des, dim=-1)
-        thrust = torch.clamp(thrust, 0, self.mass * 30.0)  # Max 3g thrust
-
-        # Ensure a_des points somewhat upward for attitude computation
-        a_des_safe = a_des.clone()
-        a_des_safe[:, 2] = torch.clamp(a_des[:, 2], min=1.0)  # At least 1 m/s^2 upward
-
-        # Desired attitude from safe acceleration direction
-        q_des = self._accel_to_quat(a_des_safe)
-
-        # =====================================================================
-        # LOOP 2: Attitude Control (P-only) -> rate setpoint
-        # =====================================================================
-        att_error = self._quat_error(q_des, quat)
-
-        # P-only attitude control outputs angular rate setpoint
-        rate_setpoint = -self.Kp_att * att_error
-
-        # Clamp rate setpoint to reasonable limits (360 deg/s)
-        rate_limit = 6.28  # ~360 deg/s
-        rate_setpoint = torch.clamp(rate_setpoint, -rate_limit, rate_limit)
-
-        # =====================================================================
-        # LOOP 3: Rate Control (PID) -> torque
-        # =====================================================================
-        rate_error = rate_setpoint - omega
-
-        # Angular acceleration (backward difference)
-        angular_accel = (omega - self.prev_omega) / self.dt
-        self.prev_omega = omega.clone()
-
-        # Update rate integral with clamping
-        self.rate_integral = torch.clamp(
-            self.rate_integral + rate_error * self.dt,
-            -0.3, 0.3  # Integral limit
+        # Build per-env gain tensors — (N, 3) with one row per env
+        Kp_vel = torch.tensor(
+            [[p.Kp_vel_xy, p.Kp_vel_xy, p.Kp_vel_z] for p in params_list],
+            dtype=torch.float32, device=self.device,
+        )
+        Ki_vel = torch.tensor(
+            [[p.Ki_vel_xy, p.Ki_vel_xy, p.Ki_vel_z] for p in params_list],
+            dtype=torch.float32, device=self.device,
+        )
+        Kp_att = torch.tensor(
+            [[p.Kp_att_rp, p.Kp_att_rp, p.Kp_att_y] for p in params_list],
+            dtype=torch.float32, device=self.device,
+        )
+        Kp_rate = torch.tensor(
+            [[p.Kp_rate_rp, p.Kp_rate_rp, p.Kp_rate_y] for p in params_list],
+            dtype=torch.float32, device=self.device,
+        )
+        Ki_rate = torch.tensor(
+            [[p.Ki_rate_rp, p.Ki_rate_rp, p.Ki_rate_y] for p in params_list],
+            dtype=torch.float32, device=self.device,
+        )
+        Kd_rate = torch.tensor(
+            [[p.Kd_rate_rp, p.Kd_rate_rp, p.Kd_rate_y] for p in params_list],
+            dtype=torch.float32, device=self.device,
         )
 
-        # PID control: tau = Kp * error + Ki * integral - Kd * accel
-        tau = (
-            self.Kp_rate * rate_error
-            + self.Ki_rate * self.rate_integral
-            - self.Kd_rate * angular_accel
+        # Apply to real controller sub-modules
+        self.controller._velocity.set_gains(Kp_vel=Kp_vel, Ki_vel=Ki_vel)
+        self.controller._attitude.set_gains(Kp_att=Kp_att)
+        self.controller._rate.set_gains(Kp_rate=Kp_rate, Ki_rate=Ki_rate, Kd_rate=Kd_rate)
+
+    def _step_with_controller(self, v_cmd: torch.Tensor) -> tuple:
+        """Run one physics step through the real DroneController.
+
+        Steps at physics_dt (0.01s) — not policy_dt — for maximum time resolution.
+        The controller is called every physics step so all 4 cascade loops run
+        at full rate, and oscillation signals are sampled at 100 Hz.
+
+        Args:
+            v_cmd: (num_envs, 3) desired velocity in world frame [m/s].
+
+        Returns:
+            att_error: (num_envs, 3) attitude error from the attitude controller [rad].
+            rate_error: (num_envs, 3) rate error (rate_setpoint - omega) [rad/s].
+        """
+        N = self.num_envs
+        q_body = self.robot.data.root_quat_w[:N]
+        v_body = self.robot.data.root_lin_vel_w[:N]
+        omega_body = self.robot.data.root_ang_vel_b[:N]
+
+        # Read gimbal joint positions (pitch, yaw, roll order in sim)
+        gimbal_pos = torch.zeros(N, 3, device=self.device)
+
+        # Zero gimbal/yaw/zoom commands — tuning focuses on flight dynamics
+        zeros_n = torch.zeros(N, device=self.device)
+
+        # Call controller at physics_dt — all cascade loops get one substep
+        F_body, tau_body, gimbal_targets, gimbal_vels, zoom = self.controller.step_policy(
+            v_cmd=v_cmd,
+            yaw_rate_cmd=zeros_n,
+            gimbal_yaw_rate_cmd=zeros_n,
+            gimbal_pitch_rate_cmd=zeros_n,
+            zoom_rate_cmd=zeros_n,
+            q_body=q_body,
+            v_body=v_body,
+            omega_body=omega_body,
+            sim_dt=self.physics_dt,
+            gimbal_joint_positions=gimbal_pos,
+            physics_dt=self.physics_dt,
         )
 
-        # Clamp torque output
-        tau = torch.clamp(tau, -5.0, 5.0)
+        # Extract intermediate signals for oscillation analysis
+        q_des = self.controller._last_q_des if hasattr(self.controller, '_last_q_des') else q_body
+        att_error = self.controller._attitude.compute_attitude_error(q_des, q_body)  # (N, 3) rad
 
-        # Force in body frame
-        F_body = torch.zeros(N, 3, device=self.device)
-        F_body[:, 2] = thrust
+        rate_setpoint = -self.controller._attitude._Kp_att * att_error
+        rate_error = rate_setpoint - omega_body  # (N, 3) rad/s
 
-        return F_body, tau
+        # Apply forces and step physics once
+        forces = torch.zeros(N, 1, 3, device=self.device)
+        torques = torch.zeros(N, 1, 3, device=self.device)
+        forces[:, 0] = F_body
+        torques[:, 0] = tau_body
 
-    def _accel_to_quat(self, a_des: torch.Tensor) -> torch.Tensor:
-        """Convert desired acceleration to quaternion (wxyz)."""
-        N = a_des.shape[0]
+        self.robot.set_external_force_and_torque(forces, torques, body_ids=self.body_ids)
+        self.robot.write_data_to_sim()
+        self.sim.step(render=False)
+        self.robot.update(self.physics_dt)
 
-        # Normalize to get body z-axis direction
-        z_body = a_des / (torch.norm(a_des, dim=-1, keepdim=True) + 1e-6)
+        return att_error, rate_error
 
-        # Choose x-axis perpendicular to world y and body z
-        y_world = torch.tensor([0.0, 1.0, 0.0], device=self.device).expand(N, 3)
-        x_body = torch.cross(y_world, z_body, dim=-1)
-        x_body = x_body / (torch.norm(x_body, dim=-1, keepdim=True) + 1e-6)
-        y_body = torch.cross(z_body, x_body, dim=-1)
-
-        # Rotation matrix to quaternion
-        R = torch.stack([x_body, y_body, z_body], dim=-1)  # (N, 3, 3)
-        return self._rotmat_to_quat(R)
-
-    def _rotmat_to_quat(self, R: torch.Tensor) -> torch.Tensor:
-        """Convert rotation matrix to quaternion (wxyz)."""
-        N = R.shape[0]
-        q = torch.zeros(N, 4, device=self.device)
-
-        trace = R[:, 0, 0] + R[:, 1, 1] + R[:, 2, 2]
-        mask = trace > 0
-
-        # Case 1: trace > 0
-        if mask.any():
-            s = torch.sqrt(trace[mask] + 1.0) * 2
-            q[mask, 0] = 0.25 * s
-            q[mask, 1] = (R[mask, 2, 1] - R[mask, 1, 2]) / s
-            q[mask, 2] = (R[mask, 0, 2] - R[mask, 2, 0]) / s
-            q[mask, 3] = (R[mask, 1, 0] - R[mask, 0, 1]) / s
-
-        # Case 2: trace <= 0, use largest diagonal element
-        mask2 = ~mask
-        if mask2.any():
-            # Simplified: assume z is largest (typical for hover)
-            s = torch.sqrt(1.0 + R[mask2, 2, 2] - R[mask2, 0, 0] - R[mask2, 1, 1]) * 2
-            q[mask2, 0] = (R[mask2, 1, 0] - R[mask2, 0, 1]) / s
-            q[mask2, 1] = (R[mask2, 0, 2] + R[mask2, 2, 0]) / s
-            q[mask2, 2] = (R[mask2, 1, 2] + R[mask2, 2, 1]) / s
-            q[mask2, 3] = 0.25 * s
-
-        # Normalize
-        return q / (torch.norm(q, dim=-1, keepdim=True) + 1e-8)
-
-    def _quat_error(self, q_des: torch.Tensor, q_curr: torch.Tensor) -> torch.Tensor:
-        """Compute attitude error from quaternion error (wxyz convention)."""
-        # q_err = q_des^-1 * q_curr
-        q_des_inv = q_des * torch.tensor([1, -1, -1, -1], device=self.device)
-        q_err = self._quat_multiply(q_des_inv, q_curr)
-
-        # Ensure shortest path
-        sign = torch.sign(q_err[:, 0:1])
-        sign = torch.where(sign == 0, torch.ones_like(sign), sign)
-        q_err = q_err * sign
-
-        # Attitude error: 2 * q_err.xyz
-        return 2.0 * q_err[:, 1:4]
-
-    def _quat_multiply(self, q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
-        """Quaternion multiplication (wxyz convention)."""
-        w1, x1, y1, z1 = q1[:, 0], q1[:, 1], q1[:, 2], q1[:, 3]
-        w2, x2, y2, z2 = q2[:, 0], q2[:, 1], q2[:, 2], q2[:, 3]
-
-        return torch.stack([
-            w1*w2 - x1*x2 - y1*y2 - z1*z2,
-            w1*x2 + x1*w2 + y1*z2 - z1*y2,
-            w1*y2 - x1*z2 + y1*w2 + z1*x2,
-            w1*z2 + x1*y2 - y1*x2 + z1*w2,
-        ], dim=-1)
-
-    def _euler_to_quat(self, roll: torch.Tensor, pitch: torch.Tensor, yaw: torch.Tensor) -> torch.Tensor:
-        """Convert Euler angles (radians) to quaternion (wxyz convention).
-
-        Args:
-            roll, pitch, yaw: (N,) tensors of angles in radians
-
-        Returns:
-            Quaternion (N, 4) in wxyz format
-        """
-        cr = torch.cos(roll * 0.5)
-        sr = torch.sin(roll * 0.5)
-        cp = torch.cos(pitch * 0.5)
-        sp = torch.sin(pitch * 0.5)
-        cy = torch.cos(yaw * 0.5)
-        sy = torch.sin(yaw * 0.5)
-
-        w = cr * cp * cy + sr * sp * sy
-        x = sr * cp * cy - cr * sp * sy
-        y = cr * sp * cy + sr * cp * sy
-        z = cr * cp * sy - sr * sp * cy
-
-        return torch.stack([w, x, y, z], dim=-1)
-
-    def _quat_to_euler(self, q: torch.Tensor) -> tuple:
-        """Convert quaternion (wxyz) to Euler angles (roll, pitch, yaw) in radians.
-
-        Args:
-            q: Quaternion (N, 4) in wxyz format
-
-        Returns:
-            roll, pitch, yaw: (N,) tensors in radians
-        """
-        w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
-
-        # Roll (x-axis rotation)
-        sinr_cosp = 2.0 * (w * x + y * z)
-        cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
-        roll = torch.atan2(sinr_cosp, cosr_cosp)
-
-        # Pitch (y-axis rotation)
-        sinp = 2.0 * (w * y - z * x)
-        sinp = torch.clamp(sinp, -1.0, 1.0)
-        pitch = torch.asin(sinp)
-
-        # Yaw (z-axis rotation)
-        siny_cosp = 2.0 * (w * z + x * y)
-        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-        yaw = torch.atan2(siny_cosp, cosy_cosp)
-
-        return roll, pitch, yaw
-
-    def _compute_attitude_error_deg(self, quat: torch.Tensor) -> torch.Tensor:
-        """Compute attitude error from level (degrees).
-
-        Args:
-            quat: Current quaternion (N, 4) in wxyz format
-
-        Returns:
-            Attitude error in degrees (N,) - angle from level attitude
-        """
-        # Level attitude quaternion (identity rotation)
-        q_level = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).expand(quat.shape[0], 4)
-
-        # Compute error quaternion
-        q_level_inv = q_level * torch.tensor([1, -1, -1, -1], device=self.device)
-        q_err = self._quat_multiply(q_level_inv, quat)
-
-        # Ensure shortest path
-        sign = torch.sign(q_err[:, 0:1])
-        sign = torch.where(sign == 0, torch.ones_like(sign), sign)
-        q_err = q_err * sign
-
-        # Angle from quaternion: 2 * acos(w)
-        angle_rad = 2.0 * torch.acos(torch.clamp(q_err[:, 0], -1.0, 1.0))
-        return torch.rad2deg(angle_rad)
+    def _reset_controller_state(self):
+        """Reset the real DroneController for all environments."""
+        all_ids = torch.arange(self.num_envs, device=self.device)
+        self.controller.reset(all_ids)
 
     def _generate_step_response_initial_conditions(self, att_cfg: AttitudeTestConfig) -> tuple:
         """Generate deterministic initial conditions for step response characterization.
@@ -453,7 +462,7 @@ class ParallelTuner:
             quat: Quaternion (N, 4) in wxyz format - same for all envs
             ang_vel: Angular velocity (N, 3) in body frame (rad/s) - same for all envs
         """
-        N = self.batch_size
+        N = self.num_envs
 
         # Fixed Euler angles (same extreme attitude for all environments)
         roll = torch.full((N,), att_cfg.roll_deg, device=self.device)
@@ -465,7 +474,7 @@ class ParallelTuner:
         pitch = torch.deg2rad(pitch)
         yaw = torch.deg2rad(yaw)
 
-        quat = self._euler_to_quat(roll, pitch, yaw)
+        quat = quat_from_euler_xyz(roll, pitch, yaw)
 
         # Fixed angular velocity (typically zero for clean step response)
         ang_vel = torch.zeros(N, 3, device=self.device)
@@ -504,140 +513,94 @@ class ParallelTuner:
         self.robot.write_root_state_to_sim(full_root_state)
         self.robot.update(self.physics_dt)
 
-    def _step_physics(self, F_body: torch.Tensor, tau_body: torch.Tensor):
-        """Apply forces and step simulation for one policy timestep.
+    def _reset_to_hover(self):
+        """Reset all envs to identical clean hover state.
 
-        This steps the physics by self.decimation steps (e.g., 4x at 0.01s each = 0.04s total).
+        Preserves per-env grid positions (from default_root_state) but sets
+        level attitude, 2m height, zero velocity. This ensures the only
+        variable across envs is the controller gains.
         """
-        # Expand to full environment size
-        forces = torch.zeros(self.num_envs, 1, 3, device=self.device)
-        torques = torch.zeros(self.num_envs, 1, 3, device=self.device)
-        forces[:self.batch_size, 0] = F_body
-        torques[:self.batch_size, 0] = tau_body
+        self.env.reset()
+        self._reset_controller_state()
 
-        # Step physics multiple times (decimation) - matching direct_marl_env.py pattern
-        for _ in range(self.decimation):
-            # Apply forces (body frame)
-            self.robot.set_external_force_and_torque(forces, torques, body_ids=self.body_ids)
+        # Start from default state (preserves per-env grid x,y offsets)
+        full_root_state = self.robot.data.default_root_state.clone()
+        full_root_state[:, 2] = 2.0          # Height = 2m (override default)
+        full_root_state[:, 3] = 1.0          # quat w = 1 (identity)
+        full_root_state[:, 4:7] = 0.0        # quat xyz = 0 (level)
+        full_root_state[:, 7:10] = 0.0       # Linear velocity = 0
+        full_root_state[:, 10:13] = 0.0      # Angular velocity = 0
 
-            # Write to sim and step (matching scene.write_data_to_sim pattern)
-            self.robot.write_data_to_sim()
-            self.sim.step(render=False)
+        self.robot.write_root_state_to_sim(full_root_state)
+        self.robot.update(self.physics_dt)
 
-            # Update robot state at physics dt (CRITICAL - must be inside loop!)
-            self.robot.update(self.physics_dt)
+    def _compute_attitude_error_deg(self, quat: torch.Tensor) -> torch.Tensor:
+        """Compute attitude error from level (degrees) using the real attitude controller.
 
-        # Render once per policy step
-        self.sim.render()
+        Args:
+            quat: Current quaternion (N, 4) in wxyz format.
 
-    def _reset_controller_state(self):
-        """Reset all controller state variables."""
-        self.vel_integral.zero_()
-        self.rate_integral.zero_()
-        self.prev_omega.zero_()
+        Returns:
+            Attitude error in degrees (N,) — angle from level attitude.
+        """
+        q_level = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).expand(quat.shape[0], 4)
+        att_error_rad = self.controller._attitude.compute_attitude_error(q_level, quat)  # (N, 3)
+        angle_rad = att_error_rad.norm(dim=-1)  # Scalar error magnitude
+        return torch.rad2deg(angle_rad)
 
-    def evaluate_batch(self, params_list: list) -> list:
+    def evaluate_batch(self, params_list: list) -> tuple:
         """Evaluate multiple parameter sets in parallel.
 
         Args:
-            params_list: List of ParameterSet to evaluate
+            params_list: List of ParameterSet to evaluate.
 
         Returns:
-            List of TuningMetrics for each parameter set
+            Tuple of (metrics_list, per_env_histories) where:
+                metrics_list: List of TuningMetrics for each parameter set.
+                per_env_histories: List of dicts per env, each with keys
+                    "vel_5", "vel_10", "att" containing per-env time-series.
+                    Returns None if NaN detected (all envs failed).
         """
         self._setup_batch(params_list)
-        N = self.batch_size
+        N = self.num_envs
 
         # === Hover Test (3 seconds) ===
-        self.env.reset()
-        self._reset_controller_state()
-        self.robot.update(self.physics_dt)
+        self._reset_to_hover()
 
         initial_pos = self.robot.data.root_pos_w[:N].clone()
         hover_drifts = []
 
+        v_cmd_hover = torch.zeros(N, 3, device=self.device)
         num_hover_steps = int(3.0 / self.dt)
         for step in range(num_hover_steps):
-            # Check for NaN
             pos = self.robot.data.root_pos_w[:N]
             if torch.isnan(pos).any():
-                print(f"  NaN detected at step {step}", flush=True)
-                return [TuningMetrics(is_stable=False, score=9999.0)] * N
+                print(f"  NaN detected at hover step {step}", flush=True)
+                return [TuningMetrics(is_stable=False, score=9999.0)] * N, None
 
-            v_des = torch.zeros(N, 3, device=self.device)
-            F, tau = self._compute_control(v_des)
-            self._step_physics(F, tau)
-
+            self._step_with_controller(v_cmd_hover)
             drift = (self.robot.data.root_pos_w[:N] - initial_pos).norm(dim=-1)
             hover_drifts.append(drift.clone())
 
-
         hover_drifts = torch.stack(hover_drifts)  # (T, N)
 
-        # === Velocity Test (2 seconds) ===
-        self.env.reset()
-        self._reset_controller_state()
-        self.robot.update(self.physics_dt)
-        vel_history = []
+        # === Velocity Test at 5 m/s (5 seconds) ===
+        vel_5_data = self._run_velocity_test(duration=5.0, target_speed=5.0)
+        if vel_5_data is None:
+            return [TuningMetrics(is_stable=False, score=9999.0)] * N, None
 
-        v_des = torch.zeros(N, 3, device=self.device)
-        v_des[:, 0] = 3.0  # Target: 3 m/s forward
-
-        num_vel_steps = int(2.0 / self.dt)
-        for _ in range(num_vel_steps):
-            vel = self.robot.data.root_lin_vel_w[:N]
-            if torch.isnan(vel).any():
-                return [TuningMetrics(is_stable=False, score=9999.0)] * N
-
-            F, tau = self._compute_control(v_des)
-            self._step_physics(F, tau)
-
-            vel_history.append(self.robot.data.root_lin_vel_w[:N, 0].clone())
-
-        vel_history = torch.stack(vel_history)  # (T, N)
+        # === Velocity Test at 10 m/s (5 seconds) ===
+        vel_10_data = self._run_velocity_test(duration=5.0, target_speed=10.0)
+        if vel_10_data is None:
+            return [TuningMetrics(is_stable=False, score=9999.0)] * N, None
 
         # === Attitude Step Response Test (3 seconds) ===
-        # All envs start from same extreme attitude (45° roll, 45° pitch, 30° yaw)
-        # This provides consistent step response characterization across parameter sets
-        att_cfg = AttitudeTestConfig()
-        self.env.reset()
-        self._reset_controller_state()
-
-        # Generate deterministic step response initial conditions (same for all envs)
-        init_quat, init_ang_vel = self._generate_step_response_initial_conditions(att_cfg)
-        self._set_initial_conditions(init_quat, init_ang_vel)
-
-        att_errors = []  # (T, N) attitude error in degrees
-        recovery_times = torch.full((N,), att_cfg.test_duration, device=self.device)  # Default to max time
-        recovered_flags = torch.zeros(N, dtype=torch.bool, device=self.device)
-
-        num_att_steps = int(att_cfg.test_duration / self.dt)
-        for step in range(num_att_steps):
-            quat = self.robot.data.root_quat_w[:N]
-            pos = self.robot.data.root_pos_w[:N]
-
-            # Check for NaN or crashed (hit ground)
-            if torch.isnan(quat).any() or (pos[:, 2] < 0.1).any():
-                print(f"  NaN/crash detected at attitude test step {step}", flush=True)
-                return [TuningMetrics(is_stable=False, att_recovered=False, score=9999.0)] * N
-
-            # Compute attitude error from level
-            att_error_deg = self._compute_attitude_error_deg(quat)
-            att_errors.append(att_error_deg.clone())
-
-            # Check for recovery (first time error < threshold)
-            just_recovered = (att_error_deg < att_cfg.recovery_threshold_deg) & ~recovered_flags
-            recovery_times[just_recovered] = step * self.dt
-            recovered_flags = recovered_flags | just_recovered
-
-            # Control: try to stabilize to hover
-            v_des = torch.zeros(N, 3, device=self.device)
-            F, tau = self._compute_control(v_des)
-            self._step_physics(F, tau)
-
-        att_errors = torch.stack(att_errors)  # (T, N)
+        # Per-env failure tracking — never returns None
+        att_data = self._run_attitude_test(AttitudeTestConfig())
+        att_env_failed = att_data["failed_envs"]  # (N,) bool
 
         # === Compute Metrics Per Environment ===
+        weights = TuningScoreWeights()
         results = []
         for i in range(N):
             m = TuningMetrics()
@@ -646,61 +609,234 @@ class ParallelTuner:
             m.hover_drift_mean = hover_drifts[:, i].mean().item()
             m.hover_drift_max = hover_drifts[:, i].max().item()
 
-            # Velocity metrics
-            vt = vel_history[:, i]
-            target = 3.0
+            # Velocity metrics (use 5 m/s test for settling/overshoot/ss_error)
+            vt = vel_5_data["vel_history"][:, i]
+            target = 5.0
 
-            # Settling time (95% of target)
             threshold = 0.95 * target
             settled = vt >= threshold
             if settled.any():
                 m.vel_settling_time = settled.nonzero()[0].item() * self.dt
             else:
-                m.vel_settling_time = 2.0
+                m.vel_settling_time = 5.0
 
-            # Overshoot
             max_vel = vt.max().item()
             m.vel_overshoot = max(0, (max_vel - target) / target * 100)
 
-            # Steady-state error (last 0.5s)
             last_steps = max(1, int(0.5 / self.dt))
             m.vel_ss_error = abs(target - vt[-last_steps:].mean().item())
 
-            # Attitude recovery metrics
-            m.att_recovery_time = recovery_times[i].item()
-            m.att_max_error = att_errors[:, i].max().item()
-            m.att_final_error = att_errors[-1, i].item()
-            m.att_recovered = bool(recovered_flags[i].item())
+            # Attitude recovery metrics (per-env: failed envs get penalty values)
+            this_env_att_failed = bool(att_env_failed[i].item())
+            m.att_recovery_time = att_data["recovery_times"][i].item()
+            m.att_max_error = att_data["att_errors"][:, i].max().item()
+            m.att_final_error = att_data["att_errors"][-1, i].item()
+            m.att_recovered = bool(att_data["recovered_flags"][i].item())
 
-            # Stability check - must pass all tests
+            # Oscillation metrics — velocity error at 5 m/s (X axis)
+            vel_error_5 = vel_5_data["vel_history"][:, i] - 5.0
+            settling_idx_5 = int(m.vel_settling_time / self.dt) if m.vel_settling_time < 5.0 else 0
+            m.vel_osc_5 = compute_oscillation_metrics(vel_error_5, settling_idx_5, self.dt)
+
+            # Oscillation metrics — velocity error at 10 m/s (X axis)
+            vt_10 = vel_10_data["vel_history"][:, i]
+            vel_error_10 = vt_10 - 10.0
+            threshold_10 = 0.95 * 10.0
+            settled_10 = vt_10 >= threshold_10
+            settling_idx_10 = int(settled_10.nonzero()[0].item()) if settled_10.any() else 0
+            m.vel_osc_10 = compute_oscillation_metrics(vel_error_10, settling_idx_10, self.dt)
+
+            # Oscillation metrics — attitude (only for non-failed envs)
+            if not this_env_att_failed:
+                att_err_norm = att_data["att_errors"][:, i]
+                att_settling_idx = int(m.att_recovery_time / self.dt) if m.att_recovered else 0
+                m.att_osc = compute_oscillation_metrics(att_err_norm, att_settling_idx, self.dt)
+
+                rate_err_att_norm = att_data["rate_error_history"][:, i, :].norm(dim=-1)
+                m.rate_osc_att = compute_oscillation_metrics(rate_err_att_norm, att_settling_idx, self.dt)
+
+            # Oscillation metrics — rate error during velocity tests
+            rate_err_5_norm = vel_5_data["rate_error_history"][:, i, :].norm(dim=-1)
+            m.rate_osc_vel5 = compute_oscillation_metrics(rate_err_5_norm, settling_idx_5, self.dt)
+
+            rate_err_10_norm = vel_10_data["rate_error_history"][:, i, :].norm(dim=-1)
+            m.rate_osc_vel10 = compute_oscillation_metrics(rate_err_10_norm, settling_idx_10, self.dt)
+
+            # Stability check — att_final_error is the gate, not att_recovered
+            # (att_recovered uses a tight 5° threshold; final error < 15° is sufficient)
             m.is_stable = (
-                m.hover_drift_max < 2.0 and
-                not np.isnan(m.hover_drift_mean) and
-                m.att_recovered and
-                m.att_final_error < 10.0  # Must stabilize to within 10 degrees
+                m.hover_drift_max < 2.0
+                and not np.isnan(m.hover_drift_mean)
+                and not this_env_att_failed
+                and m.att_final_error < 15.0
             )
 
-            # Combined score (lower is better)
+            # Combined score with oscillation penalties
             if m.is_stable:
-                m.score = (
-                    # Hover performance
-                    1.0 * m.hover_drift_mean +
-                    0.5 * m.hover_drift_max +
-                    # Velocity tracking
-                    2.0 * m.vel_settling_time +
-                    0.1 * m.vel_overshoot +
-                    5.0 * m.vel_ss_error +
-                    # Attitude recovery (heavily weighted)
-                    3.0 * m.att_recovery_time +
-                    0.1 * m.att_max_error +
-                    2.0 * m.att_final_error
+                # Base metrics
+                base_score = (
+                    weights.hover_drift_mean * m.hover_drift_mean
+                    + weights.hover_drift_max * m.hover_drift_max
+                    + weights.vel_settling_time * m.vel_settling_time
+                    + weights.vel_overshoot * m.vel_overshoot
+                    + weights.vel_ss_error * m.vel_ss_error
+                    + weights.att_recovery_time * m.att_recovery_time
+                    + weights.att_max_error * m.att_max_error
+                    + weights.att_final_error * m.att_final_error
                 )
+
+                # Oscillation penalty — averaged across all 6 signals
+                osc_list = [
+                    m.vel_osc_5, m.vel_osc_10, m.att_osc,
+                    m.rate_osc_vel5, m.rate_osc_vel10, m.rate_osc_att,
+                ]
+                osc_penalty = 0.0
+                for osc in osc_list:
+                    osc_penalty += (
+                        weights.oscillation_damping * (1.0 - osc.damping_ratio)
+                        + weights.oscillation_zero_crossings * osc.zero_crossings
+                        + weights.oscillation_ss_amplitude * osc.ss_amplitude
+                    )
+                osc_penalty /= len(osc_list)
+
+                m.score = base_score + osc_penalty
             else:
                 m.score = 9999.0
 
             results.append(m)
 
-        return results
+        # Build per-env histories for plotting
+        per_env_histories = []
+        for i in range(N):
+            per_env_histories.append({
+                "vel_5": {
+                    "vel_history": vel_5_data["vel_history"][:, i],
+                    "att_error_history": vel_5_data["att_error_history"][:, i],
+                    "rate_error_history": vel_5_data["rate_error_history"][:, i],
+                },
+                "vel_10": {
+                    "vel_history": vel_10_data["vel_history"][:, i],
+                    "att_error_history": vel_10_data["att_error_history"][:, i],
+                    "rate_error_history": vel_10_data["rate_error_history"][:, i],
+                },
+                "att": {
+                    "att_errors": att_data["att_errors"][:, i],
+                    "rate_error_history": att_data["rate_error_history"][:, i],
+                },
+            })
+
+        return results, per_env_histories
+
+    def _run_velocity_test(self, duration: float, target_speed: float) -> dict | None:
+        """Run a velocity step response test.
+
+        Args:
+            duration: Test duration [s].
+            target_speed: Target forward velocity [m/s].
+
+        Returns:
+            Dict with vel_history (T, N), att_error_history (T, N, 3),
+            rate_error_history (T, N, 3), or None if NaN detected.
+        """
+        N = self.num_envs
+        self._reset_to_hover()
+
+        v_cmd = torch.zeros(N, 3, device=self.device)
+        v_cmd[:, 0] = target_speed
+
+        vel_history = []
+        att_error_history = []
+        rate_error_history = []
+
+        num_steps = int(duration / self.dt)
+        for _ in range(num_steps):
+            vel = self.robot.data.root_lin_vel_w[:N]
+            if torch.isnan(vel).any():
+                return None
+
+            att_error, rate_error = self._step_with_controller(v_cmd)
+
+            vel_history.append(self.robot.data.root_lin_vel_w[:N, 0].clone())
+            att_error_history.append(att_error[:N].clone())
+            rate_error_history.append(rate_error[:N].clone())
+
+        return {
+            "vel_history": torch.stack(vel_history),          # (T, N)
+            "att_error_history": torch.stack(att_error_history),  # (T, N, 3)
+            "rate_error_history": torch.stack(rate_error_history),  # (T, N, 3)
+        }
+
+    def _run_attitude_test(self, att_cfg: AttitudeTestConfig) -> dict | None:
+        """Run an attitude step response test.
+
+        Args:
+            att_cfg: Attitude test configuration.
+
+        Returns:
+            Dict with att_errors (T, N), att_error_3d (T, N, 3),
+            rate_error_history (T, N, 3), recovery_times (N,),
+            recovered_flags (N,), or None if NaN/crash detected.
+        """
+        N = self.num_envs
+        self._reset_to_hover()
+
+        # Override with tilted attitude for step response test
+        init_quat, init_ang_vel = self._generate_step_response_initial_conditions(att_cfg)
+        self._set_initial_conditions(init_quat, init_ang_vel)
+
+        att_errors = []  # (T, N) scalar attitude error in degrees
+        rate_error_history = []
+        recovery_times = torch.full((N,), att_cfg.test_duration, device=self.device)
+        recovered_flags = torch.zeros(N, dtype=torch.bool, device=self.device)
+        failed_envs = torch.zeros(N, dtype=torch.bool, device=self.device)
+
+        v_cmd = torch.zeros(N, 3, device=self.device)
+        num_steps = int(att_cfg.test_duration / self.dt)
+        for step in range(num_steps):
+            quat = self.robot.data.root_quat_w[:N]
+            pos = self.robot.data.root_pos_w[:N]
+
+            # Track per-env failures (NaN or ground crash)
+            env_nan = torch.isnan(quat).any(dim=-1)
+            env_crash = pos[:, 2] < 0.1
+            newly_failed = (env_nan | env_crash) & ~failed_envs
+            if newly_failed.any():
+                n_new = newly_failed.sum().item()
+                n_total = (failed_envs | newly_failed).sum().item()
+                print(f"  Attitude test: {n_new} envs failed at step {step}/{num_steps} "
+                      f"({n_total}/{N} total failed)", flush=True)
+            failed_envs = failed_envs | newly_failed
+
+            # For failed envs, clamp quat to identity to avoid NaN propagation
+            quat = torch.where(failed_envs.unsqueeze(-1),
+                               torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device),
+                               quat)
+
+            att_error_deg = self._compute_attitude_error_deg(quat)
+            # Failed envs get max error
+            att_error_deg = torch.where(failed_envs, torch.tensor(999.0, device=self.device), att_error_deg)
+            att_errors.append(att_error_deg.clone())
+
+            just_recovered = (att_error_deg < att_cfg.recovery_threshold_deg) & ~recovered_flags & ~failed_envs
+            recovery_times[just_recovered] = step * self.dt
+            recovered_flags = recovered_flags | just_recovered
+
+            _, rate_error = self._step_with_controller(v_cmd)
+            # Zero out rate error for failed envs
+            rate_error = torch.where(failed_envs.unsqueeze(-1), torch.zeros_like(rate_error), rate_error)
+            rate_error_history.append(rate_error[:N].clone())
+
+        n_failed = failed_envs.sum().item()
+        if n_failed > 0:
+            print(f"  Attitude test complete: {n_failed}/{N} envs failed", flush=True)
+
+        return {
+            "att_errors": torch.stack(att_errors),                  # (T, N)
+            "rate_error_history": torch.stack(rate_error_history),  # (T, N, 3)
+            "recovery_times": recovery_times,                       # (N,)
+            "recovered_flags": recovered_flags,                     # (N,)
+            "failed_envs": failed_envs,                             # (N,)
+        }
 
     def close(self):
         """Close environment."""
@@ -753,16 +889,35 @@ def generate_grid_params() -> list:
 
 
 def generate_random_params(num_trials: int) -> list:
-    """Generate parameter sets for random search (4-loop architecture)."""
+    """Generate parameter sets for random search (4-loop architecture).
+
+    Search ranges are informed by cascade stability constraints:
+    - Inner loops (rate) must be faster than outer loops (velocity)
+    - Motor dynamics (tau=10ms) require higher rate gains to compensate lag
+    - Low velocity P-gain avoids overdriving the attitude loop
+    - D-gain on rate controller damps motor lag oscillation
+
+    Gain coupling: Kp_vel and Kp_rate are sampled jointly to ensure the
+    rate controller bandwidth exceeds the velocity controller bandwidth.
+    """
     params_list = []
     for _ in range(num_trials):
-        # Sample base values
-        Kp_vel_xy = np.random.uniform(1.5, 5.0)
-        Ki_vel_xy = np.random.uniform(0.2, 0.8)
+        # --- Rate controller (innermost — sample first) ---
+        # Expanded upper range: motor dynamics need higher gains
+        Kp_rate_rp = np.random.uniform(0.10, 0.40)
+        Ki_rate_rp = np.random.uniform(0.05, 0.30)
+        Kd_rate_rp = np.random.uniform(0.002, 0.015)  # D-gain matters for motor lag
+
+        # --- Attitude controller (middle) ---
         Kp_att_rp = np.random.uniform(4.0, 10.0)
-        Kp_rate_rp = np.random.uniform(0.08, 0.25)
-        Ki_rate_rp = np.random.uniform(0.1, 0.35)
-        Kd_rate_rp = np.random.uniform(0.001, 0.008)
+
+        # --- Velocity controller (outermost — coupled to rate gains) ---
+        # Bandwidth constraint: Kp_vel should not exceed what the rate loop
+        # can track. With Kp_rate ~ 0.2, Kp_vel > 3 causes oscillation.
+        # Scale max Kp_vel with Kp_rate to maintain stability margin.
+        Kp_vel_max = min(5.0, 2.0 + 10.0 * Kp_rate_rp)  # Higher rate → allows higher vel
+        Kp_vel_xy = np.random.uniform(1.5, Kp_vel_max)
+        Ki_vel_xy = np.random.uniform(0.3, 2.0)  # Must be > 0.95 for 10 m/s drag compensation
 
         params = ParameterSet(
             # Velocity controller (PI)
@@ -796,10 +951,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # Create tuner
-    tuner = ParallelTuner(num_envs=args_cli.num_envs, device="cuda:0")
-
-    # Generate parameters
+    # Generate parameters — num_envs == num_trials (one param set per env)
     if args_cli.search_mode == "grid":
         params_list = generate_grid_params()
         print(f"Grid search: {len(params_list)} combinations")
@@ -807,41 +959,49 @@ def main():
         params_list = generate_random_params(args_cli.num_trials)
         print(f"Random search: {len(params_list)} trials")
 
-    # Batch info
-    batch_size = args_cli.num_envs
-    num_batches = (len(params_list) + batch_size - 1) // batch_size
-    print(f"Testing in {num_batches} batches of {batch_size}")
+    num_envs = len(params_list)
+    print(f"Creating {num_envs} parallel environments (one per param set)")
     print("-" * 80)
 
-    # Run tuning
+    # Create tuner sized to match param count
+    tuner = ParallelTuner(num_envs=num_envs, device="cuda:0", aero_level=args_cli.aero_level)
+
+    # Single-shot evaluation — all params tested in parallel
+    start_time = time.time()
+    print(f"Evaluating {num_envs} configs in parallel...", flush=True)
+
+    metrics_list, per_env_histories = tuner.evaluate_batch(params_list)
+
+    # Process results
     results = []
+    plot_candidates = []
     best_score = float("inf")
     best_params = None
     best_metrics = None
 
-    start_time = time.time()
+    for i, (params, metrics) in enumerate(zip(params_list, metrics_list)):
+        results.append({"params": asdict(params), "metrics": asdict(metrics)})
 
-    for batch_idx in range(num_batches):
-        batch_start = batch_idx * batch_size
-        batch_end = min(batch_start + batch_size, len(params_list))
-        batch = params_list[batch_start:batch_end]
+        if metrics.score < best_score:
+            best_score = metrics.score
+            best_params = params
+            best_metrics = metrics
 
-        print(f"Batch [{batch_idx+1}/{num_batches}] Testing {len(batch)} configs...", end=" ", flush=True)
+        # Store candidate for top-K plotting (only stable results with histories)
+        if metrics.is_stable and per_env_histories is not None:
+            plot_candidates.append({
+                "trial_idx": i,
+                "params": params,
+                "metrics": metrics,
+                "histories": per_env_histories[i],
+            })
 
-        metrics_list = tuner.evaluate_batch(batch)
+    stable_count = sum(1 for m in metrics_list if m.is_stable)
+    print(f"Done. Stable: {stable_count}/{num_envs}, Best score: {best_score:.3f}")
 
-        # Process results
-        stable_count = sum(1 for m in metrics_list if m.is_stable)
-        batch_best = min(m.score for m in metrics_list)
-
-        for params, metrics in zip(batch, metrics_list):
-            results.append({"params": asdict(params), "metrics": asdict(metrics)})
-            if metrics.score < best_score:
-                best_score = metrics.score
-                best_params = params
-                best_metrics = metrics
-
-        print(f"Stable: {stable_count}/{len(batch)}, Best: {batch_best:.3f}, Overall: {best_score:.3f}")
+    # Keep only top-K candidates by score
+    plot_candidates.sort(key=lambda x: x["metrics"].score)
+    plot_candidates = plot_candidates[:args_cli.top_k]
 
     elapsed = time.time() - start_time
 
@@ -849,7 +1009,7 @@ def main():
     print("\n" + "=" * 80)
     print("TUNING RESULTS")
     print("=" * 80)
-    print(f"Total time: {elapsed:.1f}s ({elapsed/len(params_list):.2f}s per trial)")
+    print(f"Total time: {elapsed:.1f}s")
     print(f"Stable: {sum(1 for r in results if r['metrics']['is_stable'])}/{len(results)}")
 
     if best_params:
@@ -870,6 +1030,27 @@ def main():
         print(f"\n  Attitude recovery: {best_metrics.att_recovery_time:.3f}s (recovered: {best_metrics.att_recovered})")
         print(f"  Attitude max error: {best_metrics.att_max_error:.1f}deg")
         print(f"  Attitude final error: {best_metrics.att_final_error:.1f}deg")
+        print(f"\n  Oscillation (vel 5m/s):  ζ={best_metrics.vel_osc_5.damping_ratio:.3f}, "
+              f"ZC={best_metrics.vel_osc_5.zero_crossings}, "
+              f"amp={best_metrics.vel_osc_5.ss_amplitude:.3f}, "
+              f"freq={best_metrics.vel_osc_5.frequency:.1f}Hz")
+        print(f"  Oscillation (vel 10m/s): ζ={best_metrics.vel_osc_10.damping_ratio:.3f}, "
+              f"ZC={best_metrics.vel_osc_10.zero_crossings}, "
+              f"amp={best_metrics.vel_osc_10.ss_amplitude:.3f}, "
+              f"freq={best_metrics.vel_osc_10.frequency:.1f}Hz")
+        print(f"  Oscillation (attitude):  ζ={best_metrics.att_osc.damping_ratio:.3f}, "
+              f"ZC={best_metrics.att_osc.zero_crossings}, "
+              f"amp={best_metrics.att_osc.ss_amplitude:.3f}, "
+              f"freq={best_metrics.att_osc.frequency:.1f}Hz")
+
+    # Generate step response plots for top-K results
+    print(f"\nPlot candidates: {len(plot_candidates)} stable results available for plotting")
+    if plot_candidates:
+        from isaaclab_tasks.direct.iris_ma6.controller.tuning.step_response_plotter import StepResponsePlotter
+        plotter = StepResponsePlotter(output_dir / "step_responses")
+        plotter.plot_top_k(plot_candidates, k=args_cli.top_k, dt=tuner.dt)
+    else:
+        print("WARNING: No stable results to plot. All trials may have failed (NaN/crash).")
 
     # Save results
     output_file = output_dir / f"tuning_results_{timestamp}.json"
@@ -877,8 +1058,9 @@ def main():
         json.dump({
             "config": {
                 "search_mode": args_cli.search_mode,
-                "num_envs": args_cli.num_envs,
+                "num_envs": num_envs,
                 "num_trials": len(params_list),
+                "aero_level": args_cli.aero_level,
                 "elapsed_time": elapsed,
             },
             "best": {

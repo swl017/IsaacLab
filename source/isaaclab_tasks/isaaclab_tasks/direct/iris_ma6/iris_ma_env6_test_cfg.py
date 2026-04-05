@@ -371,17 +371,17 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # Reward Scales (migrated from iris_ma5)
     # ==========================================================================
 
-    action_sum_penalty_scale: float = -2.0
+    action_sum_penalty_scale: float = -10.0
     """Penalty scale for total action magnitude."""
 
     # [0 vx, 1 vy, 2 vz, 3 yaw_rate, 4 gimbal_yaw_rate, 5 gimbal_pitch_rate, 6 zoom_rate]
-    action_weight: list = [1, 1, 5, 1, 0.5, 0.5, 0.3]
+    action_weight: list = [1, 1, 5, 1, 0.5, 0.5, 1.0]
     """Weights for each action dimension in penalty computation."""
 
-    action_delta_weight: list = [1, 1, 1, 1, 0.5, 0.5, 0.3]
+    action_delta_weight: list = [1, 1, 1, 1, 0.5, 0.5, 1.0]
     """Weights for action delta (smoothness) penalty."""
 
-    action_delta_penalty_scale: float = -1.0
+    action_delta_penalty_scale: float = -5.0
     """Penalty scale for action changes (smoothness)."""
 
     bbox_center_reward_scale: float = 60.0
@@ -541,7 +541,8 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # ==========================================================================
     # Debugging and Testing Flags
     # ==========================================================================
-    debug_initial_step: int = 0 #200000
+    use_debug_initial_step: bool = False
+    debug_initial_step: int = 150000
     """If > 0, initializes the environment at the specified training step for debugging."""
 
 

@@ -1,117 +1,155 @@
 # DroneController Auto-Tuning
 
-This module provides automatic parameter tuning for the iris_ma6 DroneController with **parallel parameter testing** - each environment tests a different parameter set simultaneously, making tuning N times faster.
+Automatic parameter tuning for the iris_ma6 cascaded PID controller with **parallel parameter testing**, **oscillation detection metrics**, and **step response visualization**.
+
+Each environment tests a different parameter set simultaneously, achieving ~Nx speedup where N is the number of parallel environments. The tuner uses the real `DroneController` (not a simplified approximation), so results directly predict training behavior.
 
 ## Quick Start
 
 ```bash
-# Run grid search (default, ~540 combinations)
-# With 64 parallel envs, tests 64 parameter sets simultaneously
+# Random search with 100 trials (100 parallel envs, one per trial)
 ./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/controller/tuning/auto_tune.py --headless
 
-# Run random search with 100 trials (tests 64 in parallel by default)
-./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/controller/tuning/auto_tune.py --headless --search-mode random --num-trials 100
+# Grid search (~108 combinations, one env per combination)
+./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/controller/tuning/auto_tune.py --headless --search-mode grid
 
-# Use more parallel environments for faster evaluation (128x speedup)
-./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/controller/tuning/auto_tune.py --headless --num-envs 128
+# Random search with 200 trials + step response plots for top 5
+./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/controller/tuning/auto_tune.py --headless --num-trials 200 --top-k 5
 ```
 
-## Parallel Testing
+All trials run in a single parallel batch — one Isaac Sim environment per parameter set.
 
-The tuner uses **per-environment parameter testing**:
-- Each of the `num_envs` parallel environments tests a DIFFERENT parameter set
-- With `--num-envs 64`, 64 parameter sets are evaluated simultaneously
-- Grid search with 540 combinations completes in ~9 batches (instead of 540 sequential trials)
-- **Speedup**: ~Nx faster where N = num_envs
+## Architecture
+
+The tuner evaluates the real 4-loop PX4-style cascade:
+
+```
+Velocity (PI) → Attitude (P) → Rate (PID) → Motor Dynamics → Forces/Torques
+```
+
+Per-env gains are set via `set_gains()` on each sub-controller, and `DroneController.step_policy()` is called each step. This includes motor dynamics, anti-windup, aerodynamics, and all other real controller features.
 
 ## Parameters Tuned
 
-### Grid Search Ranges
-| Parameter | Description | Grid Values |
-|-----------|-------------|-------------|
-| `Kp_vel_xy` | Proportional gain (XY) | [2.0, 3.0, 4.0, 5.0] |
-| `Kp_vel_z` | Proportional gain (Z) | [1.5, 2.0, 3.0] |
-| `Ki_vel_xy` | Integral gain (XY) | [0.3, 0.5, 0.8] |
-| `Kp_att_rp` | Proportional gain (roll/pitch) | [6.0, 8.0, 10.0, 12.0] |
-| `Kd_att_rp` | Derivative gain (roll/pitch) | [1.5, 2.5, 3.5] |
+| Parameter | Description | Grid Values | Random Range |
+|-----------|-------------|-------------|-------------|
+| `Kp_vel_xy` | Velocity P-gain (XY) | [2.0, 3.0, 4.0] | [1.5, 5.0] |
+| `Ki_vel_xy` | Velocity I-gain (XY) | [0.3, 0.5] | [0.2, 0.8] |
+| `Kp_att_rp` | Attitude P-gain (roll/pitch) | [5.0, 6.5, 8.0] | [4.0, 10.0] |
+| `Kp_rate_rp` | Rate P-gain (roll/pitch) | [0.10, 0.15, 0.20] | [0.08, 0.25] |
+| `Ki_rate_rp` | Rate I-gain (roll/pitch) | [0.15, 0.25] | [0.1, 0.35] |
+| `Kd_rate_rp` | Rate D-gain (roll/pitch) | 0.003 (fixed) | [0.001, 0.008] |
 
-### Random Search Ranges
-| Parameter | Description | Range |
-|-----------|-------------|-------|
-| `Kp_vel_xy` | Proportional gain (XY) | [1.5, 6.0] |
-| `Kp_vel_z` | Proportional gain (Z) | [1.0, 4.0] |
-| `Ki_vel_xy` | Integral gain (XY) | [0.1, 1.0] |
-| `Ki_vel_z` | Integral gain (Z) | [0.1, 0.6] |
-| `Kp_att_rp` | Proportional gain (roll/pitch) | [4.0, 15.0] |
-| `Kp_att_y` | Proportional gain (yaw) | [2.0, 8.0] |
-| `Kd_att_rp` | Derivative gain (roll/pitch) | [1.0, 5.0] |
-| `Kd_att_y` | Derivative gain (yaw) | [0.5, 2.5] |
+Z-axis and yaw gains are derived from XY/roll-pitch gains using PX4 ratios.
 
-## Metrics Evaluated
+## Test Suite
 
-### Hover Stability (3 seconds)
+Each parameter set is evaluated on three tests:
+
+### 1. Hover Stability (3 seconds)
 - **Drift Mean**: Average position error from initial position [m]
 - **Drift Max**: Maximum position error [m]
 
-### Velocity Tracking (2 seconds)
-- **Settling Time**: Time to reach 95% of target velocity (3 m/s) [s]
+### 2. Velocity Step Response (5 seconds, at 5 m/s and 10 m/s)
+- **Settling Time**: Time to reach 95% of target velocity [s]
 - **Overshoot**: Peak velocity above target [%]
 - **Steady-State Error**: Final velocity error [m/s]
+- **Oscillation Metrics** (see below)
 
-### Combined Score
-Lower is better:
+### 3. Attitude Step Response (3 seconds, from 45°/45°/30° perturbation)
+- **Recovery Time**: Time to reach <5° error [s]
+- **Max Error**: Peak attitude error [deg]
+- **Final Error**: Error at end of test [deg]
+- **Oscillation Metrics** (see below)
+
+## Oscillation Metrics
+
+Computed on velocity error, attitude error, and rate error signals after 95% settling:
+
+| Metric | Description | Method |
+|--------|-------------|--------|
+| **Damping Ratio** (ζ) | 0=undamped, 1=critically damped | Logarithmic decrement of first two peaks |
+| **Zero Crossings** | Sign changes in error after settling | Direct count |
+| **SS Amplitude** | Peak-to-peak in steady-state window | max - min |
+| **Frequency** | Dominant oscillation frequency [Hz] | Mean half-period from zero crossings |
+
+Six oscillation signals are measured:
+- `vel_osc_5`, `vel_osc_10`: Velocity error at 5/10 m/s
+- `att_osc`: Attitude error during recovery
+- `rate_osc_vel5`, `rate_osc_vel10`, `rate_osc_att`: Rate error during each test
+
+## Scoring
+
+Combined score (lower is better), with configurable weights via `TuningScoreWeights`:
+
 ```
-score = 1.0 * drift_mean + 0.5 * drift_max + 2.0 * settling_time + 0.1 * overshoot + 5.0 * ss_error
+score = base_metrics_score + oscillation_penalty
+
+base = w.hover_drift_mean * drift_mean
+     + w.hover_drift_max * drift_max
+     + w.vel_settling_time * settling_time
+     + w.vel_overshoot * overshoot
+     + w.vel_ss_error * ss_error
+     + w.att_recovery_time * recovery_time
+     + w.att_max_error * max_error
+     + w.att_final_error * final_error
+
+oscillation = mean over 6 signals of:
+    w.oscillation_damping * (1 - damping_ratio)
+  + w.oscillation_zero_crossings * zero_crossings
+  + w.oscillation_ss_amplitude * ss_amplitude
 ```
+
+Default weights penalize low damping ratio most heavily (5.0).
+
+## Step Response Plots
+
+The `--top-k` flag generates multi-panel PDF plots for the best K results:
+
+```
+tuning_results/step_responses/
+├── trial_0042.pdf   # Best result
+├── trial_0117.pdf   # 2nd best
+└── ...
+```
+
+Each PDF contains 6 panels:
+- **Row 1**: Velocity step response at 5 m/s and 10 m/s (actual vs target)
+- **Row 2**: Attitude error during velocity step and attitude recovery
+- **Row 3**: Rate error during velocity step and attitude recovery
+
+Panel titles show oscillation metrics (ζ, zero crossings, amplitude, frequency).
 
 ## Output Files
 
 Results are saved to `tuning_results/` (configurable via `--output-dir`):
 
-1. **`tuning_results_YYYYMMDD_HHMMSS.json`**: Full results
-   - Configuration used
-   - Best parameters found
-   - All trial results
+| File | Description |
+|------|-------------|
+| `tuning_results_*.json` | Full results with all metrics including oscillation |
+| `best_config_*.py` | Python config file ready to import |
+| `step_responses/trial_*.pdf` | Step response plots for top-K results |
 
-2. **`best_config_YYYYMMDD_HHMMSS.py`**: Python config file
-   - Ready to import and use
-   ```python
-   from tuning_results.best_config_20260311_123456 import TUNED_CONTROLLER_CFG
-   ```
+## Command-Line Options
 
-## Example Results
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--search-mode` | `random` | Search mode: `grid` or `random` |
+| `--num-trials` | `100` | Number of trials (random mode). Each trial gets its own parallel env. |
+| `--output-dir` | `tuning_results` | Output directory |
+| `--top-k` | `10` | Number of top results to plot |
+| `--headless` | `True` | Run without visualization |
 
-```
-================================================================================
-TUNING RESULTS
-================================================================================
-Total time: 245.3s (0.45s per trial)
-Stable configurations: 498/540
-
-Best configuration (score: 1.1684):
-  Velocity Controller:
-    Kp_vel: (4.60, 4.60, 1.96)
-    Ki_vel: (0.19, 0.19, 0.43)
-  Attitude Controller:
-    Kp_att: (14.45, 14.45, 4.01)
-    Kd_att: (1.13, 1.13, 0.88)
-
-  Performance Metrics:
-    Hover drift (mean): 0.0821 m
-    Hover drift (max):  0.2134 m
-    Velocity settling:  0.320 s
-    Velocity overshoot: 8.2%
-    Steady-state error: 0.0423 m/s
-```
+Note: `num_envs` is set automatically to match the number of parameter sets (one env per trial).
 
 ## Using Tuned Parameters
 
 ```python
-from isaaclab_tasks.direct.iris_ma6.controller import DroneController, DroneControllerCfg
+from isaaclab_tasks.direct.iris_ma6.controller import DroneControllerCfg
 from isaaclab_tasks.direct.iris_ma6.controller.velocity_controller_cfg import VelocityControllerCfg
 from isaaclab_tasks.direct.iris_ma6.controller.attitude_controller_cfg import AttitudeControllerCfg
+from isaaclab_tasks.direct.iris_ma6.controller.rate_controller_cfg import RateControllerCfg
 
-# Use tuned parameters
 cfg = DroneControllerCfg(
     velocity=VelocityControllerCfg(
         Kp_vel=(4.60, 4.60, 1.96),
@@ -119,75 +157,24 @@ cfg = DroneControllerCfg(
     ),
     attitude=AttitudeControllerCfg(
         Kp_att=(14.45, 14.45, 4.01),
-        Kd_att=(1.13, 1.13, 0.88),
     ),
-)
-
-controller = DroneController(
-    cfg=cfg,
-    mass=1.5,
-    gravity=9.81,
-    num_envs=num_envs,
-    device=device,
+    rate=RateControllerCfg(
+        Kp_rate=(0.150, 0.150, 0.200),
+        Ki_rate=(0.200, 0.200, 0.100),
+        Kd_rate=(0.00300, 0.00300, 0.00000),
+    ),
 )
 ```
 
-## Command-Line Options
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--search-mode` | `grid` | Search mode: `grid` or `random` |
-| `--num-envs` | `64` | Number of parallel environments (= batch size for parallel testing) |
-| `--num-trials` | `100` | Number of trials (random mode only) |
-| `--output-dir` | `tuning_results` | Output directory |
-| `--headless` | `False` | Run without visualization |
-
 ## Performance
 
-### Parallel Speedup
+All trials run in a single GPU-parallel batch. Wall-clock time is independent of trial count (limited by GPU memory, not sequential execution).
 
-With parallel parameter testing:
-- **Sequential mode (old)**: Each trial takes ~8 seconds → 540 trials = ~72 minutes
-- **Parallel mode (new)**: Each batch tests N params simultaneously → 540/64 ≈ 9 batches = ~1.5 minutes
+Each trial runs ~16s of sim time (3s hover + 5s vel@5 + 5s vel@10 + 3s attitude).
 
-| num_envs | Grid Search Time (540 params) | Speedup |
-|----------|-------------------------------|---------|
-| 1 | ~72 minutes | 1x |
-| 32 | ~2.5 minutes | 29x |
-| 64 | ~1.5 minutes | 48x |
-| 128 | ~0.8 minutes | 90x |
-
-### GPU Memory Usage
-
-Higher `num_envs` requires more GPU memory. Recommended settings:
-- **8GB VRAM**: `--num-envs 32`
-- **16GB VRAM**: `--num-envs 64`
-- **24GB+ VRAM**: `--num-envs 128`
-
-## Notes
-
-### Console Output
-Due to Isaac Sim's logging redirection in headless mode, console output may not appear in real-time. Results are always saved to the output directory regardless of console output.
-
-### Isaac Sim Physics
-The tuner uses the actual Isaac Sim environment (`Isaac-Iris-MA6-Direct-Test-v0`) for physics simulation. This provides realistic evaluation including:
-- Full rigid body dynamics with gravity and inertia
-- Rotor-level motor model with first-order lag
-- Aerodynamic drag effects
-- Gimbal dynamics
-
-Each trial runs approximately 5-10 seconds (3s hover test + 2s velocity test + overhead).
-
-### Stability Criteria
-A configuration is considered "stable" if:
-- Hover drift max < 2.0 m
-- No NaN/Inf values in physics
-
-## Extending the Tuner
-
-To add new parameters or metrics:
-
-1. Update `ParameterSet` dataclass in `auto_tune.py`
-2. Modify `to_controller_cfg()` to apply new parameters
-3. Add evaluation methods (e.g., `evaluate_attitude_tracking()`)
-4. Update the scoring function in `evaluate()`
+| Trials | Approx. Wall Time | GPU Memory |
+|--------|-------------------|------------|
+| 50 | ~20s | ~4 GB |
+| 100 | ~20s | ~8 GB |
+| 200 | ~20s | ~16 GB |
+| 500 | ~25s | ~40 GB |

@@ -44,10 +44,11 @@ class TrajectoryRecorder:
         for eid in self.sample_env_ids:
             self._data[eid] = {
                 "agents": {
-                    aid: {"x": [], "y": [], "z": [], "gimbal_yaw": [], "gimbal_pitch": [], "zoom": []}
+                    aid: {"x": [], "y": [], "z": [], "vx": [], "vy": [], "vz": [],
+                          "gimbal_yaw": [], "gimbal_pitch": [], "zoom": []}
                     for aid in self.agent_ids
                 },
-                "target": {"x": [], "y": [], "z": []},
+                "target": {"x": [], "y": [], "z": [], "vx": [], "vy": [], "vz": []},
                 "tri_estimate": {"x": [], "y": [], "z": []},
                 "tri_valid": [],
                 "rmse": [],
@@ -65,6 +66,8 @@ class TrajectoryRecorder:
         env_origins: torch.Tensor,
         gimbal_angles: Dict[str, torch.Tensor] | None = None,
         zoom_levels: Dict[str, torch.Tensor] | None = None,
+        agent_velocities: Dict[str, torch.Tensor] | None = None,
+        target_vel: torch.Tensor | None = None,
     ) -> None:
         """Record one simulation step for all active sampled environments.
 
@@ -78,6 +81,8 @@ class TrajectoryRecorder:
             env_origins: [N, 3] terrain environment origins.
             gimbal_angles: {agent_id: [N, 2]} gimbal yaw/pitch per agent.
             zoom_levels: {agent_id: [N]} zoom level per agent.
+            agent_velocities: {agent_id: [N, 3]} world-frame velocities.
+            target_vel: [N, 3] target world-frame velocity.
         """
         if tri_valid.dim() > 1:
             tri_valid = tri_valid.squeeze(-1)
@@ -101,11 +106,21 @@ class TrajectoryRecorder:
                     d["agents"][aid]["gimbal_pitch"].append(float(ga[1]))
                 if zoom_levels is not None and aid in zoom_levels:
                     d["agents"][aid]["zoom"].append(float(zoom_levels[aid][eid]))
+                if agent_velocities is not None and aid in agent_velocities:
+                    vel = agent_velocities[aid][eid]
+                    d["agents"][aid]["vx"].append(float(vel[0]))
+                    d["agents"][aid]["vy"].append(float(vel[1]))
+                    d["agents"][aid]["vz"].append(float(vel[2]))
 
             tgt_local = target_pos[eid] - origin
             d["target"]["x"].append(float(tgt_local[0]))
             d["target"]["y"].append(float(tgt_local[1]))
             d["target"]["z"].append(float(tgt_local[2]))
+            if target_vel is not None:
+                tv = target_vel[eid]
+                d["target"]["vx"].append(float(tv[0]))
+                d["target"]["vy"].append(float(tv[1]))
+                d["target"]["vz"].append(float(tv[2]))
 
             valid = bool(tri_valid[eid])
             d["tri_valid"].append(valid)
