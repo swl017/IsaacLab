@@ -497,6 +497,80 @@ def compute_projection_jacobian(
 
 
 # =============================================================================
+# AoI-Aware Covariance Inflation
+# =============================================================================
+
+
+def compute_sigma_drift(
+    observation_age: torch.Tensor,
+    velocity_magnitude: torch.Tensor,
+    angular_velocity_magnitude: torch.Tensor,
+    cfg: TriangulationCfg,
+    target_velocity: float = 0.0,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Compute AoI-inflated per-camera position and orientation std deviations.
+
+    Implements Bar-Shalom's OOSM effective measurement covariance:
+        R_eff = R + H · Σ_drift · Hᵀ
+
+    by computing inflated σ_pos and σ_ori per camera that account for
+    state drift between observation time and current time.
+
+    When target_velocity > 0, accounts for target motion drift:
+        Σ_drift_total = Σ_drift_camera + v_target² · Δt² · I₃
+
+    Args:
+        observation_age: [N, C] Age of each camera's observation (seconds, ≥ 0)
+        velocity_magnitude: [N, C] Linear velocity magnitude of each camera (m/s)
+        angular_velocity_magnitude: [N, C] Angular velocity magnitude (rad/s)
+        cfg: Triangulation configuration (provides base stds and process model)
+        target_velocity: Target speed (m/s). Added as independent drift source.
+
+    Returns:
+        pos_std_inflated: [N, C] Inflated position std per camera (meters)
+        ori_std_inflated: [N, C] Inflated orientation std per camera (radians)
+    """
+    dt = observation_age
+    v = velocity_magnitude
+    w = angular_velocity_magnitude
+
+    if cfg.aoi_process_model == "random_walk":
+        # Σ_drift = Q · Δt, where Q = v² (process noise intensity)
+        # σ_eff = sqrt(σ_base² + v² · Δt)
+        pos_var = cfg.pos_std**2 + v**2 * dt
+        ori_var = cfg.ori_std**2 + w**2 * dt
+
+    elif cfg.aoi_process_model == "constant_velocity":
+        # For constant-velocity model, position drift variance grows as v² · Δt²
+        # (deterministic drift) plus Q · Δt³/3 (process noise accumulation).
+        # We use the deterministic component since v is known from odom.
+        pos_var = cfg.pos_std**2 + v**2 * dt**2
+        ori_var = cfg.ori_std**2 + w**2 * dt**2
+
+    elif cfg.aoi_process_model == "ou":
+        # OU process: Σ_drift = (σ²_stationary / 2θ)(1 - e^{-2θΔt})
+        # σ_stationary = v / sqrt(2θ) for position
+        theta = cfg.aoi_ou_theta
+        pos_stationary_var = v**2 / (2.0 * theta) if theta > 0 else v**2
+        ori_stationary_var = w**2 / (2.0 * theta) if theta > 0 else w**2
+        decay = 1.0 - torch.exp(-2.0 * theta * dt)
+        pos_var = cfg.pos_std**2 + pos_stationary_var * decay
+        ori_var = cfg.ori_std**2 + ori_stationary_var * decay
+
+    else:
+        raise ValueError(f"Unknown AoI process model: {cfg.aoi_process_model}")
+
+    # Add target motion drift (independent of camera drift)
+    if target_velocity > 0:
+        pos_var = pos_var + target_velocity**2 * dt**2
+
+    pos_std_inflated = torch.sqrt(pos_var)
+    ori_std_inflated = torch.sqrt(ori_var)
+
+    return pos_std_inflated, ori_std_inflated
+
+
+# =============================================================================
 # Covariance Computation
 # =============================================================================
 
@@ -512,6 +586,8 @@ def compute_triangulation_covariance(
     valid_mask: torch.Tensor,
     triangulation_valid: torch.Tensor,
     cfg: TriangulationCfg,
+    pos_std_per_camera: Optional[torch.Tensor] = None,
+    ori_std_per_camera: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute triangulation covariance for target positions.
 
@@ -532,6 +608,11 @@ def compute_triangulation_covariance(
         valid_mask: [N, C, T] Valid observation mask
         triangulation_valid: [N, T] Validity from triangulation step
         cfg: Triangulation configuration
+        pos_std_per_camera: [N, C] Optional per-camera position std (meters).
+            When provided, overrides cfg.pos_std with AoI-inflated values
+            from compute_sigma_drift(). When None, uses cfg.pos_std for all cameras.
+        ori_std_per_camera: [N, C] Optional per-camera orientation std (radians).
+            When provided, overrides cfg.ori_std. When None, uses cfg.ori_std.
 
     Returns:
         Sigma_X: [N, T, 3, 3] Covariance matrices (NaN where invalid)
@@ -564,14 +645,24 @@ def compute_triangulation_covariance(
     Sigma_beta = None
 
     if cfg.include_pose_uncertainty:
-        Sigma_twb = (
-            torch.eye(3, device=device, dtype=dtype).view(1, 1, 3, 3).expand(N, C, 3, 3)
-            * (cfg.pos_std**2)
-        )
-        Sigma_phiwb = (
-            torch.eye(3, device=device, dtype=dtype).view(1, 1, 3, 3).expand(N, C, 3, 3)
-            * (cfg.ori_std**2)
-        )
+        if pos_std_per_camera is not None:
+            # Per-camera position covariance: [N, C] -> [N, C, 3, 3]
+            pos_var = (pos_std_per_camera**2).unsqueeze(-1).unsqueeze(-1)  # [N, C, 1, 1]
+            Sigma_twb = torch.eye(3, device=device, dtype=dtype).view(1, 1, 3, 3) * pos_var
+        else:
+            Sigma_twb = (
+                torch.eye(3, device=device, dtype=dtype).view(1, 1, 3, 3).expand(N, C, 3, 3)
+                * (cfg.pos_std**2)
+            )
+        if ori_std_per_camera is not None:
+            # Per-camera orientation covariance: [N, C] -> [N, C, 3, 3]
+            ori_var = (ori_std_per_camera**2).unsqueeze(-1).unsqueeze(-1)  # [N, C, 1, 1]
+            Sigma_phiwb = torch.eye(3, device=device, dtype=dtype).view(1, 1, 3, 3) * ori_var
+        else:
+            Sigma_phiwb = (
+                torch.eye(3, device=device, dtype=dtype).view(1, 1, 3, 3).expand(N, C, 3, 3)
+                * (cfg.ori_std**2)
+            )
 
     if cfg.include_gimbal_uncertainty:
         # All gimbal angles use the same uncertainty (yaw, roll, pitch)
@@ -804,6 +895,8 @@ def compute_full_triangulation(
     camera_intrinsics: torch.Tensor,
     cfg: TriangulationCfg,
     target_positions_gt: Optional[torch.Tensor] = None,
+    pos_std_per_camera: Optional[torch.Tensor] = None,
+    ori_std_per_camera: Optional[torch.Tensor] = None,
 ) -> TriangulationResult:
     """Perform full triangulation with uncertainty estimation.
 
@@ -821,6 +914,10 @@ def compute_full_triangulation(
         cfg: Triangulation configuration
         target_positions_gt: [N, T, 3] Optional GT positions for covariance
             (if None, uses triangulated positions)
+        pos_std_per_camera: [N, C] Optional AoI-inflated position std per camera.
+            Computed by compute_sigma_drift(). When None, uses cfg.pos_std.
+        ori_std_per_camera: [N, C] Optional AoI-inflated orientation std per camera.
+            Computed by compute_sigma_drift(). When None, uses cfg.ori_std.
 
     Returns:
         TriangulationResult containing all outputs with validity masks
@@ -857,6 +954,8 @@ def compute_full_triangulation(
         bbox_valid,
         cov_target_valid,
         cfg,
+        pos_std_per_camera=pos_std_per_camera,
+        ori_std_per_camera=ori_std_per_camera,
     )
 
     # Combined validity: triangulation valid AND covariance valid

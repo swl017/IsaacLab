@@ -6,7 +6,7 @@
 """Configuration for the triangulation module."""
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, Optional
 
 
 @dataclass
@@ -152,4 +152,37 @@ class TriangulationCfg:
 
     When no valid measurement is available, covariance is multiplied by this.
     Models increasing uncertainty over time without observations.
+    """
+
+    # ==========================================================================
+    # Age-of-Information (AoI) Parameters
+    # ==========================================================================
+
+    aoi_process_model: Literal["random_walk", "constant_velocity", "ou"] = "constant_velocity"
+    """Process model for AoI-based covariance inflation.
+
+    Determines how Σ_drift grows with observation age Δt:
+    - "random_walk": Σ_drift = Q · Δt  (linear growth)
+    - "constant_velocity": Σ_drift = Q · Δt³/3  (cubic growth, position block)
+    - "ou": Σ_drift = (σ²/2θ)(1 - e^{-2θΔt})  (saturating, mean-reverting)
+
+    References:
+    - Bar-Shalom, "Update with Out-of-Sequence Measurements," IEEE Trans. AES, 2002
+    - Sun et al., "Sampling of the Wiener Process for Remote Estimation," IEEE ISIT, 2017
+    """
+
+    max_detection_age: float = 0.5
+    """Maximum observation age (seconds) before a ray is discarded.
+
+    Rays older than this are excluded from triangulation entirely.
+    Provides a safety cutoff where velocity-based covariance inflation
+    is no longer reliable.
+    """
+
+    aoi_ou_theta: float = 1.0
+    """Mean-reversion rate for OU process model (1/s).
+
+    Only used when aoi_process_model="ou". Higher values mean faster
+    reversion to mean (target stays closer to its nominal position).
+    Typical values: 0.5-2.0 for loitering targets.
     """

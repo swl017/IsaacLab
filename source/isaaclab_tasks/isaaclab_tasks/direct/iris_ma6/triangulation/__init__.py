@@ -20,6 +20,7 @@ from .triangulation import (
     triangulate_targets,
     compute_triangulation_covariance,
     compute_full_triangulation,
+    compute_sigma_drift,
     get_ray_directions_from_bbox,
     TriangulationResult,
 )
