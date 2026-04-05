@@ -84,7 +84,7 @@ agent:
   # Experiment tracking
   experiment:
     directory: iris_ma6
-    experiment_name: "928b9585f2-mod_reward_weight_tuning"
+    experiment_name: "2be3b9a3d9_control_gain_and_fidelity"
     write_interval: auto
     checkpoint_interval: auto
     store_separately: false
