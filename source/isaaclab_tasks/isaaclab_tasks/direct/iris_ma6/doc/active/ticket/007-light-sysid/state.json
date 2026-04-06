@@ -1,0 +1,11 @@
+{
+  "ticket_slug": "007-light-sysid",
+  "current_stage": "Y",
+  "last_approved_stage": "Y",
+  "next_action": "Closed. iris_ma6 reference curve generation deferred to when sim-to-sim comparison is needed.",
+  "slices_completed": ["slice-1-core-state-machine", "slice-2-gimbal-tests", "slice-3-tmuxp", "slice-4-analysis"],
+  "slices_total": 4,
+  "created": "2026-04-06",
+  "updated": "2026-04-06",
+  "notes": "Complete. PX4 SITL sysid pipeline: sysid_node (MAVROS offboard, 7 tests, cascade setpoints), sysid_analyze (metrics + PDFs), isaac_sysid.tmuxp.yaml. Key finding: MAVROS offboard must use wallclock timer + TwistStamped + TAKEOFF phase (matching mas_offboard). vel_step_10 drag-limited (never reaches 95%). Gimbal stabilization works. Cascade setpoints (ATTITUDE_TARGET msg 83) recorded for future iris_ma6 comparison."
+}

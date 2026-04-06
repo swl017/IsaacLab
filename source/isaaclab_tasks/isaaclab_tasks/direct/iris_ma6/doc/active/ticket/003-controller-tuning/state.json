@@ -1,0 +1,11 @@
+{
+  "ticket_slug": "003-controller-tuning",
+  "current_stage": "Y",
+  "last_approved_stage": "Y",
+  "next_action": "User inspects tuning results with updated score weights and search ranges. When satisfied with gains, update controller cfg defaults and run training.",
+  "slices_completed": ["slice-1-oscillation-metrics", "slice-2-real-controller", "slice-3-multi-speed-tests", "slice-4-plotter-readme"],
+  "slices_total": 4,
+  "created": "2026-04-06",
+  "updated": "2026-04-06",
+  "notes": "All 4 slices implemented. Post-slice iteration: fixed parallelism (single batch), per-env attitude test failure, physics_dt stepping, score weight rebalancing, gain coupling in search ranges, integral limit expansion. Spawned ticket-004 (drag feedforward) and ticket-005 (sim-to-sim analysis) and ticket-006 (domain randomizer integration) during the process."
+}

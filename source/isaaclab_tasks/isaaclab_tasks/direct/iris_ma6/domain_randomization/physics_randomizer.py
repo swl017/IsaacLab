@@ -263,25 +263,29 @@ class PhysicsRandomizer:
         else:
             env_ids = env_ids.to(self.device)
 
-        # Get current masses
+        # Resolve body indices
         if body_ids is None:
             body_ids = slice(None)
 
-        # Get default masses and apply randomization
-        # Note: asset.data.default_body_masses stores original values
-        default_masses = asset.data.default_body_masses[env_ids, body_ids]
+        # env_ids must be on CPU for PhysX view indexing
+        env_ids_cpu = env_ids.cpu()
+
+        # Get full mass tensor and reset to defaults for target envs
+        masses = asset.root_physx_view.get_masses()  # (num_envs, num_bodies)
+        default_masses = asset.data.default_mass[env_ids_cpu, body_ids].clone()
+        masses[env_ids_cpu, body_ids] = default_masses
 
         # Apply scale
-        scales = self.mass_scales[env_ids].unsqueeze(-1)  # (N, 1) for broadcasting
+        scales = self.mass_scales[env_ids].unsqueeze(-1).cpu()  # (M, 1)
         new_masses = default_masses * scales
 
         # Apply additive mass (distributed across bodies)
-        additions = self.mass_additions[env_ids].unsqueeze(-1)
+        additions = self.mass_additions[env_ids].unsqueeze(-1).cpu()
         num_bodies = new_masses.shape[-1] if new_masses.dim() > 1 else 1
         new_masses = new_masses + additions / num_bodies
 
         # Apply payload mass (add to base link, index 0)
-        payloads = self.payload_masses[env_ids]
+        payloads = self.payload_masses[env_ids].cpu()
         if new_masses.dim() > 1:
             new_masses[:, 0] = new_masses[:, 0] + payloads
         else:
@@ -290,18 +294,20 @@ class PhysicsRandomizer:
         # Ensure positive masses
         new_masses = new_masses.clamp(min=0.001)
 
-        # Write to simulation
-        asset.write_body_mass_to_sim(new_masses, body_ids=body_ids, env_ids=env_ids)
+        # Write to simulation via PhysX view API
+        masses[env_ids_cpu, body_ids] = new_masses
+        asset.root_physx_view.set_masses(masses, env_ids_cpu)
 
         # Optionally recompute inertia
         if self.cfg.mass.recompute_inertia:
-            # Inertia scales with mass for uniform density
-            default_inertias = asset.data.default_body_inertias[env_ids, body_ids]
+            inertias = asset.root_physx_view.get_inertias()  # (num_envs, num_bodies, 9)
+            default_inertias = asset.data.default_inertia[env_ids_cpu, body_ids].clone()
             mass_ratios = new_masses / default_masses.clamp(min=0.001)
             if default_inertias.dim() == 3:
-                mass_ratios = mass_ratios.unsqueeze(-1)  # For (N, num_bodies, 3) inertias
+                mass_ratios = mass_ratios.unsqueeze(-1)  # (M, num_bodies, 1) for broadcasting
             new_inertias = default_inertias * mass_ratios
-            asset.write_body_inertia_to_sim(new_inertias, body_ids=body_ids, env_ids=env_ids)
+            inertias[env_ids_cpu, body_ids] = new_inertias
+            asset.root_physx_view.set_inertias(inertias, env_ids_cpu)
 
     def apply_material_randomization(
         self,

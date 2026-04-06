@@ -19,7 +19,8 @@ controller    delay_system_v3  cbf_safety       triangulation
     ▼              ▼              ▼                    ▼
 target_      bbox_raycaster   initial_states    domain_
 controller       _v2                            randomization
-(uses controller)
+(uses controller)                               (camera, physics,
+                                                 gimbal randomizers)
                    ▼              ▼
               visualization    curriculum
               (debug only)     (config only)
@@ -84,7 +85,12 @@ _get_dones()
 
 _reset_idx(env_ids)
   ├─ InitialStates.generate(curriculum_progress)
-  ├─ DomainRandomization.sample()
+  ├─ DomainRandomizer.randomize_all(env_ids)   [WRITE — samples + applies per-episode]
+  │   ├─ CameraProcessor.randomize()           → _dr_intrinsic_scale buffer
+  │   ├─ PhysicsRandomizer.apply_mass/material()→ write_body_mass_to_sim (per robot)
+  │   ├─ GimbalRandomizer.randomize_offsets()  → _dr_gimbal_offsets buffer
+  │   └─ GimbalRandomizer.apply_dynamics()     → write_joint_stiffness/damping_to_sim
+  │   All curriculum-gated by progress_dynamics (180k-200k)
   └─ Reset delay system + reward accumulators
 ```
 

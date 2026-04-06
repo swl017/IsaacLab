@@ -27,6 +27,7 @@ from .controller import DroneControllerCfg
 from .controller.gain_randomization_cfg import GainRandomizationCfg
 from .controller.tuning import TUNED_CONTROLLER_CFG
 from .curriculum import CurriculumCfg
+from .domain_randomization import DomainRandomizationCfg, MountOffsetRandomizationCfg
 from .delay_system_v3 import (
     MultiAgentDelayCfgV3,
     DelaySystemKeyParams,
@@ -536,6 +537,35 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     Applies +-20% uniform scaling on controller gains (velocity PID,
     attitude P, rate PID, motor time constant). Curriculum-gated to
     dynamics phase (dynamics_start_step to dynamics_end_step).
+    """
+
+    # ==========================================================================
+    # Domain Randomization
+    # ==========================================================================
+
+    domain_randomization: DomainRandomizationCfg = DomainRandomizationCfg(
+        enabled=True,
+        mount_offset=MountOffsetRandomizationCfg(enabled=True),
+    )
+    """Domain randomization for sim-to-real transfer.
+
+    Randomizes camera intrinsics, physics mass/material, and gimbal
+    dynamics at each episode reset. Curriculum-gated to the dynamics
+    phase (progress_dynamics, same as gain_randomization).
+
+    Camera randomization affects the intrinsic matrix used by
+    bbox_raycaster and delay system (no actual RGB processing).
+    Physics mass is applied to simulation assets; the controller
+    retains nominal mass (intentional model mismatch for robustness).
+    Gimbal offsets are added to joint position targets.
+    """
+
+    target_z_scale_range: tuple[float, float] = (1.0, 3.0)
+    """Z-axis scale range for target visual size randomization.
+
+    Enriches bbox size variation by scaling the target's apparent height.
+    Applied to the bbox raycaster via target_scale parameter (no USD/physics change).
+    Curriculum-gated by progress_dynamics like other DR parameters.
     """
 
     # ==========================================================================

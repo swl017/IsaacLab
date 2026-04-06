@@ -534,3 +534,129 @@ Done:
 Next:
 - Training run to verify corrected ray_w improves policy's target tracking
 - Monitor triangulation quality — bbox-based rays should improve convergence
+
+----------------------------------------
+2026-04-06 — Ticket-003: Controller tuning infrastructure (QRISPY complete)
+----------------------------------------
+Done:
+- Full QRISPY flow (Q→R→I→S→P→Y) for ticket-003 (controller tuning)
+- Replaced hand-rolled tuner controller with real DroneController (step_policy)
+  - Per-env gains via set_gains() APIs, one env per param set
+  - Intermediate signals extracted: attitude error, rate error from cascade
+  - Added _last_q_des to DroneController for external analysis access
+- Added OscillationMetrics (damping ratio via log decrement, zero-crossings,
+  SS amplitude, frequency), TuningScoreWeights (configurable), extended TuningMetrics
+  with 6 oscillation fields (vel_osc_5, vel_osc_10, att_osc, rate_osc_*)
+- Multi-speed velocity test: 5 m/s and 10 m/s, 5 seconds each at physics_dt (100Hz)
+- Attitude step response test: 20° perturbation, per-env failure tracking
+- Step response plotter: 6-panel PDF (velocity, attitude error, rate error)
+- Parallelism fix: num_envs == num_trials, single batch, no loop
+- Clean initial state: _reset_to_hover() ensures identical start across envs
+- Score weight rebalancing: velocity + oscillation dominate (~70%), attitude secondary
+- Search range improvements: Kp_rate expanded to 0.40, Kd_rate to 0.015,
+  Ki_vel to 2.0, gain coupling (Kp_vel_max = f(Kp_rate)), integral_limit raised to 8.0
+- Added --aero-level flag (0-3) for aerodynamic fidelity comparison
+- Tuning runs completed at aero levels 0, 1, 3 — results in tuning_results/
+- Files: auto_tune.py (major rewrite), step_response_plotter.py (new),
+  README.md (rewrite), drone_controller.py (+1 line)
+
+Spawned tickets:
+- ticket-004: Drag feedforward in velocity controller (10 m/s SS error)
+- ticket-005: Sim-to-sim transfer analysis (domain shift decomposition + gap audit)
+- ticket-006: DomainRandomizer integration into _reset_idx (P0 gap from ticket-005)
+
+Key finding from ticket-005 analysis:
+- DomainRandomizer module (camera, physics, gimbal) exists with tests but is NOT
+  integrated into iris_ma_env6_test.py — camera intrinsics, mass, gimbal dynamics
+  all fixed during training. This is the biggest transfer robustness gap.
+- mas_policy already implements full inference pipeline (obs assembler, SKRL loader,
+  action publisher, CBF filter, 25Hz RNN loop) — no work needed there.
+
+Next:
+- User inspects tuning results, selects best gains for training
+- Ticket-004: Implement drag feedforward (Light flow)
+- Ticket-006: Wire DomainRandomizer into _reset_idx (Light flow, P0 priority)
+- Training run with tuned gains + domain randomization active
+
+----------------------------------------
+2026-04-06 — Ticket-006: DomainRandomizer integration into env
+----------------------------------------
+Done:
+- Wired existing DomainRandomizer module into iris_ma_env6_test.py:
+  - Added DomainRandomizationCfg field to IrisMA6TestEnvCfg (mount_offset.enabled=True)
+  - DomainRandomizer instantiated in __init__ with env num_envs/num_agents/device
+  - randomize_all() called in _reset_idx for each reset batch
+  - All randomization curriculum-gated by progress_dynamics (180k-200k steps)
+- Camera intrinsics flow:
+  - FOV scale → per-env intrinsic_scale buffer (curriculum-interpolated from 1.0 to 1/fov_scale)
+  - Applied in 3 locations: bbox raycaster intrinsics, delay system GT data, _build_gt_states
+  - Flows through to triangulation via _compute_zoomed_intrinsics (uses already-scaled base)
+- Physics mass/material:
+  - apply_physics_randomization() called per robot articulation (write_body_mass_to_sim)
+  - Controller retains nominal mass — intentional model mismatch for robustness
+  - Inertia recomputed proportionally (recompute_inertia=True in cfg)
+- Gimbal offsets:
+  - Stored in _dr_gimbal_offsets buffer, scaled by progress_dynamics
+  - Added to joint position targets in both implicit and direct control branches
+  - Affects yaw (+dr_yaw_off), pitch (+dr_pitch_off), roll (+dr_roll_off)
+- Gimbal dynamics:
+  - Stiffness/damping scale applied to actuators via write_joint_stiffness/damping_to_sim
+  - Called per agent with correct gimbal_joint_ids
+- Updated ARCHITECTURE.md with DR data flow in _reset_idx
+- Updated feature_list.json: domain-randomization-integration → done
+- Files modified: iris_ma_env6_test.py, iris_ma_env6_test_cfg.py, ARCHITECTURE.md
+
+Design decisions:
+- Controller keeps nominal mass (not updated with DR mass): physically correct model
+  mismatch — policy must learn to compensate for unknown mass variation
+- Intrinsic scale uses 1/fov_scale (not absolute focal_length): avoids unit mismatch
+  between CameraProcessor pixel focal lengths and env's physical focal length
+- Curriculum gating via linear interpolation: 1.0 + progress * (sampled - 1.0) for
+  intrinsics and offsets ensures smooth ramp from zero perturbation to full range
+
+Continued:
+- Added target z-scale randomization (z-axis 1-3x) via bbox raycaster target_scale param
+  - No USD/physics change needed — raycaster multiplies cached local corners by scale
+  - Curriculum-gated same as other DR: 1.0 at progress=0, sampled [1, 3] at progress=1
+  - Verified: bbox height 21.5px → 38.8px with z-scale=3
+- Fixed physics_randomizer.py API calls:
+  - default_body_masses → default_mass, default_body_inertias → default_inertia
+  - write_body_mass_to_sim → root_physx_view.set_masses()
+  - write_body_inertia_to_sim → root_physx_view.set_inertias()
+- Integration test (test_integration.py): 18/18 passing
+  - DR buffer initialization, shapes, identity values
+  - No-effect at progress=0, full-effect at progress=1
+  - Partial progress interpolation
+  - Bbox raycaster receives target_scale (height increase confirmed)
+  - Physics mass written to simulation (std=0.14 across envs)
+- Files modified: physics_randomizer.py (API fix), iris_ma_env6_test.py, iris_ma_env6_test_cfg.py
+
+Next:
+- Training run with domain randomization active at dynamics phase
+- Ticket-004: Implement drag feedforward (Light flow)
+
+----------------------------------------
+2026-04-06 — Ticket-007: Light sysid (QRISPY Q→R→I→S→P complete)
+----------------------------------------
+Done:
+- Created ticket-007 (light system identification) from ticket-005 analysis §2.1 (P0.5)
+- Completed QRISPY stages Q through P:
+  - Q: 22 questions answered (single drone px4_1, MAVROS-only, velocity-only offboard,
+    100 Hz sim-time, gimbal short pulses, new tmuxp)
+  - R: Research on offboard_py, los_rate_controller, auto_tune.py, PegasusSimulator,
+    MAVROS config. Key finding: offboard_control.py wrong direction for reuse (publishes
+    MAVROS, we need to subscribe). Raw timeseries not saved by auto_tune.py.
+  - I: Design — new ROS2 node in offboard_py, MAVROS-only (no fmu/*), all ENU,
+    7 tests (hover, vel 5/10, impulse recovery, yaw, gimbal rate, gimbal stabilization),
+    post-hoc analysis, comparison PDFs, mismatch table
+  - S: Structure — sysid_node.py (state machine + recorder), sysid_analyze.py (offline),
+    isaac_sysid.tmuxp.yaml, setup.py + package.xml modifications
+  - P: 4 slices — (1) core state machine + velocity tests, (2) gimbal tests,
+    (3) tmuxp, (4) offline analysis + comparison plots
+- QRISPY state saved to doc/active/ticket/007-light-sysid/
+
+QRISPY state saved for 007-light-sysid at Stage Y (implementation pending)
+
+Next:
+- Implement Slice 1: sysid_node core state machine + velocity tests
+- Requires isaac_sim.tmuxp.yaml + MAVROS running for testing

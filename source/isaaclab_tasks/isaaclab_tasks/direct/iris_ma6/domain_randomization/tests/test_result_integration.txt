@@ -1,0 +1,67 @@
+================================================================================
+DOMAIN RANDOMIZATION INTEGRATION TEST
+================================================================================
+Device: cuda
+Torch: 2.5.1+cu118
+
+Creating environment...
+Environment created: 64 envs, 2 agents
+  ✓ Environment creation
+
+================================================================================
+Testing: DR buffer initialization
+================================================================================
+  ✓ DomainRandomizer instantiated
+  ✓ DR buffer shapes correct
+  ✓ DR buffers initialized to identity values
+
+================================================================================
+Testing: DR no-effect at progress_dynamics=0
+================================================================================
+  ✓ progress_dynamics=0 at step 0
+  ✓ Intrinsic scale = 1.0 at progress=0
+  ✓ Gimbal offsets = 0 at progress=0
+  ✓ Target z-scale = 1.0 at progress=0
+
+================================================================================
+Testing: DR full-effect at progress_dynamics=1
+================================================================================
+  ✓ progress_dynamics=1 past dynamics_end_step
+    intrinsic_scale: mean=1.344, std=0.265, range=[1.002, 1.989]
+  ✓ Intrinsic scale randomized at progress=1
+    yaw offset: mean=0.0094, range=[-0.0991, 0.0994]
+    pitch offset: mean=-0.0008, range=[-0.0495, 0.0497]
+  ✓ Gimbal offsets randomized at progress=1
+    target z-scale: mean=1.968, range=[1.058, 2.966]
+  ✓ Target z-scale randomized at progress=1
+  ✓ Target x,y scale unchanged
+
+================================================================================
+Testing: DR interpolation at progress_dynamics=0.5
+================================================================================
+  ✓ progress_dynamics=0.500 at midpoint
+    intrinsic_scale at progress=0.50: mean=1.176
+  ✓ Intrinsic scale interpolated at half progress
+    target z-scale at progress=0.50: mean=1.484, max=1.985
+  ✓ Target z-scale interpolated at half progress
+
+================================================================================
+Testing: Bbox raycaster target_scale flow
+================================================================================
+    bbox height without scale: 21.5
+    bbox height with z-scale=3: 38.8
+  ✓ Bbox height increased with z-scale (no_scale=21.5, z3=38.8)
+
+================================================================================
+Testing: Physics mass application
+================================================================================
+    Default total mass (agent 0, env 0): 1.5708 kg
+    Mass after DR (env 0): 1.7498 kg
+    Mass std across reset envs: 0.1375 kg
+  ✓ Mass varies across envs (std=0.1375)
+
+================================================================================
+TEST SUMMARY
+================================================================================
+Total: 18, Passed: 18, Failed: 0, Errors: 0
+================================================================================

@@ -28,6 +28,7 @@ from isaaclab.utils.math import euler_xyz_from_quat, quat_mul, quat_rotate, quat
 from .bbox_raycaster_v2 import BBoxRayCasterV2
 from .bbox_raycaster_v2.utils.projection import create_intrinsic_matrix_tensor
 from .cbf_safety import CBFManager
+from .domain_randomization import DomainRandomizer
 from .controller import DroneController
 from .controller.gimbal_controller import YAW_JOINT_OFFSET
 from .delay_system_v3 import MultiAgentDelaySystemV3, AgentStates
@@ -436,6 +437,29 @@ class IrisMA6TestEnv(DirectMARLEnv):
         else:
             self._initial_states = None
 
+        # Initialize domain randomizer for sim-to-real transfer
+        if self.cfg.domain_randomization.enabled:
+            self._domain_randomizer = DomainRandomizer(
+                cfg=self.cfg.domain_randomization,
+                num_envs=self.num_envs,
+                num_agents=len(cfg.possible_agents),
+                device=self.device,
+            )
+        else:
+            self._domain_randomizer = None
+
+        # DR buffers: per-env intrinsic scale, gimbal offsets, target scale
+        self._dr_intrinsic_scale = torch.ones(
+            self.num_envs, len(cfg.possible_agents), device=self.device
+        )
+        self._dr_gimbal_offsets = torch.zeros(
+            self.num_envs, len(cfg.possible_agents), 3, device=self.device
+        )
+        # Target z-scale for bbox size randomization: (N, 1, 3) = (x=1, y=1, z=sampled)
+        self._dr_target_scale = torch.ones(
+            self.num_envs, 1, 3, device=self.device
+        )
+
         # Curriculum progress tracking (updated externally, used by initial_states)
         self.progress_tracking = 0.0
         self.progress_moving_target = 0.0
@@ -605,6 +629,11 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 body_ids=self._body_ids[agent_id],
             )
 
+            # DR gimbal offsets: simulate mechanical misalignment (yaw, pitch, roll)
+            dr_yaw_off = self._dr_gimbal_offsets[:, idx, 0]
+            dr_pitch_off = self._dr_gimbal_offsets[:, idx, 1]
+            dr_roll_off = self._dr_gimbal_offsets[:, idx, 2]
+
             use_implicit_gimbal_control = True  # Set to False to bypass implicit control and write joint state directly
             if use_implicit_gimbal_control:
                 # Apply gimbal position targets
@@ -612,9 +641,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 # (physics forward). The offset shifts the physical joint so the
                 # combined chain (joint + camera offset) points along body +X.
                 gimbal_yaw, gimbal_roll, gimbal_pitch = gimbal_pos_targets
-                gimbal_yaw_joint = gimbal_yaw + YAW_JOINT_OFFSET
+                gimbal_yaw_joint = gimbal_yaw + YAW_JOINT_OFFSET + dr_yaw_off
                 robot.set_joint_position_target(
-                    target=torch.stack([gimbal_pitch, gimbal_yaw_joint, gimbal_roll], dim=-1),
+                    target=torch.stack([gimbal_pitch + dr_pitch_off, gimbal_yaw_joint, gimbal_roll + dr_roll_off], dim=-1),
                     joint_ids=[
                         self.gimbal_joint_idx[agent_id]["pitch"],
                         self.gimbal_joint_idx[agent_id]["yaw"],
@@ -644,14 +673,14 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 # targets, pulling joints away from the desired position.
                 # With targets == state, PD force = k*(pos-pos) + d*(vel-vel) = 0.
                 gimbal_yaw, gimbal_roll, gimbal_pitch = gimbal_pos_targets
-                gimbal_yaw_joint = gimbal_yaw + YAW_JOINT_OFFSET
+                gimbal_yaw_joint = gimbal_yaw + YAW_JOINT_OFFSET + dr_yaw_off
                 gimbal_yaw_vel, gimbal_roll_vel, gimbal_pitch_vel = gimbal_vel_targets
                 gimbal_joint_ids = [
                     self.gimbal_joint_idx[agent_id]["pitch"],
                     self.gimbal_joint_idx[agent_id]["yaw"],
                     self.gimbal_joint_idx[agent_id]["roll"],
                 ]
-                pos_cmd = torch.stack([gimbal_pitch, gimbal_yaw_joint, gimbal_roll], dim=-1)
+                pos_cmd = torch.stack([gimbal_pitch + dr_pitch_off, gimbal_yaw_joint, gimbal_roll + dr_roll_off], dim=-1)
                 vel_cmd = torch.stack([gimbal_pitch_vel, gimbal_yaw_vel, gimbal_roll_vel], dim=-1)
                 robot.write_joint_state_to_sim(
                     position=pos_cmd, velocity=vel_cmd, joint_ids=gimbal_joint_ids,
@@ -788,8 +817,10 @@ class IrisMA6TestEnv(DirectMARLEnv):
             camera_poses[agent_id] = (camera_pos_w, camera_quat_w)
 
             intrinsic = self._camera_intrinsics_base.clone()
-            intrinsic[:, 0, 0] *= self.zoom_level[:, idx]
-            intrinsic[:, 1, 1] *= self.zoom_level[:, idx]
+            # Apply DR focal length perturbation (curriculum-gated) alongside zoom
+            dr_scale = self._dr_intrinsic_scale[:, idx]
+            intrinsic[:, 0, 0] *= self.zoom_level[:, idx] * dr_scale
+            intrinsic[:, 1, 1] *= self.zoom_level[:, idx] * dr_scale
             camera_intrinsics[agent_id] = intrinsic
             image_shapes[agent_id] = self._camera_image_shape
             agent_poses[agent_id] = (root_pos, root_quat)
@@ -807,6 +838,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
             target_poses=(target_pos, target_quat),
             agent_poses=agent_poses,
             image_shapes=image_shapes,
+            target_scale=self._dr_target_scale,
         )
 
         # Apply temporal smoothing to bbox_confidence to prevent oscillation
@@ -883,7 +915,10 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 gt_data.camera_position_w = cam_pos_w
                 gt_data.camera_orientation_w = cam_ori_w
                 gt_data.camera_zoom_level = self.zoom_level[:, idx]
-                gt_data.camera_base_intrinsics = self._camera_intrinsics_base.clone()
+                dr_base = self._camera_intrinsics_base.clone()
+                dr_base[:, 0, 0] *= self._dr_intrinsic_scale[:, idx]
+                dr_base[:, 1, 1] *= self._dr_intrinsic_scale[:, idx]
+                gt_data.camera_base_intrinsics = dr_base
 
                 # Detection (bbox) - shape (N, T, 4)
                 # CRITICAL: Use pixel bboxes, not normalized - triangulation expects pixels
@@ -979,7 +1014,10 @@ class IrisMA6TestEnv(DirectMARLEnv):
             pitch_link_idx = self._frame_link_ids[agent_id]["pitch_link"]
             data.camera_position_w = robot.data.body_pos_w[:, pitch_link_idx]
             data.camera_orientation_w = robot.data.body_quat_w[:, pitch_link_idx]
-            data.camera_base_intrinsics = self._camera_intrinsics_base.clone()
+            dr_base = self._camera_intrinsics_base.clone()
+            dr_base[:, 0, 0] *= self._dr_intrinsic_scale[:, idx]
+            dr_base[:, 1, 1] *= self._dr_intrinsic_scale[:, idx]
+            data.camera_base_intrinsics = dr_base
             data.camera_zoom_level = self.zoom_level[:, idx]
 
             # Detection - use pixel bboxes (not normalized) for triangulation
@@ -1951,6 +1989,51 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 M = len(env_ids)
                 scale = torch.empty(M, device=self.device).uniform_(low, high)
                 self._max_lin_vel[env_ids] = self.cfg.max_lin_vel * scale
+
+        # ---- Domain Randomization (curriculum-gated to dynamics phase) ----
+        if self._domain_randomizer is not None:
+            # Sample new randomized parameters for resetting envs
+            self._domain_randomizer.randomize_all(env_ids)
+
+            # Camera intrinsics: FOV scale perturbation → effective focal length change
+            # fov_scale < 1 means narrower FOV → larger effective focal length (1/fov_scale)
+            # Curriculum gating: interpolate from 1.0 (no perturbation) to full perturbation
+            fov_scales = self._domain_randomizer.get_fov_scales()  # (N, num_agents)
+            raw_scale = 1.0 / fov_scales[env_ids]  # range [1.0, 2.0] for fov [0.5, 1.0]
+            self._dr_intrinsic_scale[env_ids] = 1.0 + self.progress_dynamics * (raw_scale - 1.0)
+
+            # Gimbal offsets: curriculum-gated mechanical misalignment
+            # Offsets are (M, num_agents, 3) with [yaw, pitch, roll]
+            gimbal_offsets = self._domain_randomizer.get_gimbal_offsets(env_ids)
+            self._dr_gimbal_offsets[env_ids] = self.progress_dynamics * gimbal_offsets
+
+            if self.progress_dynamics > 0.0:
+                # Physics: apply randomized mass/inertia to simulation assets
+                # Controller retains nominal mass — intentional model mismatch for robustness
+                for agent_id in self.cfg.possible_agents:
+                    self._domain_randomizer.apply_physics_randomization(
+                        self._robots[agent_id], env_ids
+                    )
+
+                # Gimbal dynamics: apply randomized stiffness/damping to actuators
+                for agent_id in self.cfg.possible_agents:
+                    gimbal_joint_ids = [
+                        self.gimbal_joint_idx[agent_id]["yaw"],
+                        self.gimbal_joint_idx[agent_id]["roll"],
+                        self.gimbal_joint_idx[agent_id]["pitch"],
+                    ]
+                    self._domain_randomizer.apply_gimbal_dynamics(
+                        self._robots[agent_id], env_ids, gimbal_joint_ids
+                    )
+
+        # Target z-scale randomization for bbox size enrichment
+        # Curriculum-gated: z=1.0 at progress=0, ramp to sampled [1, max] at progress=1
+        z_lo, z_hi = self.cfg.target_z_scale_range
+        raw_z = torch.empty(len(env_ids), device=self.device).uniform_(z_lo, z_hi)
+        gated_z = 1.0 + self.progress_dynamics * (raw_z - 1.0)
+        self._dr_target_scale[env_ids, 0, 0] = 1.0  # x unchanged
+        self._dr_target_scale[env_ids, 0, 1] = 1.0  # y unchanged
+        self._dr_target_scale[env_ids, 0, 2] = gated_z  # z scaled
 
         self._sim_time[env_ids] = 0.0
 

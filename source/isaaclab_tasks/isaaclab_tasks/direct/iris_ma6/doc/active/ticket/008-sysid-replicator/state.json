@@ -1,0 +1,11 @@
+{
+  "ticket_slug": "008-sysid-replicator",
+  "current_stage": "Q",
+  "last_approved_stage": "Q",
+  "next_action": "Review ticket scope and approve to proceed to R (requirements/slicing).",
+  "slices_completed": [],
+  "slices_total": null,
+  "created": "2026-04-06",
+  "updated": "2026-04-06",
+  "notes": "Spawned from ticket-007 results: 7/8 metrics exceed ±20% threshold. Tune iris_ma6 to match PX4, not the other way around. New version of auto_tune.py with PX4 SITL data as scoring target."
+}
