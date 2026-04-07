@@ -30,8 +30,8 @@ class GimbalControllerCfg:
     max_gimbal_rate: float = 1.0 * math.pi
     """Maximum gimbal angular rate [rad/s]. Default 2*pi (360 deg/s)."""
 
-    yaw_limits: tuple[float, float] = (-math.radians(45), math.radians(45))
-    """Yaw joint limits [min, max] [rad]. Default +-45 deg."""
+    yaw_limits: tuple[float, float] = (-math.radians(120), math.radians(120))
+    """Yaw joint limits [min, max] [rad]. Default +-120 deg."""
 
     pitch_limits: tuple[float, float] = (-math.radians(45), math.radians(45))
     """Pitch joint limits [min, max] [rad]. Default -45 to 45 deg.

@@ -1,11 +1,11 @@
 {
   "ticket_slug": "009-bbox-noise-model",
-  "current_stage": "Q",
-  "last_approved_stage": "Q",
-  "next_action": "Review ticket scope.",
+  "current_stage": "P",
+  "last_approved_stage": "S",
+  "next_action": "Engineer reviews implementation plan (p_plan.md), then -> Start Y",
   "slices_completed": [],
-  "slices_total": null,
+  "slices_total": 3,
   "created": "2026-04-06",
-  "updated": "2026-04-06",
-  "notes": "Spawned from ticket-005 §1.4 (P2 priority). Calibrate raycaster noise from YOLO statistics."
+  "updated": "2026-04-08",
+  "notes": "Spawned from ticket-005 §1.4. Calibration done (Phase 1). Phase 2: detector_replicator in bbox_raycaster_v2. 3 slices: core+data, plumbing, env integration."
 }

@@ -2,10 +2,10 @@
   "ticket_slug": "010-fp-fn-model",
   "current_stage": "Q",
   "last_approved_stage": "Q",
-  "next_action": "Review ticket scope.",
+  "next_action": "Engineer approves Q answers and revised ticket, then → Start R",
   "slices_completed": [],
   "slices_total": null,
   "created": "2026-04-06",
-  "updated": "2026-04-06",
-  "notes": "Spawned from ticket-005 §1.4 (P3 priority). Depends on ticket-009 for calibrated parameters (can use placeholders)."
+  "updated": "2026-04-08",
+  "notes": "Q complete. Ticket revised: no confidence/obs-dim change, detector_replicator inside bbox_raycaster_v2, background-dependent miss rate via raycast_mesh, FPs as random bbox with random location/size. Depends on ticket-009 (noise model should also move into replicator). Blocked on ticket-009 for calibrated parameters."
 }

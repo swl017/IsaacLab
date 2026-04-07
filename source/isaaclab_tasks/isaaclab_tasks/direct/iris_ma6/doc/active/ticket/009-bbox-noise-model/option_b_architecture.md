@@ -1,4 +1,4 @@
-# Option B: Offline YOLO Calibration → Parameterized Noise in Training
+# Option B: Offline YOLO Calibration → Detector Replicator in Training
 
 ## Problem
 
@@ -18,10 +18,10 @@ Instead of running YOLO during training, split into two phases:
 
 ```
 Phase 1: Offline calibration (~10 min, one-time)
-  32 envs + cameras ON → YOLO vs raycaster → fit NoiseModelParams → save JSON
+  64 envs + cameras ON → YOLO vs raycaster → fit NoiseModelParams → save JSON
 
 Phase 2: Full training (unchanged, zero overhead)
-  1024 envs + cameras OFF → raycaster + calibrated noise from JSON → policy
+  1024 envs + cameras OFF → raycaster + detector_replicator(JSON params) → policy
 ```
 
 This is simpler, faster, and decouples calibration from training entirely.
@@ -43,18 +43,18 @@ This is simpler, faster, and decouples calibration from training entirely.
 ```
 calibrate_bbox_noise.py (standalone script)
 │
-├── IrisMA6TestEnv            (32 envs, enable_tiled_cameras=True)
-│   ├── BBoxRayCasterV2       → GT pixel bboxes (32, 3, 1, 4)
-│   └── TiledCamera × 3      → RGB images (32, H, W, 3) per agent
+├── IrisMA6TestEnv            (64 envs, enable_tiled_cameras=True)
+│   ├── BBoxRayCasterV2       → GT pixel bboxes (64, 2, 1, 4)
+│   └── TiledCamera × 2      → RGB images (64, H, W, 3) per agent
 │
 ├── YoloBatchInference        → YOLO detections per image
-│   └── ultralytics YOLO(yolov11m-drone.pt)
+│   └── ultralytics YOLO(yolov11m-drone.pt or dronecop9-2.pt)
 │
 ├── DetectorCalibrator        → accumulates YOLO-vs-raycaster stats
 │   ├── .ingest()             → IoU matching, error recording
 │   └── .fit()                → binned regression → NoiseModelParams
 │
-└── Output: bbox_noise_params.json
+└── Output: bbox_noise_params.json + report PNGs
 ```
 
 **Script**: `experiments/calibrate_bbox_noise.py`
@@ -62,77 +62,210 @@ calibrate_bbox_noise.py (standalone script)
 **Usage**:
 ```bash
 # With trained policy (realistic bbox size distribution)
-./isaaclab.sh -p .../calibrate_bbox_noise.py \
-    --experiment a3_full \
+python calibrate_bbox_noise.py \
+    --experiment a1_with_aoi \
     --checkpoint /path/to/best_agent.pt \
-    --num_envs 32 --num_steps 5000 \
-    --output bbox_noise_params.json
+    --num_envs 64 --num_steps 250 \
+    --output bbox_noise_params_yolov11m.json
 
 # Quick sanity check with random policy
-./isaaclab.sh -p .../calibrate_bbox_noise.py \
+python calibrate_bbox_noise.py \
     --num_envs 32 --num_steps 2000 \
     --output bbox_noise_params.json
 ```
 
-**Expected timing**: 32 envs × 3 agents = 96 images/step.
-YOLO batch at ~2ms/image → ~200ms/step. 5000 steps ≈ 17 minutes.
+### Phase 2: Apply Fitted Parameters via Detector Replicator
 
-### Phase 2: Apply Fitted Parameters in Training
+Load the JSON and apply via `detector_replicator` inside `bbox_raycaster_v2`.
+The replicator is the single architectural home for all detector modeling:
+- **Ticket 009**: calibrated Student's t localization noise
+- **Ticket 010**: miss rate (FN) and false positive (FP) injection
 
-Load the JSON and apply to the delay system. Two integration points:
+#### Dual output from bbox_raycaster_v2
 
-#### 2a. Size-dependent noise in delay system
+`bbox_raycaster_v2` outputs both pure GT bboxes and replicated bboxes:
+- **GT bboxes** → reward path (both privileged and perception-aligned). Rewards must never be corrupted by detector stochasticity.
+- **Replicated bboxes** → observation path only. The policy learns to cope with noisy/unreliable detections through its observations.
 
-Extend `_get_noise_std()` in `delay_system_v3/multi_agent_wrapper.py:360`:
-
-```python
-# Current
-elif noise_type == "bbox":
-    base_std = self._noise_cfg.bbox_std.value
-
-# With calibrated params loaded from JSON
-elif noise_type == "bbox":
-    if self._calibrated_params is not None and target_size_px is not None:
-        p = self._calibrated_params
-        base_std = p.center_noise_a / target_size_px.clamp(min=5.0) + p.center_noise_b
-    else:
-        base_std = self._noise_cfg.bbox_std.value
-```
-
-#### 2b. Miss injection (probabilistic bbox dropout)
+#### Localization noise (detector_replicator, ticket 009)
 
 ```python
-def _apply_detection_miss(self, bbox: torch.Tensor,
-                          target_size_px: torch.Tensor) -> torch.Tensor:
-    """Zero out bbox with probability p_miss(target_size)."""
-    if self._calibrated_params is None:
-        return bbox
+# Inside bbox_raycaster_v2/detector_replicator
+def apply_noise(self, bboxes, bbox_empty, target_size_px, noise_scale):
+    """Apply calibrated Student's t noise to detected bboxes.
+    
+    Only applied where bbox_empty=False (valid detections).
+    """
     p = self._calibrated_params
-    p_miss = torch.sigmoid(p.miss_sigmoid_a * (p.miss_size_threshold - target_size_px))
-    mask = torch.bernoulli(1.0 - p_miss).unsqueeze(-1)
-    return bbox * mask  # missed detections become zero → bbox_empty
+    scale = p.center_noise_a / target_size_px.clamp(min=5.0) + p.center_noise_b
+    scale *= noise_scale  # curriculum gating
+    noise = StudentT(df=p.center_noise_df, loc=p.center_bias, scale=scale).sample()
+    
+    # Only add noise to valid detections
+    noisy_bboxes = bboxes.clone()
+    noisy_bboxes[~bbox_empty] += noise[~bbox_empty]
+    return noisy_bboxes
 ```
 
-Both are applied after raycaster GT is written to `gt_data.bboxes_2d` and before
-the delay system processes it. Curriculum-gated via existing `noise_scale`.
+#### Miss injection (detector_replicator, ticket 010)
 
-### Data Flow (per policy step, calibrated training)
+```python
+# Inside bbox_raycaster_v2/detector_replicator
+def apply_miss(self, bboxes, bbox_empty, target_size_px, bg_is_sky):
+    """Probabilistic miss based on target size and background type.
+    
+    Only applied where bbox_empty=False (skip already-empty).
+    Uses dual sigmoids conditioned on background (sky vs ground).
+    """
+    p = self._calibrated_params
+    if bg_is_sky:
+        p_miss = sigmoid(p.miss_a_sky * (p.miss_threshold_sky - target_size_px))
+    else:
+        p_miss = sigmoid(p.miss_a_gnd * (p.miss_threshold_gnd - target_size_px))
+    
+    missed = torch.bernoulli(p_miss).bool() & ~bbox_empty
+    bboxes_out = bboxes.clone()
+    bboxes_out[missed] = 0.0
+    bbox_empty_out = bbox_empty | missed
+    return bboxes_out, bbox_empty_out
+```
+
+#### Data Flow (per policy step, calibrated training)
 
 ```
 bbox_raycaster_v2.update(...)
-    → bboxes: (1024, 3, 1, 4) pixel         [GT geometry]
+    → data.bboxes            (1024, 2, 1, 4) pixel     [GT, clean]
+    → data.bbox_empty        (1024, 2, 1)               [GT occlusion]
+
+bbox_raycaster_v2.apply_detector_replicator(params, noise_scale)
+    # 1. Apply miss rate (ticket 010) — only where bbox_empty=False
+    #    bg_is_sky from raycast_mesh query through target
+    #    Missed → zero bbox, set bbox_empty_replicated=True
+    # 2. Apply noise (ticket 009) — only where bbox_empty_replicated=False
+    #    Student's t(df~12-16, scale=a/size+b) + bias
+    # 3. Zero out bboxes where bbox_empty_replicated=True (bug fix)
+    → data.bboxes_replicated       (1024, 2, 1, 4)     [noisy + FN]
+    → data.bbox_empty_replicated   (1024, 2, 1)         [includes FN misses]
 
 For each agent:
-    gt_data.bboxes_2d = raycaster.bboxes[:, idx, :, :]
+    # Reward path: GT bboxes (clean)
+    gt_data.bboxes_2d = raycaster.data.bboxes[:, idx, :, :]
 
-    # NEW: apply calibrated noise + miss
-    target_size = sqrt(bbox_w * bbox_h)
-    noise_std = calibrated.center_noise_a / target_size + calibrated.center_noise_b
-    gt_data.bboxes_2d += N(0, noise_std)     [size-dependent noise]
-    gt_data.bboxes_2d *= bernoulli(1-p_miss)  [probabilistic miss]
+    # Obs path: replicated bboxes (noisy, with FN)
+    obs_data.bboxes_2d = raycaster.data.bboxes_replicated[:, idx, :, :]
 
-    delay_system.update_ground_truth(agent_id, gt_states)
+    delay_system.update_ground_truth(agent_id, gt_states, obs_states)
+
+_get_rewards():
+    delay_system.get_states_for_rewards()  → GT bboxes (clean, delayed)
+
+_get_observations():
+    delay_system.get_states_for_observations()  → replicated bboxes (noisy, delayed)
 ```
+
+---
+
+## Calibration Results (2026-04-07)
+
+### Run Configuration
+
+| Parameter | Value |
+|-----------|-------|
+| YOLO model | yolov11m-drone.pt (39 MB, single-class "drone") |
+| YOLO confidence threshold | 0.25 |
+| Num envs | 64 |
+| Num agents | 2 |
+| Num steps | 250 |
+| Policy | a1_with_aoi (trained checkpoint) |
+| Camera resolution | 640 × 480 |
+| Fit size range | [20, 80] px |
+
+### Fitted Parameters
+
+```json
+{
+  "noise_distribution": "student_t",
+  "center_noise_a": "~0 (size-independent in [20,80]px range — needs refit from binned data)",
+  "center_noise_b": "13.4 px (authoritative, from findings.md)",
+  "center_noise_df": "12-16 (authoritative, from report-5 with more matches)",
+  "size_noise_a": "~0",
+  "size_noise_b": "18.0 px",
+  "size_noise_df": "12.2",
+  "miss_sigmoid_a": "0.031 (ticket-010 scope)",
+  "miss_size_threshold_px": "65.6 (ticket-010 scope)",
+  "fp_rate": "0.49/frame (inflated by other-agent detections — needs re-measurement)",
+  "center_bias_x": "-1.2 px",
+  "center_bias_y": "+0.1 px"
+}
+```
+
+**Parameter sources**: Two calibration runs produced different values. The authoritative
+sources are:
+- **df~12-16**: from `bbox_noise_params_yolov11m_report-5/` (more matches, more reliable)
+- **noise scale ~13.4px**: from `findings.md` (supersedes earlier 10.5px estimate)
+- **bias (-1.2, +0.1)px**: from findings.md
+
+### Key Findings
+
+**Detection statistics** (20,897 visible frames analyzed):
+- **5,043 matched** (24%) — YOLO found the target with IoU ≥ 0.1
+- **15,854 missed** (76%) — target visible to raycaster but YOLO missed it
+- **4,402 false positives** — spurious detections (FP rate = 0.21/frame, pre-agent-filtering)
+
+**Distribution model**: Student's t fits significantly better than both Gaussian
+and Laplace for localization error. The t-distribution captures the rounded peak
+(like Gaussian) with heavier tails (like Laplace) via the df parameter:
+
+| Distribution | Peak shape | Tail weight | Fit quality |
+|-------------|------------|-------------|-------------|
+| Gaussian | Rounded | Light | Underestimates tails |
+| Laplace | Too sharp (spike) | Heavy | Overestimates peak |
+| **Student's t (df≈12-16)** | **Rounded** | **Moderate-heavy** | **Best fit** |
+
+**Localization noise** (center error):
+- Scale ≈ 13.4 px base, size-dependent: ~20px at 10px targets, ~5px at 100px targets
+- Binned data shows clear size-dependent trend despite regression returning a≈0
+- Bias: (-1.2, +0.1) px — small systematic offset
+- df ≈ 12-16 — moderately heavy tails (heavier than Gaussian, lighter than Laplace)
+
+**Size noise** (bbox width/height error):
+- Scale ≈ 18.0 px
+- df ≈ 12 — slightly heavier tails than center error
+
+**Miss rate** (see findings.md §3 for background-dependent curves):
+- Overall: 68.2% (gimbal-locked calibration)
+- Sky background: 64.3%, Ground background: 81.8% (+17.5% penalty)
+- Critical zone: 10-60px target size
+- Sigmoid parameters to be fitted per-background (ticket-010 scope)
+
+**False positive rate**: 0.49/frame (inflated by other-agent detections).
+True clutter FP rate needs re-measurement with agent filtering applied.
+
+### Comparison with Previous Assumptions
+
+| Parameter | Old (hand-tuned) | Calibrated | Change |
+|-----------|-----------------|------------|--------|
+| `bbox_std` | 7.0 px (Gaussian) | 13.4 px (Student's t, df=12-16) | +91%, heavier tails |
+| Miss rate | Not modeled | dual sigmoid (sky/ground) | **New** (ticket-010) |
+| FP rate | Not modeled | ~0.49/frame (needs filtering) | **New** (ticket-010) |
+| Bias | Not modeled | (-1.2, +0.1) px | **New** (small) |
+
+### Visual Report
+
+Three report figures generated in `bbox_noise_params_yolov11m_report/`:
+
+1. **calibration_report.png** — 2×3 grid:
+   - Top: Center X/Y error distributions (Student's t vs Gaussian vs Laplace PDFs)
+   - Bottom: Noise vs target size [20,80]px, miss rate vs target size, confidence distribution
+
+2. **calibration_report_size_dist.png** — 1×3:
+   - Width/height error distributions + error vs camera-to-target distance scatter
+
+3. **calibration_validation.png** — 1×3:
+   - Overlay histograms: synthetic samples from fitted Student's t model vs actual YOLO errors
+   - Good match for center X and Euclidean error; slight mismatch in center Y tails
+
+---
 
 ## Fitted Noise Model
 
@@ -141,15 +274,22 @@ For each agent:
 ```python
 @dataclass
 class NoiseModelParams:
-    # Localization: std = a / target_size_px + b
-    center_noise_a: float    # size-dependent term (larger for small targets)
-    center_noise_b: float    # constant floor
+    noise_distribution: str = "student_t"
+
+    # Localization: scale = a / target_size_px + b
+    # Sampled as StudentT(df, loc=bias, scale=scale)
+    center_noise_a: float     # size-dependent term
+    center_noise_b: float     # constant floor (px)
+    center_noise_df: float    # Student's t degrees of freedom
+
     size_noise_a: float
     size_noise_b: float
+    size_noise_df: float
 
     # Miss rate: p_miss = sigmoid(a * (threshold - target_size_px))
-    miss_sigmoid_a: float    # steepness of transition
-    miss_size_threshold_px: float  # size below which miss rate rises
+    # Ticket-010 extends with dual sigmoids (sky/ground)
+    miss_sigmoid_a: float
+    miss_size_threshold_px: float
 
     # False positive rate (per frame per camera)
     fp_rate: float
@@ -158,66 +298,39 @@ class NoiseModelParams:
     center_bias_x: float
     center_bias_y: float
 
-    # Metadata
-    num_frames: int
-    num_matches: int
-    num_misses: int
-    num_false_positives: int
+    # Fitting regime
+    fit_size_range: tuple     # (min_px, max_px) used for fitting
 ```
 
-### What gets fitted (replacing tickets 009 + 010)
-
-| Parameter | Manual (ticket 009/010) | Auto-calibrated |
-|-----------|------------------------|-----------------|
-| bbox_std | Fixed 7.0 px | `a/size + b` fitted from YOLO data |
-| Miss rate | Hand-modeled sigmoid | Sigmoid fitted from YOLO miss data |
-| FP rate | Hand-tuned constant | Measured directly |
-| Center bias | Not modeled | Measured directly |
-| Size noise | Fixed scalar | `a/size + b` fitted from YOLO data |
-
-### Calibration methodology
+### Calibration Methodology
 
 1. **IoU matching**: For each frame where raycaster reports a visible target
    (confidence > 0.5, size > 1px), find the best-IoU YOLO detection.
    Match if IoU ≥ 0.1. Unmatched GT = miss. Unmatched YOLO = false positive.
 
-2. **Localization noise**: Bin matched pairs by target size (log-spaced).
-   Per-bin, compute std of center error. Fit `std = a/size + b` via least squares.
+2. **Distribution fitting**: Fit Student's t via `scipy.stats.t.fit()` on the
+   center error (zero-mean) to get df. This gives a rounded peak (no Laplace
+   spike) with controllable tail heaviness.
 
-3. **Miss rate**: Bin by target size. Per-bin miss rate.
-   Fit sigmoid `p = σ(a*(threshold - size))` to find threshold and steepness.
+3. **Localization scale**: Bin matched pairs by target size (log-spaced, [20,80]px).
+   Per-bin 1D IQR/1.35 scale (average of X and Y axes). Fit `scale = a/size + b`
+   via weighted `scipy.optimize.curve_fit`.
 
-4. **FP rate**: Total false positives / total frames.
+4. **Miss rate**: Bin by target size. Per-bin miss rate.
+   Fit sigmoid `p = σ(a*(threshold - size))` via weighted `scipy.optimize.curve_fit`.
 
-5. **Bias**: Mean center error across all matches.
+5. **FP rate**: Total false positives / total frames.
 
-## Integration into env_cfg
-
-```python
-# In iris_ma_env6_test_cfg.py
-@configclass
-class CalibratedBBoxNoiseCfg:
-    enabled: bool = False
-    """Load calibrated noise params from JSON."""
-
-    params_path: str = ""
-    """Path to bbox_noise_params.json from calibration run."""
-
-    apply_miss: bool = True
-    """Apply probabilistic miss based on calibrated miss rate."""
-
-    apply_fp: bool = False
-    """Apply false positive injection (deferred — requires obs changes)."""
-```
+6. **Bias**: Median center error across all matches.
 
 ## What This Replaces
 
-| Ticket | Manual work | Option B replacement |
+| Ticket | Manual work | Detector replicator replacement |
 |--------|-------------|---------------------|
-| 009 (bbox noise model) | Collect data in PegasusSim, fit offline, update NoiseCfg | 10-min calibration script → JSON |
-| 010 §1 (miss rate) | Hand-model sigmoid | Auto-fitted from YOLO miss data |
+| 009 (bbox noise model) | Collect data in PegasusSim, fit offline, update NoiseCfg | 10-min calibration script → JSON → replicator |
+| 010 §1 (miss rate) | Hand-model sigmoid | Auto-fitted from YOLO miss data (dual sky/ground sigmoids) |
 | 010 §2 (FP model) | Hand-tune FP rate | Measured directly from YOLO |
-| 010 §3 (detection confidence in obs) | **Not replaced** — orthogonal observation design choice |
+| 010 §3 (detection confidence in obs) | **Deferred** — requires principled model from calibration data |
 | 010 §4 (curriculum gating) | **Not replaced** — still needed, but params come from JSON |
 
 **Tickets 009 and 010 scopes 1-2 are fully replaced by the calibration script.**
@@ -226,47 +339,65 @@ class CalibratedBBoxNoiseCfg:
 
 | Component | Status | Location |
 |-----------|--------|----------|
-| `YoloBatchInference` | **Done** (in calibration script) | `experiments/calibrate_bbox_noise.py` |
-| `DetectorCalibrator` | **Done** (in calibration script) | `experiments/calibrate_bbox_noise.py` |
-| `NoiseModelParams` | **Done** (in calibration script) | `experiments/calibrate_bbox_noise.py` |
-| Calibration script | **Done** — ready to test | `experiments/calibrate_bbox_noise.py` |
-| Size-dependent noise in delay system | Not started | `delay_system_v3/multi_agent_wrapper.py` |
-| Miss injection in delay system | Not started | `delay_system_v3/multi_agent_wrapper.py` |
+| `YoloBatchInference` | **Done** | `experiments/calibrate_bbox_noise.py` |
+| `DetectorCalibrator` | **Done** | `experiments/calibrate_bbox_noise.py` |
+| `NoiseModelParams` | **Done** | `experiments/calibrate_bbox_noise.py` |
+| Calibration script | **Done** — validated | `experiments/calibrate_bbox_noise.py` |
+| Visual report generation | **Done** | 3 PNG figures per run |
+| Calibration run | **Done** | `experiments/bbox_noise_params_yolov11m_report/` |
+| `detector_replicator` in `bbox_raycaster_v2` | Not started | `bbox_raycaster_v2/detector_replicator.py` |
+| Dual bbox output from raycaster | Not started | `bbox_raycaster_v2/bbox_raycaster_v2_data.py` |
 | `CalibratedBBoxNoiseCfg` in env cfg | Not started | `iris_ma_env6_test_cfg.py` |
-| JSON loading in env init | Not started | `iris_ma_env6_test.py` |
+| Dual bbox wiring in env (GT→rewards, replicated→obs) | Not started | `iris_ma_env6_test.py` |
+| Delay system `bbox_std=0` when replicator enabled | Not started | `iris_ma_env6_test.py` init |
 
-## Implementation Order
+## Implementation Order (Remaining)
 
-1. **Run calibration script** — get actual numbers, validate YOLO works in Isaac Sim env
-2. **Inspect fitted params** — sanity check: are the numbers reasonable?
-3. **Extend delay system** — size-dependent noise + miss injection (~50 lines)
-4. **Add CalibratedBBoxNoiseCfg** — config + JSON loading (~30 lines)
-5. **Wire into env** — apply calibrated noise before delay system update (~20 lines)
-6. **Validation** — compare policy performance with/without calibrated noise
+1. **Create `detector_replicator`** in `bbox_raycaster_v2` — Student's t noise, cfg, toggle (~80 lines)
+2. **Add dual bbox output** to `BBoxRayCasterV2Data` — `bboxes_replicated`, `bbox_empty_replicated` (~20 lines)
+3. **Add `CalibratedBBoxNoiseCfg`** — config + JSON loading (~30 lines)
+4. **Wire dual bboxes in env** — GT to reward path, replicated to obs path; set delay `bbox_std=0` (~30 lines)
+5. **Validation** — compare policy performance with/without calibrated noise
 
-**Total new code in training pipeline**: ~100 lines (delay system + env + cfg).
-The calibration script is standalone and already complete.
+**Total new code in training pipeline**: ~160 lines (replicator + data + cfg + env wiring).
+
+## Integration into env_cfg
+
+```python
+# In iris_ma_env6_test_cfg.py
+@configclass
+class CalibratedBBoxNoiseCfg:
+    enabled: bool = False
+    """Load calibrated noise params from JSON and apply via detector_replicator."""
+
+    params_path: str = ""
+    """Path to bbox_noise_params.json from calibration run."""
+
+    apply_bias: bool = True
+    """Apply systematic center bias from calibration."""
+```
 
 ## Risks and Mitigations
 
 | Risk | Mitigation |
 |------|-----------|
-| ultralytics not in Isaac Sim conda env | `pip install ultralytics` before first run |
+| ultralytics not in Isaac Sim conda env | `pip install ultralytics` — no conflicts with env_isaaclab |
 | YOLO detects wrong objects (not target drone) | Single-class model, filter by class_id=0 |
-| Calibration data from 32 envs not representative | Use trained policy for diverse bbox sizes; 5000 steps × 96 cameras = 480K frames |
+| 68% miss rate seems high | Expected — sim camera distances produce small targets; real deployment may differ |
 | Stale calibration after detector update | Re-run 10-min script — automated, no manual fitting |
-| Rendering 32×3 cameras is slow | Only during calibration, not training. ~17 min one-time cost |
+| Rendering 64×2 cameras is slow | Only during calibration, not training |
+| Dual bbox storage in delay system | May need dual fields in AgentStates or separate store calls — design in Stage S |
 
 ## Open Questions
 
-1. **When to re-calibrate?** After YOLO model update, after camera resolution change,
-   or after significant env changes (new target model, new zoom range). Could automate
-   as a CI step.
+1. **Should noise be size-dependent in training?** Current calibration shows ~constant
+   scale across [20,80]px (a≈0). However, binned data from findings.md clearly shows
+   ~20px noise at 10px targets, ~5px at 100px targets. Re-fit `a, b` from per-bin
+   scale values with a wider size range.
 
-2. **Should FP injection be in Phase 1?** FP requires generating spurious bboxes
-   at random image locations, which changes the observation semantics. Defer to
-   after basic noise + miss are validated.
+2. **When to re-calibrate?** After YOLO model update, after camera resolution change,
+   or after significant env changes (new target model, new zoom range).
 
-3. **Detection confidence in observations?** Ticket 010 §3 proposes adding confidence
-   to the obs vector. This is orthogonal to calibration — it's an architecture decision.
-   The calibrated miss rate already captures the main effect (small targets → more misses).
+3. **Dual bbox storage mechanism**: How does the delay system store both GT and replicated
+   bboxes? Options: (a) dual fields in AgentStates, (b) separate store calls,
+   (c) single store with a flag for which path to use. Resolve in Stage S.

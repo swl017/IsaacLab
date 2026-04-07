@@ -62,6 +62,8 @@ parser.add_argument("--agent_idx", type=int, default=0, help="Index of agent to 
 parser.add_argument("--debug", action="store_true", help="Print debug values for teleop inputs.")
 parser.add_argument("--show_camera", action="store_true", default=True, help="Show camera view with bbox overlay.")
 parser.add_argument("--no_show_camera", dest="show_camera", action="store_false", help="Disable camera view.")
+parser.add_argument("--test_gimbal_lock", action="store_true", default=False,
+                    help="Lock gimbal to target (bypass policy gimbal). Adds az/el tracking plot.")
 
 # Append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -464,6 +466,9 @@ def main():
     env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
     env_cfg.use_debug_initial_step = True
     env_cfg.enable_tiled_cameras = True
+    if args_cli.test_gimbal_lock:
+        env_cfg.debug_lock_gimbal_to_target = True
+        print("[INFO] Gimbal locked to target (debug_lock_gimbal_to_target=True)")
 
     # Create environment
     env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
@@ -591,12 +596,28 @@ def main():
     total_reward_line = None
     ax_rewards = None
 
+    # Gimbal tracking plot state (only when test_gimbal_lock)
+    gimbal_history_len = 200
+    gimbal_history = {
+        "desired_az": [], "actual_az": [],
+        "desired_el": [], "actual_el": [],
+        "az_error_deg": [], "el_error_deg": [],
+    }
+    ax_gimbal = None
+    gimbal_lines = {}
+
     if show_camera:
         plt.ion()
-        fig, (ax_camera, ax_rewards) = plt.subplots(
-            1, 2, figsize=(14, 5),
-            gridspec_kw={"width_ratios": [1.2, 1]},
-        )
+        if args_cli.test_gimbal_lock:
+            fig, (ax_camera, ax_rewards, ax_gimbal) = plt.subplots(
+                1, 3, figsize=(20, 5),
+                gridspec_kw={"width_ratios": [1.2, 1, 1]},
+            )
+        else:
+            fig, (ax_camera, ax_rewards) = plt.subplots(
+                1, 2, figsize=(14, 5),
+                gridspec_kw={"width_ratios": [1.2, 1]},
+            )
         ax_camera.set_title(f"Camera - drone_{controlled_agent_idx}")
         ax_camera.axis("off")
 
@@ -613,6 +634,22 @@ def main():
         total_reward_line, = ax_rewards.plot([], [], label="total", color="black",
                                              linewidth=1.5)
         ax_rewards.legend(fontsize=7, loc="upper left")
+
+        # Initialize gimbal tracking plot
+        if ax_gimbal is not None:
+            ax_gimbal.set_title("Gimbal Tracking (Lock-to-Target)")
+            ax_gimbal.set_xlabel("Step")
+            ax_gimbal.set_ylabel("Angle (deg)")
+            ax_gimbal.set_xlim(0, gimbal_history_len)
+            ax_gimbal.grid(True, alpha=0.3)
+            gimbal_lines["desired_az"], = ax_gimbal.plot([], [], "b-", lw=1.5, label="Desired Az")
+            gimbal_lines["actual_az"], = ax_gimbal.plot([], [], "b--", lw=1.0, alpha=0.7, label="Actual Az")
+            gimbal_lines["desired_el"], = ax_gimbal.plot([], [], "r-", lw=1.5, label="Desired El")
+            gimbal_lines["actual_el"], = ax_gimbal.plot([], [], "r--", lw=1.0, alpha=0.7, label="Actual El")
+            gimbal_lines["az_error_deg"], = ax_gimbal.plot([], [], "b:", lw=1.0, alpha=0.5, label="Az err")
+            gimbal_lines["el_error_deg"], = ax_gimbal.plot([], [], "r:", lw=1.0, alpha=0.5, label="El err")
+            ax_gimbal.legend(fontsize=6, loc="upper left")
+
         fig.tight_layout()
 
     print("[INFO] Starting teleoperation loop...")
@@ -785,6 +822,64 @@ def main():
                         ymin, ymax = min(all_vals), max(all_vals)
                         margin = max(0.01, (ymax - ymin) * 0.1)
                         ax_rewards.set_ylim(ymin - margin, ymax + margin)
+
+                # Update gimbal tracking plot
+                if ax_gimbal is not None and args_cli.test_gimbal_lock:
+                    agent_id = f"drone_{controlled_agent_idx}"
+                    robot = env._robots[agent_id]
+                    idx = controlled_agent_idx
+
+                    # Desired az/el: from drone to target
+                    los = env._target_pos_w[0] - robot.data.root_pos_w[0]
+                    desired_az = torch.atan2(los[1], los[0]).item()
+                    desired_el = torch.atan2(los[2], los[:2].norm()).item()
+
+                    # Actual az/el: from gimbal ray direction
+                    # Read current gimbal joint positions
+                    from isaaclab_tasks.direct.iris_ma6.iris_ma_env6_test import (
+                        body_to_world_gimbal_angles, YAW_JOINT_OFFSET,
+                    )
+                    yaw_joint = robot.data.joint_pos[0, env.gimbal_joint_idx[agent_id]["yaw"]].item()
+                    pitch_joint = robot.data.joint_pos[0, env.gimbal_joint_idx[agent_id]["pitch"]].item()
+                    yaw_body = yaw_joint - YAW_JOINT_OFFSET
+                    actual_az_t, actual_el_t = body_to_world_gimbal_angles(
+                        torch.tensor([yaw_body], device=env.device),
+                        torch.tensor([pitch_joint], device=env.device),
+                        robot.data.root_quat_w[0:1],
+                    )
+                    actual_az = actual_az_t.item()
+                    actual_el = actual_el_t.item()
+
+                    import math
+                    to_deg = 180.0 / math.pi
+                    az_err = (desired_az - actual_az)
+                    # Wrap to [-pi, pi]
+                    az_err = (az_err + math.pi) % (2 * math.pi) - math.pi
+                    el_err = desired_el - actual_el
+
+                    gimbal_history["desired_az"].append(desired_az * to_deg)
+                    gimbal_history["actual_az"].append(actual_az * to_deg)
+                    gimbal_history["desired_el"].append(desired_el * to_deg)
+                    gimbal_history["actual_el"].append(actual_el * to_deg)
+                    gimbal_history["az_error_deg"].append(az_err * to_deg)
+                    gimbal_history["el_error_deg"].append(el_err * to_deg)
+
+                    for k in gimbal_history:
+                        if len(gimbal_history[k]) > gimbal_history_len:
+                            gimbal_history[k].pop(0)
+
+                    n = len(gimbal_history["desired_az"])
+                    x_data = list(range(n))
+                    for k, line in gimbal_lines.items():
+                        line.set_data(x_data, gimbal_history[k])
+
+                    ax_gimbal.set_xlim(0, max(gimbal_history_len, n))
+                    all_angles = (gimbal_history["desired_az"] + gimbal_history["actual_az"]
+                                  + gimbal_history["desired_el"] + gimbal_history["actual_el"])
+                    if all_angles:
+                        ymin, ymax = min(all_angles), max(all_angles)
+                        margin = max(1.0, (ymax - ymin) * 0.1)
+                        ax_gimbal.set_ylim(ymin - margin, ymax + margin)
 
                 fig.canvas.draw()
                 fig.canvas.flush_events()

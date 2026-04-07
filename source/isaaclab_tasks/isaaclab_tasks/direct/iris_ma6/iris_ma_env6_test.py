@@ -23,7 +23,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectMARLEnv
 from isaaclab.sensors import TiledCamera
-from isaaclab.utils.math import euler_xyz_from_quat, quat_mul, quat_rotate, quat_rotate_inverse, wrap_to_pi
+from isaaclab.utils.math import euler_xyz_from_quat, quat_mul, quat_rotate, quat_rotate_inverse, wrap_to_pi, yaw_quat
 
 from .bbox_raycaster_v2 import BBoxRayCasterV2
 from .bbox_raycaster_v2.utils.projection import create_intrinsic_matrix_tensor
@@ -102,6 +102,44 @@ def gimbal_ray_direction_world(
         dim=-1,
     )
     return quat_rotate(q_body, dir_body)
+
+
+def az_el_to_gimbal_angles(
+    azimuth_world: torch.Tensor,
+    elevation_world: torch.Tensor,
+    q_body: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Convert world-frame azimuth/elevation to body-frame gimbal (yaw, roll, pitch).
+
+    Inverse of body_to_world_gimbal_angles / gimbal_ray_direction_world.
+
+    Args:
+        azimuth_world: (N,) desired world-frame azimuth (rad).
+        elevation_world: (N,) desired world-frame elevation (rad).
+        q_body: (N, 4) body orientation quaternion (wxyz).
+
+    Returns:
+        Tuple of (yaw_body, roll_body, pitch_body), each (N,) in radians.
+        roll_body is 0 (horizon-level auto-stabilization).
+    """
+    # Desired direction in world frame
+    cos_el = torch.cos(elevation_world)
+    dir_world = torch.stack(
+        [
+            cos_el * torch.cos(azimuth_world),
+            cos_el * torch.sin(azimuth_world),
+            torch.sin(elevation_world),
+        ],
+        dim=-1,
+    )
+    # Rotate into body frame
+    dir_body = quat_rotate_inverse(q_body, dir_world)
+    # Invert the gimbal_ray_direction_world mapping:
+    #   dir_body = [cos(pitch)*cos(yaw), cos(pitch)*sin(yaw), -sin(pitch)]
+    yaw_body = torch.atan2(dir_body[..., 1], dir_body[..., 0])
+    pitch_body = -torch.asin(dir_body[..., 2].clamp(-1.0, 1.0))
+    roll_body = torch.zeros_like(yaw_body)  # auto-stabilize horizon
+    return yaw_body, roll_body, pitch_body
 
 
 class IrisMA6TestEnv(DirectMARLEnv):
@@ -516,6 +554,14 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
 
+        # Offset ground plane downward so it doesn't occlude the scene
+        import omni.usd
+        from pxr import Gf, UsdGeom
+        stage = omni.usd.get_context().get_stage()
+        ground_prim = stage.GetPrimAtPath(self.cfg.terrain.prim_path + "/terrain")
+        if ground_prim.IsValid():
+            ground_prim.GetAttribute("xformOp:translate").Set(Gf.Vec3d(0.0, 0.0, -20.0))
+
         # Create shared target (RigidObject with gravity enabled)
         # RigidObject is used because iris_body.usda has no joints (propellers removed)
         self.target = RigidObject(self.cfg.target_cfg)
@@ -634,8 +680,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
             dr_pitch_off = self._dr_gimbal_offsets[:, idx, 1]
             dr_roll_off = self._dr_gimbal_offsets[:, idx, 2]
 
-            use_implicit_gimbal_control = True  # Set to False to bypass implicit control and write joint state directly
-            if use_implicit_gimbal_control:
+            if not self.cfg.debug_lock_gimbal_to_target:
                 # Apply gimbal position targets
                 # Add YAW_JOINT_OFFSET (-π/2) to yaw: controller yaw=0 means body +X
                 # (physics forward). The offset shifts the physical joint so the
@@ -665,29 +710,31 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     ],
                 )
             else:
-                # Apply gimbal joint state directly (bypass implicit actuator lag).
-                # write_joint_state_to_sim teleports joints to exact positions at
-                # the start of the physics step. We must ALSO set the actuator
-                # targets to match, otherwise the implicit PD controller (still
-                # active in PhysX) applies force during the step based on stale
-                # targets, pulling joints away from the desired position.
-                # With targets == state, PD force = k*(pos-pos) + d*(vel-vel) = 0.
-                gimbal_yaw, gimbal_roll, gimbal_pitch = gimbal_pos_targets
+                # point to region
+                los_to_target = self._target_pos_w - robot.data.root_pos_w  # (N, 3)
+                desired_az = torch.atan2(los_to_target[..., 1], los_to_target[..., 0])
+                desired_el = torch.atan2(los_to_target[..., 2], torch.linalg.norm(los_to_target[..., 0:2], dim=-1))
+                
+                # Turn desired az/el into body-frame gimbal angles using inverse of camera offset rotation
+                gimbal_yaw, gimbal_roll, gimbal_pitch = az_el_to_gimbal_angles(
+                    desired_az, desired_el, robot.data.root_quat_w
+                )
+
                 gimbal_yaw_joint = gimbal_yaw + YAW_JOINT_OFFSET + dr_yaw_off
-                gimbal_yaw_vel, gimbal_roll_vel, gimbal_pitch_vel = gimbal_vel_targets
+                # gimbal_yaw_vel, gimbal_roll_vel, gimbal_pitch_vel = gimbal_vel_targets
                 gimbal_joint_ids = [
                     self.gimbal_joint_idx[agent_id]["pitch"],
                     self.gimbal_joint_idx[agent_id]["yaw"],
                     self.gimbal_joint_idx[agent_id]["roll"],
                 ]
                 pos_cmd = torch.stack([gimbal_pitch + dr_pitch_off, gimbal_yaw_joint, gimbal_roll + dr_roll_off], dim=-1)
-                vel_cmd = torch.stack([gimbal_pitch_vel, gimbal_yaw_vel, gimbal_roll_vel], dim=-1)
-                robot.write_joint_state_to_sim(
-                    position=pos_cmd, velocity=vel_cmd, joint_ids=gimbal_joint_ids,
-                )
+                # vel_cmd = torch.stack([gimbal_pitch_vel, gimbal_yaw_vel, gimbal_roll_vel], dim=-1)
+                # robot.write_joint_state_to_sim(
+                #     position=pos_cmd, velocity=vel_cmd, joint_ids=gimbal_joint_ids,
+                # )
                 # Match actuator targets so PD applies zero force during step
                 robot.set_joint_position_target(target=pos_cmd, joint_ids=gimbal_joint_ids)
-                robot.set_joint_velocity_target(target=vel_cmd, joint_ids=gimbal_joint_ids)
+                # robot.set_joint_velocity_target(target=vel_cmd, joint_ids=gimbal_joint_ids)
 
             # Store zoom level for observations
             self.zoom_level[:, idx] = zoom_level

@@ -157,6 +157,10 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
             dynamic_friction=1.0,
             restitution=0.0,
         ),
+        visual_material=sim_utils.PreviewSurfaceCfg(
+            diffuse_color=(0.0, 0.0, 0.0),
+            opacity=0.0,
+        ),
         debug_vis=False,
     )
 
@@ -166,6 +170,10 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
 
     debug_vis: bool = True
     """Enable debug visualization."""
+
+    debug_lock_gimbal_to_target: bool = False
+    """Bypass policy gimbal commands and always point gimbal at GT target position.
+    Useful for calibration scripts and testing bbox pipeline without gimbal noise."""
 
     debug_frame_vis: bool = False
     """Enable visualization of coordinate frames for debugging."""
@@ -185,7 +193,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     (~600k, ~1.4M in native units), 0.01 converts cm->m 
     adjust further if needed to fit the environment."""
 
-    flight_scene_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    flight_scene_offset: tuple[float, float, float] = (0.0, 0.0, -20.0)
     """Translation offset (x, y, z) in meters applied after scaling, to center the scene on the environment."""
 
     # ==========================================================================
@@ -210,7 +218,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
 
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=1024,
-        env_spacing=50.0,
+        env_spacing=1000.0,
         replicate_physics=True,
     )
 
