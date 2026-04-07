@@ -2026,14 +2026,19 @@ class IrisMA6TestEnv(DirectMARLEnv):
                         self._robots[agent_id], env_ids, gimbal_joint_ids
                     )
 
-        # Target z-scale randomization for bbox size enrichment
-        # Curriculum-gated: z=1.0 at progress=0, ramp to sampled [1, max] at progress=1
+        # Target scale randomization for bbox size enrichment
+        # x=y (uniform), z >= xy, curriculum-gated: 1.0 at progress=0, full at progress=1
+        M = len(env_ids)
+        xy_lo, xy_hi = self.cfg.target_xy_scale_range
         z_lo, z_hi = self.cfg.target_z_scale_range
-        raw_z = torch.empty(len(env_ids), device=self.device).uniform_(z_lo, z_hi)
+        raw_xy = torch.empty(M, device=self.device).uniform_(xy_lo, xy_hi)
+        raw_z = torch.empty(M, device=self.device).uniform_(z_lo, z_hi)
+        raw_z = torch.max(raw_z, raw_xy)  # z >= xy
+        gated_xy = 1.0 + self.progress_dynamics * (raw_xy - 1.0)
         gated_z = 1.0 + self.progress_dynamics * (raw_z - 1.0)
-        self._dr_target_scale[env_ids, 0, 0] = 1.0  # x unchanged
-        self._dr_target_scale[env_ids, 0, 1] = 1.0  # y unchanged
-        self._dr_target_scale[env_ids, 0, 2] = gated_z  # z scaled
+        self._dr_target_scale[env_ids, 0, 0] = gated_xy  # x
+        self._dr_target_scale[env_ids, 0, 1] = gated_xy  # y = x
+        self._dr_target_scale[env_ids, 0, 2] = gated_z   # z >= xy
 
         self._sim_time[env_ids] = 0.0
 

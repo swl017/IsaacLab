@@ -142,6 +142,7 @@ def draw_bbox_overlay(
     obs_bbox_xyxy: tuple[int, int, int, int] | None = None,
     obs_bbox_empty: bool = True,
     bbox_aoi: float | None = None,
+    dr_info: dict | None = None,
 ) -> np.ndarray:
     """Draw bounding box overlay on camera image.
 
@@ -158,6 +159,7 @@ def draw_bbox_overlay(
         obs_bbox_xyxy: (x_min, y_min, x_max, y_max) delayed+noisy observation bbox.
         obs_bbox_empty: True if observed bbox is empty.
         bbox_aoi: Bbox Age-of-Information in seconds (t_current - t_capture).
+        dr_info: Domain randomization state dict (target_z_scale, intrinsic_scale, progress).
 
     Returns:
         Annotated image (H, W, 3), uint8.
@@ -223,6 +225,20 @@ def draw_bbox_overlay(
         aoi_str = f"BBox AoI: {aoi_ms:.0f}ms ({aoi_steps:.1f} steps)"
         cv2.putText(vis, aoi_str, (10, 125),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+
+    # Domain randomization state (top-right corner)
+    if dr_info is not None:
+        dr_x = w_img - 250
+        dr_y = 25
+        dr_color = (255, 180, 0)  # orange
+        cv2.putText(vis, f"DR xy-scale: {dr_info.get('target_xy_scale', 1.0):.2f}x",
+                    (dr_x, dr_y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, dr_color, 1)
+        cv2.putText(vis, f"DR z-scale: {dr_info.get('target_z_scale', 1.0):.2f}x",
+                    (dr_x, dr_y + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, dr_color, 1)
+        cv2.putText(vis, f"DR fov-scale: {dr_info.get('intrinsic_scale', 1.0):.2f}x",
+                    (dr_x, dr_y + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.45, dr_color, 1)
+        cv2.putText(vis, f"DR progress: {dr_info.get('progress', 0.0):.2f}",
+                    (dr_x, dr_y + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.45, dr_color, 1)
 
     # Legend
     has_obs = obs_bbox_xyxy is not None
@@ -446,6 +462,8 @@ def main():
 
     # Parse environment configuration
     env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
+    env_cfg.use_debug_initial_step = True
+    env_cfg.enable_tiled_cameras = True
 
     # Create environment
     env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
@@ -538,6 +556,10 @@ def main():
     # Reset environment
     env.reset()
     teleop_interface.reset()
+    print(f"[INFO] Initial DR state: xy={env._dr_target_scale[0, 0, 0].item():.2f}, "
+          f"z={env._dr_target_scale[0, 0, 2].item():.2f}, "
+          f"fov={env._dr_intrinsic_scale[0, 0].item():.2f}, "
+          f"progress={env.progress_dynamics:.2f}")
 
     # Enable delay system at full strength for realistic observation delays
     # (env starts with mode="none" due to curriculum — override for teleop)
@@ -707,6 +729,14 @@ def main():
                             int(cx + bw / 2), int(cy + bh / 2),
                         )
 
+                # Gather DR state for overlay
+                dr_info = {
+                    "target_xy_scale": env._dr_target_scale[0, 0, 0].item(),
+                    "target_z_scale": env._dr_target_scale[0, 0, 2].item(),
+                    "intrinsic_scale": env._dr_intrinsic_scale[0, controlled_agent_idx].item(),
+                    "progress": env.progress_dynamics,
+                }
+
                 vis_image = draw_bbox_overlay(
                     camera_rgb, bbox_xyxy, bbox_empty_val, controlled_agent_idx, zoom,
                     target_pixel=target_pixel,
@@ -716,6 +746,7 @@ def main():
                     obs_bbox_xyxy=obs_bbox_xyxy_val,
                     obs_bbox_empty=obs_bbox_empty_val,
                     bbox_aoi=bbox_aoi_val,
+                    dr_info=dr_info,
                 )
 
                 if image_display is None:
@@ -785,7 +816,10 @@ def main():
             if should_reset:
                 env.reset()
                 should_reset = False
-                print("[INFO] Environment reset")
+                xy_s = env._dr_target_scale[0, 0, 0].item()
+                z_s = env._dr_target_scale[0, 0, 2].item()
+                intr_s = env._dr_intrinsic_scale[0, controlled_agent_idx].item()
+                print(f"[INFO] Environment reset | DR: xy={xy_s:.2f}, z={z_s:.2f}, fov={intr_s:.2f}, progress={env.progress_dynamics:.2f}")
 
     # Cleanup
     env.close()

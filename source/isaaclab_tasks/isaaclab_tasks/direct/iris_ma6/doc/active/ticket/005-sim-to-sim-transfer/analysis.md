@@ -152,10 +152,10 @@ For sim-to-sim transfer (iris_ma6 → PegasusSimulator + PX4), the priorities ar
 | **P0.5** | Light system identification | Step response comparison: iris_ma6 vs PX4 SITL (see §2.1 below) | Ticket-007 **Done** (7/8 metrics exceed ±20%: settling +55%, SS error +50%, hover drift +58-73%) |
 | **P1** | Controller dynamics match | Tune iris_ma6 gains to match PX4 SITL response | Ticket-008 (sysid replicator — sweep gains, score against PX4 SITL data) |
 | **P1** | Temporal model calibration | Measure PegasusSim latency distributions, update delay_cfg | Not started |
-| **P2** | Bbox noise model | Run real detector → measure miss rate, FP rate, noise stats → update NoiseCfg | Not started |
-| **P2** | Burst dropout | Add correlated dropout model to delay system | Not started |
+| **P2** | Bbox noise model | Calibrate raycaster noise from YOLO detector statistics | Ticket-009 |
+| **P2** | Burst dropout | Gilbert-Elliott correlated dropout model in delay system | Ticket-011 |
 | **P3** | Calibration biases | Enable gimbal mount offset randomization, add zoom nonlinearity | Not started |
-| **P3** | False positive/negative model | Add probabilistic detection model to bbox pipeline | Not started |
+| **P3** | False positive/negative model | Probabilistic miss rate, FP, detection confidence in bbox pipeline | Ticket-010 (depends on ticket-009 for calibration data) |
 
 ### 2.1 Light System Identification (P0.5)
 

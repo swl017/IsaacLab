@@ -23,8 +23,8 @@ class ZoomControllerCfg:
     zoom_min: float = 1.0
     """Minimum zoom level (1x = no zoom)."""
 
-    zoom_max: float = 30.0
-    """Maximum zoom level (30x)."""
+    zoom_max: float = 6.0
+    """Maximum zoom level (6x)."""
 
     max_zoom_rate: float = 2.0
     """Maximum zoom change rate [1/s]. How fast zoom level can change."""

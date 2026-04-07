@@ -1,0 +1,11 @@
+{
+  "ticket_slug": "010-fp-fn-model",
+  "current_stage": "Q",
+  "last_approved_stage": "Q",
+  "next_action": "Review ticket scope.",
+  "slices_completed": [],
+  "slices_total": null,
+  "created": "2026-04-06",
+  "updated": "2026-04-06",
+  "notes": "Spawned from ticket-005 §1.4 (P3 priority). Depends on ticket-009 for calibrated parameters (can use placeholders)."
+}

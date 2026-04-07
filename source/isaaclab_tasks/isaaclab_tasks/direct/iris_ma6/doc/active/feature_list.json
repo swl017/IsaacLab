@@ -94,6 +94,13 @@
       "notes": "Real DroneController in tuner, oscillation metrics (damping/ZC/amplitude/freq), multi-speed tests (5+10 m/s at 100Hz), step response PDF plotter, TuningScoreWeights, gain coupling in search, --aero-level flag. Spawned ticket-004 (drag FF) and ticket-006 (DR integration). (2026-04-06)"
     },
     {
+      "id": "sysid-replicator",
+      "name": "PX4 SITL response matching via gain sweep",
+      "status": "done",
+      "spec": null,
+      "notes": "sysid_replicator.py: loads PX4 SITL CSVs, resamples 125→100 Hz, scores DroneController gain candidates via timeseries MSE (vel 60%/att 25%/rate 15%). 4 tests (hover, vel_5, impulse, yaw). 3-way PDF overlay (PX4-matched vs PX4 SITL vs current). Exports PX4_MATCHED_CONTROLLER_CFG. vel_5 settling matched to 0.7%. (2026-04-06)"
+    },
+    {
       "id": "domain-randomization-integration",
       "name": "DomainRandomizer wiring into env _reset_idx",
       "status": "done",

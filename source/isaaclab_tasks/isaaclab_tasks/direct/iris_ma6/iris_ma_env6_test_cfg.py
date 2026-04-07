@@ -25,7 +25,7 @@ from .bbox_raycaster_v2 import BBoxRayCasterV2Cfg
 from .cbf_safety import CBFManagerCfg
 from .controller import DroneControllerCfg
 from .controller.gain_randomization_cfg import GainRandomizationCfg
-from .controller.tuning import TUNED_CONTROLLER_CFG
+from .controller.tuning.tuning_results.px4_matched import PX4_MATCHED_CONTROLLER_CFG
 from .curriculum import CurriculumCfg
 from .domain_randomization import DomainRandomizationCfg, MountOffsetRandomizationCfg
 from .delay_system_v3 import (
@@ -267,8 +267,8 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # Controller Config
     # ==========================================================================
 
-    drone_controller: DroneControllerCfg = TUNED_CONTROLLER_CFG
-    """Drone controller configuration. Loaded from auto-tuning results."""
+    drone_controller: DroneControllerCfg = PX4_MATCHED_CONTROLLER_CFG
+    """Drone controller configuration. PX4 SITL-matched gains from sysid replicator (ticket-008)."""
 
     # ==========================================================================
     # Motion Limits
@@ -560,11 +560,19 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     Gimbal offsets are added to joint position targets.
     """
 
+    target_xy_scale_range: tuple[float, float] = (0.5, 2.5)
+    """XY-axis scale range for target visual size randomization (x=y, uniform).
+
+    Enriches bbox size variation by scaling the target's apparent width/depth.
+    Applied to the bbox raycaster via target_scale parameter (no USD/physics change).
+    Curriculum-gated by progress_dynamics like other DR parameters.
+    """
+
     target_z_scale_range: tuple[float, float] = (1.0, 3.0)
     """Z-axis scale range for target visual size randomization.
 
-    Enriches bbox size variation by scaling the target's apparent height.
-    Applied to the bbox raycaster via target_scale parameter (no USD/physics change).
+    Z-scale is clamped to be >= xy-scale so the target never appears
+    squashed vertically. Applied via bbox raycaster target_scale.
     Curriculum-gated by progress_dynamics like other DR parameters.
     """
 
@@ -572,7 +580,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # Debugging and Testing Flags
     # ==========================================================================
     use_debug_initial_step: bool = False
-    debug_initial_step: int = 150000
+    debug_initial_step: int = 400000
     """If > 0, initializes the environment at the specified training step for debugging."""
 
 

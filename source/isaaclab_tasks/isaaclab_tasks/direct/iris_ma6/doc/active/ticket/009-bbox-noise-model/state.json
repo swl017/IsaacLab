@@ -1,0 +1,11 @@
+{
+  "ticket_slug": "009-bbox-noise-model",
+  "current_stage": "Q",
+  "last_approved_stage": "Q",
+  "next_action": "Review ticket scope.",
+  "slices_completed": [],
+  "slices_total": null,
+  "created": "2026-04-06",
+  "updated": "2026-04-06",
+  "notes": "Spawned from ticket-005 §1.4 (P2 priority). Calibrate raycaster noise from YOLO statistics."
+}

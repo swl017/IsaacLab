@@ -11,11 +11,16 @@
 - The gap is too large for gain randomization (±20%) to cover — need to shift the nominal gains
 
 **Scope**:
-1. **PX4 SITL target loader**: Load the recorded PX4 SITL CSVs (from ticket-007 sysid_node output) as the target response to match
-2. **iris_ma6 response generator**: For each candidate gain set, run DroneController.step_policy() on the same step commands as sysid_node (hover, vel_step_5, vel_step_10, yaw_step) and collect timeseries (velocity, attitude, rate vs time). Reuse auto_tune.py's parallel env infrastructure.
-3. **Matching score function**: Score each gain set by how well iris_ma6's response matches PX4 SITL's response. Metrics: timeseries MSE on velocity, attitude error (actual vs setpoint), rate error (actual vs setpoint). Weight velocity tracking highest.
+1. **PX4 SITL target loader**: Load the recorded PX4 SITL CSVs (from ticket-007 sysid_node output) as the target response to match. PX4 SITL records at 125 Hz (8ms dt from PegasusSimulator physics). Resample to common timebase for comparison.
+2. **iris_ma6 response generator**: For each candidate gain set, run DroneController.step_policy() at the iris_ma6 physics rate (100 Hz, dt=0.01s, from `iris_ma_env6_test_cfg.py:sim.dt=1/100`) on the same step commands as sysid_node (hover, vel_step_5, vel_step_10, yaw_step) and collect timeseries (velocity, attitude, rate vs time). Reuse auto_tune.py's parallel env infrastructure.
+3. **Matching score function**: Score each gain set by how well iris_ma6's response matches PX4 SITL's response. Resample both to a common timebase (e.g. 100 Hz) before comparison. Metrics: timeseries MSE on velocity, attitude error (actual vs setpoint), rate error (actual vs setpoint). Weight velocity tracking highest.
 4. **Gain search**: Random search over the same parameter space as auto_tune.py (12 gains: Kp/Ki_vel, Kp_att, Kp/Ki/Kd_rate). Output: best-matching gain set + comparison plots (iris_ma6 best vs PX4 SITL overlay).
 5. **Output**: Updated `TUNED_CONTROLLER_CFG` with PX4-matched gains, comparison PDFs, mismatch table showing improvement.
+
+**Rate notes**:
+- iris_ma6 physics: 100 Hz (dt=0.01s), auto_tune.py steps DroneController at this rate
+- PX4 SITL (via PegasusSimulator): 125 Hz (dt=0.008s) as recorded by sysid_node
+- Comparison requires resampling to common timebase (interpolate PX4 SITL to 100 Hz, or both to a common grid)
 
 **Scope boundary**:
 - Do NOT modify PX4 parameters or the sysid_node

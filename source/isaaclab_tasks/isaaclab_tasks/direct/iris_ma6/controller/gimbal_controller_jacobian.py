@@ -164,15 +164,28 @@ class GimbalController:
         azimuth_rate = gimbal_yaw_rate_cmd * self.cfg.max_gimbal_rate
         elevation_rate = gimbal_pitch_rate_cmd * self.cfg.max_gimbal_rate
 
-        self._azimuth_world = self._azimuth_world + azimuth_rate * dt
-        self._elevation_world = self._elevation_world + elevation_rate * dt
+        azimuth_candidate = self._azimuth_world + azimuth_rate * dt
+        elevation_candidate = self._elevation_world + elevation_rate * dt
 
-        self._azimuth_world = torch.atan2(
-            torch.sin(self._azimuth_world), torch.cos(self._azimuth_world)
+        azimuth_candidate = torch.atan2(
+            torch.sin(azimuth_candidate), torch.cos(azimuth_candidate)
         )
-        self._elevation_world = torch.clamp(
-            self._elevation_world, self._pitch_limits[0], self._pitch_limits[1]
+        elevation_candidate = torch.clamp(
+            elevation_candidate, self._pitch_limits[0], self._pitch_limits[1]
         )
+
+        # Anti-windup: reject azimuth/elevation updates that would exceed
+        # body-frame joint limits.  This prevents the world-frame setpoint
+        # from diverging past what the gimbal can physically reach.
+        yaw_body, pitch_body = self._world_to_body_angles(
+            azimuth_candidate, elevation_candidate, q_body
+        )
+        yaw_in_limits = (yaw_body >= self._yaw_limits[0]) & (yaw_body <= self._yaw_limits[1])
+        pitch_in_limits = (pitch_body >= self._pitch_limits[0]) & (pitch_body <= self._pitch_limits[1])
+        in_limits = yaw_in_limits & pitch_in_limits
+
+        self._azimuth_world = torch.where(in_limits, azimuth_candidate, self._azimuth_world)
+        self._elevation_world = torch.where(in_limits, elevation_candidate, self._elevation_world)
 
         # -- 3. Compute desired camera quaternion in body frame --
         q_desired_body = self._compute_desired_camera_quat(
@@ -183,9 +196,9 @@ class GimbalController:
         q_current = self._gimbal_joints_to_quat(actual_yaw, actual_roll, actual_pitch)
 
         # -- 5. Quaternion error -> body-frame angular error --
-        #   q_err = q_desired^{-1} * q_current
+        #   q_err = q_current * q_desired^{-1}  (error axis in body frame)
         #   att_error = 2 * sign(w) * [x, y, z]  (body-frame rotation error)
-        q_err = quat_mul(quat_inv(q_desired_body), q_current)
+        q_err = quat_mul(q_current, quat_inv(q_desired_body))
         sign_w = torch.sign(q_err[:, 0]).unsqueeze(-1)
         sign_w = torch.where(sign_w == 0, torch.ones_like(sign_w), sign_w)
         att_error = 2.0 * sign_w * q_err[:, 1:4]  # (N, 3) in body frame

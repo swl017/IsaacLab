@@ -1,0 +1,11 @@
+{
+  "ticket_slug": "008-sysid-replicator",
+  "current_stage": "done",
+  "last_approved_stage": "Y",
+  "next_action": "Ticket complete. PX4-matched gains available in tuning_results/px4_matched.py.",
+  "slices_completed": ["slice_1", "slice_2", "slice_3", "slice_4"],
+  "slices_total": 4,
+  "created": "2026-04-06",
+  "updated": "2026-04-06",
+  "notes": "1024-candidate sweep: best score 0.016 (2.2x better than baseline 0.035). vel_5 settling matched to 0.7%. vel_10 excluded (no drag feedforward). Kp_vel_xy lowered 2.04→1.51 to match PX4 sluggish transient."
+}

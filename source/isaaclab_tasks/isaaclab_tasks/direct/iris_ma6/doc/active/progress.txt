@@ -660,3 +660,58 @@ QRISPY state saved for 007-light-sysid at Stage Y (implementation pending)
 Next:
 - Implement Slice 1: sysid_node core state machine + velocity tests
 - Requires isaac_sim.tmuxp.yaml + MAVROS running for testing
+
+----------------------------------------
+2026-04-06 — Ticket-008: Sysid replicator (QRISPY complete)
+----------------------------------------
+Done:
+- Full QRISPY flow (Q→R→I→S→P→Y, 4 slices) for ticket-008 (sysid replicator)
+- New script: controller/tuning/sysid_replicator.py
+  - PX4TargetLoader: loads PX4 SITL CSVs, reorders quat xyzw→wxyz,
+    resamples ~125 Hz → 100 Hz, computes cascade errors (att_error, rate_error)
+  - SysidReplicator: parallel gain sweep with DroneController, scored against
+    PX4 SITL timeseries via weighted MSE (vel 60% / att 25% / rate 15%)
+  - 4 tests matched: hover_drift, vel_step_5, vel_impulse_recovery, yaw_step
+  - vel_step_10 excluded (iris_ma6 lacks drag feedforward — plant-level gap)
+  - 3-way comparison plots: PX4-matched (blue) vs PX4 SITL (red) vs current gains (green)
+  - Exports PX4_MATCHED_CONTROLLER_CFG to tuning_results/px4_matched.py
+- Copied PX4 SITL CSVs (5 tests) to controller/sysid_output/
+- Run script: controller/tuning/run_sysid_replicator.bash
+- Updated tuning_results/__init__.py to re-export PX4_MATCHED_CONTROLLER_CFG
+- 1024-candidate sweep results (aero-level 3):
+  - Best score: 0.016 (baseline current gains: 0.035, 2.2x improvement)
+  - vel_5_settling_time: 2.75s iris_ma6 vs 2.73s PX4 SITL (0.7% — PASS)
+  - Kp_vel_xy lowered 2.04→1.51 (-26%), Ki_vel_xy 1.30→0.90 (-31%)
+  - Key insight: slower velocity loop matches PX4's sluggish transient
+
+Design decisions:
+- auto_tune.py has top-level argparse/AppLauncher, not import-safe.
+  ParameterSet and generate_random_params mirrored in sysid_replicator.py.
+- Attitude/rate error rows use norm (scalar) in 3-way plots for readability
+- Baseline run reuses existing replicator env (can't create second sim context)
+
+Next:
+- Training run with PX4-matched gains to evaluate policy performance
+- Consider drag feedforward (ticket-004) to close vel_10 gap
+- Yaw settling mismatch (0.44s vs 0.15s) may need separate investigation
+
+----------------------------------------
+2026-04-07 — Ticket-026: Gimbal controller frame bugs (quat error + windup)
+----------------------------------------
+Done:
+- Fixed quaternion error frame mismatch in gimbal_controller_jacobian.py:
+  - Was: q_err = q_desired^{-1} * q_current (error axis in camera frame)
+  - Now: q_err = q_current * q_desired^{-1} (error axis in body frame)
+  - Root cause of LOS divergence at gimbal yaw ~pi/2: omega_cmd (camera frame)
+    subtracted from omega_body (body frame) mixed x/y components
+- Fixed world-frame azimuth integrator windup:
+  - _azimuth_world integrated past gimbal joint limits with no anti-windup
+  - Added body-frame limit check: candidate azimuth/elevation converted to
+    body-frame yaw/pitch; update rejected if outside joint limits
+  - Prevents unclamped velocity targets from driving joints past limits
+- Both bugs verified fixed via teleop (teleop_iris_ma6.py --num_envs 4 --enable_camera)
+- Files modified: controller/gimbal_controller_jacobian.py
+
+Next:
+- Training run to verify stable LOS tracking at all gimbal yaw angles
+- Monitor bbox metrics during aggressive maneuvers (high yaw rate commands)
