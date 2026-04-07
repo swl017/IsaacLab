@@ -35,8 +35,17 @@ Example:
 from .bbox_raycaster_v2 import BBoxRayCasterV2
 from .bbox_raycaster_v2_cfg import BBoxRayCasterV2Cfg
 from .bbox_raycaster_v2_data import BBoxRayCasterV2Data
+from .detector_replicator import DetectorReplicator, DetectorReplicatorCfg, NoiseModelParams
 from . import utils
 
-__all__ = ["BBoxRayCasterV2", "BBoxRayCasterV2Cfg", "BBoxRayCasterV2Data", "utils"]
+__all__ = [
+    "BBoxRayCasterV2",
+    "BBoxRayCasterV2Cfg",
+    "BBoxRayCasterV2Data",
+    "DetectorReplicator",
+    "DetectorReplicatorCfg",
+    "NoiseModelParams",
+    "utils",
+]
 
 __version__ = "2.0.0"

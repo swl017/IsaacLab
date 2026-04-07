@@ -21,7 +21,7 @@ from isaaclab.utils import configclass
 
 from isaaclab_assets import IRIS_GIMBAL3_CFG
 
-from .bbox_raycaster_v2 import BBoxRayCasterV2Cfg
+from .bbox_raycaster_v2 import BBoxRayCasterV2Cfg, DetectorReplicatorCfg
 from .cbf_safety import CBFManagerCfg
 from .controller import DroneControllerCfg
 from .controller.gain_randomization_cfg import GainRandomizationCfg
@@ -364,6 +364,18 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     """Enable delay system for observations. Set False for ground-truth testing."""
 
     # ==========================================================================
+    # Detector Replicator Configuration
+    # ==========================================================================
+
+    calibrated_bbox_noise: DetectorReplicatorCfg = DetectorReplicatorCfg()
+    """Calibrated bbox noise from offline YOLO calibration.
+
+    When enabled, applies Student's t noise with size-dependent scale to raycaster
+    bboxes, replicating real detector error profile. Replaces delay system bbox_std.
+    See experiments/calibrate_bbox_noise.py for calibration workflow.
+    """
+
+    # ==========================================================================
     # Triangulation Configuration
     # ==========================================================================
 
@@ -488,7 +500,11 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # Initial States Configuration
     # ==========================================================================
 
-    initial_states: InitialStatesCfg = InitialStatesCfg()
+    initial_states: InitialStatesCfg = InitialStatesCfg(
+        agent_velocity_scale_max=0.0,
+        target_velocity_scale_max=0.0,
+        max_yaw_rate=0.0,
+    )
     """Initial states configuration for reset randomization.
 
     Controls curriculum-driven randomization of:
@@ -603,6 +619,14 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
 
         # Build delay system from key parameters
         self.delay_system = create_delay_cfg_from_params(self.delay_system_params)
+
+        # When detector replicator is enabled, zero out delay system bbox noise
+        # (calibrated noise is applied upstream by the replicator)
+        if self.calibrated_bbox_noise.enabled:
+            from .delay_system_v3 import DistributionCfg
+            self.delay_system.noise.bbox_std = DistributionCfg(
+                type="constant", value=0.0, min_value=0.0
+            )
 
         # Update observation space:
         # Ego: 30D (pos, vel, rpy, ang_vel_b, lin_acc_b, gimbal_yaw_body, gimbal_pitch_body,

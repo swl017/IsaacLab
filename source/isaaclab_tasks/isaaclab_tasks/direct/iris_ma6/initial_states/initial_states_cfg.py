@@ -194,7 +194,7 @@ class InitialStatesCfg:
     zoom_min: float = 1.0
     """Minimum zoom level."""
 
-    zoom_max: float = 10.0
+    zoom_max: float = 6.0
     """Maximum zoom level."""
 
     zoom_initial_min: float = 1.0

@@ -359,6 +359,10 @@ class IrisMA6TestEnv(DirectMARLEnv):
             agent_ids=self.cfg.possible_agents,
         )
 
+        # Setup detector replicator for calibrated bbox noise
+        if self.cfg.calibrated_bbox_noise.enabled:
+            self.bbox_raycaster_v2.setup_detector_replicator(self.cfg.calibrated_bbox_noise)
+
         # Initialize CBF safety manager for collision avoidance
         self.cbf_manager = CBFManager(
             cfg=self.cfg.cbf_safety,
@@ -504,6 +508,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self.progress_agent_velocity = 0.0
         self.progress_delay = 0.0
         self.progress_dynamics = 0.0
+        self._curriculum_noise_scale = 0.0
 
         # Initialize target controller for physics-based target movement
         if self.cfg.enable_target_controller:
@@ -888,6 +893,12 @@ class IrisMA6TestEnv(DirectMARLEnv):
             target_scale=self._dr_target_scale,
         )
 
+        # Apply calibrated detector noise to produce replicated bboxes
+        if self.cfg.calibrated_bbox_noise.enabled:
+            self.bbox_raycaster_v2.apply_detector_replicator(
+                noise_scale=self._curriculum_noise_scale
+            )
+
         # Apply temporal smoothing to bbox_confidence to prevent oscillation
         # EMA: smoothed = alpha * new + (1 - alpha) * old
         raw_confidence = self.bbox_raycaster_v2.data.bbox_confidence  # (N, C, T)
@@ -978,8 +989,20 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 gt_data.timestamp_motion = self._sim_time.clone()
                 gt_data.timestamp_detection = self._sim_time.clone()
 
+                # Pass replicated (noisy) bboxes if detector replicator is active
+                replicated_bboxes = None
+                if (
+                    self.cfg.calibrated_bbox_noise.enabled
+                    and self.bbox_raycaster_v2.data.bboxes_replicated is not None
+                ):
+                    replicated_bboxes = self.bbox_raycaster_v2.data.bboxes_replicated[
+                        :, idx, :, :
+                    ]
+
                 # Update delay system
-                self._delay_system.update_ground_truth(agent_id, gt_states)
+                self._delay_system.update_ground_truth(
+                    agent_id, gt_states, replicated_bboxes=replicated_bboxes
+                )
 
         # Cache data for debug visualization callback
         self._vis_camera_poses = camera_poses
@@ -1224,7 +1247,8 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 self._delay_system.set_delay_mode("random", progress=self.progress_delay)
 
             # Ramp noise (phase 2: 80k-100k)
-            self._delay_system.set_noise_scale(curr.get_noise_progress(current_step))
+            self._curriculum_noise_scale = curr.get_noise_progress(current_step)
+            self._delay_system.set_noise_scale(self._curriculum_noise_scale)
 
             # Ramp dropout (phase 5: 160k-200k)
             dropout_progress = curr.get_dropout_progress(current_step)

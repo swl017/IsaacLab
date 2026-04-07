@@ -1,6 +1,6 @@
 {
   "project": "iris_ma6",
-  "last_updated": "2026-04-06",
+  "last_updated": "2026-04-08",
   "features": [
     {
       "id": "controller",
@@ -35,7 +35,14 @@
       "name": "GPU-accelerated 2D bbox extraction with occlusion",
       "status": "done",
       "spec": "doc/bbox_spec.md",
-      "notes": "Warp raycasting for occlusion detection"
+      "notes": "Warp raycasting for occlusion detection. Detector replicator submodule added: Student's t noise with size-dependent scale, dual output (GT→rewards, replicated→obs). (2026-04-08)"
+    },
+    {
+      "id": "detector-replicator",
+      "name": "Calibrated detector noise replicator (YOLO sim-to-real)",
+      "status": "in_progress",
+      "spec": null,
+      "notes": "Ticket-009: Student's t noise with calibrated params from offline YOLO calibration. Architecture in bbox_raycaster_v2/detector_replicator.py. Dual bbox output wired to delay system. Teleop validation showed uniform noise is exaggerated — needs confidence-conditioned noise (ticket-010). Noise model refit pending. (2026-04-08)"
     },
     {
       "id": "initial-states",

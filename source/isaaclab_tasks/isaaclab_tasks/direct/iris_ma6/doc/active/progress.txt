@@ -715,3 +715,37 @@ Done:
 Next:
 - Training run to verify stable LOS tracking at all gimbal yaw angles
 - Monitor bbox metrics during aggressive maneuvers (high yaw rate commands)
+
+----------------------------------------
+2026-04-08 — Ticket-009: Calibrated bbox noise (detector replicator)
+----------------------------------------
+Done:
+- Full QRISPY workflow (Q→R→I→S→P→Y) for ticket-009
+- Created bbox_raycaster_v2/detector_replicator.py: NoiseModelParams (JSON loader),
+  DetectorReplicatorCfg, DetectorReplicator with Student's t noise (size-dependent scale)
+- Added dual bbox output to BBoxRayCasterV2Data: bboxes_replicated, bboxes_xyxy_replicated,
+  bbox_empty_replicated (GT for rewards, replicated for observations)
+- Added apply_detector_replicator() and setup_detector_replicator() to BBoxRayCasterV2
+- Extended field_storage.store() and UnifiedDelaySystem.store() with noisy_data parameter
+  for pre-noised data passthrough (bypasses Gaussian noise generation)
+- Extended multi_agent_wrapper.update_ground_truth() with replicated_bboxes parameter
+- Added CalibratedBBoxNoiseCfg (DetectorReplicatorCfg) to iris_ma_env6_test_cfg.py;
+  __post_init__ zeros delay system bbox_std when replicator enabled
+- Wired in iris_ma_env6_test.py: init replicator, apply after raycaster update,
+  pass replicated bboxes to delay system, curriculum noise_scale gating
+- Added YOLO live overlay to teleop_iris_ma6.py: --yolo_model arg (optional),
+  cyan YOLO bboxes + magenta replicated bboxes + auto-loads calibration JSON
+- Teleop validation finding: uniform noise is exaggerated — YOLO has bimodal behavior
+  (precise-or-missed). Documented in ticket-010 findings §9 as confidence-conditioned
+  noise requirement.
+- Updated bbox_raycaster_v2/CONTEXT.md with replicator, dual outputs, calling contract
+- Files: bbox_raycaster_v2/{detector_replicator.py (NEW), __init__.py, bbox_raycaster_v2.py,
+  bbox_raycaster_v2_data.py, CONTEXT.md}, delay_system_v3/{field_storage.py,
+  delay_system_v3.py, multi_agent_wrapper.py}, iris_ma_env6_test.py, iris_ma_env6_test_cfg.py,
+  tests/teleop_iris_ma6.py, doc/active/ticket/010-fp-fn-model/findings.md
+
+Next:
+- Ticket-010: confidence-conditioned noise (§9 in findings.md) — noise_scale=f(confidence)
+- Ticket-010: miss rate injection (FN) with sky/ground conditioning via raycast_mesh
+- Refit noise model: bin by (size, confidence), wider size range, fix a≈0 regression artifact
+- Histogram validation (ticket-009 acceptance #6) after model refit

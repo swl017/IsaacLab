@@ -208,7 +208,12 @@ class MultiAgentDelaySystemV3:
         self._t_current = t.to(self._device)
         self._delay_system.set_time(t)
 
-    def update_ground_truth(self, agent_id: AgentID, states: AgentStates):
+    def update_ground_truth(
+        self,
+        agent_id: AgentID,
+        states: AgentStates,
+        replicated_bboxes: Optional[torch.Tensor] = None,
+    ):
         """Update ground truth state for an agent.
 
         This stores the current state and pushes it through the delay system.
@@ -216,6 +221,10 @@ class MultiAgentDelaySystemV3:
         Args:
             agent_id: Agent identifier.
             states: Current ground truth state.
+            replicated_bboxes: Pre-noised bboxes from detector replicator, shape (N, T, 4).
+                When provided, stored as the noisy version of bboxes_2d instead of
+                applying Gaussian noise. The clean GT bboxes from states.data.bboxes_2d
+                are still stored as raw (for reward path).
         """
         # Store ground truth
         self._gt_states[agent_id] = states
@@ -323,14 +332,22 @@ class MultiAgentDelaySystemV3:
         )
 
         # Detection fields (bbox)
-        # Flatten bbox for storage: (N, T, 4) -> (N, T*4)
-        # Actually, we keep it as (N, T, 4) since we registered it with that shape
-        bbox_noise = self._get_noise_std("bbox", agent_id)
-        self._delay_system.store(
-            prefix + "bboxes_2d",
-            data.bboxes_2d,
-            noise_std=bbox_noise,  # Pixel noise on bbox center/dimensions
-        )
+        # When replicated_bboxes is provided (from detector replicator), store it
+        # as the noisy version directly — skip Gaussian noise generation.
+        if replicated_bboxes is not None:
+            self._delay_system.store(
+                prefix + "bboxes_2d",
+                data.bboxes_2d,
+                noise_std=0.0,
+                noisy_data=replicated_bboxes,
+            )
+        else:
+            bbox_noise = self._get_noise_std("bbox", agent_id)
+            self._delay_system.store(
+                prefix + "bboxes_2d",
+                data.bboxes_2d,
+                noise_std=bbox_noise,
+            )
 
     def _get_noise_std(
         self, noise_type: str, agent_id: Optional[AgentID] = None

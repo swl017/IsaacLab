@@ -83,6 +83,27 @@ class BBoxRayCasterV2Data:
     bbox_confidence: torch.Tensor = None
     """Confidence for each bbox. Shape is (N, C, T)."""
 
+    # Detector-replicated bounding boxes (from DetectorReplicator)
+    bboxes_replicated: torch.Tensor = None
+    """2D bounding boxes with calibrated detector noise applied.
+
+    Shape is (N, C, T, 4), where the last dimension contains (center_x, center_y, width, height) in pixels.
+    Populated by apply_detector_replicator(). None until replicator is applied.
+    """
+
+    bboxes_xyxy_replicated: torch.Tensor = None
+    """Replicated bounding boxes in xyxy format.
+
+    Shape is (N, C, T, 4), where the last dimension contains (x_min, y_min, x_max, y_max) in pixels.
+    """
+
+    bbox_empty_replicated: torch.Tensor = None
+    """Empty mask for replicated bboxes, including detector misses (FN).
+
+    Shape is (N, C, T). True = empty. For ticket-009, same as bbox_empty.
+    Ticket-010 will extend with miss injection.
+    """
+
     occluded: torch.Tensor = None
     """Inter-target occlusion mask. Shape is (N, C, T)."""
 

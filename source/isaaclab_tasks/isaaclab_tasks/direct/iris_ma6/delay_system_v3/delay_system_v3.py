@@ -170,6 +170,7 @@ class UnifiedDelaySystem:
         data: torch.Tensor,
         timestamp: Optional[torch.Tensor] = None,
         noise_std: float = 0.0,
+        noisy_data: Optional[torch.Tensor] = None,
     ):
         """Store field data with optional noise.
 
@@ -178,6 +179,10 @@ class UnifiedDelaySystem:
             data: Data tensor of shape (num_envs, ...).
             timestamp: Optional capture timestamp. If None, uses current time.
             noise_std: Standard deviation for observation noise.
+                Ignored when noisy_data is provided.
+            noisy_data: Pre-noised data tensor (same shape as data). When provided,
+                stored directly as the noisy version instead of generating Gaussian
+                noise. Used by the detector replicator to pass calibrated noise.
         """
         # Auto-register if not already registered
         if field_name not in self._field_shapes:
@@ -185,7 +190,7 @@ class UnifiedDelaySystem:
             self.register_field(field_name, data_shape)
 
         # Store in field storage
-        self._storage.store(field_name, data, timestamp, noise_std)
+        self._storage.store(field_name, data, timestamp, noise_std, noisy_data=noisy_data)
 
     def get_delayed(
         self,

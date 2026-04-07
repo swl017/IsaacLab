@@ -268,7 +268,9 @@ confidence += normal(0, 0.1)  # noise
 
 | Item | Status | Notes |
 |------|--------|-------|
-| Localization noise → delay system | Not started | Apply Student's t(df=4.9, scale=13.4) in `_get_noise_std()` |
+| Localization noise → detector replicator | **Done** (ticket-009) | `detector_replicator.py` in `bbox_raycaster_v2/`, Student's t noise, dual bbox output |
+| **Confidence-conditioned noise** | Not started | **Critical** — see §9. Current uniform noise is exaggerated; must condition on YOLO confidence |
+| Refit noise model from per-bin + per-confidence data | Not started | Current `a≈0` is a fitting artifact; binned data shows clear size dependence. Also bin by confidence. |
 | Sky/ground conditional miss → replicator | Not started | `raycast_mesh` query + dual sigmoid |
 | FP injection | Deferred | Need agent-filtered FP statistics first |
 | Detection confidence in obs | Deferred | Orthogonal to calibration — architecture decision |
@@ -309,3 +311,72 @@ This is:
 - **Exact**: no approximation via angles
 - **Cheap**: one ray per frame per camera, GPU-accelerated
 - **Available during training**: the `static_mesh` is already loaded by `BBoxRayCasterV2`
+
+---
+
+## 9. Confidence-Conditioned Noise (from ticket-009 teleop validation, 2026-04-08)
+
+### Observation
+
+Real-time comparison of YOLO output vs detector replicator in the teleop script
+revealed that the ticket-009 uniform Student's t noise model is **exaggerated**.
+
+YOLO has two distinct regimes:
+- **Clean detections** (large target, uncluttered background, high confidence):
+  nearly zero localization error — bbox tracks GT precisely
+- **Marginal detections** (small target, ground clutter, low confidence):
+  high error — but these are also frames that frequently become FN misses
+
+The calibrated 10.5-13.4 px scale is the *average* across both regimes. Applying
+it uniformly means clean detections (the majority when tracking is good) get far
+too much noise.
+
+### Why this matters
+
+Excessive uniform noise teaches the policy to **distrust bbox observations**. At
+deployment, YOLO provides precise bboxes when it detects — the policy should exploit
+that precision. Training with inflated noise causes:
+- Underweighting of bbox information in favor of inertial/velocity cues
+- Unnecessarily conservative tracking behavior
+- Failure to exploit the precision real YOLO actually provides
+
+This is a harmful **domain shift**, not helpful domain randomization. Reality is
+bimodal (precise or missed); the current model is unimodal (always noisy).
+
+### Required fix: confidence-conditioned noise
+
+The calibration data already has YOLO confidence per matched detection. The fix:
+
+```python
+# noise_scale varies with confidence
+noise_scale = f(confidence)  # f(high_conf) ≈ 0, f(low_conf) ≈ large
+
+# Possible forms:
+noise_scale = a / confidence + b          # hyperbolic
+noise_scale = a * (1 - confidence) + b    # linear
+noise_scale = a * exp(-k * confidence)    # exponential decay
+```
+
+This naturally produces:
+- **Precise bboxes** when YOLO is confident (high conf → low noise)
+- **Noisy bboxes** when YOLO is marginal (low conf → high noise)
+- **FN misses** when below confidence threshold (no detection at all)
+
+Together with miss rate (§5b), this captures the full bimodal detector behavior.
+
+### Implementation path
+
+1. Re-bin calibration data by (target_size, confidence) — 2D histogram
+2. Fit `noise_scale(size, confidence)` — likely confidence is the dominant variable
+3. Extend `DetectorReplicator.apply()` to accept confidence tensor (from raycaster's
+   `bbox_confidence` or a synthetic confidence model)
+4. The `DetectorReplicator` already has the architecture for this — just needs the
+   confidence tensor as an additional input and the per-confidence scale model
+
+### Architecture note
+
+The `detector_replicator` from ticket-009 is already in place at
+`bbox_raycaster_v2/detector_replicator.py`. It handles dual bbox output
+(GT → rewards, replicated → obs) and curriculum-gated noise. Ticket-010
+extends it with miss injection and confidence conditioning — no new modules
+needed, just additional parameters and logic in `DetectorReplicator.apply()`.

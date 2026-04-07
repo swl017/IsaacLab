@@ -1,11 +1,11 @@
 {
   "ticket_slug": "009-bbox-noise-model",
-  "current_stage": "P",
-  "last_approved_stage": "S",
-  "next_action": "Engineer reviews implementation plan (p_plan.md), then -> Start Y",
-  "slices_completed": [],
+  "current_stage": "Y",
+  "last_approved_stage": "P",
+  "next_action": "Engineer reviews all 3 slices (code diff), then -> Start PR or request changes",
+  "slices_completed": ["slice_1", "slice_2", "slice_3"],
   "slices_total": 3,
   "created": "2026-04-06",
   "updated": "2026-04-08",
-  "notes": "Spawned from ticket-005 §1.4. Calibration done (Phase 1). Phase 2: detector_replicator in bbox_raycaster_v2. 3 slices: core+data, plumbing, env integration."
+  "notes": "All 3 slices implemented. Detector replicator in bbox_raycaster_v2, field_storage noisy_data passthrough, env wiring with curriculum noise_scale."
 }

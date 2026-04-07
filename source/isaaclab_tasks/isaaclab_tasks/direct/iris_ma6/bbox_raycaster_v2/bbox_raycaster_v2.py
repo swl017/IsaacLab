@@ -20,6 +20,7 @@ from isaaclab.utils.warp import convert_to_warp_mesh
 import isaaclab.utils.math as math_utils
 
 from .bbox_raycaster_v2_data import BBoxRayCasterV2Data
+from .detector_replicator import DetectorReplicator, DetectorReplicatorCfg
 from .utils import (
     batch_project_to_image_plane,
     batch_transform_points,
@@ -993,6 +994,50 @@ class BBoxRayCasterV2:
             epsilon=self.cfg.projection_epsilon
         )
         self._validate_detections()
+
+    def setup_detector_replicator(self, cfg: DetectorReplicatorCfg):
+        """Create and configure a detector replicator for calibrated noise.
+
+        Args:
+            cfg: Detector replicator configuration (enabled, params_path, apply_bias).
+        """
+        self._detector_replicator = DetectorReplicator(cfg=cfg, device=self.device)
+
+    def apply_detector_replicator(self, noise_scale: float = 1.0):
+        """Apply calibrated detector noise to produce replicated bboxes.
+
+        Must be called after update(). Writes results to:
+        - data.bboxes_replicated (N, C, T, 4) xywh
+        - data.bboxes_xyxy_replicated (N, C, T, 4) xyxy
+        - data.bbox_empty_replicated (N, C, T)
+
+        Args:
+            noise_scale: Curriculum scale [0, 1]. 0 = no noise, 1 = full calibrated noise.
+        """
+        if not hasattr(self, "_detector_replicator") or self._detector_replicator is None:
+            # No replicator configured — replicated = GT
+            self._data.bboxes_replicated = self._data.bboxes.clone()
+            self._data.bboxes_xyxy_replicated = self._data.bboxes_xyxy.clone()
+            self._data.bbox_empty_replicated = self._data.bbox_empty.clone()
+            return
+
+        bboxes_rep, empty_rep = self._detector_replicator.apply(
+            bboxes_xywh=self._data.bboxes,
+            bbox_empty=self._data.bbox_empty,
+            noise_scale=noise_scale,
+        )
+
+        self._data.bboxes_replicated = bboxes_rep
+        self._data.bbox_empty_replicated = empty_rep
+        self._data.bboxes_xyxy_replicated = self._xywh_to_xyxy(bboxes_rep)
+
+    @staticmethod
+    def _xywh_to_xyxy(bboxes_xywh: torch.Tensor) -> torch.Tensor:
+        """Convert (cx, cy, w, h) to (x_min, y_min, x_max, y_max)."""
+        cx, cy, w, h = bboxes_xywh[..., 0], bboxes_xywh[..., 1], bboxes_xywh[..., 2], bboxes_xywh[..., 3]
+        half_w = w / 2.0
+        half_h = h / 2.0
+        return torch.stack([cx - half_w, cy - half_h, cx + half_w, cy + half_h], dim=-1)
 
     def get_normalized_bboxes(self, bboxes_xywh: torch.Tensor) -> torch.Tensor:
         """Get normalized bounding boxes (x_center, y_center, width, height) in [0,1].

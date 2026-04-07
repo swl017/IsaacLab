@@ -64,6 +64,11 @@ parser.add_argument("--show_camera", action="store_true", default=True, help="Sh
 parser.add_argument("--no_show_camera", dest="show_camera", action="store_false", help="Disable camera view.")
 parser.add_argument("--test_gimbal_lock", action="store_true", default=False,
                     help="Lock gimbal to target (bypass policy gimbal). Adds az/el tracking plot.")
+parser.add_argument("--yolo_model", type=str,
+                    default="/home/usrg/mas/src/ultralytics_ros/models/yolov11m-drone.pt",
+                    help="Path to YOLO model weights for live detection overlay. Set '' to disable.")
+parser.add_argument("--yolo_conf", type=float, default=0.25,
+                    help="YOLO confidence threshold.")
 
 # Append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -145,6 +150,9 @@ def draw_bbox_overlay(
     obs_bbox_empty: bool = True,
     bbox_aoi: float | None = None,
     dr_info: dict | None = None,
+    yolo_bboxes: list | None = None,
+    replicated_bbox_xyxy: tuple[int, int, int, int] | None = None,
+    replicated_bbox_empty: bool = True,
 ) -> np.ndarray:
     """Draw bounding box overlay on camera image.
 
@@ -162,6 +170,9 @@ def draw_bbox_overlay(
         obs_bbox_empty: True if observed bbox is empty.
         bbox_aoi: Bbox Age-of-Information in seconds (t_current - t_capture).
         dr_info: Domain randomization state dict (target_z_scale, intrinsic_scale, progress).
+        yolo_bboxes: List of (x1, y1, x2, y2, conf, cls) from YOLO detector.
+        replicated_bbox_xyxy: (x_min, y_min, x_max, y_max) from detector replicator (calibrated noise).
+        replicated_bbox_empty: True if replicated bbox is empty.
 
     Returns:
         Annotated image (H, W, 3), uint8.
@@ -242,11 +253,42 @@ def draw_bbox_overlay(
         cv2.putText(vis, f"DR progress: {dr_info.get('progress', 0.0):.2f}",
                     (dr_x, dr_y + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.45, dr_color, 1)
 
+    # YOLO detections (cyan, solid)
+    if yolo_bboxes is not None:
+        for det in yolo_bboxes:
+            yx1, yy1, yx2, yy2, conf = int(det[0]), int(det[1]), int(det[2]), int(det[3]), det[4]
+            yolo_color = (0, 255, 255)  # cyan
+            cv2.rectangle(vis, (yx1, yy1), (yx2, yy2), yolo_color, 2)
+            cv2.putText(vis, f"YOLO {conf:.2f}", (yx1, max(yy1 - 5, 15)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, yolo_color, 1)
+
+    # Replicated bbox from detector replicator (magenta, dotted)
+    if replicated_bbox_xyxy is not None and not replicated_bbox_empty:
+        rx1, ry1, rx2, ry2 = replicated_bbox_xyxy
+        rep_color = (255, 0, 255)  # magenta
+        for start, end in [
+            ((rx1, ry1), (rx2, ry1)),
+            ((rx2, ry1), (rx2, ry2)),
+            ((rx2, ry2), (rx1, ry2)),
+            ((rx1, ry2), (rx1, ry1)),
+        ]:
+            _draw_dashed_line(vis, start, end, rep_color, thickness=2, dash_len=5)
+
     # Legend
     has_obs = obs_bbox_xyxy is not None
-    legend = "green=GT  yellow=observed  blue=camera" if has_obs else "green=raycaster  blue=camera"
+    has_yolo = yolo_bboxes is not None and len(yolo_bboxes) > 0
+    has_rep = replicated_bbox_xyxy is not None and not replicated_bbox_empty
+    parts = ["green=GT"]
+    if has_obs:
+        parts.append("yellow=observed")
+    if has_rep:
+        parts.append("magenta=replicated")
+    if has_yolo:
+        parts.append("cyan=YOLO")
+    parts.append("blue=camera")
+    legend = "  ".join(parts)
     cv2.putText(vis, legend, (10, h_img - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
 
     return vis
 
@@ -470,6 +512,21 @@ def main():
         env_cfg.debug_lock_gimbal_to_target = True
         print("[INFO] Gimbal locked to target (debug_lock_gimbal_to_target=True)")
 
+    # Configure detector replicator with calibration JSON if available
+    import os
+    _default_calib = os.path.join(
+        os.path.dirname(__file__), "..",
+        "experiments", "bbox_noise_params_yolov11m_report-5",
+        "bbox_noise_params_yolov11m.json",
+    )
+    if env_cfg.calibrated_bbox_noise.enabled and not env_cfg.calibrated_bbox_noise.params_path:
+        if os.path.isfile(_default_calib):
+            env_cfg.calibrated_bbox_noise.params_path = _default_calib
+            print(f"[INFO] Detector replicator enabled with: {os.path.basename(_default_calib)}")
+        else:
+            env_cfg.calibrated_bbox_noise.enabled = False
+            print("[INFO] Detector replicator disabled — no calibration JSON found")
+
     # Create environment
     env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
 
@@ -566,11 +623,35 @@ def main():
           f"fov={env._dr_intrinsic_scale[0, 0].item():.2f}, "
           f"progress={env.progress_dynamics:.2f}")
 
+    # Load YOLO model for live detection overlay (optional)
+    yolo_model = None
+    if args_cli.yolo_model and args_cli.yolo_model.strip():
+        import os
+        if os.path.isfile(args_cli.yolo_model):
+            try:
+                from ultralytics import YOLO
+                yolo_model = YOLO(args_cli.yolo_model)
+                print(f"[INFO] YOLO model loaded: {args_cli.yolo_model}")
+                print(f"[INFO] YOLO confidence threshold: {args_cli.yolo_conf}")
+            except ImportError:
+                print("[WARN] ultralytics not installed — YOLO overlay disabled")
+                print("[WARN] Install with: pip install ultralytics")
+            except Exception as e:
+                print(f"[WARN] Failed to load YOLO model: {e}")
+        else:
+            print(f"[INFO] YOLO model not found at {args_cli.yolo_model} — YOLO overlay disabled")
+
     # Enable delay system at full strength for realistic observation delays
     # (env starts with mode="none" due to curriculum — override for teleop)
     if env._delay_system is not None:
         env._delay_system.set_delay_mode("fixed", progress=1.0)
-        print("[INFO] Delay system enabled (fixed mode, progress=1.0)")
+        env._delay_system.set_noise_scale(1.0)
+        print("[INFO] Delay system enabled (fixed mode, progress=1.0, noise_scale=1.0)")
+
+    # Override curriculum noise_scale for teleop (curriculum starts at 0)
+    if env.cfg.calibrated_bbox_noise.enabled:
+        env._curriculum_noise_scale = 1.0
+        print("[INFO] Detector replicator noise_scale=1.0 (full calibrated noise)")
 
     # Camera visualization setup
     show_camera = args_cli.show_camera
@@ -774,6 +855,52 @@ def main():
                     "progress": env.progress_dynamics,
                 }
 
+                # Run YOLO inference on camera image
+                yolo_bboxes = None
+                if yolo_model is not None:
+                    try:
+                        # YOLO expects BGR; camera_rgb is RGB
+                        yolo_input = cv2.cvtColor(camera_rgb, cv2.COLOR_RGB2BGR)
+                        results = yolo_model.predict(
+                            source=yolo_input,
+                            conf=args_cli.yolo_conf,
+                            verbose=False,
+                            device="cuda:0",
+                        )
+                        if results and len(results[0].boxes) > 0:
+                            boxes = results[0].boxes
+                            yolo_bboxes = []
+                            for i in range(len(boxes)):
+                                x1, y1, x2, y2 = boxes.xyxy[i].cpu().numpy()
+                                conf = boxes.conf[i].item()
+                                cls = int(boxes.cls[i].item())
+                                yolo_bboxes.append((x1, y1, x2, y2, conf, cls))
+                    except Exception as e:
+                        if step_count % 100 == 0:
+                            print(f"[WARN] YOLO inference error: {e}")
+
+                # Get replicated (calibrated noise) bbox if detector replicator is active
+                replicated_bbox_xyxy_val = None
+                replicated_bbox_empty_val = True
+                if (
+                    env.cfg.calibrated_bbox_noise.enabled
+                    and env.bbox_raycaster_v2.data.bboxes_xyxy_replicated is not None
+                ):
+                    rep_xyxy_t = env.bbox_raycaster_v2.data.bboxes_xyxy_replicated[
+                        0, controlled_agent_idx, 0, :
+                    ]
+                    rep_empty = env.bbox_raycaster_v2.data.bbox_empty_replicated[
+                        0, controlled_agent_idx, 0
+                    ].item()
+                    replicated_bbox_empty_val = bool(rep_empty)
+                    if not replicated_bbox_empty_val:
+                        replicated_bbox_xyxy_val = (
+                            int(rep_xyxy_t[0].item()),
+                            int(rep_xyxy_t[1].item()),
+                            int(rep_xyxy_t[2].item()),
+                            int(rep_xyxy_t[3].item()),
+                        )
+
                 vis_image = draw_bbox_overlay(
                     camera_rgb, bbox_xyxy, bbox_empty_val, controlled_agent_idx, zoom,
                     target_pixel=target_pixel,
@@ -784,6 +911,9 @@ def main():
                     obs_bbox_empty=obs_bbox_empty_val,
                     bbox_aoi=bbox_aoi_val,
                     dr_info=dr_info,
+                    yolo_bboxes=yolo_bboxes,
+                    replicated_bbox_xyxy=replicated_bbox_xyxy_val,
+                    replicated_bbox_empty=replicated_bbox_empty_val,
                 )
 
                 if image_display is None:

@@ -81,14 +81,19 @@ class FieldStorage:
         data: torch.Tensor,
         timestamp: Optional[torch.Tensor] = None,
         noise_std: float = 0.0,
+        noisy_data: Optional[torch.Tensor] = None,
     ):
         """Store field data with optional noise injection.
 
         Args:
             field_name: Name of the field (e.g., "agent_0.body_position_w").
-            data: Data tensor of shape (num_envs, ...).
+            data: Data tensor of shape (num_envs, ...). Stored as ground truth.
             timestamp: Optional capture timestamp. If None, uses current time.
             noise_std: Standard deviation for Gaussian noise. 0 = no noise.
+                Ignored when noisy_data is provided.
+            noisy_data: Pre-noised data tensor (same shape as data). When provided,
+                stored directly as the noisy version instead of generating Gaussian
+                noise. Used by the detector replicator to pass calibrated noise.
         """
         # Ensure data is on correct device
         data = data.to(self._device)
@@ -97,7 +102,9 @@ class FieldStorage:
         self._raw[field_name] = data.clone()
 
         # Store noisy version
-        if noise_std > 0:
+        if noisy_data is not None:
+            self._noisy[field_name] = noisy_data.to(self._device).clone()
+        elif noise_std > 0:
             noise = torch.randn_like(data) * noise_std
             self._noisy[field_name] = data + noise
         else:
