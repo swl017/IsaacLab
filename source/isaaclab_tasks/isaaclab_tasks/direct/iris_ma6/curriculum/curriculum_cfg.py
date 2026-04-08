@@ -45,7 +45,7 @@ class CurriculumCfg:
     # Global Curriculum Settings
     # ==========================================================================
 
-    all_end_step: int = 180000
+    all_end_step: int = 400000
     """Step at which all curriculum factors reach their final values."""
 
     # ==========================================================================
