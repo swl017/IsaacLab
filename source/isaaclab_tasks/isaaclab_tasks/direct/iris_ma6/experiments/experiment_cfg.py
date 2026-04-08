@@ -53,7 +53,7 @@ class ExperimentCfg:
     num_envs: int = 4096
     """Number of parallel environments."""
 
-    total_timesteps: int = 200000
+    total_timesteps: int = 400000
     """Total training timesteps."""
 
     # Evaluation params

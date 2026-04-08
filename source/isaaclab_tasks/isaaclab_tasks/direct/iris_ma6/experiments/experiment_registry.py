@@ -535,6 +535,29 @@ for _speed, _min_speed in [(3, 2), (5, 3), (10, 5)]:
 
 
 # ===========================================================================
+# A9: Bbox Size Reward Ablation (ticket-014)
+# ===========================================================================
+# Does the policy discover optimal zoom from miss rate + triangulation signals
+# alone, without the heuristic bbox_size_reward (target area = 20% of image)?
+
+register_experiment(ExperimentCfg(
+    name="a9_bbox_size_baseline",
+    description="Bbox size reward enabled (default scale=60, baseline)",
+    group="A9",
+    env_overrides={},  # Default: bbox_size_reward_scale=60.0
+))
+
+register_experiment(ExperimentCfg(
+    name="a9_no_bbox_size",
+    description="Bbox size reward disabled — policy learns zoom from miss rate + triangulation",
+    group="A9",
+    env_overrides={
+        "bbox_size_reward_scale": 0.0,
+    },
+))
+
+
+# ===========================================================================
 # A8: Action Smoothness (Weight Tuning)
 # ===========================================================================
 

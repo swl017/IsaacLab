@@ -21,6 +21,7 @@ Usage:
 
 import argparse
 import re
+import subprocess
 import sys
 import os
 
@@ -177,6 +178,18 @@ def _log_dir_from_checkpoint(checkpoint_path):
     return os.path.dirname(os.path.dirname(ckpt_abs))
 
 
+def _git_short_hash(length: int = 10) -> str:
+    """Return the short git commit hash of HEAD, or 'unknown' if git is unavailable."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", f"--short={length}", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
 def _setup_logging(agent_cfg, exp_name, seed):
     """Configure logging directories."""
     log_root_path = os.path.join(
@@ -185,7 +198,8 @@ def _setup_logging(agent_cfg, exp_name, seed):
     )
     log_root_path = os.path.abspath(log_root_path)
 
-    log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + f"_{exp_name}_seed{seed}"
+    git_hash = _git_short_hash()
+    log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + f"_{exp_name}_{git_hash}_seed{seed}"
     agent_cfg["agent"]["experiment"]["directory"] = log_root_path
     agent_cfg["agent"]["experiment"]["experiment_name"] = log_dir
 
