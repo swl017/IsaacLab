@@ -16,7 +16,7 @@ import isaacsim.core.utils.prims as prim_utils
 import isaaclab.sim as sim_utils
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.terrains.trimesh.utils import make_plane
-from isaaclab.utils.warp import convert_to_warp_mesh
+from isaaclab.utils.warp import convert_to_warp_mesh, raycast_mesh
 import isaaclab.utils.math as math_utils
 
 from .bbox_raycaster_v2_data import BBoxRayCasterV2Data
@@ -1002,9 +1002,15 @@ class BBoxRayCasterV2:
             cfg: Detector replicator configuration (enabled, params_path, apply_bias).
         """
         self._detector_replicator = DetectorReplicator(cfg=cfg, device=self.device)
+        self._last_replicator_time = -1.0
 
-    def apply_detector_replicator(self, noise_scale: float = 1.0):
-        """Apply calibrated detector noise to produce replicated bboxes.
+    def apply_detector_replicator(
+        self,
+        noise_scale: float = 1.0,
+        fp_fn_scale: float = 1.0,
+        sim_time: float | None = None,
+    ):
+        """Apply calibrated noise, miss rate, and FP injection.
 
         Must be called after update(). Writes results to:
         - data.bboxes_replicated (N, C, T, 4) xywh
@@ -1012,8 +1018,19 @@ class BBoxRayCasterV2:
         - data.bbox_empty_replicated (N, C, T)
 
         Args:
-            noise_scale: Curriculum scale [0, 1]. 0 = no noise, 1 = full calibrated noise.
+            noise_scale: Curriculum scale [0, 1] for localization noise.
+            fp_fn_scale: Curriculum scale [0, 1] for miss rate and FP.
+            sim_time: Current sim time for idempotency guard. If None, no guard.
         """
+        # Idempotency guard: skip if already applied this sim step
+        if sim_time is not None:
+            t = sim_time.item() if isinstance(sim_time, torch.Tensor) and sim_time.numel() == 1 else (
+                sim_time[0].item() if isinstance(sim_time, torch.Tensor) else sim_time
+            )
+            if abs(t - self._last_replicator_time) < 1e-6:
+                return
+            self._last_replicator_time = t
+
         if not hasattr(self, "_detector_replicator") or self._detector_replicator is None:
             # No replicator configured — replicated = GT
             self._data.bboxes_replicated = self._data.bboxes.clone()
@@ -1021,15 +1038,74 @@ class BBoxRayCasterV2:
             self._data.bbox_empty_replicated = self._data.bbox_empty.clone()
             return
 
+        # Classify background (sky vs ground) for miss rate conditioning
+        bg_is_ground = self._classify_background() if fp_fn_scale > 0.0 else None
+        self._data.bg_is_ground = bg_is_ground
+
         bboxes_rep, empty_rep = self._detector_replicator.apply(
             bboxes_xywh=self._data.bboxes,
             bbox_empty=self._data.bbox_empty,
             noise_scale=noise_scale,
+            fp_fn_scale=fp_fn_scale,
+            bg_is_ground=bg_is_ground,
+            image_shapes=self._data.image_shapes,
         )
 
         self._data.bboxes_replicated = bboxes_rep
         self._data.bbox_empty_replicated = empty_rep
         self._data.bboxes_xyxy_replicated = self._xywh_to_xyxy(bboxes_rep)
+
+    def _classify_background(self) -> torch.Tensor:
+        """Classify background as sky or ground for each camera-target pair.
+
+        Uses two criteria (OR):
+        1. Raycast from target beyond: if it hits the static mesh → ground.
+        2. Ray direction check: if the ray points downward (negative Z),
+           the background is terrain/ground even if the mesh raycast misses
+           (e.g. flight scene mountains not in the warp mesh).
+
+        Returns:
+            bg_is_ground: (N, C, T) bool. True = ground background.
+        """
+        N, C, T = self._data.bbox_empty.shape
+
+        # Ray from camera through target
+        camera_pos = self._data.camera_pos_w  # (N, C, 3)
+        target_pos = self._data.target_pos_w  # (N, T, 3)
+
+        # Expand for all camera-target pairs: (N, C, T, 3)
+        cam_expanded = camera_pos.unsqueeze(2).expand(N, C, T, 3)
+        tgt_expanded = target_pos.unsqueeze(1).expand(N, C, T, 3)
+
+        # Direction: camera → target → beyond (we want what's behind the target)
+        ray_dir = tgt_expanded - cam_expanded
+        ray_dir = ray_dir / (ray_dir.norm(dim=-1, keepdim=True) + 1e-8)
+
+        # Criterion 2: ray points downward → ground background
+        # (catches mountains/terrain not in static_mesh)
+        ray_points_down = ray_dir[..., 2] < 0.0  # (N, C, T)
+
+        if self.static_mesh is None:
+            return ray_points_down
+
+        # Criterion 1: raycast against static mesh
+        batch_size = N * C * T
+        ray_starts_flat = tgt_expanded.reshape(batch_size, 3)
+        ray_dirs_flat = ray_dir.reshape(batch_size, 3)
+
+        ray_hits_flat, _, _, _ = raycast_mesh(
+            ray_starts_flat,
+            ray_dirs_flat,
+            mesh=self.static_mesh,
+            max_dist=self.cfg.max_distance,
+            return_distance=False,
+            return_normal=False,
+        )
+
+        ray_hits = ray_hits_flat.view(N, C, T, 3)
+        mesh_hit = ~(torch.isinf(ray_hits).any(dim=-1) | torch.isnan(ray_hits).any(dim=-1))
+
+        return mesh_hit | ray_points_down  # (N, C, T) True = ground
 
     @staticmethod
     def _xywh_to_xyxy(bboxes_xywh: torch.Tensor) -> torch.Tensor:

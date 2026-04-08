@@ -509,6 +509,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self.progress_delay = 0.0
         self.progress_dynamics = 0.0
         self._curriculum_noise_scale = 0.0
+        self._curriculum_fp_fn_scale = 0.0
 
         # Initialize target controller for physics-based target movement
         if self.cfg.enable_target_controller:
@@ -893,10 +894,12 @@ class IrisMA6TestEnv(DirectMARLEnv):
             target_scale=self._dr_target_scale,
         )
 
-        # Apply calibrated detector noise to produce replicated bboxes
+        # Apply calibrated detector noise, miss rate, and FP injection
         if self.cfg.calibrated_bbox_noise.enabled:
             self.bbox_raycaster_v2.apply_detector_replicator(
-                noise_scale=self._curriculum_noise_scale
+                noise_scale=self._curriculum_noise_scale,
+                fp_fn_scale=self._curriculum_fp_fn_scale,
+                sim_time=self._sim_time,
             )
 
         # Apply temporal smoothing to bbox_confidence to prevent oscillation
@@ -1249,6 +1252,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
             # Ramp noise (phase 2: 80k-100k)
             self._curriculum_noise_scale = curr.get_noise_progress(current_step)
             self._delay_system.set_noise_scale(self._curriculum_noise_scale)
+
+            # Ramp FP/FN (co-located with noise by default)
+            self._curriculum_fp_fn_scale = curr.get_fp_fn_progress(current_step)
 
             # Ramp dropout (phase 5: 160k-200k)
             dropout_progress = curr.get_dropout_progress(current_step)
@@ -2097,19 +2103,19 @@ class IrisMA6TestEnv(DirectMARLEnv):
                         self._robots[agent_id], env_ids, gimbal_joint_ids
                     )
 
-        # Target scale randomization for bbox size enrichment
-        # x=y (uniform), z >= xy, curriculum-gated: 1.0 at progress=0, full at progress=1
-        M = len(env_ids)
-        xy_lo, xy_hi = self.cfg.target_xy_scale_range
-        z_lo, z_hi = self.cfg.target_z_scale_range
-        raw_xy = torch.empty(M, device=self.device).uniform_(xy_lo, xy_hi)
-        raw_z = torch.empty(M, device=self.device).uniform_(z_lo, z_hi)
-        raw_z = torch.max(raw_z, raw_xy)  # z >= xy
-        gated_xy = 1.0 + self.progress_dynamics * (raw_xy - 1.0)
-        gated_z = 1.0 + self.progress_dynamics * (raw_z - 1.0)
-        self._dr_target_scale[env_ids, 0, 0] = gated_xy  # x
-        self._dr_target_scale[env_ids, 0, 1] = gated_xy  # y = x
-        self._dr_target_scale[env_ids, 0, 2] = gated_z   # z >= xy
+            # Target scale randomization for bbox size enrichment
+            # x=y (uniform), z >= xy, curriculum-gated: 1.0 at progress=0, full at progress=1
+            M = len(env_ids)
+            xy_lo, xy_hi = self.cfg.target_xy_scale_range
+            z_lo, z_hi = self.cfg.target_z_scale_range
+            raw_xy = torch.empty(M, device=self.device).uniform_(xy_lo, xy_hi)
+            raw_z = torch.empty(M, device=self.device).uniform_(z_lo, z_hi)
+            raw_z = torch.max(raw_z, raw_xy)  # z >= xy
+            gated_xy = 1.0 + self.progress_dynamics * (raw_xy - 1.0)
+            gated_z = 1.0 + self.progress_dynamics * (raw_z - 1.0)
+            self._dr_target_scale[env_ids, 0, 0] = gated_xy  # x
+            self._dr_target_scale[env_ids, 0, 1] = gated_xy  # y = x
+            self._dr_target_scale[env_ids, 0, 2] = gated_z   # z >= xy
 
         self._sim_time[env_ids] = 0.0
 

@@ -169,7 +169,7 @@ class MotorDynamics:
         return omega_cmd
 
     def reset(self, env_ids: torch.Tensor | None = None):
-        """Reset motor states.
+        """Reset motor states to idle.
 
         Args:
             env_ids: Environment indices to reset. If None, reset all.
@@ -178,6 +178,28 @@ class MotorDynamics:
             self._omega.fill_(self._omega_min)
         else:
             self._omega[env_ids] = self._omega_min
+
+    def reset_to_hover(
+        self, mass: float, gravity: float, env_ids: torch.Tensor | None = None
+    ):
+        """Reset motor speeds to hover equilibrium.
+
+        Initializes omega = sqrt(mass * g / (4 * k_f)) so the drone produces
+        exactly hover thrust on the first sim step, avoiding a gravity dip.
+
+        Args:
+            mass: Drone mass [kg].
+            gravity: Gravity magnitude [m/s^2].
+            env_ids: Environment indices to reset. If None, reset all.
+        """
+        import math
+
+        omega_hover = math.sqrt(mass * gravity / (4.0 * self.cfg.k_f))
+        omega_hover = max(self._omega_min, min(omega_hover, self._omega_max))
+        if env_ids is None:
+            self._omega.fill_(omega_hover)
+        else:
+            self._omega[env_ids] = omega_hover
 
     def set_tau_motor(self, tau_motor: torch.Tensor | float):
         """Set motor time constant (for randomization).

@@ -1,0 +1,11 @@
+{
+  "ticket_slug": "013-calibration-refit",
+  "current_stage": "CLOSED",
+  "last_approved_stage": "CLOSED",
+  "next_action": "None — ticket closed.",
+  "slices_completed": ["correlated-wh-noise", "dual-sigmoid-fitting", "calibration-rerun", "background-classification-fix", "teleop-validation"],
+  "slices_total": 5,
+  "created": "2026-04-08",
+  "updated": "2026-04-09",
+  "notes": "All 5 acceptance criteria met. Calibration refitted with policy checkpoint, FP rate 0.21→0.035, dual sky/ground miss sigmoids, correlated w/h noise, bg classification fixed for mountains."
+}

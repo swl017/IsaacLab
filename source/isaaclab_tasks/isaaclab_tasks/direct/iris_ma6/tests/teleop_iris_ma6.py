@@ -153,6 +153,7 @@ def draw_bbox_overlay(
     yolo_bboxes: list | None = None,
     replicated_bbox_xyxy: tuple[int, int, int, int] | None = None,
     replicated_bbox_empty: bool = True,
+    bg_is_ground: bool | None = None,
 ) -> np.ndarray:
     """Draw bounding box overlay on camera image.
 
@@ -220,10 +221,18 @@ def draw_bbox_overlay(
     cv2.putText(vis, f"Agent {agent_idx} | Zoom: {zoom_level:.2f}x", (10, 50),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
-    # Distance to target
+    # Distance to target + background type
     if distance_m is not None:
-        cv2.putText(vis, f"{distance_m:.1f} m", (10, 75),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        dist_str = f"{distance_m:.1f} m"
+        if bg_is_ground is not None:
+            bg_label = "GND" if bg_is_ground else "SKY"
+            bg_color = (139, 90, 43) if bg_is_ground else (135, 206, 250)  # brown / light blue
+            dist_str += f"  [{bg_label}]"
+            cv2.putText(vis, dist_str, (10, 75),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, bg_color, 1)
+        else:
+            cv2.putText(vis, dist_str, (10, 75),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
     # Simulation time and realtime factor
     if sim_time is not None and realtime_factor is not None:
@@ -511,21 +520,11 @@ def main():
     if args_cli.test_gimbal_lock:
         env_cfg.debug_lock_gimbal_to_target = True
         print("[INFO] Gimbal locked to target (debug_lock_gimbal_to_target=True)")
+    env_cfg.use_debug_initial_step = True
+    env_cfg.debug_initial_step = 400000
 
-    # Configure detector replicator with calibration JSON if available
-    import os
-    _default_calib = os.path.join(
-        os.path.dirname(__file__), "..",
-        "experiments", "bbox_noise_params_yolov11m_report-5",
-        "bbox_noise_params_yolov11m.json",
-    )
-    if env_cfg.calibrated_bbox_noise.enabled and not env_cfg.calibrated_bbox_noise.params_path:
-        if os.path.isfile(_default_calib):
-            env_cfg.calibrated_bbox_noise.params_path = _default_calib
-            print(f"[INFO] Detector replicator enabled with: {os.path.basename(_default_calib)}")
-        else:
-            env_cfg.calibrated_bbox_noise.enabled = False
-            print("[INFO] Detector replicator disabled — no calibration JSON found")
+    # Detector replicator uses hardcoded defaults from NoiseModelParams dataclass
+    # (calibrated from experiments/calibrate_detector.py, no JSON loading needed)
 
     # Create environment
     env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
@@ -643,15 +642,15 @@ def main():
 
     # Enable delay system at full strength for realistic observation delays
     # (env starts with mode="none" due to curriculum — override for teleop)
-    if env._delay_system is not None:
-        env._delay_system.set_delay_mode("fixed", progress=1.0)
-        env._delay_system.set_noise_scale(1.0)
-        print("[INFO] Delay system enabled (fixed mode, progress=1.0, noise_scale=1.0)")
+    # if env._delay_system is not None:
+    #     env._delay_system.set_delay_mode("fixed", progress=1.0)
+    #     env._delay_system.set_noise_scale(1.0)
+    #     print("[INFO] Delay system enabled (fixed mode, progress=1.0, noise_scale=1.0)")
 
     # Override curriculum noise_scale for teleop (curriculum starts at 0)
     if env.cfg.calibrated_bbox_noise.enabled:
         env._curriculum_noise_scale = 1.0
-        print("[INFO] Detector replicator noise_scale=1.0 (full calibrated noise)")
+        env._curriculum_fp_fn_scale = 1.0
 
     # Camera visualization setup
     show_camera = args_cli.show_camera
@@ -879,9 +878,10 @@ def main():
                         if step_count % 100 == 0:
                             print(f"[WARN] YOLO inference error: {e}")
 
-                # Get replicated (calibrated noise) bbox if detector replicator is active
+                # Get replicated (calibrated noise) bbox and background classification
                 replicated_bbox_xyxy_val = None
                 replicated_bbox_empty_val = True
+                bg_is_ground_val = None
                 if (
                     env.cfg.calibrated_bbox_noise.enabled
                     and env.bbox_raycaster_v2.data.bboxes_xyxy_replicated is not None
@@ -900,6 +900,12 @@ def main():
                             int(rep_xyxy_t[2].item()),
                             int(rep_xyxy_t[3].item()),
                         )
+                    if env.bbox_raycaster_v2.data.bg_is_ground is not None:
+                        bg_is_ground_val = bool(
+                            env.bbox_raycaster_v2.data.bg_is_ground[
+                                0, controlled_agent_idx, 0
+                            ].item()
+                        )
 
                 vis_image = draw_bbox_overlay(
                     camera_rgb, bbox_xyxy, bbox_empty_val, controlled_agent_idx, zoom,
@@ -914,6 +920,7 @@ def main():
                     yolo_bboxes=yolo_bboxes,
                     replicated_bbox_xyxy=replicated_bbox_xyxy_val,
                     replicated_bbox_empty=replicated_bbox_empty_val,
+                    bg_is_ground=bg_is_ground_val,
                 )
 
                 if image_display is None:

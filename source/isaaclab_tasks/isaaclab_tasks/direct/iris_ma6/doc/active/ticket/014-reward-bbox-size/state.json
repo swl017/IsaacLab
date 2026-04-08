@@ -1,0 +1,11 @@
+{
+  "ticket_slug": "014-reward-bbox-size",
+  "current_stage": "Q",
+  "last_approved_stage": "Q",
+  "next_action": "Review ticket scope.",
+  "slices_completed": [],
+  "slices_total": null,
+  "created": "2026-04-08",
+  "updated": "2026-04-08",
+  "notes": "Spawned from ticket-010 teleop testing. Blocked on ticket-013 (need correct replicator params before ablation is meaningful)."
+}

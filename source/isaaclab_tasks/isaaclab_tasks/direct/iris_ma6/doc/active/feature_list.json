@@ -1,6 +1,6 @@
 {
   "project": "iris_ma6",
-  "last_updated": "2026-04-08",
+  "last_updated": "2026-04-09",
   "features": [
     {
       "id": "controller",
@@ -39,10 +39,10 @@
     },
     {
       "id": "detector-replicator",
-      "name": "Calibrated detector noise replicator (YOLO sim-to-real)",
-      "status": "in_progress",
+      "name": "Calibrated detector noise + FP/FN replicator (YOLO sim-to-real)",
+      "status": "done",
       "spec": null,
-      "notes": "Ticket-009: Student's t noise with calibrated params from offline YOLO calibration. Architecture in bbox_raycaster_v2/detector_replicator.py. Dual bbox output wired to delay system. Teleop validation showed uniform noise is exaggerated — needs confidence-conditioned noise (ticket-010). Noise model refit pending. (2026-04-08)"
+      "notes": "Ticket-009: Student's t noise. Ticket-010: FP/FN injection. Ticket-013 (closed): calibration refit — correlated w/h noise, dual sky/ground miss sigmoids, agent FP filtering (0.21→0.035), policy-driven calibration, background classification with ray direction check. Params baked into NoiseModelParams defaults. Manual tuning: 2x ground sigmoid, 0.1x sky, size cutoff floors. (2026-04-09)"
     },
     {
       "id": "initial-states",
@@ -77,7 +77,7 @@
       "name": "Curriculum learning system",
       "status": "in_progress",
       "spec": "doc/curriculum_spec.md",
-      "notes": "Redesigned: decoupled agent velocity ramp (0-40k, 3→10m/s) from target motion (40k-120k). Observability phases pushed after target mastery (noise 120k, delay 140k+). Anti-forgetting: tau_zoom/max_lin_vel wide-range randomization. Backlog: per-agent noise/dropout/max_lin_vel (2026-03-24)"
+      "notes": "Redesigned: decoupled agent velocity ramp (0-40k, 3→10m/s) from target motion (40k-120k). Observability phases pushed after target mastery (noise 120k, delay 140k+). Added FP/FN phase (fp_fn_start/end_step, default co-located with noise 100k-120k). Anti-forgetting: tau_zoom/max_lin_vel wide-range randomization. Backlog: per-agent noise/dropout/max_lin_vel (2026-04-08)"
     },
     {
       "id": "env-integration",

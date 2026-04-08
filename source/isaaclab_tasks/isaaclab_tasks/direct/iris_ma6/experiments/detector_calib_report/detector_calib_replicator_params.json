@@ -1,0 +1,32 @@
+{
+  "noise_distribution": "student_t",
+  "center_noise_a": 3.32094098449108e-08,
+  "center_noise_b": 0.9903605416833782,
+  "center_noise_df": 3.14485116541261,
+  "size_noise_a": 52.57566163317716,
+  "size_noise_b": 1.0712118528882864,
+  "size_noise_df": 7.728841290635469,
+  "center_bias_x": -0.236480712890625,
+  "center_bias_y": -0.71551513671875,
+  "fit_size_range": [
+    20.0,
+    80.0
+  ],
+  "num_matches": 6956,
+  "miss_sigmoid_a_sky": 0.024751038174665885,
+  "miss_size_threshold_sky": 1.2214178344000452e-12,
+  "miss_sigmoid_a_gnd": 0.013808565449099726,
+  "miss_size_threshold_gnd": 45.56221154006872,
+  "miss_sigmoid_a": 0.02047826820512022,
+  "miss_size_threshold_px": 1.8884202227332354,
+  "fp_rate": 0.03469779341221618,
+  "fp_size_range": [
+    10.0,
+    60.0
+  ],
+  "num_frames": 12508,
+  "num_misses": 5552,
+  "num_false_positives": 434,
+  "yolo_model": "/home/usrg/mas/src/ultralytics_ros/models/yolov11m-drone.pt",
+  "yolo_conf_threshold": 0.25
+}

@@ -301,7 +301,7 @@ class DroneController:
         Args:
             env_ids: Environment indices to reset. If None, reset all.
         """
-        self._motor.reset(env_ids)
+        self._motor.reset_to_hover(self.mass, self.gravity, env_ids)
         self._rate.reset(env_ids)
         self._attitude.reset(env_ids)
         self._velocity.reset(env_ids)

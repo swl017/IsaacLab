@@ -104,6 +104,13 @@ class BBoxRayCasterV2Data:
     Ticket-010 will extend with miss injection.
     """
 
+    bg_is_ground: torch.Tensor = None
+    """Background classification for each camera-target pair.
+
+    Shape is (N, C, T). True = ground background, False = sky.
+    Populated by apply_detector_replicator() when fp_fn_scale > 0.
+    """
+
     occluded: torch.Tensor = None
     """Inter-target occlusion mask. Shape is (N, C, T)."""
 

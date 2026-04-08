@@ -86,6 +86,16 @@ class CurriculumCfg:
     noise_end_step: int = 120000
     """Step when noise reaches maximum realistic values."""
 
+    fp_fn_start_step: int = 100000
+    """Step to start introducing false positives and miss rate.
+
+    Co-located with noise phase by default — FP/FN is another form
+    of observation degradation the policy should learn alongside noise.
+    """
+
+    fp_fn_end_step: int = 120000
+    """Step when FP/FN rates reach calibrated values."""
+
     # ==========================================================================
     # Phase 3: Fixed Delay (Deterministic Latency)
     # ==========================================================================
@@ -238,6 +248,10 @@ class CurriculumCfg:
     def get_noise_progress(self, current_step: int) -> float:
         """Get progress within noise phase [0, 1]."""
         return self.get_progress(current_step, self.noise_start_step, self.noise_end_step)
+
+    def get_fp_fn_progress(self, current_step: int) -> float:
+        """Get progress within FP/FN phase [0, 1]."""
+        return self.get_progress(current_step, self.fp_fn_start_step, self.fp_fn_end_step)
 
     def get_fixed_delay_progress(self, current_step: int) -> float:
         """Get progress within fixed delay phase [0, 1].

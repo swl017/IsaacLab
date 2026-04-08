@@ -748,4 +748,73 @@ Next:
 - Ticket-010: confidence-conditioned noise (§9 in findings.md) — noise_scale=f(confidence)
 - Ticket-010: miss rate injection (FN) with sky/ground conditioning via raycast_mesh
 - Refit noise model: bin by (size, confidence), wider size range, fix a≈0 regression artifact
+
+----------------------------------------
+2026-04-08 — Ticket-010: FP/FN detector replicator (all 3 slices)
+----------------------------------------
+Done:
+- Full QRISPY workflow (Q→R→I→S→P→Y) for ticket-010
+- Revised ticket scope: no confidence/obs-dim change, detector_replicator as single
+  architectural home for all detector modeling (noise+FN+FP)
+- Extended NoiseModelParams with miss rate fields (miss_sigmoid_a_sky/gnd,
+  miss_size_threshold_sky/gnd, fp_rate, fp_size_range) + backward-compat from_json()
+- Added apply_miss/apply_fp toggles to DetectorReplicatorCfg
+- Refactored DetectorReplicator.apply() into 4 stages: noise→miss→FP→zero-out
+- Implemented _apply_miss(): dual sigmoid conditioned on bg_is_ground, Bernoulli sampling,
+  skips bbox_empty=True, curriculum-gated by fp_fn_scale
+- Implemented _apply_fp(): independent Bernoulli per (N,C,T), random center/size within
+  image bounds, writes to target slot, configurable for any num_targets
+- Added _classify_background() to BBoxRayCasterV2: raycast_mesh from target position,
+  hit=ground miss=sky, uses existing static_mesh
+- Added idempotency guard (_last_replicator_time) to apply_detector_replicator()
+- Added fp_fn_start_step/fp_fn_end_step + get_fp_fn_progress() to CurriculumCfg
+- Wired fp_fn_scale through env: init, _get_rewards() curriculum, _update_state_cache()
+- Added teleop overrides for FP/FN param tuning (noise, fp_rate, miss thresholds)
+- Fixed runtime bugs: tensor sim_time in idempotency guard, boolean mask indexing in _apply_fp
+- Updated ticket-009 documents (ticket.md, i_design.md, option_b_architecture.md) to reflect
+  replicator architecture: noise in bbox_raycaster_v2 not delay system, dual bbox output
+- Created ticket-013 (calibration refit): fix IoU matching, correlated w/h noise, gimbal-varied
+  calibration, sky/ground sigmoid refit
+- Created ticket-014 (reward bbox size): ablation to drop bbox_size_reward, let policy learn
+  optimal zoom from miss rate + triangulation signals
+- Files: bbox_raycaster_v2/{detector_replicator.py, bbox_raycaster_v2.py},
+  curriculum/curriculum_cfg.py, iris_ma_env6_test.py, tests/teleop_iris_ma6.py
+
+Next:
+- Ticket-013: refit calibration — filter agent-on-agent FP, fix w/h noise, rerun with varied gimbal
+- Ticket-014: ablation — train with bbox_size_reward_scale=0 (blocked on 013)
+- Ticket-010 PR: after 013 provides correct parameters
 - Histogram validation (ticket-009 acceptance #6) after model refit
+
+----------------------------------------
+2026-04-08/09 — Ticket-013: Calibration refit (CLOSED)
+----------------------------------------
+Done:
+- Correlated w/h size noise in detector_replicator.py: single Student's t draw applied to
+  both width and height, preventing impossible aspect ratios from independent sampling
+- Extended calibrate_detector.py with:
+  - fit_miss_sigmoids(): dual sigmoid fitting (sky/ground) via binned curve_fit
+  - size_noise_a/b fitting in fit_noise_model() (was missing, only center noise was fitted)
+  - NoiseModelParams-compatible JSON output (_replicator_params.json) loadable by from_json()
+  - Sigmoid curve overlay on FN report (generate_report with miss_sigmoids kwarg)
+  - Policy checkpoint loading (--checkpoint): uses policy xyz velocity, zeroes gimbal/yaw
+  - Episode length 30s with policy (was 5s hover-only)
+- Ran calibration with policy checkpoint (varied gimbal angles, realistic flight):
+  - FP rate: 0.21 → 0.035 (agent-on-agent filtering already in calibrate_detector.py)
+  - Dual miss sigmoids fitted: sky a=0.025 thr≈0, ground a=0.014 thr=45.6
+- Updated NoiseModelParams defaults in detector_replicator.py from new calibration
+- Removed JSON loading and param overrides from teleop (uses hardcoded defaults now)
+- Added miss_size_cutoff_sky/gnd params for hard floor on very small targets
+- Manual tuning of miss model: 2x ground sigmoid, 0.1x sky sigmoid, cutoff floors
+- Fixed _classify_background(): added ray direction check (negative Z = ground) to catch
+  flight scene mountains/terrain not in the warp static_mesh
+- Added bg_is_ground to BBoxRayCasterV2Data, stored in apply_detector_replicator()
+- Added [SKY]/[GND] background label to teleop camera overlay (colored text)
+- All 5 acceptance criteria met (see ticket.md)
+- Files: bbox_raycaster_v2/{detector_replicator.py, bbox_raycaster_v2.py,
+  bbox_raycaster_v2_data.py}, experiments/calibrate_detector.py, tests/teleop_iris_ma6.py
+
+Next:
+- Ticket-014: ablation — train with bbox_size_reward_scale=0
+- Ticket-010 PR: correct parameters now available
+- Training run with refitted detector replicator params
