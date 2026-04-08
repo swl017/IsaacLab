@@ -1,6 +1,7 @@
 {
   "project": "iris_ma6",
   "last_updated": "2026-04-09",
+  "last_session_ticket": "015-continuous-aoi",
   "features": [
     {
       "id": "controller",
@@ -14,7 +15,7 @@
       "name": "Multi-agent delay/staleness/dropout simulation",
       "status": "done",
       "spec": null,
-      "notes": "Ringbuffer-based with timestamp guarantees. Fixed calling contract: advance/query split ensures idempotent multi-call per step. Stage order: staleness→latency→FOL→dropout. (2026-03-23)"
+      "notes": "Ringbuffer-based with timestamp guarantees. Fixed calling contract: advance/query split ensures idempotent multi-call per step. Stage order: staleness→latency→FOL→dropout. Ticket-015: continuous AoI — jittered capture timestamps propagated via explicit store() timestamp arg. (2026-04-09)"
     },
     {
       "id": "cbf-safety",
@@ -84,7 +85,7 @@
       "name": "Full environment integration and training",
       "status": "in_progress",
       "spec": "doc/iris_ma6_env_spec.md",
-      "notes": "Obs: 30D ego (pos, vel, rpy, ang_vel_b, lin_acc_b, gimbal joints, ray_dir_w, combined_ang_vel_w, bbox_aoi, zoom, bbox) + 16D*(N-1) inter-agent [+6D tri]. ray_w fixed: bbox-based (camera→target) not gimbal pointing (2026-03-27)"
+      "notes": "Obs: 31D ego (pos, vel, rpy, ang_vel_b, lin_acc_b, gimbal joints, ray_dir_w, combined_ang_vel_w, bbox_aoi, zoom, effective_hfov, bbox) + 16D*(N-1) inter-agent [+6D tri]. Ticket-012: added effective HFOV (1D, radians) to ego obs — physical quantity, deployment-ready from camera calibration (2026-04-09)"
     },
     {
       "id": "experiments",

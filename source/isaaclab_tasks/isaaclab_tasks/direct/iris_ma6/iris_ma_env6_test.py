@@ -977,9 +977,17 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 gt_data.camera_orientation_w = cam_ori_w
                 gt_data.camera_zoom_level = self.zoom_level[:, idx]
                 dr_base = self._camera_intrinsics_base.clone()
-                dr_base[:, 0, 0] *= self._dr_intrinsic_scale[:, idx]
-                dr_base[:, 1, 1] *= self._dr_intrinsic_scale[:, idx]
+                dr_scale = self._dr_intrinsic_scale[:, idx]
+                dr_base[:, 0, 0] *= dr_scale
+                dr_base[:, 1, 1] *= dr_scale
                 gt_data.camera_base_intrinsics = dr_base
+                # effective_hfov = 2 * atan(image_width / (2 * fx_effective))
+                # where fx_effective = fx_nominal * dr_scale * zoom
+                img_w = self._camera_image_shape[1]
+                fx_eff = self._camera_intrinsics_base[:, 0, 0] * dr_scale * self.zoom_level[:, idx]
+                gt_data.camera_effective_hfov = 2.0 * torch.atan2(
+                    torch.tensor(img_w * 0.5, device=self.device), fx_eff
+                )
 
                 # Detection (bbox) - shape (N, T, 4)
                 # CRITICAL: Use pixel bboxes, not normalized - triangulation expects pixels
@@ -987,10 +995,15 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     :, idx, :, :
                 ]
 
-                # Timestamps
+                # Timestamps — sub-step jitter for continuous AoI
                 gt_data.timestamp_sim_walltime = self._sim_time
-                gt_data.timestamp_motion = self._sim_time.clone()
-                gt_data.timestamp_detection = self._sim_time.clone()
+                if self.cfg.continuous_aoi_jitter:
+                    step_dt = self.cfg.sim.dt * self.cfg.decimation
+                    gt_data.timestamp_motion = self._sim_time + torch.empty_like(self._sim_time).uniform_(-step_dt, 0)
+                    gt_data.timestamp_detection = self._sim_time + torch.empty_like(self._sim_time).uniform_(-step_dt, 0)
+                else:
+                    gt_data.timestamp_motion = self._sim_time.clone()
+                    gt_data.timestamp_detection = self._sim_time.clone()
 
                 # Pass replicated (noisy) bboxes if detector replicator is active
                 replicated_bboxes = None
@@ -1087,11 +1100,18 @@ class IrisMA6TestEnv(DirectMARLEnv):
             pitch_link_idx = self._frame_link_ids[agent_id]["pitch_link"]
             data.camera_position_w = robot.data.body_pos_w[:, pitch_link_idx]
             data.camera_orientation_w = robot.data.body_quat_w[:, pitch_link_idx]
+            dr_scale = self._dr_intrinsic_scale[:, idx]
             dr_base = self._camera_intrinsics_base.clone()
-            dr_base[:, 0, 0] *= self._dr_intrinsic_scale[:, idx]
-            dr_base[:, 1, 1] *= self._dr_intrinsic_scale[:, idx]
+            dr_base[:, 0, 0] *= dr_scale
+            dr_base[:, 1, 1] *= dr_scale
             data.camera_base_intrinsics = dr_base
             data.camera_zoom_level = self.zoom_level[:, idx]
+            # effective_hfov = 2 * atan(image_width / (2 * fx_effective))
+            img_w = self._camera_image_shape[1]
+            fx_eff = self._camera_intrinsics_base[:, 0, 0] * dr_scale * self.zoom_level[:, idx]
+            data.camera_effective_hfov = 2.0 * torch.atan2(
+                torch.tensor(img_w * 0.5, device=self.device), fx_eff
+            )
 
             # Detection - use pixel bboxes (not normalized) for triangulation
             data.bboxes_2d = self.bbox_raycaster_v2.data.bboxes[:, idx, :, :]
@@ -1256,11 +1276,19 @@ class IrisMA6TestEnv(DirectMARLEnv):
             # Ramp FP/FN (co-located with noise by default)
             self._curriculum_fp_fn_scale = curr.get_fp_fn_progress(current_step)
 
-            # Ramp dropout (phase 5: 160k-200k)
+            # Ramp dropout (phase 5: 160k-180k)
             dropout_progress = curr.get_dropout_progress(current_step)
             self._delay_system.set_dropout_rate(
                 dropout_progress * self.cfg.delay_system_params.dropout_prob
             )
+
+            # Ramp burst dropout (phase 6: 200k-220k)
+            if self.cfg.delay_system_params.burst_dropout_enabled:
+                burst_progress = curr.get_burst_dropout_progress(current_step)
+                self._delay_system.set_burst_params(
+                    p_onset=burst_progress * self.cfg.delay_system_params.burst_p_onset,
+                    p_recovery=self.cfg.delay_system_params.burst_p_recovery,
+                )
 
         # Get states for reward computation
         if self._delay_system is not None:
@@ -1595,11 +1623,10 @@ class IrisMA6TestEnv(DirectMARLEnv):
         Otherwise, uses ground truth states directly.
 
         Observation structure per agent:
-        - Ego (26D): pos(3), vel(3), quat(4), ang_vel_b(3), lin_acc_b(3),
-          gimbal_az_w(1), gimbal_el_w(1), gimbal_az_rate(1), gimbal_el_rate(1),
-          zoom(1), bbox(4), bbox_empty(1)
-        - Inter-agent (14D per other): pos(3), vel(3), gimbal_az_w(1),
-          gimbal_el_w(1), gimbal_az_rate(1), gimbal_el_rate(1),
+        - Ego (31D): pos(3), vel(3), rpy(3), ang_vel_b(3), lin_acc_b(3),
+          gimbal_yaw_body(1), gimbal_pitch_body(1), ray_w(3), combined_ang_vel_w(3),
+          bbox_aoi(1), zoom(1), effective_hfov(1), bbox(4), bbox_empty(1)
+        - Inter-agent (16D per other): pos(3), vel(3), ray_w(3), combined_ang_vel_w(3),
           zoom(1), bbox_empty(1), data_age(1), bbox_age(1)
         - Optional triangulation tail (6D): tri_pos(3), tri_std(3)
 
@@ -1641,7 +1668,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 # Ego bbox age-of-information
                 ego_bbox_aoi = (self._sim_time - ego_data.timestamp_detection).unsqueeze(-1)
 
-                # Build ego observation (30D)
+                # Build ego observation (31D)
                 ego_obs = torch.cat(
                     [
                         ego_data.body_position_w,  # (N, 3)
@@ -1655,6 +1682,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                         ego_data.body_combined_angular_velocity_w,  # (N, 3) — camera sweep rate
                         ego_bbox_aoi,  # (N, 1) — bbox age-of-information
                         ego_data.camera_zoom_level.unsqueeze(-1),  # (N, 1)
+                        ego_data.camera_effective_hfov.unsqueeze(-1),  # (N, 1) — effective HFOV (rad)
                         bbox,  # (N, 4) - normalized
                         bbox_empty,  # (N, 1)
                     ],
@@ -1716,7 +1744,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 # Ego camera ray direction in world frame (bbox-based, from camera to target)
                 ego_ray_w = ego_gt.camera_ray_directions_w[:, 0, :]
 
-                # Ego observation (30D) — GT path: bbox AoI = 0 (no delay)
+                # Ego observation (31D) — GT path: bbox AoI = 0 (no delay)
                 ego_obs = torch.cat(
                     [
                         self._root_pos_w[agent_id],  # (N, 3)
@@ -1730,6 +1758,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                         ego_gt.body_combined_angular_velocity_w,  # (N, 3) — camera sweep rate
                         torch.zeros(self.num_envs, 1, device=self.device),  # (N, 1) — bbox AoI (GT = 0)
                         self.zoom_level[:, idx : idx + 1],  # (N, 1)
+                        ego_gt.camera_effective_hfov.unsqueeze(-1),  # (N, 1) — effective HFOV (rad)
                         bbox,  # (N, 4)
                         bbox_empty,  # (N, 1)
                     ],

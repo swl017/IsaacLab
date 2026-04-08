@@ -64,7 +64,7 @@ class NoiseModelParams:
     miss_sigmoid_a_sky: float = 0.024751038174665885
     """Miss sigmoid steepness for sky background."""
 
-    miss_size_cutoff_sky: float = 20.0
+    miss_size_cutoff_sky: float = 33.0
     """Size cutoff below which sky targets are always missed (px)."""
 
     miss_size_threshold_sky: float = 1.2214178344000452e-12
@@ -73,7 +73,7 @@ class NoiseModelParams:
     miss_sigmoid_a_gnd: float = 0.013808565449099726
     """Miss sigmoid steepness for ground background."""
 
-    miss_size_cutoff_gnd: float = 50.0
+    miss_size_cutoff_gnd: float = 60.0
     """Size cutoff below which ground targets are always missed (px)."""
 
     miss_size_threshold_gnd: float = 45.56221154006872
@@ -304,7 +304,7 @@ class DetectorReplicator:
             p_miss_gnd = (2.0 * torch.sigmoid(p.miss_sigmoid_a_gnd * (p.miss_size_threshold_gnd - target_size))).clamp_(max=1.0)
             p_miss_gnd = torch.where(target_size < p.miss_size_cutoff_gnd, torch.ones_like(p_miss_gnd), p_miss_gnd)  # Floor for very small targets
             # p_miss_sky = torch.sigmoid(p.miss_sigmoid_a_sky * (p.miss_size_threshold_sky - target_size))
-            p_miss_sky = 0.1 * torch.sigmoid(p.miss_sigmoid_a_sky * (p.miss_size_threshold_sky - target_size))
+            p_miss_sky = 1.0 * torch.sigmoid(p.miss_sigmoid_a_sky * (p.miss_size_threshold_sky - target_size))
             p_miss_sky = torch.where(target_size < p.miss_size_cutoff_sky, torch.ones_like(p_miss_sky), p_miss_sky)  # Floor for very small targets
             p_miss = torch.where(bg_is_ground, p_miss_gnd, p_miss_sky)
         else:

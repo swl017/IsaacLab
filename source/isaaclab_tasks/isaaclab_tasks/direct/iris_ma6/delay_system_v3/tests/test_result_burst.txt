@@ -1,0 +1,66 @@
+[3gH    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H   [INFO] Using python from: /home/usrg/IsaacPX4/IsaacLab/_isaac_sim/python.sh
+Loading user config located at: '/home/usrg/isaacsim/kit/data/Kit/Isaac-Sim/4.5/user.config.json'
+[Info] [carb] Logging to file: /home/usrg/isaacsim/kit/logs/Kit/Isaac-Sim/4.5/kit_20260409_020829.log
+2026-04-08 17:08:29 [0ms] [Warning] [omni.kit.app.plugin] No crash reporter present, dumps uploading isn't available.
+2026-04-08 17:08:29 [2ms] [Warning] [omni.ext.plugin] [ext: driver_artifacts] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts' or '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts/config'
+2026-04-08 17:08:29 [2ms] [Warning] [omni.ext.plugin] [ext: rendering_modes] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes' or '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes/config'
+2026-04-08 17:08:30 [555ms] [Warning] [omni.usd_config.extension] Enable omni.materialx.libs extension to use MaterialX
+2026-04-08 17:08:30 [680ms] [Warning] [omni.platforminfo.plugin] failed to open the default display.  Can't verify X Server version.
+2026-04-08 17:08:30 [1,042ms] [Warning] [omni.isaac.dynamic_control] omni.isaac.dynamic_control is deprecated as of Isaac Sim 4.5. No action is needed from end-users.
+
+|---------------------------------------------------------------------------------------------|
+| Driver Version: 535.230.02    | Graphics API: Vulkan
+|=============================================================================================|
+| GPU | Name                             | Active | LDA | GPU Memory | Vendor-ID | LUID       |
+|     |                                  |        |     |            | Device-ID | UUID       |
+|     |                                  |        |     |            | Bus-ID    |            |
+|---------------------------------------------------------------------------------------------|
+| 0   | NVIDIA GeForce RTX 3090          | Yes: 0 |     | 24822   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2204      | 7116df58.. |
+|     |                                  |        |     |            | 9         |            |
+|=============================================================================================|
+| OS: 20.04.6 LTS (Focal Fossa) ubuntu, Version: 20.04.6, Kernel: 5.15.0-139-generic
+| Processor: AMD Ryzen 9 5950X 16-Core Processor
+| Cores: 16 | Logical Cores: 32
+|---------------------------------------------------------------------------------------------|
+| Total Memory (MB): 64194 | Free Memory: 15326
+| Total Page/Swap (MB): 13730 | Free Page/Swap: 17592186044415
+|---------------------------------------------------------------------------------------------|
+[WARN][AppLauncher]: There are no arguments attached to the ArgumentParser object. If you have your own arguments, please load your own arguments before calling the `AppLauncher.add_app_launcher_args` method. This allows the method to check the validity of the arguments and perform checks for argument names.
+[INFO][AppLauncher]: Using device: cuda:0
+[INFO][AppLauncher]: Loading experience file: /home/usrg/IsaacPX4/IsaacLab/apps/isaaclab.python.headless.kit
+================================================================================
+BURST DROPOUT TEST SUITE
+================================================================================
+Device: cuda  Time: 2026-04-09 02:08:35
+
+================================================================================
+Testing BurstDropoutSampler
+================================================================================
+  ✓ Initialization
+  ✓ Advance produces valid masks
+  ✓ sample_mask returns correct slice
+  ✓ sample_mask is idempotent (READ)
+  ✓ Reset restores Good state
+  Running 5000-step burst statistics....1000.2000.3000.4000 done
+    Bursts observed: 21154
+    Mean burst length: 10.06 (expected: 10.0)
+    Min/Max burst: 1/111
+  ✓ Burst statistics — mean burst length (10.1 ≈ 10)
+  Running 5000-step good-run statistics....1000.2000.3000.4000 done
+    Good runs observed: 21420
+    Mean good-run length: 49.25 (expected: 50.0)
+  ✓ Burst statistics — mean good-run length (49.2 ≈ 50)
+    Mean correlation between channels 0->1 and 1->0: -0.017
+  ✓ Asymmetry — channels are independent
+  ✓ set_burst_params curriculum control
+  ✓ Per-episode randomization
+  ✓ Scales to 5 agents
+
+================================================================================
+TEST SUMMARY
+================================================================================
+Total: 11  Passed: 11  Failed: 0  Errors: 0
+================================================================================
+2026-04-08 17:08:38 [9,199ms] [Warning] [omni.fabric.plugin] gFabricState->gUsdStageToSimStageWithHistoryMap had 1 outstanding SimStageWithHistory(s) at shutdown
+2026-04-08 17:08:39 [9,227ms] [Warning] [carb] Recursive unloadAllPlugins() detected!

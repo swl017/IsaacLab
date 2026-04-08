@@ -93,7 +93,6 @@ from .sampling_strategies import (
     PerAgentParameterSampler,
     PerAgentLatencySampler,
     PerAgentStalenessSampler,
-    PerAgentDropoutSampler,
 )
 
 # Storage
@@ -104,6 +103,9 @@ from .delay_pipeline_v3 import DelayPipelineV3
 
 # Unified system
 from .delay_system_v3 import UnifiedDelaySystem, DelayedFieldAccessor
+
+# Burst dropout
+from .burst_dropout import BurstDropoutCfg, BurstDropoutSampler
 
 # Multi-agent wrapper
 from .multi_agent_wrapper import MultiAgentDelaySystemV3
@@ -150,10 +152,12 @@ __all__ = [
     "PerAgentParameterSampler",
     "PerAgentLatencySampler",
     "PerAgentStalenessSampler",
-    "PerAgentDropoutSampler",
     # Storage
     "FieldStorage",
     "MultiFieldStorage",
+    # Burst dropout
+    "BurstDropoutCfg",
+    "BurstDropoutSampler",
     # Core
     "DelayPipelineV3",
     "UnifiedDelaySystem",

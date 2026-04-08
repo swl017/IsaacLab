@@ -1,11 +1,11 @@
 {
   "ticket_slug": "011-burst-dropout",
-  "current_stage": "Q",
-  "last_approved_stage": "Q",
-  "next_action": "Review ticket scope.",
-  "slices_completed": [],
-  "slices_total": null,
+  "current_stage": "PR",
+  "last_approved_stage": "Y",
+  "next_action": "Engineer reviews all 4 slices, then → Start PR or merge",
+  "slices_completed": [1, 2, 3, 4],
+  "slices_total": 4,
   "created": "2026-04-06",
-  "updated": "2026-04-06",
-  "notes": "Spawned from ticket-005 §1.2 (P2 priority). Gilbert-Elliott two-state Markov model for bursty packet loss."
+  "updated": "2026-04-09",
+  "notes": "All 4 slices implemented and tested. Gilbert-Elliott burst dropout with asymmetric per-directional-channel Markov state. 21 new tests (11 burst sampler + 5 pipeline external mask + 5 config integration). Backward compatible: burst_enabled=False is default, identical to prior behavior."
 }

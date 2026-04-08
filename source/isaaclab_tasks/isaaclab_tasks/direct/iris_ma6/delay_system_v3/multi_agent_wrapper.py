@@ -21,6 +21,7 @@ from isaaclab.utils.math import quat_from_angle_axis, quat_mul
 from .delay_cfg_v3 import MultiAgentDelayCfgV3, NoiseCfg
 from .delay_system_v3 import UnifiedDelaySystem
 from .agent_states import AgentStates, AgentStatesData
+from .burst_dropout import BurstDropoutCfg, BurstDropoutSampler
 from .derived_field_computers import compute_ray_origins, compute_ray_directions_from_bbox
 
 
@@ -44,6 +45,7 @@ CAMERA_FIELDS = [
     ("camera_position_w", (3,)),
     ("camera_orientation_w", (4,)),
     ("camera_zoom_level", (1,)),  # zoom level scalar per env
+    ("camera_effective_hfov", (1,)),  # effective horizontal FOV in radians
 ]
 
 GIMBAL_WORLD_FIELDS = [
@@ -144,6 +146,20 @@ class MultiAgentDelaySystemV3:
         # Base dropout rate from curriculum (before per-agent offsets)
         self._base_dropout_rate: float = 0.0
 
+        # Burst dropout sampler (Gilbert-Elliott model)
+        self._burst_sampler: Optional[BurstDropoutSampler] = None
+        if cfg.burst_dropout is not None and cfg.burst_dropout.enabled:
+            self._burst_sampler = BurstDropoutSampler(
+                cfg=cfg.burst_dropout,
+                num_envs=num_envs,
+                num_agents=len(possible_agents),
+                device=device,
+            )
+        # Map agent IDs to integer indices for burst sampler lookup
+        self._agent_id_to_idx: Dict[AgentID, int] = {
+            a: i for i, a in enumerate(possible_agents)
+        }
+
     def _register_fields(self):
         """Register all fields for delay processing."""
         for agent_id in self._possible_agents:
@@ -202,11 +218,17 @@ class MultiAgentDelaySystemV3:
     def set_time(self, t: torch.Tensor):
         """Set current simulation time.
 
+        Also advances burst dropout Markov chain (WRITE, once per step).
+
         Args:
             t: Current time tensor.
         """
         self._t_current = t.to(self._device)
         self._delay_system.set_time(t)
+
+        # Advance burst dropout Markov chain for this step
+        if self._burst_sampler is not None:
+            self._burst_sampler.advance()
 
     def update_ground_truth(
         self,
@@ -240,42 +262,53 @@ class MultiAgentDelaySystemV3:
         data = states.data
         prefix = f"{agent_id}."
 
+        # Capture timestamps for continuous AoI (jittered in env, or discrete)
+        ts_motion = data.timestamp_motion
+        ts_detection = data.timestamp_detection
+
         # Body fields with appropriate noise
         # NOTE: Quaternion orientation stored with noise_std=0 — rotation noise
         # applied properly via axis-angle perturbation in _add_noise_to_states()
         self._delay_system.store(
             prefix + "body_position_w",
             data.body_position_w,
+            timestamp=ts_motion,
             noise_std=pos_noise,
         )
         self._delay_system.store(
             prefix + "body_orientation_w",
             data.body_orientation_w,
+            timestamp=ts_motion,
             noise_std=0.0,
         )
         self._delay_system.store(
             prefix + "body_linear_velocity_w",
             data.body_linear_velocity_w,
+            timestamp=ts_motion,
             noise_std=vel_noise,
         )
         self._delay_system.store(
             prefix + "body_angular_velocity_w",
             data.body_angular_velocity_w,
+            timestamp=ts_motion,
             noise_std=ang_vel_noise,
         )
         self._delay_system.store(
             prefix + "body_angular_velocity_b",
             data.body_angular_velocity_b,
+            timestamp=ts_motion,
             noise_std=ang_vel_noise,
         )
         self._delay_system.store(
             prefix + "body_linear_acceleration_b",
             data.body_linear_acceleration_b,
+            timestamp=ts_motion,
             noise_std=acc_noise,
         )
         self._delay_system.store(
             prefix + "body_combined_angular_velocity_w",
             data.body_combined_angular_velocity_w,
+            timestamp=ts_motion,
             noise_std=ang_vel_noise,
         )
 
@@ -283,11 +316,13 @@ class MultiAgentDelaySystemV3:
         self._delay_system.store(
             prefix + "joint_positions_b",
             data.joint_positions_b,
+            timestamp=ts_motion,
             noise_std=ori_noise,
         )
         self._delay_system.store(
             prefix + "joint_velocities_b",
             data.joint_velocities_b,
+            timestamp=ts_motion,
             noise_std=vel_noise,
         )
 
@@ -295,21 +330,25 @@ class MultiAgentDelaySystemV3:
         self._delay_system.store(
             prefix + "gimbal_azimuth_world",
             data.gimbal_azimuth_world.unsqueeze(-1),
+            timestamp=ts_motion,
             noise_std=ori_noise,
         )
         self._delay_system.store(
             prefix + "gimbal_elevation_world",
             data.gimbal_elevation_world.unsqueeze(-1),
+            timestamp=ts_motion,
             noise_std=ori_noise,
         )
         self._delay_system.store(
             prefix + "gimbal_azimuth_rate",
             data.gimbal_azimuth_rate.unsqueeze(-1),
+            timestamp=ts_motion,
             noise_std=vel_noise,
         )
         self._delay_system.store(
             prefix + "gimbal_elevation_rate",
             data.gimbal_elevation_rate.unsqueeze(-1),
+            timestamp=ts_motion,
             noise_std=vel_noise,
         )
 
@@ -317,17 +356,27 @@ class MultiAgentDelaySystemV3:
         self._delay_system.store(
             prefix + "camera_position_w",
             data.camera_position_w,
+            timestamp=ts_motion,
             noise_std=pos_noise,
         )
         self._delay_system.store(
             prefix + "camera_orientation_w",
             data.camera_orientation_w,
+            timestamp=ts_motion,
             noise_std=0.0,  # Rotation noise applied in _add_noise_to_states()
         )
         # Zoom level (no noise on discrete camera setting)
         self._delay_system.store(
             prefix + "camera_zoom_level",
             data.camera_zoom_level.unsqueeze(-1),  # Convert [N] to [N, 1]
+            timestamp=ts_detection,
+            noise_std=0.0,
+        )
+        # Effective HFOV (known at deployment — no noise)
+        self._delay_system.store(
+            prefix + "camera_effective_hfov",
+            data.camera_effective_hfov.unsqueeze(-1),  # Convert [N] to [N, 1]
+            timestamp=ts_detection,
             noise_std=0.0,
         )
 
@@ -338,6 +387,7 @@ class MultiAgentDelaySystemV3:
             self._delay_system.store(
                 prefix + "bboxes_2d",
                 data.bboxes_2d,
+                timestamp=ts_detection,
                 noise_std=0.0,
                 noisy_data=replicated_bboxes,
             )
@@ -346,6 +396,7 @@ class MultiAgentDelaySystemV3:
             self._delay_system.store(
                 prefix + "bboxes_2d",
                 data.bboxes_2d,
+                timestamp=ts_detection,
                 noise_std=bbox_noise,
             )
 
@@ -448,7 +499,7 @@ class MultiAgentDelaySystemV3:
                 "ego" if agent_id == ego_agent_id else "other"
             )
             result[agent_id] = self._build_agent_states(
-                agent_id, perspective, use_noise
+                agent_id, perspective, use_noise, ego_agent_id=ego_agent_id
             )
 
         return result
@@ -458,13 +509,15 @@ class MultiAgentDelaySystemV3:
         agent_id: AgentID,
         perspective: Literal["ego", "other"],
         use_noise: bool,
+        ego_agent_id: Optional[AgentID] = None,
     ) -> AgentStates:
         """Build delayed states for a single agent.
 
         Args:
-            agent_id: Agent identifier.
+            agent_id: Agent identifier (the agent whose data is being queried).
             perspective: "ego" or "other".
             use_noise: Whether to use noisy path.
+            ego_agent_id: The observing agent (needed for burst dropout mask lookup).
 
         Returns:
             AgentStates with delayed data.
@@ -483,90 +536,119 @@ class MultiAgentDelaySystemV3:
         # Allow dropout only for observations, not rewards
         allow_dropout = use_noise
 
+        # Get burst dropout mask for this directional channel (j -> i)
+        # where j = agent_id (sender), i = ego_agent_id (receiver)
+        burst_mask: Optional[torch.Tensor] = None
+        if (
+            self._burst_sampler is not None
+            and allow_dropout
+            and perspective == "other"
+            and ego_agent_id is not None
+        ):
+            i = self._agent_id_to_idx[ego_agent_id]
+            j = self._agent_id_to_idx[agent_id]
+            burst_mask = self._burst_sampler.sample_mask(i, j)
+
         # Body position
         pos, pos_ts = self._delay_system.get_delayed(
-            prefix + "body_position_w", perspective, use_noise, allow_dropout
+            prefix + "body_position_w", perspective, use_noise, allow_dropout,
+            burst_dropout_mask=burst_mask,
         )
         data.body_position_w = pos
 
         # Body orientation
         ori, ori_ts = self._delay_system.get_delayed(
-            prefix + "body_orientation_w", perspective, use_noise, allow_dropout
+            prefix + "body_orientation_w", perspective, use_noise, allow_dropout,
+            burst_dropout_mask=burst_mask,
         )
         data.body_orientation_w = ori
 
         # Body velocity
         lin_vel, _ = self._delay_system.get_delayed(
-            prefix + "body_linear_velocity_w", perspective, use_noise, allow_dropout
+            prefix + "body_linear_velocity_w", perspective, use_noise, allow_dropout,
+            burst_dropout_mask=burst_mask,
         )
         data.body_linear_velocity_w = lin_vel
 
         ang_vel, _ = self._delay_system.get_delayed(
-            prefix + "body_angular_velocity_w", perspective, use_noise, allow_dropout
+            prefix + "body_angular_velocity_w", perspective, use_noise, allow_dropout,
+            burst_dropout_mask=burst_mask,
         )
         data.body_angular_velocity_w = ang_vel
 
         ang_vel_b, _ = self._delay_system.get_delayed(
-            prefix + "body_angular_velocity_b", perspective, use_noise, allow_dropout
+            prefix + "body_angular_velocity_b", perspective, use_noise, allow_dropout,
+            burst_dropout_mask=burst_mask,
         )
         data.body_angular_velocity_b = ang_vel_b
 
         combined_ang_vel_w, _ = self._delay_system.get_delayed(
-            prefix + "body_combined_angular_velocity_w", perspective, use_noise, allow_dropout
+            prefix + "body_combined_angular_velocity_w", perspective, use_noise, allow_dropout,
+            burst_dropout_mask=burst_mask,
         )
         data.body_combined_angular_velocity_w = combined_ang_vel_w
 
         lin_acc_b, _ = self._delay_system.get_delayed(
-            prefix + "body_linear_acceleration_b", perspective, use_noise, allow_dropout
+            prefix + "body_linear_acceleration_b", perspective, use_noise, allow_dropout,
+            burst_dropout_mask=burst_mask,
         )
         data.body_linear_acceleration_b = lin_acc_b
 
         # Joint states
         joint_pos, _ = self._delay_system.get_delayed(
-            prefix + "joint_positions_b", perspective, use_noise, allow_dropout
+            prefix + "joint_positions_b", perspective, use_noise, allow_dropout,
+            burst_dropout_mask=burst_mask,
         )
         data.joint_positions_b = joint_pos
 
         joint_vel, _ = self._delay_system.get_delayed(
-            prefix + "joint_velocities_b", perspective, use_noise, allow_dropout
+            prefix + "joint_velocities_b", perspective, use_noise, allow_dropout,
+            burst_dropout_mask=burst_mask,
         )
         data.joint_velocities_b = joint_vel
 
         # Gimbal world-frame angles
         az, _ = self._delay_system.get_delayed(
-            prefix + "gimbal_azimuth_world", perspective, use_noise, allow_dropout
+            prefix + "gimbal_azimuth_world", perspective, use_noise, allow_dropout,
+            burst_dropout_mask=burst_mask,
         )
         data.gimbal_azimuth_world = az.squeeze(-1)
 
         el, _ = self._delay_system.get_delayed(
-            prefix + "gimbal_elevation_world", perspective, use_noise, allow_dropout
+            prefix + "gimbal_elevation_world", perspective, use_noise, allow_dropout,
+            burst_dropout_mask=burst_mask,
         )
         data.gimbal_elevation_world = el.squeeze(-1)
 
         az_rate, _ = self._delay_system.get_delayed(
-            prefix + "gimbal_azimuth_rate", perspective, use_noise, allow_dropout
+            prefix + "gimbal_azimuth_rate", perspective, use_noise, allow_dropout,
+            burst_dropout_mask=burst_mask,
         )
         data.gimbal_azimuth_rate = az_rate.squeeze(-1)
 
         el_rate, _ = self._delay_system.get_delayed(
-            prefix + "gimbal_elevation_rate", perspective, use_noise, allow_dropout
+            prefix + "gimbal_elevation_rate", perspective, use_noise, allow_dropout,
+            burst_dropout_mask=burst_mask,
         )
         data.gimbal_elevation_rate = el_rate.squeeze(-1)
 
         # Camera states
         cam_pos, _ = self._delay_system.get_delayed(
-            prefix + "camera_position_w", perspective, use_noise, allow_dropout
+            prefix + "camera_position_w", perspective, use_noise, allow_dropout,
+            burst_dropout_mask=burst_mask,
         )
         data.camera_position_w = cam_pos
 
         cam_ori, _ = self._delay_system.get_delayed(
-            prefix + "camera_orientation_w", perspective, use_noise, allow_dropout
+            prefix + "camera_orientation_w", perspective, use_noise, allow_dropout,
+            burst_dropout_mask=burst_mask,
         )
         data.camera_orientation_w = cam_ori
 
         # Bounding boxes
         bbox, bbox_ts = self._delay_system.get_delayed(
-            prefix + "bboxes_2d", perspective, use_noise, allow_dropout
+            prefix + "bboxes_2d", perspective, use_noise, allow_dropout,
+            burst_dropout_mask=burst_mask,
         )
         data.bboxes_2d = bbox
 
@@ -584,9 +666,17 @@ class MultiAgentDelaySystemV3:
 
         # Retrieve delayed zoom level
         zoom, _ = self._delay_system.get_delayed(
-            prefix + "camera_zoom_level", perspective, use_noise, allow_dropout
+            prefix + "camera_zoom_level", perspective, use_noise, allow_dropout,
+            burst_dropout_mask=burst_mask,
         )
         data.camera_zoom_level = zoom.squeeze(-1)  # Convert [N, 1] back to [N]
+
+        # Retrieve delayed effective HFOV
+        effective_hfov, _ = self._delay_system.get_delayed(
+            prefix + "camera_effective_hfov", perspective, use_noise, allow_dropout,
+            burst_dropout_mask=burst_mask,
+        )
+        data.camera_effective_hfov = effective_hfov.squeeze(-1)  # Convert [N, 1] back to [N]
 
         # Compute derived ray geometry from delayed states
         # Ray origins = camera position (expanded to match num_targets)
@@ -668,6 +758,7 @@ class MultiAgentDelaySystemV3:
         dst_data.camera_offset_rotation_b = src_data.camera_offset_rotation_b.clone()
         dst_data.camera_base_intrinsics = src_data.camera_base_intrinsics.clone()
         dst_data.camera_zoom_level = src_data.camera_zoom_level.clone()
+        dst_data.camera_effective_hfov = src_data.camera_effective_hfov.clone()
         dst_data.camera_ray_directions_w = src_data.camera_ray_directions_w.clone()
         dst_data.camera_ray_origins_w = src_data.camera_ray_origins_w.clone()
 
@@ -834,10 +925,20 @@ class MultiAgentDelaySystemV3:
     def set_dropout_rate(self, rate: float):
         """Set dropout rate for curriculum control with per-agent offsets.
 
+        When burst dropout is active, per-pipeline i.i.d. dropout is skipped
+        (burst replaces i.i.d. on affected channels). The per-pipeline rate is
+        set to 0 so only burst dropout governs packet loss.
+
         Args:
             rate: Base dropout probability [0, 1].
         """
         self._base_dropout_rate = rate
+
+        # When burst dropout is active, disable per-pipeline i.i.d. dropout
+        # (burst model replaces it on "other" perspective channels)
+        if self._burst_sampler is not None:
+            self._delay_system.set_dropout_rate(0.0)
+            return
 
         if self._cfg.per_agent_randomization:
             for agent_id in self._possible_agents:
@@ -846,6 +947,16 @@ class MultiAgentDelaySystemV3:
                 self._delay_system.set_field_dropout_rate(str(agent_id), effective_rate)
         else:
             self._delay_system.set_dropout_rate(rate)
+
+    def set_burst_params(self, p_onset: float, p_recovery: float):
+        """Set burst dropout parameters for curriculum control.
+
+        Args:
+            p_onset: Good->Bad transition probability. 0 disables bursts.
+            p_recovery: Bad->Good transition probability.
+        """
+        if self._burst_sampler is not None:
+            self._burst_sampler.set_burst_params(p_onset, p_recovery)
 
     def set_noise_scale(self, scale: float):
         """Set noise scale for curriculum control.
@@ -886,6 +997,10 @@ class MultiAgentDelaySystemV3:
         self.set_delay_mode(self._mode, self._progress)
         self.set_dropout_rate(self._base_dropout_rate)
 
+        # Randomize burst dropout params per episode
+        if self._burst_sampler is not None:
+            self._burst_sampler.randomize_params(env_ids)
+
     def reset(self, env_ids: Optional[torch.Tensor] = None):
         """Reset system for specified environments.
 
@@ -893,6 +1008,10 @@ class MultiAgentDelaySystemV3:
             env_ids: Environment indices to reset.
         """
         self._delay_system.reset(env_ids)
+
+        # Reset burst dropout Markov state to Good
+        if self._burst_sampler is not None:
+            self._burst_sampler.reset(env_ids)
 
         if env_ids is None:
             self._t_current.zero_()

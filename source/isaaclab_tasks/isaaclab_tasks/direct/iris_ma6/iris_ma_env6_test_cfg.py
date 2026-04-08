@@ -92,7 +92,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     This is a simplified test environment to validate the DroneController
     integration with 3 agents.
 
-    Observation space per agent: 30D ego (pos, vel, rpy, ang_vel_b, lin_acc_b, gimbal, ray, sweep, aoi, zoom, bbox, bbox_empty)
+    Observation space per agent: 31D ego (pos, vel, rpy, ang_vel_b, lin_acc_b, gimbal, ray, sweep, aoi, zoom, effective_hfov, bbox, bbox_empty)
     Action space per agent: 7D (vx, vy, vz, yaw_rate, gimbal_yaw_rate, gimbal_pitch_rate, zoom_rate)
     """
 
@@ -117,7 +117,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     """Action space dimensions per agent (auto-populated from num_agents)."""
 
     observation_spaces: dict = {"drone_0": 62, "drone_1": 62, "drone_2": 62}
-    """Observation space dimensions per agent. 30D ego + 16D*(num_agents-1) inter-agent [+6D triangulation]."""
+    """Observation space dimensions per agent. 31D ego + 16D*(num_agents-1) inter-agent [+6D triangulation]."""
 
     state_space: int = -1
     """State space dimension. -1 means concatenate all observations."""
@@ -288,13 +288,13 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     max_lin_vel_min: float = 3.0
     """Minimum linear velocity (m/s) at curriculum progress=0. Ramps to max_lin_vel with agent velocity curriculum."""
 
-    max_yaw_rate: float = math.radians(45.0)
+    max_yaw_rate: float = math.radians(90.0)
     """Maximum yaw rate (rad/s)."""
 
-    max_gimbal_rate: float = math.radians(180.0)
+    max_gimbal_rate: float = math.radians(360.0)
     """Maximum gimbal rate (rad/s)."""
 
-    max_zoom_rate: float = 1.0
+    max_zoom_rate: float = 4.0
     """Maximum zoom rate (zoom levels per second)."""
 
     # ==========================================================================
@@ -362,6 +362,13 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
 
     enable_delay_system: bool = True
     """Enable delay system for observations. Set False for ground-truth testing."""
+
+    continuous_aoi_jitter: bool = True
+    """Add uniform sub-step jitter to capture timestamps for continuous AoI.
+
+    When True, timestamp_motion and timestamp_detection get independent
+    U(-step_dt, 0) offsets so the policy sees continuous
+    age-of-information instead of staircase multiples of step_dt."""
 
     # ==========================================================================
     # Detector Replicator Configuration
@@ -568,8 +575,8 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # ==========================================================================
 
     domain_randomization: DomainRandomizationCfg = DomainRandomizationCfg(
-        enabled=False,
-        mount_offset=MountOffsetRandomizationCfg(enabled=False),
+        enabled=True,
+        mount_offset=MountOffsetRandomizationCfg(enabled=True),
     )
     """Domain randomization for sim-to-real transfer.
 
@@ -629,12 +636,13 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
             )
 
         # Update observation space:
-        # Ego: 30D (pos, vel, rpy, ang_vel_b, lin_acc_b, gimbal_yaw_body, gimbal_pitch_body,
-        #           ray_direction_w, combined_ang_vel_w, bbox_aoi, zoom, bbox, bbox_empty)
+        # Ego: 31D (pos, vel, rpy, ang_vel_b, lin_acc_b, gimbal_yaw_body, gimbal_pitch_body,
+        #           ray_direction_w, combined_ang_vel_w, bbox_aoi, zoom, effective_hfov,
+        #           bbox, bbox_empty)
         # Inter-agent: 16D per other agent (pos, vel, ray_direction_w, combined_ang_vel_w,
         #              zoom, bbox_empty, data_age, bbox_age)
         # Optional: +6D triangulation (tri_pos + tri_std)
-        obs_dim = 30 + 16 * (self.num_agents - 1)
+        obs_dim = 31 + 16 * (self.num_agents - 1)
         if self.enable_triangulation:
             obs_dim += 6  # triangulated position (3) + std_dev (3)
         self.observation_spaces = {a: obs_dim for a in self.possible_agents}

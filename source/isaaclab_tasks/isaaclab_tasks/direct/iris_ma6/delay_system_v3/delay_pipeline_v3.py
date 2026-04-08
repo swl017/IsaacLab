@@ -238,6 +238,7 @@ class DelayPipelineV3:
         data: torch.Tensor,
         timestamp: torch.Tensor,
         t_current: torch.Tensor,
+        burst_dropout_mask: Optional[torch.Tensor] = None,
     ) -> None:
         """Advance all stateful pipeline stages. WRITE — call once per sim step.
 
@@ -253,6 +254,9 @@ class DelayPipelineV3:
             data: Input data tensor of shape (num_envs, ...).
             timestamp: Capture timestamp of shape (num_envs,).
             t_current: Current simulation time of shape (num_envs,).
+            burst_dropout_mask: Optional external dropout mask of shape (num_envs,),
+                dtype bool. When provided, replaces the internal i.i.d. sampler for
+                this step (used by burst dropout from multi-agent wrapper).
         """
         data = data.to(self._device)
         timestamp = timestamp.to(self._device)
@@ -292,7 +296,7 @@ class DelayPipelineV3:
 
         # Stage 4: Dropout (mask sampled once per step)
         if self._cfg.dropout.enabled:
-            data, timestamp = self._apply_dropout(data, timestamp)
+            data, timestamp = self._apply_dropout(data, timestamp, external_mask=burst_dropout_mask)
 
         self._cached_data_with_dropout = data.clone()
         self._cached_ts_with_dropout = timestamp.clone()
@@ -318,6 +322,7 @@ class DelayPipelineV3:
         timestamp: torch.Tensor,
         t_current: torch.Tensor,
         allow_dropout: bool = True,
+        burst_dropout_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Process data through the delay pipeline (advance + query).
 
@@ -332,11 +337,12 @@ class DelayPipelineV3:
             timestamp: Capture timestamp of shape (num_envs,).
             t_current: Current simulation time of shape (num_envs,).
             allow_dropout: Whether to return post-dropout data.
+            burst_dropout_mask: Optional external dropout mask from burst model.
 
         Returns:
             Tuple of (delayed_data, delayed_timestamp).
         """
-        self.advance(data, timestamp, t_current)
+        self.advance(data, timestamp, t_current, burst_dropout_mask=burst_dropout_mask)
         return self.query(allow_dropout=allow_dropout)
 
     def _apply_staleness(
@@ -441,12 +447,20 @@ class DelayPipelineV3:
         self,
         data: torch.Tensor,
         timestamp: torch.Tensor,
+        external_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Apply dropout (missed detections).
 
         When dropout occurs, the previous data AND timestamp are retained.
 
         **KEY**: Both data and timestamp are held together during dropout.
+
+        Args:
+            data: Input data tensor.
+            timestamp: Capture timestamp tensor.
+            external_mask: Optional external dropout mask of shape (num_envs,),
+                dtype bool. When provided, replaces the internal i.i.d. sampler
+                (used by burst dropout). True = dropped.
         """
         if not self._dropout_initialized:
             # First call - initialize held values with incoming data
@@ -456,8 +470,11 @@ class DelayPipelineV3:
             self._dropout_initialized = True
             return data.clone(), timestamp.clone()
 
-        # Sample dropout mask for this step
-        drop_mask = self._dropout_sampler.sample_mask()
+        # Use external mask (burst dropout) or internal i.i.d. sampler
+        if external_mask is not None:
+            drop_mask = external_mask
+        else:
+            drop_mask = self._dropout_sampler.sample_mask()
 
         # Shape handling
         drop_mask_data = drop_mask

@@ -42,7 +42,6 @@ def run_per_agent_randomization_tests(
         PerAgentParameterSampler,
         PerAgentLatencySampler,
         PerAgentStalenessSampler,
-        PerAgentDropoutSampler,
     )
 
     num_envs = 16
@@ -185,57 +184,7 @@ def run_per_agent_randomization_tests(
     except Exception as e:
         results.add_fail("PerAgentStalenessSampler FPS to period", str(e))
 
-    # Test 8: PerAgentDropoutSampler mask shape
-    try:
-        cfg_samp = SamplingCfg(frequency="per_step")
-        sampler = PerAgentDropoutSampler(
-            probability=0.5,
-            rate_distribution=None,
-            sampling_cfg=cfg_samp,
-            num_envs=num_envs,
-            num_agents=num_agents,
-            device=device,
-        )
-        sampler.initialize()
-
-        mask = sampler.sample_mask()
-        assert mask.shape == (num_envs, num_agents), \
-            f"Expected shape ({num_envs}, {num_agents}), got {mask.shape}"
-        assert mask.dtype == torch.bool
-
-        results.add_pass("PerAgentDropoutSampler mask shape")
-    except Exception as e:
-        results.add_fail("PerAgentDropoutSampler mask shape", str(e))
-
-    # Test 9: PerAgentDropoutSampler probability distribution
-    try:
-        cfg_samp = SamplingCfg(frequency="per_step")
-        sampler = PerAgentDropoutSampler(
-            probability=0.5,
-            rate_distribution=None,
-            sampling_cfg=cfg_samp,
-            num_envs=num_envs,
-            num_agents=num_agents,
-            device=device,
-        )
-        sampler.initialize()
-
-        # Sample many times and check approximate rate
-        total_drops = 0
-        num_samples = 100
-        for _ in range(num_samples):
-            mask = sampler.sample_mask()
-            total_drops += mask.sum().item()
-
-        drop_rate = total_drops / (num_samples * num_envs * num_agents)
-        # Should be approximately 0.5 with some tolerance
-        assert 0.35 < drop_rate < 0.65, f"Drop rate {drop_rate} not close to 0.5"
-
-        results.add_pass("PerAgentDropoutSampler probability distribution")
-    except Exception as e:
-        results.add_fail("PerAgentDropoutSampler probability distribution", str(e))
-
-    # Test 10: Statistical independence between agents
+    # Test 8: Statistical independence between agents
     try:
         cfg_dist = DistributionCfg(type="uniform", mean=0.5, half_range=0.3)
         cfg_samp = SamplingCfg(frequency="per_step")

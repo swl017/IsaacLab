@@ -33,4 +33,4 @@
 2. Metrics compared: pair_valid_rate, triangulation RMSE, average zoom level, detection rate
 3. Decision documented with data
 
-**Flow**: Light (I → S → Y → PR) — single ablation experiment
+**Flow**: Full (Q → R → I → S → Y → PR) - including an ablation experiment

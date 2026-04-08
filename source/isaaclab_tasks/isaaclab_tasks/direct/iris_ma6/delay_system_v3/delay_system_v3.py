@@ -198,6 +198,7 @@ class UnifiedDelaySystem:
         perspective: Literal["ego", "other"],
         use_noise: bool = False,
         allow_dropout: bool = True,
+        burst_dropout_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Get delayed data with specified perspective and noise mode.
 
@@ -206,6 +207,9 @@ class UnifiedDelaySystem:
             perspective: "ego" or "other" (determines delay parameters).
             use_noise: If True, use noisy data. If False, use raw.
             allow_dropout: Whether to allow dropout (typically False for rewards).
+            burst_dropout_mask: Optional external dropout mask of shape (num_envs,),
+                dtype bool. When provided, replaces per-pipeline i.i.d. dropout
+                for this field (used by burst dropout model).
 
         Returns:
             Tuple of (delayed_data, delayed_timestamp).
@@ -236,9 +240,12 @@ class UnifiedDelaySystem:
             or (not use_noise and cfg.dropout_for_rewards)
         )
 
-        # Process through pipeline
+        # Process through pipeline (burst mask only passed when dropout is active)
+        effective_burst_mask = burst_dropout_mask if apply_dropout else None
         delayed_data, delayed_timestamp = pipeline.process(
-            data, timestamp, self._t_current, allow_dropout=apply_dropout
+            data, timestamp, self._t_current,
+            allow_dropout=apply_dropout,
+            burst_dropout_mask=effective_burst_mask,
         )
 
         return delayed_data, delayed_timestamp

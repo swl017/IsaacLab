@@ -818,3 +818,49 @@ Next:
 - Ticket-014: ablation — train with bbox_size_reward_scale=0
 - Ticket-010 PR: correct parameters now available
 - Training run with refitted detector replicator params
+
+----------------------------------------
+2026-04-09 — Ticket-014: Bbox size reward ablation (experiment registered)
+----------------------------------------
+Done:
+- Added A9 ablation group to experiment_registry.py:
+  - a9_bbox_size_baseline: default bbox_size_reward_scale=60.0 (control)
+  - a9_no_bbox_size: bbox_size_reward_scale=0.0 (policy learns zoom from miss rate + triangulation)
+- Ticket flow: Light (I → S → Y → PR)
+
+Next:
+- Run ablation: a9_bbox_size_baseline vs a9_no_bbox_size
+- Compare metrics: pair_valid_rate, triangulation RMSE, average zoom level, detection rate
+- Decision: drop bbox_size_reward permanently or replace with detector-aware reward
+
+--- 2026-04-09 ---
+QRISPY state saved for 011-burst-dropout at Stage PR (all 4 slices complete)
+
+Done:
+- Ticket 011: Burst dropout — full QRISPY (Q→R→I→S→P→Y×4)
+- Implemented Gilbert-Elliott two-state Markov chain for correlated packet loss
+- New file: delay_system_v3/burst_dropout.py (BurstDropoutCfg + BurstDropoutSampler)
+- Per-directional-channel asymmetric dropout (j→i independent of i→j)
+- Integrated into pipeline (external mask), unified system, multi-agent wrapper
+- Curriculum phase 200k-220k ramps p_onset
+- Deleted unused PerAgentDropoutSampler
+- 21 new tests: 11 burst sampler + 5 pipeline external mask + 5 config integration
+- Backward compatible: burst_enabled=False (default) identical to prior behavior
+- Created ticket 012: Continuous AoI (stub only)
+
+Next:
+- Engineer code review of all 4 slices → PR stage
+- Enable burst dropout in training config and run ablation
+
+--- 2026-04-09 ---
+Ticket 015: Continuous AoI — Light flow (I→S→Y)
+
+Done:
+- Added continuous_aoi_jitter config flag (iris_ma_env6_test_cfg.py)
+- Jitter GT capture timestamps with U(-step_dt, 0) independently for motion/detection (iris_ma_env6_test.py)
+- Passed jittered timestamps through delay system store() calls (multi_agent_wrapper.py)
+- Root cause: store() defaulted to discrete _sim_time when no timestamp arg given
+
+Next:
+- Verify continuous AoI in teleop overlay
+- Training run with continuous AoI enabled to check for regressions

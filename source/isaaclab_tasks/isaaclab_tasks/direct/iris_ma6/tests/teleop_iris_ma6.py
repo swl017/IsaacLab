@@ -642,10 +642,10 @@ def main():
 
     # Enable delay system at full strength for realistic observation delays
     # (env starts with mode="none" due to curriculum — override for teleop)
-    # if env._delay_system is not None:
-    #     env._delay_system.set_delay_mode("fixed", progress=1.0)
-    #     env._delay_system.set_noise_scale(1.0)
-    #     print("[INFO] Delay system enabled (fixed mode, progress=1.0, noise_scale=1.0)")
+    if env._delay_system is not None:
+        env._delay_system.set_delay_mode("fixed", progress=1.0)
+        env._delay_system.set_noise_scale(1.0)
+        print("[INFO] Delay system enabled (fixed mode, progress=1.0, noise_scale=1.0)")
 
     # Override curriculum noise_scale for teleop (curriculum starts at 0)
     if env.cfg.calibrated_bbox_noise.enabled:

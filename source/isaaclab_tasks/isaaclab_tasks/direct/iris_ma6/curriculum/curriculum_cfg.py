@@ -131,6 +131,20 @@ class CurriculumCfg:
     dropout_end_step: int = 180000
     """Step when dropout reaches maximum rate."""
 
+    # ==========================================================================
+    # Phase 6: Burst Dropout (after i.i.d. dropout)
+    # ==========================================================================
+
+    burst_dropout_start_step: int = 200000
+    """Step to start introducing burst dropout (correlated packet loss).
+
+    Placed after i.i.d. dropout phase so the policy first learns to handle
+    isolated single-frame drops before experiencing sustained blackouts.
+    """
+
+    burst_dropout_end_step: int = 220000
+    """Step when burst dropout onset probability reaches target value."""
+
     # Legacy alias for backward compatibility
     delay_start_step: int = 120000
     """[DEPRECATED] Use noise_start_step, fixed_delay_start_step, etc."""
@@ -270,6 +284,13 @@ class CurriculumCfg:
     def get_dropout_progress(self, current_step: int) -> float:
         """Get progress within dropout phase [0, 1]."""
         return self.get_progress(current_step, self.dropout_start_step, self.dropout_end_step)
+
+    def get_burst_dropout_progress(self, current_step: int) -> float:
+        """Get progress within burst dropout phase [0, 1].
+
+        Used to ramp burst onset probability (p_onset) from 0 to target value.
+        """
+        return self.get_progress(current_step, self.burst_dropout_start_step, self.burst_dropout_end_step)
 
     def get_task_level_progress(self, current_step: int) -> tuple:
         """Get task reward level curriculum progress.

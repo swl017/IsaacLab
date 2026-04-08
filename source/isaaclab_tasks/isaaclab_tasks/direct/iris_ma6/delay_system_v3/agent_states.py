@@ -66,6 +66,7 @@ class AgentStatesData:
     camera_ray_directions_w: torch.Tensor  # [N, T, 3]
     camera_ray_origins_w: torch.Tensor  # [N, T, 3]
     camera_zoom_level: torch.Tensor  # zoom level [N]
+    camera_effective_hfov: torch.Tensor  # effective horizontal FOV in radians [N]
 
     # Detection (bbox)
     bboxes_2d: torch.Tensor  # xywh format [N, T, 4]
@@ -146,6 +147,7 @@ class AgentStates:
         self.data.camera_ray_directions_w = torch.zeros(N, T, 3, device=device)
         self.data.camera_ray_origins_w = torch.zeros(N, T, 3, device=device)
         self.data.camera_zoom_level = torch.zeros(N, device=device)
+        self.data.camera_effective_hfov = torch.zeros(N, device=device)  # radians
 
         # Detection
         self.data.bboxes_2d = torch.zeros(N, T, 4, device=device)

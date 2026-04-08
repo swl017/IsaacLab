@@ -389,6 +389,14 @@ class MultiAgentDelayCfgV3:
     noise: NoiseCfg = field(default_factory=NoiseCfg)
     """Observation noise configuration."""
 
+    burst_dropout: "BurstDropoutCfg | None" = None
+    """Optional burst dropout configuration (Gilbert-Elliott model).
+
+    When set and enabled, replaces per-pipeline i.i.d. dropout with
+    correlated burst dropout on directional communication channels.
+    Import: from .burst_dropout import BurstDropoutCfg
+    """
+
     # Per-agent randomization settings
     per_agent_randomization: bool = True
     """If True, each agent samples its own delay parameters independently.
@@ -519,6 +527,27 @@ class DelaySystemKeyParams:
     # === Dropout Parameters ===
     dropout_prob: float = 0.05
     """Probability of detection dropout (missed detections) per step."""
+
+    # === Burst Dropout Parameters ===
+    burst_dropout_enabled: bool = False
+    """Whether burst dropout (Gilbert-Elliott model) is active.
+
+    When enabled, replaces i.i.d. per-pipeline dropout with correlated
+    burst dropout on directional communication channels."""
+
+    burst_p_onset: float = 0.01
+    """Good->Bad transition probability per step.
+    Controls burst frequency. Mean good-run = 1/p_onset steps."""
+
+    burst_p_recovery: float = 0.1
+    """Bad->Good transition probability per step.
+    Controls burst duration. Mean burst length = 1/p_recovery steps."""
+
+    burst_good_dropout_prob: float = 0.01
+    """Dropout probability in Good state (low baseline loss)."""
+
+    burst_bad_dropout_prob: float = 0.9
+    """Dropout probability in Bad state (near-total loss during burst)."""
 
     # === Noise Parameters ===
     noise_enabled: bool = True
@@ -656,6 +685,18 @@ def create_delay_cfg_from_params(params: DelaySystemKeyParams) -> MultiAgentDela
     # Reward state configuration
     cfg.reward_state_cfg.use_delay = params.reward_use_delay
     cfg.reward_state_cfg.use_noise = params.reward_use_noise
+
+    # Burst dropout configuration
+    if params.burst_dropout_enabled:
+        from .burst_dropout import BurstDropoutCfg
+
+        cfg.burst_dropout = BurstDropoutCfg(
+            enabled=True,
+            p_onset=params.burst_p_onset,
+            p_recovery=params.burst_p_recovery,
+            good_dropout_prob=params.burst_good_dropout_prob,
+            bad_dropout_prob=params.burst_bad_dropout_prob,
+        )
 
     return cfg
 
