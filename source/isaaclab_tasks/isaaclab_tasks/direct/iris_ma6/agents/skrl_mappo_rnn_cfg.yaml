@@ -35,7 +35,7 @@ agent:
 
   # PPO parameters
   rollouts: 32              # Number of rollouts before updating
-  learning_epochs: 6         # Number of learning epochs during each update
+  learning_epochs: 4         # Number of learning epochs during each update
   mini_batches: 8            # Number of mini batches (lower = better sequence sampling)
 
   discount_factor: 0.99      # Discount factor (gamma)
@@ -62,7 +62,7 @@ agent:
   learning_rate_scheduler: KLAdaptiveLR
   learning_rate_scheduler_kwargs:
     kl_threshold: 0.02       # Wider dead zone (0.02–0.08) absorbs curriculum transitions
-    min_lr: 1.0e-4           # Prevent LR collapse after curriculum shifts (default 1e-6 froze policy)
+    min_lr: 3.0e-4           # Prevent LR collapse after curriculum shifts (default 1e-6 froze policy)
 
   # Preprocessors
   state_preprocessor: RunningStandardScaler
