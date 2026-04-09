@@ -417,35 +417,27 @@ class DroneController:
         high = 1.0 + progress * (cfg.scale_range[1] - 1.0)
         M = len(env_ids)
 
+        # In-place updates: only modify the specified env_ids rows.
+        # This is safe for batched controllers where different agent slices
+        # are randomized in separate calls.
         if cfg.randomize_velocity:
             scale = torch.empty(M, 1, device=self.device).uniform_(low, high)
-            new_Kp = self._nominal_gains["Kp_vel"].clone()
-            new_Ki = self._nominal_gains["Ki_vel"].clone()
-            new_Kp[env_ids] = self._nominal_gains["Kp_vel"][env_ids] * scale
-            new_Ki[env_ids] = self._nominal_gains["Ki_vel"][env_ids] * scale
-            self._velocity.set_gains(Kp_vel=new_Kp, Ki_vel=new_Ki)
+            self._velocity._Kp_vel[env_ids] = self._nominal_gains["Kp_vel"][env_ids] * scale
+            self._velocity._Ki_vel[env_ids] = self._nominal_gains["Ki_vel"][env_ids] * scale
 
         if cfg.randomize_attitude:
             scale = torch.empty(M, 1, device=self.device).uniform_(low, high)
-            new_Kp = self._nominal_gains["Kp_att"].clone()
-            new_Kp[env_ids] = self._nominal_gains["Kp_att"][env_ids] * scale
-            self._attitude.set_gains(Kp_att=new_Kp)
+            self._attitude._Kp_att[env_ids] = self._nominal_gains["Kp_att"][env_ids] * scale
 
         if cfg.randomize_rate:
             scale = torch.empty(M, 1, device=self.device).uniform_(low, high)
-            new_Kp = self._nominal_gains["Kp_rate"].clone()
-            new_Ki = self._nominal_gains["Ki_rate"].clone()
-            new_Kd = self._nominal_gains["Kd_rate"].clone()
-            new_Kp[env_ids] = self._nominal_gains["Kp_rate"][env_ids] * scale
-            new_Ki[env_ids] = self._nominal_gains["Ki_rate"][env_ids] * scale
-            new_Kd[env_ids] = self._nominal_gains["Kd_rate"][env_ids] * scale
-            self._rate.set_gains(Kp_rate=new_Kp, Ki_rate=new_Ki, Kd_rate=new_Kd)
+            self._rate._Kp_rate[env_ids] = self._nominal_gains["Kp_rate"][env_ids] * scale
+            self._rate._Ki_rate[env_ids] = self._nominal_gains["Ki_rate"][env_ids] * scale
+            self._rate._Kd_rate[env_ids] = self._nominal_gains["Kd_rate"][env_ids] * scale
 
         if cfg.randomize_motor:
             scale = torch.empty(M, device=self.device).uniform_(low, high)
-            new_tau = self._nominal_gains["tau_motor"].clone()
-            new_tau[env_ids] = self._nominal_gains["tau_motor"][env_ids] * scale
-            self._motor.set_tau_motor(new_tau)
+            self._motor._tau_motor[env_ids] = self._nominal_gains["tau_motor"][env_ids] * scale
 
         if cfg.randomize_zoom:
             # Update nominal if curriculum override provided
@@ -457,14 +449,10 @@ class DroneController:
             z_high = 1.0 + progress * (cfg.zoom_scale_range[1] - 1.0)
 
             scale = torch.empty(M, device=self.device).uniform_(z_low, z_high)
-            new_tau_z = self._nominal_gains["tau_zoom"].clone()
-            new_tau_z[env_ids] = self._nominal_gains["tau_zoom"][env_ids] * scale
-            self._zoom.set_tau_zoom(new_tau_z)
+            self._zoom._tau_zoom[env_ids] = self._nominal_gains["tau_zoom"][env_ids] * scale
 
             scale2 = torch.empty(M, device=self.device).uniform_(low, high)
-            new_mzr = self._nominal_gains["max_zoom_rate"].clone()
-            new_mzr[env_ids] = self._nominal_gains["max_zoom_rate"][env_ids] * scale2
-            self._zoom.set_max_zoom_rate(new_mzr)
+            self._zoom._max_zoom_rate[env_ids] = self._nominal_gains["max_zoom_rate"][env_ids] * scale2
 
     def set_aerodynamic_level(self, level: int):
         """Set aerodynamic fidelity level.

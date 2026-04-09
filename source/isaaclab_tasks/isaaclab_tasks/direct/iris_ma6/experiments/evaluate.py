@@ -724,9 +724,12 @@ def main(env_cfg, agent_cfg: dict):
             _traj_gimbal_angles = {}
             _traj_zoom_levels = {}
             for _i, aid in enumerate(possible_agents):
-                gimbal = unwrapped._controllers[aid]._gimbal
+                # Batched controller: agent _i occupies rows [_i*N, (_i+1)*N)
+                _s = _i * unwrapped.num_envs
+                _e = _s + unwrapped.num_envs
+                gimbal = unwrapped._controller._gimbal
                 _traj_gimbal_angles[aid] = torch.stack(
-                    [gimbal._yaw, gimbal._pitch], dim=-1
+                    [gimbal._yaw[_s:_e], gimbal._pitch[_s:_e]], dim=-1
                 )  # (N, 2)
                 _traj_zoom_levels[aid] = unwrapped.zoom_level[:, _i]  # (N,)
 

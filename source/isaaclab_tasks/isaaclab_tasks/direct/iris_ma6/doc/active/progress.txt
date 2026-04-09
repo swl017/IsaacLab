@@ -864,3 +864,54 @@ Done:
 Next:
 - Verify continuous AoI in teleop overlay
 - Training run with continuous AoI enabled to check for regressions
+
+--- 2026-04-09 ---
+Ticket 018: Pre-allocate AgentStates buffers (A2)
+
+Done:
+- Added AgentStates.zero_() method that zeros all fields in-place without re-allocation
+- Pre-allocated _delay_gt_buffers dict in __init__ (reused in _update_state_cache)
+- Pre-allocated _gt_state_cache dict in __init__ (reused in _build_gt_states)
+- Pre-allocated _dr_intrinsics_per_agent tensor (N, A, 3, 3) for per-agent intrinsics
+- Replaced 2× per-step AgentStates() construction with zero_()+repopulate pattern
+- Replaced 3× per-step _camera_intrinsics_base.clone() with in-place copy_() + scale
+- Eliminates ~50 torch.zeros() GPU allocations per policy step (2 agents × 29 tensors)
+
+Files modified:
+- delay_system_v3/agent_states.py: added zero_() method
+- iris_ma_env6_test.py: __init__ (pre-alloc), _update_state_cache, _build_gt_states
+
+Next:
+- Run training to verify no regression (functional correctness)
+- Profile wall-clock to confirm 5-8% step time reduction
+
+----------------------------------------
+2026-04-09 — Ticket 017: Batch DroneController across agents
+----------------------------------------
+Done:
+- Replaced N per-agent DroneController instances with single batched
+  DroneController(num_envs=N*A). Agent-major layout: [0,N)=agent0, [N,2N)=agent1, etc.
+- Added _batch_idx() helper for env_ids → batch row mapping
+- Rewrote _apply_action(): gather inputs (N*A,...), single step_policy() call,
+  scatter outputs per-robot for Isaac Sim API (forces, gimbal, zoom)
+- Updated _reset_idx() and _reset_idx_hardcoded() to use batch indices for
+  controller reset, gimbal state sync, zoom level, tau_zoom
+- Fixed randomize_gains() in drone_controller.py: replaced clone-replace-all
+  pattern with in-place row updates to prevent cross-agent gain interference
+- Made _tau_motor (motor_dynamics.py) and _tau_zoom/_max_zoom_rate
+  (zoom_controller.py) per-env tensors from init (required for in-place indexing)
+- Updated external scripts: tune_pointing_gain.py, experiments/evaluate.py
+
+Files modified:
+- iris_ma_env6_test.py: __init__, _batch_idx, _apply_action, _reset_idx,
+  _reset_idx_hardcoded, gain randomization section
+- controller/drone_controller.py: randomize_gains() in-place updates
+- controller/motor_dynamics.py: _tau_motor init as (N,) tensor
+- controller/zoom_controller.py: _tau_zoom/_max_zoom_rate init as (N,) tensors
+- controller/tuning/tune_pointing_gain.py: batched gimbal access
+- experiments/evaluate.py: batched gimbal angle extraction
+
+Next:
+- Run training to verify no regression (functional correctness)
+- Benchmark with torch.cuda.Event timing to measure _apply_action speedup
+- Expected: ~15-20% wall-clock reduction per step (eliminates 2 redundant kernel launches)

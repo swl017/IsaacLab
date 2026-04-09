@@ -218,7 +218,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
 
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=1024,
-        env_spacing=1000.0,
+        env_spacing=200.0,
         replicate_physics=True,
     )
 
@@ -320,7 +320,9 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
 
     delay_system_params: DelaySystemKeyParams = DelaySystemKeyParams(
         # === Ego Motion Latency (proprioceptive sensing) ===
-        ego_motion_latency_enabled=True,  # First-order lag only (fast IMU/GPS)
+        ego_motion_latency_enabled=True,  # Transport latency for IMU/GPS
+        ego_motion_latency_mean=0.005,    # 5ms mean transport latency
+        ego_motion_latency_std=0.002,     # 2ms std
         ego_motion_fol_tau=0.005,          # 5ms time constant for smoothing
         # === Ego Detection Latency (NN inference) ===
         ego_detection_latency_mean=0.1,   # 100ms mean (GPU inference time)
@@ -399,17 +401,17 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # Reward Scales (migrated from iris_ma5)
     # ==========================================================================
 
-    action_sum_penalty_scale: float = -30.0
+    action_sum_penalty_scale: float = -2.0
     """Penalty scale for total action magnitude."""
 
     # [0 vx, 1 vy, 2 vz, 3 yaw_rate, 4 gimbal_yaw_rate, 5 gimbal_pitch_rate, 6 zoom_rate]
-    action_weight: list = [1, 1, 5, 1, 0.5, 0.5, 1.0]
+    action_weight: list = [1, 1, 5, 1, 0.5, 0.5, 0.5]
     """Weights for each action dimension in penalty computation."""
 
-    action_delta_weight: list = [1, 1, 1, 1, 0.5, 0.5, 1.0]
+    action_delta_weight: list = [1, 1, 1, 1, 0.5, 0.5, 0.5]
     """Weights for action delta (smoothness) penalty."""
 
-    action_delta_penalty_scale: float = -15.0
+    action_delta_penalty_scale: float = -1.0
     """Penalty scale for action changes (smoothness)."""
 
     bbox_center_reward_scale: float = 60.0

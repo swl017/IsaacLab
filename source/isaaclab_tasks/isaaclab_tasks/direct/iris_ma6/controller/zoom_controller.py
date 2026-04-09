@@ -42,9 +42,13 @@ class ZoomController:
         # Target zoom level (before dynamics)
         self._zoom_target = torch.ones(num_envs, dtype=torch.float32, device=self.device)
 
-        # Store tau and max_zoom_rate for potential per-env randomization
-        self._tau_zoom = cfg.tau_zoom
-        self._max_zoom_rate = cfg.max_zoom_rate
+        # Store tau and max_zoom_rate as per-env tensors for batch indexing
+        self._tau_zoom = torch.full(
+            (num_envs,), cfg.tau_zoom, dtype=torch.float32, device=self.device
+        )
+        self._max_zoom_rate = torch.full(
+            (num_envs,), cfg.max_zoom_rate, dtype=torch.float32, device=self.device
+        )
 
     @property
     def zoom(self) -> torch.Tensor:

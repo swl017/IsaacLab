@@ -492,6 +492,16 @@ class DelaySystemKeyParams:
     This matches real-world proprioceptive sensing (IMU, GPS) which is very fast.
     """
 
+    ego_motion_latency_mean: float = 0.005
+    """Mean transport latency for ego motion (IMU/GPS) in seconds.
+
+    Only used when ego_motion_latency_enabled=True.
+    Default 5ms represents typical IMU/GPS processing time.
+    """
+
+    ego_motion_latency_std: float = 0.002
+    """Standard deviation of ego motion transport latency in seconds."""
+
     ego_motion_fol_tau: float = 0.005
     """First-order lag time constant for ego motion fields in seconds.
 
@@ -529,7 +539,7 @@ class DelaySystemKeyParams:
     """Probability of detection dropout (missed detections) per step."""
 
     # === Burst Dropout Parameters ===
-    burst_dropout_enabled: bool = False
+    burst_dropout_enabled: bool = True
     """Whether burst dropout (Gilbert-Elliott model) is active.
 
     When enabled, replaces i.i.d. per-pipeline dropout with correlated
@@ -599,7 +609,15 @@ def create_delay_cfg_from_params(params: DelaySystemKeyParams) -> MultiAgentDela
     # === Ego Motion Pipeline (first-order lag only) ===
     # Motion fields (pos, vel, orientation) use fast proprioceptive sensing
     ego_motion_pipeline = DelayPipelineCfgV3(
-        latency=LatencyCfg(enabled=params.ego_motion_latency_enabled),
+        latency=LatencyCfg(
+            enabled=params.ego_motion_latency_enabled,
+            distribution=DistributionCfg(
+                type="normal",
+                mean=params.ego_motion_latency_mean,
+                std=params.ego_motion_latency_std,
+                min_value=0.0,
+            ),
+        ),
         staleness=StalenessCfg(enabled=False),  # No staleness for motion
         dropout=DropoutCfg(enabled=False),  # No dropout for motion
         first_order_lag=FirstOrderLagCfg(

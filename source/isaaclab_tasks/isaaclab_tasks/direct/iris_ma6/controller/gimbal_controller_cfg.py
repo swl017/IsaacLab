@@ -27,7 +27,7 @@ class GimbalControllerCfg:
     maintaining parallel integrated state.
     """
 
-    max_gimbal_rate: float = 1.0 * math.pi
+    max_gimbal_rate: float = 2.0 * math.pi
     """Maximum gimbal angular rate [rad/s]. Default 2*pi (360 deg/s)."""
 
     yaw_limits: tuple[float, float] = (-math.radians(120), math.radians(120))

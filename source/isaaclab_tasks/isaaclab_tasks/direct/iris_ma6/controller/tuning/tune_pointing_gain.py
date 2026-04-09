@@ -76,7 +76,7 @@ def main():
     # Get references
     agent_id = unwrapped.cfg.possible_agents[0]
     robot = unwrapped._robots[agent_id]
-    gimbal_ctrl = unwrapped._controllers[agent_id]._gimbal
+    gimbal_ctrl = unwrapped._controller._gimbal
 
     # Override pointing_gain per env (only works with jacobian mode)
     from isaaclab_tasks.direct.iris_ma6.controller.gimbal_controller_jacobian import GimbalController as JacobianGimbal
@@ -84,7 +84,9 @@ def main():
         f"Expected jacobian gimbal controller, got {type(gimbal_ctrl).__name__}. "
         f"Set mode='jacobian' in GimbalControllerCfg."
     )
-    gimbal_ctrl._pointing_gain = gains.unsqueeze(-1)  # (N, 1)
+    # Batched controller has N*A rows; replicate test gains for all agents
+    A = len(unwrapped.cfg.possible_agents)
+    gimbal_ctrl._pointing_gain = gains.unsqueeze(-1).repeat(A, 1)  # (N*A, 1)
 
     from isaaclab_tasks.direct.iris_ma6.controller.gimbal_controller import YAW_JOINT_OFFSET
 

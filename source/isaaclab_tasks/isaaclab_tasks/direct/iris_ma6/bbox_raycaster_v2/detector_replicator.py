@@ -64,7 +64,7 @@ class NoiseModelParams:
     miss_sigmoid_a_sky: float = 0.024751038174665885
     """Miss sigmoid steepness for sky background."""
 
-    miss_size_cutoff_sky: float = 33.0
+    miss_size_cutoff_sky: float = 25.0
     """Size cutoff below which sky targets are always missed (px)."""
 
     miss_size_threshold_sky: float = 1.2214178344000452e-12
@@ -178,8 +178,12 @@ class DetectorReplicator:
         self._device = torch.device(device)
         self._params: Optional[NoiseModelParams] = None
 
-        if cfg.enabled and cfg.params_path:
-            self.load_params(cfg.params_path)
+        if cfg.enabled:
+            if cfg.params_path:
+                self.load_params(cfg.params_path)
+            else:
+                # Use hardcoded defaults from NoiseModelParams dataclass
+                self._params = NoiseModelParams()
 
     @property
     def params(self) -> Optional[NoiseModelParams]:

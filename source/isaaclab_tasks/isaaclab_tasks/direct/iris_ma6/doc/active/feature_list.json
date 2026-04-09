@@ -1,7 +1,7 @@
 {
   "project": "iris_ma6",
   "last_updated": "2026-04-09",
-  "last_session_ticket": "015-continuous-aoi",
+  "last_session_ticket": "017-batch-controller",
   "features": [
     {
       "id": "controller",
@@ -15,7 +15,7 @@
       "name": "Multi-agent delay/staleness/dropout simulation",
       "status": "done",
       "spec": null,
-      "notes": "Ringbuffer-based with timestamp guarantees. Fixed calling contract: advance/query split ensures idempotent multi-call per step. Stage order: staleness→latency→FOL→dropout. Ticket-015: continuous AoI — jittered capture timestamps propagated via explicit store() timestamp arg. (2026-04-09)"
+      "notes": "Ringbuffer-based with timestamp guarantees. Fixed calling contract: advance/query split ensures idempotent multi-call per step. Stage order: staleness→latency→FOL→dropout. Ticket-015: continuous AoI — jittered capture timestamps propagated via explicit store() timestamp arg. Ticket-018: AgentStates.zero_() for buffer reuse, eliminates ~50 GPU allocs/step. (2026-04-09)"
     },
     {
       "id": "cbf-safety",

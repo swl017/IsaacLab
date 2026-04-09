@@ -156,6 +156,54 @@ class AgentStates:
         #     bbox_valid = bbox_raycaster.validate_bbox(bbox)  # [N, T]
         # This avoids confusion between frame-level validity and detection validity.
 
+    def zero_(self):
+        """Zero all state tensors in-place without re-allocation.
+
+        WRITE method — call once per step before populating with new data.
+        """
+        d = self.data
+        # Timestamps
+        d.timestamp_sim_walltime.zero_()
+        d.timestamp_motion.zero_()
+        d.timestamp_detection.zero_()
+        # Body motion
+        d.body_position_w.zero_()
+        d.body_orientation_w[:] = 0.0
+        d.body_orientation_w[:, 0] = 1.0  # w=1 identity quaternion
+        d.body_linear_velocity_w.zero_()
+        d.body_linear_velocity_b.zero_()
+        d.body_angular_velocity_w.zero_()
+        d.body_angular_velocity_b.zero_()
+        d.body_combined_angular_velocity_w.zero_()
+        d.body_combined_angular_velocity_b.zero_()
+        d.body_linear_acceleration_w.zero_()
+        d.body_linear_acceleration_b.zero_()
+        d.body_angular_acceleration_b.zero_()
+        # Joint states
+        d.joint_positions_b.zero_()
+        d.joint_velocities_b.zero_()
+        d.joint_accelerations_b.zero_()
+        # Gimbal world-frame angles
+        d.gimbal_azimuth_world.zero_()
+        d.gimbal_elevation_world.zero_()
+        d.gimbal_azimuth_rate.zero_()
+        d.gimbal_elevation_rate.zero_()
+        # Camera geometry
+        d.camera_offset_position_b.zero_()
+        d.camera_offset_rotation_b[:] = 0.0
+        d.camera_offset_rotation_b[:, 0] = 1.0
+        d.camera_position_w.zero_()
+        d.camera_orientation_w[:] = 0.0
+        d.camera_orientation_w[:, 0] = 1.0
+        d.camera_base_intrinsics.zero_()
+        d.camera_base_intrinsics[:, 2, 2] = 1.0
+        d.camera_ray_directions_w.zero_()
+        d.camera_ray_origins_w.zero_()
+        d.camera_zoom_level.zero_()
+        d.camera_effective_hfov.zero_()
+        # Detection
+        d.bboxes_2d.zero_()
+
 
 class MultiAgentStates:
     """Container for multiple agents' states.

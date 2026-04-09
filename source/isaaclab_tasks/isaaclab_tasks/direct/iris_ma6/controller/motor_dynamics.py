@@ -60,7 +60,9 @@ class MotorDynamics:
         # Precompute limits
         self._omega_min = cfg.omega_min
         self._omega_max = cfg.omega_max
-        self._tau_motor = cfg.tau_motor
+        self._tau_motor = torch.full(
+            (num_envs,), cfg.tau_motor, dtype=torch.float32, device=self.device
+        )
 
     @property
     def omega(self) -> torch.Tensor:

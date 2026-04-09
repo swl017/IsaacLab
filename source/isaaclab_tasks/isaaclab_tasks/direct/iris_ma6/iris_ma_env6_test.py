@@ -263,21 +263,19 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 ids, _ = robot.find_bodies(link_name)
                 self._frame_link_ids[agent_id][link_name] = ids[0]
 
-        # Create per-agent DroneControllers
-        self._controllers: Dict[str, DroneController] = {}
-        for agent_id in cfg.possible_agents:
-            robot = self._robots[agent_id]
-            # Get mass from physics - sum all body masses for one environment
-            all_masses = robot.root_physx_view.get_masses()
-            # Shape is (num_envs, num_bodies) - sum bodies for first env
-            mass = all_masses[0].sum().item()
-            self._controllers[agent_id] = DroneController(
-                cfg=self.cfg.drone_controller,
-                mass=mass,
-                gravity=9.81,
-                num_envs=self.num_envs,
-                device=self.device,
-            )
+        # Single batched DroneController for all agents.
+        # Layout: rows [0, N) = agent 0, [N, 2N) = agent 1, etc.
+        # All agents share the same URDF so mass is identical.
+        first_robot = self._robots[cfg.possible_agents[0]]
+        all_masses = first_robot.root_physx_view.get_masses()
+        mass = all_masses[0].sum().item()
+        self._controller = DroneController(
+            cfg=self.cfg.drone_controller,
+            mass=mass,
+            gravity=9.81,
+            num_envs=self.num_envs * len(cfg.possible_agents),
+            device=self.device,
+        )
 
         # Action buffers
         self._actions: Dict[str, torch.Tensor] = {}
@@ -309,6 +307,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self._gimbal_joint_vel: Dict[str, torch.Tensor] = {}
         self._gimbal_az_rate_world: Dict[str, torch.Tensor] = {}
         self._gimbal_el_rate_world: Dict[str, torch.Tensor] = {}
+        self._cached_gt_states: Dict[AgentID, AgentStates] | None = None
         self._target_pos_w: torch.Tensor = torch.zeros(self.num_envs, 3, device=self.device)
         self._target_quat_w: torch.Tensor = torch.zeros(self.num_envs, 4, device=self.device)
 
@@ -388,6 +387,21 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         # Simulation time tracking for delay system
         self._sim_time = torch.zeros(self.num_envs, device=self.device)
+
+        # Pre-allocated AgentStates buffers — reused each step to avoid ~50 torch.zeros() per step
+        self._delay_gt_buffers: Dict[AgentID, AgentStates] = {
+            agent_id: AgentStates(self.num_envs, 3, 1, self.device)
+            for agent_id in self.cfg.possible_agents
+        }
+        self._gt_state_cache: Dict[AgentID, AgentStates] = {
+            agent_id: AgentStates(self.num_envs, 3, 1, self.device)
+            for agent_id in self.cfg.possible_agents
+        }
+
+        # Pre-allocated DR intrinsics tensor (N, A, 3, 3) — avoids per-agent clone each step
+        self._dr_intrinsics_per_agent = self._camera_intrinsics_base.unsqueeze(1).expand(
+            -1, num_agents, -1, -1
+        ).clone().contiguous()
 
         # Visualization is created lazily via _set_debug_vis_impl when debug_vis is enabled
         self._visualization: CustomVisualization | None = None
@@ -604,6 +618,13 @@ class IrisMA6TestEnv(DirectMARLEnv):
             xform.AddScaleOp().Set(Gf.Vec3f(s, s, s))
             xform.GetPrim().GetReferences().AddReference(self.cfg.flight_scene_usd)
 
+    def _batch_idx(self, env_ids: torch.Tensor, agent_idx: int) -> torch.Tensor:
+        """Map env_ids to batched controller row indices for a given agent.
+
+        Layout: agent 0 → rows [0, N), agent 1 → [N, 2N), etc.
+        """
+        return env_ids + agent_idx * self.num_envs
+
     def _pre_physics_step(self, actions: Dict[str, torch.Tensor]):
         """Pre-process actions for all agents before physics step.
 
@@ -633,51 +654,73 @@ class IrisMA6TestEnv(DirectMARLEnv):
         """Apply actions to the environment.
 
         Runs at simulation rate (not decimated).
+        Uses a single batched controller call for all agents to reduce
+        GPU kernel launch overhead (ticket-017).
         """
-        for idx, agent_id in enumerate(self.cfg.possible_agents):
+        N = self.num_envs
+        A = len(self.cfg.possible_agents)
+        agents = list(enumerate(self.cfg.possible_agents))
+
+        # --- Gather inputs into (N*A, ...) batched tensors ---
+        # cmd_vel is (N, A, 7) — reshape agent dim into batch dim
+        v_cmd_batch = torch.cat([self.cmd_vel[:, i, 0:3] for i in range(A)], dim=0)  # (N*A, 3)
+        yaw_rate_batch = torch.cat([self.cmd_vel[:, i, 3] for i in range(A)], dim=0)  # (N*A,)
+        gimbal_yaw_rate_batch = torch.cat([self.cmd_vel[:, i, 4] for i in range(A)], dim=0)
+        gimbal_pitch_rate_batch = torch.cat([self.cmd_vel[:, i, 5] for i in range(A)], dim=0)
+        zoom_rate_batch = torch.cat([self.cmd_vel[:, i, 6] for i in range(A)], dim=0)
+
+        # Robot state: quaternion, linear vel, angular vel, gimbal joint positions
+        q_parts, v_parts, omega_parts, gimbal_jp_parts = [], [], [], []
+        for idx, agent_id in agents:
             robot = self._robots[agent_id]
-            controller = self._controllers[agent_id]
+            q_parts.append(robot.data.root_quat_w)
+            v_parts.append(robot.data.root_lin_vel_w)
+            omega_parts.append(robot.data.root_ang_vel_b)
+            gimbal_jp_parts.append(torch.stack([
+                robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["pitch"]],
+                robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["yaw"]],
+                robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["roll"]],
+            ], dim=-1))
 
-            # Extract commands for this agent
-            v_cmd = self.cmd_vel[:, idx, 0:3]
-            yaw_rate_cmd = self.cmd_vel[:, idx, 3]
-            gimbal_yaw_rate = self.cmd_vel[:, idx, 4]
-            gimbal_pitch_rate = self.cmd_vel[:, idx, 5]
-            zoom_rate = self.cmd_vel[:, idx, 6]
+        q_batch = torch.cat(q_parts, dim=0)            # (N*A, 4)
+        v_batch = torch.cat(v_parts, dim=0)             # (N*A, 3)
+        omega_batch = torch.cat(omega_parts, dim=0)     # (N*A, 3)
+        gimbal_jp_batch = torch.cat(gimbal_jp_parts, dim=0)  # (N*A, 3)
 
-            # Read current gimbal joint positions [pitch, yaw, roll]
-            gimbal_jp = torch.stack(
-                [
-                    robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["pitch"]],
-                    robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["yaw"]],
-                    robot.data.joint_pos[:, self.gimbal_joint_idx[agent_id]["roll"]],
-                ],
-                dim=-1,
-            )
-
-            # Step the DroneController
-            # _apply_action runs every sim step (sim.dt = 0.01s), not every policy
-            # step (sim.dt * decimation = 0.04s). The drone cascade needs the full
-            # decimated dt for its inner-loop subdivision (velocity→attitude→rate).
-            # The gimbal receives sim.dt separately for correct rate integration.
-            F_body, tau_body, gimbal_pos_targets, gimbal_vel_targets, zoom_level = controller.step_policy(
-                v_cmd=v_cmd,
-                yaw_rate_cmd=yaw_rate_cmd,
-                gimbal_yaw_rate_cmd=gimbal_yaw_rate,
-                gimbal_pitch_rate_cmd=gimbal_pitch_rate,
-                zoom_rate_cmd=zoom_rate,
-                q_body=robot.data.root_quat_w,
-                v_body=robot.data.root_lin_vel_w,
-                omega_body=robot.data.root_ang_vel_b,
+        # --- Single batched controller call ---
+        # _apply_action runs every sim step (sim.dt = 0.01s), not every policy
+        # step (sim.dt * decimation = 0.04s). The drone cascade needs the full
+        # decimated dt for its inner-loop subdivision (velocity→attitude→rate).
+        # The gimbal receives sim.dt separately for correct rate integration.
+        F_body_batch, tau_body_batch, gimbal_pos_batch, gimbal_vel_batch, zoom_batch = (
+            self._controller.step_policy(
+                v_cmd=v_cmd_batch,
+                yaw_rate_cmd=yaw_rate_batch,
+                gimbal_yaw_rate_cmd=gimbal_yaw_rate_batch,
+                gimbal_pitch_rate_cmd=gimbal_pitch_rate_batch,
+                zoom_rate_cmd=zoom_rate_batch,
+                q_body=q_batch,
+                v_body=v_batch,
+                omega_body=omega_batch,
                 sim_dt=self.cfg.sim.dt * self.cfg.decimation,
-                gimbal_joint_positions=gimbal_jp,
+                gimbal_joint_positions=gimbal_jp_batch,
                 physics_dt=self.cfg.sim.dt,
             )
+        )
+
+        # Unpack batched gimbal outputs — each is (N*A,)
+        gimbal_yaw_all, gimbal_roll_all, gimbal_pitch_all = gimbal_pos_batch
+        gimbal_yaw_vel_all, gimbal_roll_vel_all, gimbal_pitch_vel_all = gimbal_vel_batch
+
+        # --- Scatter outputs back per-agent (Isaac Sim API requires per-Articulation calls) ---
+        for idx, agent_id in agents:
+            robot = self._robots[agent_id]
+            s = idx * N  # slice start
 
             # Apply forces in body frame (Isaac Lab expects local frame)
             robot.set_external_force_and_torque(
-                forces=F_body.unsqueeze(1),
-                torques=tau_body.unsqueeze(1),
+                forces=F_body_batch[s:s + N].unsqueeze(1),
+                torques=tau_body_batch[s:s + N].unsqueeze(1),
                 body_ids=self._body_ids[agent_id],
             )
 
@@ -691,7 +734,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 # Add YAW_JOINT_OFFSET (-π/2) to yaw: controller yaw=0 means body +X
                 # (physics forward). The offset shifts the physical joint so the
                 # combined chain (joint + camera offset) points along body +X.
-                gimbal_yaw, gimbal_roll, gimbal_pitch = gimbal_pos_targets
+                gimbal_yaw = gimbal_yaw_all[s:s + N]
+                gimbal_roll = gimbal_roll_all[s:s + N]
+                gimbal_pitch = gimbal_pitch_all[s:s + N]
                 gimbal_yaw_joint = gimbal_yaw + YAW_JOINT_OFFSET + dr_yaw_off
                 robot.set_joint_position_target(
                     target=torch.stack([gimbal_pitch + dr_pitch_off, gimbal_yaw_joint, gimbal_roll + dr_roll_off], dim=-1),
@@ -703,10 +748,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 )
 
                 # Apply gimbal velocity feedforward targets
-                # Makes the actuator's damping term assistive during transients:
-                # τ_d = d*(v_target - v) pushes toward the expected velocity
-                # instead of opposing motion (when v_target=0).
-                gimbal_yaw_vel, gimbal_roll_vel, gimbal_pitch_vel = gimbal_vel_targets
+                gimbal_yaw_vel = gimbal_yaw_vel_all[s:s + N]
+                gimbal_roll_vel = gimbal_roll_vel_all[s:s + N]
+                gimbal_pitch_vel = gimbal_pitch_vel_all[s:s + N]
                 robot.set_joint_velocity_target(
                     target=torch.stack([gimbal_pitch_vel, gimbal_yaw_vel, gimbal_roll_vel], dim=-1),
                     joint_ids=[
@@ -720,30 +764,23 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 los_to_target = self._target_pos_w - robot.data.root_pos_w  # (N, 3)
                 desired_az = torch.atan2(los_to_target[..., 1], los_to_target[..., 0])
                 desired_el = torch.atan2(los_to_target[..., 2], torch.linalg.norm(los_to_target[..., 0:2], dim=-1))
-                
+
                 # Turn desired az/el into body-frame gimbal angles using inverse of camera offset rotation
                 gimbal_yaw, gimbal_roll, gimbal_pitch = az_el_to_gimbal_angles(
                     desired_az, desired_el, robot.data.root_quat_w
                 )
 
                 gimbal_yaw_joint = gimbal_yaw + YAW_JOINT_OFFSET + dr_yaw_off
-                # gimbal_yaw_vel, gimbal_roll_vel, gimbal_pitch_vel = gimbal_vel_targets
                 gimbal_joint_ids = [
                     self.gimbal_joint_idx[agent_id]["pitch"],
                     self.gimbal_joint_idx[agent_id]["yaw"],
                     self.gimbal_joint_idx[agent_id]["roll"],
                 ]
                 pos_cmd = torch.stack([gimbal_pitch + dr_pitch_off, gimbal_yaw_joint, gimbal_roll + dr_roll_off], dim=-1)
-                # vel_cmd = torch.stack([gimbal_pitch_vel, gimbal_yaw_vel, gimbal_roll_vel], dim=-1)
-                # robot.write_joint_state_to_sim(
-                #     position=pos_cmd, velocity=vel_cmd, joint_ids=gimbal_joint_ids,
-                # )
-                # Match actuator targets so PD applies zero force during step
                 robot.set_joint_position_target(target=pos_cmd, joint_ids=gimbal_joint_ids)
-                # robot.set_joint_velocity_target(target=vel_cmd, joint_ids=gimbal_joint_ids)
 
             # Store zoom level for observations
-            self.zoom_level[:, idx] = zoom_level
+            self.zoom_level[:, idx] = zoom_batch[s:s + N]
 
         # Apply target controller if enabled
         if self._target_controller is not None:
@@ -869,19 +906,20 @@ class IrisMA6TestEnv(DirectMARLEnv):
             camera_quat_w = quat_mul(camera_quat_physics, self._camera_offset_rotation_b)
             camera_poses[agent_id] = (camera_pos_w, camera_quat_w)
 
-            intrinsic = self._camera_intrinsics_base.clone()
-            # Apply DR focal length perturbation (curriculum-gated) alongside zoom
+            # Compute zoomed+DR intrinsics in pre-allocated tensor (no clone)
             dr_scale = self._dr_intrinsic_scale[:, idx]
-            intrinsic[:, 0, 0] *= self.zoom_level[:, idx] * dr_scale
-            intrinsic[:, 1, 1] *= self.zoom_level[:, idx] * dr_scale
-            camera_intrinsics[agent_id] = intrinsic
+            combined_scale = self.zoom_level[:, idx] * dr_scale
+            self._dr_intrinsics_per_agent[:, idx] = self._camera_intrinsics_base
+            self._dr_intrinsics_per_agent[:, idx, 0, 0] *= combined_scale
+            self._dr_intrinsics_per_agent[:, idx, 1, 1] *= combined_scale
+            camera_intrinsics[agent_id] = self._dr_intrinsics_per_agent[:, idx]
             image_shapes[agent_id] = self._camera_image_shape
             agent_poses[agent_id] = (root_pos, root_quat)
 
             # Update TiledCamera intrinsics based on zoom level
             if agent_id in self._cameras:
                 self._cameras[agent_id].set_intrinsic_matrices_batched(
-                    intrinsic,
+                    self._dr_intrinsics_per_agent[:, idx],
                     self.cfg.camera.spawn.focal_length * self.zoom_level[:, idx],
                 )
 
@@ -913,28 +951,23 @@ class IrisMA6TestEnv(DirectMARLEnv):
         # Update delay system ground truth for each agent
         if self._delay_system is not None:
             for idx, agent_id in enumerate(self.cfg.possible_agents):
-                # Create AgentStates and populate with current ground truth
-                gt_states = AgentStates(
-                    num_envs=self.num_envs,
-                    num_joints=3,  # pitch, yaw, roll
-                    num_targets=1,
-                    device=self.device,
-                )
+                # Reuse pre-allocated AgentStates buffer (all fields overwritten below)
+                gt_states = self._delay_gt_buffers[agent_id]
                 gt_data = gt_states.data
 
-                # Body motion
-                gt_data.body_position_w = self._root_pos_w[agent_id]
-                gt_data.body_orientation_w = self._root_quat_w[agent_id]
-                gt_data.body_linear_velocity_w = self._root_lin_vel_w[agent_id]
-                gt_data.body_angular_velocity_w = self._root_ang_vel_b[agent_id]
-                gt_data.body_angular_velocity_b = self._root_ang_vel_b[agent_id]
-                gt_data.body_linear_acceleration_w = self._root_lin_acc_w[agent_id]
-                gt_data.body_linear_acceleration_b = self._root_lin_acc_b[agent_id]
+                # Body motion (copy_ keeps pre-allocated buffers bound)
+                gt_data.body_position_w.copy_(self._root_pos_w[agent_id])
+                gt_data.body_orientation_w.copy_(self._root_quat_w[agent_id])
+                gt_data.body_linear_velocity_w.copy_(self._root_lin_vel_w[agent_id])
+                gt_data.body_angular_velocity_w.copy_(self._root_ang_vel_b[agent_id])
+                gt_data.body_angular_velocity_b.copy_(self._root_ang_vel_b[agent_id])
+                gt_data.body_linear_acceleration_w.copy_(self._root_lin_acc_w[agent_id])
+                gt_data.body_linear_acceleration_b.copy_(self._root_lin_acc_b[agent_id])
 
                 # Joint states (gimbal) - order is pitch, yaw, roll
-                gt_data.joint_positions_b = self._gimbal_joint_pos[agent_id]
+                gt_data.joint_positions_b.copy_(self._gimbal_joint_pos[agent_id])
                 # Actual joint velocities from simulation (not from policy LOS rate commands)
-                gt_data.joint_velocities_b = self._gimbal_joint_vel[agent_id]
+                gt_data.joint_velocities_b.copy_(self._gimbal_joint_vel[agent_id])
 
                 # Combined angular velocity (body + gimbal)
                 combined_w, combined_b = compute_combined_angular_velocity(
@@ -944,8 +977,8 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     body_orientation_w=self._root_quat_w[agent_id],
                     joint_positions_b=self._gimbal_joint_pos[agent_id],
                 )
-                gt_data.body_combined_angular_velocity_w = combined_w
-                gt_data.body_combined_angular_velocity_b = combined_b
+                gt_data.body_combined_angular_velocity_w.copy_(combined_w)
+                gt_data.body_combined_angular_velocity_b.copy_(combined_b)
 
                 # Gimbal world-frame angles (from joint positions + body orientation)
                 az, el = body_to_world_gimbal_angles(
@@ -953,57 +986,65 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     pitch_body=gt_data.joint_positions_b[:, 0],
                     q_body=gt_data.body_orientation_w,
                 )
-                gt_data.gimbal_azimuth_world = az
-                gt_data.gimbal_elevation_world = el
+                gt_data.gimbal_azimuth_world.copy_(az)
+                gt_data.gimbal_elevation_world.copy_(el)
 
                 # Gimbal world-frame LOS rates derived from combined angular velocity
                 # (body rate + joint rates via kinematics, preserving independent noise sources)
                 # For spherical coords: d/dt(az) = omega_z - tan(el)*(omega_x*cos(az) + omega_y*sin(az))
                 #                        d/dt(el) = omega_x*sin(az) - omega_y*cos(az)
                 omega = combined_w  # (N, 3) total camera angular velocity in world frame
-                gt_data.gimbal_azimuth_rate = (
+                gt_data.gimbal_azimuth_rate.copy_(
                     omega[:, 2]
                     - torch.tan(el) * (omega[:, 0] * torch.cos(az) + omega[:, 1] * torch.sin(az))
                 )
-                gt_data.gimbal_elevation_rate = (
+                gt_data.gimbal_elevation_rate.copy_(
                     omega[:, 0] * torch.sin(az) - omega[:, 1] * torch.cos(az)
                 )
-                self._gimbal_az_rate_world[agent_id] = gt_data.gimbal_azimuth_rate
-                self._gimbal_el_rate_world[agent_id] = gt_data.gimbal_elevation_rate
+                self._gimbal_az_rate_world[agent_id] = gt_data.gimbal_azimuth_rate.clone()
+                self._gimbal_el_rate_world[agent_id] = gt_data.gimbal_elevation_rate.clone()
 
                 # Camera geometry
                 cam_pos_w, cam_ori_w = camera_poses[agent_id]
-                gt_data.camera_position_w = cam_pos_w
-                gt_data.camera_orientation_w = cam_ori_w
-                gt_data.camera_zoom_level = self.zoom_level[:, idx]
-                dr_base = self._camera_intrinsics_base.clone()
+                gt_data.camera_position_w.copy_(cam_pos_w)
+                gt_data.camera_orientation_w.copy_(cam_ori_w)
+                gt_data.camera_zoom_level.copy_(self.zoom_level[:, idx])
+                # DR intrinsics: copy base then scale in-place on gt_data
+                gt_data.camera_base_intrinsics.copy_(self._camera_intrinsics_base)
                 dr_scale = self._dr_intrinsic_scale[:, idx]
-                dr_base[:, 0, 0] *= dr_scale
-                dr_base[:, 1, 1] *= dr_scale
-                gt_data.camera_base_intrinsics = dr_base
+                gt_data.camera_base_intrinsics[:, 0, 0] *= dr_scale
+                gt_data.camera_base_intrinsics[:, 1, 1] *= dr_scale
                 # effective_hfov = 2 * atan(image_width / (2 * fx_effective))
                 # where fx_effective = fx_nominal * dr_scale * zoom
                 img_w = self._camera_image_shape[1]
                 fx_eff = self._camera_intrinsics_base[:, 0, 0] * dr_scale * self.zoom_level[:, idx]
-                gt_data.camera_effective_hfov = 2.0 * torch.atan2(
+                gt_data.camera_effective_hfov.copy_(2.0 * torch.atan2(
                     torch.tensor(img_w * 0.5, device=self.device), fx_eff
-                )
+                ))
 
                 # Detection (bbox) - shape (N, T, 4)
                 # CRITICAL: Use pixel bboxes, not normalized - triangulation expects pixels
-                gt_data.bboxes_2d = self.bbox_raycaster_v2.data.bboxes[
+                gt_data.bboxes_2d.copy_(self.bbox_raycaster_v2.data.bboxes[
                     :, idx, :, :
-                ]
+                ])
+
+                # Camera ray directions (needed by GT observation path)
+                gt_data.camera_ray_directions_w.copy_(compute_ray_directions_from_bbox(
+                    camera_orientation_w=gt_data.camera_orientation_w,
+                    camera_base_intrinsics=gt_data.camera_base_intrinsics,
+                    camera_zoom_level=gt_data.camera_zoom_level,
+                    bboxes_2d=gt_data.bboxes_2d,
+                ))
 
                 # Timestamps — sub-step jitter for continuous AoI
-                gt_data.timestamp_sim_walltime = self._sim_time
+                gt_data.timestamp_sim_walltime.copy_(self._sim_time)
                 if self.cfg.continuous_aoi_jitter:
                     step_dt = self.cfg.sim.dt * self.cfg.decimation
-                    gt_data.timestamp_motion = self._sim_time + torch.empty_like(self._sim_time).uniform_(-step_dt, 0)
-                    gt_data.timestamp_detection = self._sim_time + torch.empty_like(self._sim_time).uniform_(-step_dt, 0)
+                    gt_data.timestamp_motion.copy_(self._sim_time + torch.empty_like(self._sim_time).uniform_(-step_dt, 0))
+                    gt_data.timestamp_detection.copy_(self._sim_time + torch.empty_like(self._sim_time).uniform_(-step_dt, 0))
                 else:
-                    gt_data.timestamp_motion = self._sim_time.clone()
-                    gt_data.timestamp_detection = self._sim_time.clone()
+                    gt_data.timestamp_motion.copy_(self._sim_time)
+                    gt_data.timestamp_detection.copy_(self._sim_time)
 
                 # Pass replicated (noisy) bboxes if detector replicator is active
                 replicated_bboxes = None
@@ -1020,6 +1061,13 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     agent_id, gt_states, replicated_bboxes=replicated_bboxes
                 )
 
+            # Cache GT states dict so _build_gt_states() can skip recomputation
+            # Buffers remain valid until next _update_state_cache() call
+            self._cached_gt_states = {
+                agent_id: self._delay_gt_buffers[agent_id]
+                for agent_id in self.cfg.possible_agents
+            }
+
         # Cache data for debug visualization callback
         self._vis_camera_poses = camera_poses
         self._vis_target_pos = self._target_pos_w
@@ -1034,8 +1082,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
         }
 
         # Update camera intrinsics cache for triangulation
+        # (camera_intrinsics values are views into _dr_intrinsics_per_agent; clone to decouple)
         for idx, agent_id in enumerate(self.cfg.possible_agents):
-            self._camera_intrinsics_cache[agent_id] = camera_intrinsics[agent_id]
+            self._camera_intrinsics_cache[agent_id] = camera_intrinsics[agent_id].clone()
 
     def _compute_zoomed_intrinsics(
         self,
@@ -1057,27 +1106,31 @@ class IrisMA6TestEnv(DirectMARLEnv):
         return intrinsics
 
     def _build_gt_states(self) -> Dict[AgentID, AgentStates]:
-        """Build GT states dictionary when delay system is disabled.
+        """Build GT states dictionary.
+
+        When the delay system is active, returns the cached GT states computed
+        during _update_state_cache() to avoid redundant recomputation.
+        Otherwise, builds from scratch using current simulation state.
 
         Returns:
             Dictionary mapping agent_id to AgentStates with current GT values.
         """
+        if self._cached_gt_states is not None:
+            return self._cached_gt_states
+
         gt_states = {}
         for idx, agent_id in enumerate(self.cfg.possible_agents):
-            states = AgentStates(
-                num_envs=self.num_envs,
-                num_joints=3,
-                num_targets=1,
-                device=self.device,
-            )
+            # Reuse pre-allocated AgentStates buffer (zero and repopulate)
+            states = self._gt_state_cache[agent_id]
+            states.zero_()
             data = states.data
 
-            # Body motion
-            data.body_position_w = self._root_pos_w[agent_id]
-            data.body_orientation_w = self._root_quat_w[agent_id]
+            # Body motion (copy_ keeps pre-allocated buffers bound)
+            data.body_position_w.copy_(self._root_pos_w[agent_id])
+            data.body_orientation_w.copy_(self._root_quat_w[agent_id])
 
             # Joint states
-            data.joint_positions_b = self._gimbal_joint_pos[agent_id]
+            data.joint_positions_b.copy_(self._gimbal_joint_pos[agent_id])
 
             # Gimbal world-frame angles
             az, el = body_to_world_gimbal_angles(
@@ -1085,44 +1138,44 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 pitch_body=data.joint_positions_b[:, 0],
                 q_body=data.body_orientation_w,
             )
-            data.gimbal_azimuth_world = az
-            data.gimbal_elevation_world = el
+            data.gimbal_azimuth_world.copy_(az)
+            data.gimbal_elevation_world.copy_(el)
 
             # Gimbal world-frame rates (pre-computed via finite difference in _update_state_cache)
-            data.gimbal_azimuth_rate = self._gimbal_az_rate_world[agent_id]
-            data.gimbal_elevation_rate = self._gimbal_el_rate_world[agent_id]
+            data.gimbal_azimuth_rate.copy_(self._gimbal_az_rate_world[agent_id])
+            data.gimbal_elevation_rate.copy_(self._gimbal_el_rate_world[agent_id])
 
             # Body velocity (needed for inter-agent obs in GT path)
-            data.body_linear_velocity_w = self._root_lin_vel_w[agent_id]
+            data.body_linear_velocity_w.copy_(self._root_lin_vel_w[agent_id])
 
             # Camera geometry
             robot = self._robots[agent_id]
             pitch_link_idx = self._frame_link_ids[agent_id]["pitch_link"]
-            data.camera_position_w = robot.data.body_pos_w[:, pitch_link_idx]
-            data.camera_orientation_w = robot.data.body_quat_w[:, pitch_link_idx]
+            data.camera_position_w.copy_(robot.data.body_pos_w[:, pitch_link_idx])
+            data.camera_orientation_w.copy_(robot.data.body_quat_w[:, pitch_link_idx])
+            # DR intrinsics: copy base then scale in-place on data
+            data.camera_base_intrinsics.copy_(self._camera_intrinsics_base)
             dr_scale = self._dr_intrinsic_scale[:, idx]
-            dr_base = self._camera_intrinsics_base.clone()
-            dr_base[:, 0, 0] *= dr_scale
-            dr_base[:, 1, 1] *= dr_scale
-            data.camera_base_intrinsics = dr_base
-            data.camera_zoom_level = self.zoom_level[:, idx]
+            data.camera_base_intrinsics[:, 0, 0] *= dr_scale
+            data.camera_base_intrinsics[:, 1, 1] *= dr_scale
+            data.camera_zoom_level.copy_(self.zoom_level[:, idx])
             # effective_hfov = 2 * atan(image_width / (2 * fx_effective))
             img_w = self._camera_image_shape[1]
             fx_eff = self._camera_intrinsics_base[:, 0, 0] * dr_scale * self.zoom_level[:, idx]
-            data.camera_effective_hfov = 2.0 * torch.atan2(
+            data.camera_effective_hfov.copy_(2.0 * torch.atan2(
                 torch.tensor(img_w * 0.5, device=self.device), fx_eff
-            )
+            ))
 
             # Detection - use pixel bboxes (not normalized) for triangulation
-            data.bboxes_2d = self.bbox_raycaster_v2.data.bboxes[:, idx, :, :]
+            data.bboxes_2d.copy_(self.bbox_raycaster_v2.data.bboxes[:, idx, :, :])
 
             # Ray directions from bbox (camera-to-target through bbox center)
-            data.camera_ray_directions_w = compute_ray_directions_from_bbox(
+            data.camera_ray_directions_w.copy_(compute_ray_directions_from_bbox(
                 camera_orientation_w=data.camera_orientation_w,
                 camera_base_intrinsics=data.camera_base_intrinsics,
                 camera_zoom_level=data.camera_zoom_level,
                 bboxes_2d=data.bboxes_2d,
-            )
+            ))
 
             gt_states[agent_id] = states
         return gt_states
@@ -1943,6 +1996,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
         """
         super()._reset_idx(env_ids)
 
+        # Invalidate GT state cache — stale until next _update_state_cache()
+        self._cached_gt_states = None
+
         num_reset = len(env_ids)
 
         current_step = self.cfg.debug_initial_step if self.cfg.use_debug_initial_step else self.common_step_counter
@@ -1998,10 +2054,12 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
 
                 # Reset controller state and sync gimbal internal state
-                self._controllers[agent_id].reset(env_ids)
+                # Use batch indices: agent idx maps env_ids into the batched controller
+                batch_ids = self._batch_idx(env_ids, idx)
+                self._controller.reset(batch_ids)
                 # Sync gimbal controller internal state to initial body-frame angles
-                self._controllers[agent_id]._gimbal._yaw[env_ids] = gimbal_angles[:, 0]
-                self._controllers[agent_id]._gimbal._pitch[env_ids] = gimbal_angles[:, 2]
+                self._controller._gimbal._yaw[batch_ids] = gimbal_angles[:, 0]
+                self._controller._gimbal._pitch[batch_ids] = gimbal_angles[:, 2]
 
                 # Compute world-frame azimuth/elevation from the ACTUAL initial
                 # body-frame gimbal angles (not always the target direction).
@@ -2010,15 +2068,15 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 # _azimuth_world/_elevation_world are consistent with _yaw/_pitch,
                 # so the first compute_control() produces no gimbal movement.
                 azimuth_world, elevation_world = (
-                    self._controllers[agent_id]._gimbal._body_to_world_angles(
+                    self._controller._gimbal._body_to_world_angles(
                         gimbal_angles[:, 0],   # body-frame yaw
                         gimbal_angles[:, 2],   # body-frame pitch
                         result.agent_orientations[:, idx],  # body quaternion
                     )
                 )
 
-                self._controllers[agent_id]._gimbal._azimuth_world[env_ids] = azimuth_world
-                self._controllers[agent_id]._gimbal._elevation_world[env_ids] = elevation_world
+                self._controller._gimbal._azimuth_world[batch_ids] = azimuth_world
+                self._controller._gimbal._elevation_world[batch_ids] = elevation_world
 
                 # Set zoom level (both env tracking tensor AND controller internal state).
                 # The controller.reset() above resets zoom to 1.0, so we must
@@ -2026,8 +2084,8 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 # _zoom and _zoom_target to prevent the first _apply_action from
                 # overwriting it back to 1.0.
                 self.zoom_level[env_ids, idx] = result.zoom_levels[:, idx]
-                self._controllers[agent_id]._zoom.set_zoom(
-                    result.zoom_levels[:, idx], env_ids
+                self._controller._zoom.set_zoom(
+                    result.zoom_levels[:, idx], batch_ids
                 )
 
                 # Curriculum-scaled tau_zoom: near-instant at progress=0,
@@ -2037,7 +2095,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 tau_zoom_curriculum = max(
                     self.cfg.drone_controller.zoom.tau_zoom * self.progress_dynamics, 1e-4
                 )
-                self._controllers[agent_id]._zoom.set_tau_zoom(tau_zoom_curriculum)
+                self._controller._zoom._tau_zoom[batch_ids] = tau_zoom_curriculum
 
             # Apply target states
             target_pos = result.target_positions + self._terrain.env_origins[env_ids]
@@ -2081,9 +2139,10 @@ class IrisMA6TestEnv(DirectMARLEnv):
             tau_zoom_curriculum = max(
                 self.cfg.drone_controller.zoom.tau_zoom * self.progress_dynamics, 1e-4
             )
-            for agent_id in self.cfg.possible_agents:
-                self._controllers[agent_id].randomize_gains(
-                    env_ids, self.progress_dynamics, self.cfg.gain_randomization,
+            for idx in range(len(self.cfg.possible_agents)):
+                batch_ids = self._batch_idx(env_ids, idx)
+                self._controller.randomize_gains(
+                    batch_ids, self.progress_dynamics, self.cfg.gain_randomization,
                     tau_zoom_nominal=tau_zoom_curriculum,
                 )
 
@@ -2261,8 +2320,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
             joint_vel = torch.zeros_like(joint_pos)
             robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
 
-            # Reset controller state
-            self._controllers[agent_id].reset(env_ids)
+            # Reset controller state (use batch indices)
+            batch_ids = self._batch_idx(env_ids, idx)
+            self._controller.reset(batch_ids)
 
         # Reset target position
         target_pos = self._terrain.env_origins[env_ids].clone()

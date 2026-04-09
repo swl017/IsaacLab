@@ -925,19 +925,21 @@ class MultiAgentDelaySystemV3:
     def set_dropout_rate(self, rate: float):
         """Set dropout rate for curriculum control with per-agent offsets.
 
-        When burst dropout is active, per-pipeline i.i.d. dropout is skipped
-        (burst replaces i.i.d. on affected channels). The per-pipeline rate is
-        set to 0 so only burst dropout governs packet loss.
+        When burst dropout is active, i.i.d. dropout is disabled only on
+        "other" perspective pipelines (burst replaces i.i.d. there). Ego
+        perspective pipelines keep i.i.d. dropout so ego detection still
+        experiences independent packet loss.
 
         Args:
             rate: Base dropout probability [0, 1].
         """
         self._base_dropout_rate = rate
 
-        # When burst dropout is active, disable per-pipeline i.i.d. dropout
-        # (burst model replaces it on "other" perspective channels)
         if self._burst_sampler is not None:
-            self._delay_system.set_dropout_rate(0.0)
+            # Burst active: zero "other" pipelines, keep ego at requested rate
+            self._delay_system.set_dropout_rate_by_perspective(
+                ego_rate=rate, other_rate=0.0
+            )
             return
 
         if self._cfg.per_agent_randomization:

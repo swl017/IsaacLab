@@ -13,8 +13,16 @@ This module provides a unified delay system that handles all four paths:
 
 Instead of maintaining 4 separate delay systems (as in V2), we use:
 - One storage with raw/noisy data
-- One pipeline per field
-- Perspective specified at query time
+- One pipeline per field per perspective (ego/other)
+- Separate detection pipelines for bbox fields (noisy path only)
+- Perspective and noise mode specified at query time
+
+Detection pipelines carry their own latency buffers so that detector-
+replicator output (FN/noise/FP) is not overwritten by clean GT data
+when rewards query the raw path first in the same sim step. In ``fixed``
+mode the sampled delay values are deterministic from config, so both
+paths produce identical delay characteristics. These detection pipelines
+can later be replaced by real YOLO inference buffers.
 """
 
 from __future__ import annotations
@@ -33,11 +41,16 @@ class UnifiedDelaySystem:
     This system:
     1. Stores raw (ground truth) and noisy data with timestamps
     2. Maintains separate pipelines for ego and other perspectives
-    3. Returns delayed data with correct timestamps at query time
+    3. Maintains separate detection pipelines for bbox fields (noisy path)
+    4. Returns delayed data with correct timestamps at query time
 
-    **Key simplification over V2**: Instead of 4 DelaySystemV2 instances,
-    we have 1 UnifiedDelaySystem with perspective specified at query time.
+    Detection fields (suffix ``bboxes_2d``) get extra pipelines so the
+    noisy observation path has independent latency buffers from the raw
+    reward path.  All other fields share a single pipeline per perspective.
     """
+
+    # Field suffixes that get separate detection pipelines
+    _DETECTION_SUFFIXES = ("bboxes_2d",)
 
     def __init__(
         self,
@@ -63,6 +76,12 @@ class UnifiedDelaySystem:
         # Pipelines: separate for ego and other perspectives, per field
         self._ego_pipelines: Dict[str, DelayPipelineV3] = {}
         self._other_pipelines: Dict[str, DelayPipelineV3] = {}
+
+        # Detection pipelines: separate buffers for noisy bbox path only.
+        # Keyed by the same field_name as regular pipelines but only
+        # populated for detection fields (bboxes_2d).
+        self._ego_detection_pipelines: Dict[str, DelayPipelineV3] = {}
+        self._other_detection_pipelines: Dict[str, DelayPipelineV3] = {}
 
         # Track registered fields and their shapes
         self._field_shapes: Dict[str, Tuple[int, ...]] = {}
@@ -155,6 +174,29 @@ class UnifiedDelaySystem:
         self._ego_pipelines[field_name].set_mode(self._mode, self._progress)
         self._other_pipelines[field_name].set_mode(self._mode, self._progress)
 
+        # Create detection pipelines for bbox fields (noisy observation path)
+        if field_suffix in self._DETECTION_SUFFIXES:
+            self._ego_detection_pipelines[field_name] = DelayPipelineV3(
+                cfg=ego_cfg,
+                num_envs=self._num_envs,
+                device=self._device,
+                dt=self._dt,
+                data_shape=data_shape,
+            )
+            self._other_detection_pipelines[field_name] = DelayPipelineV3(
+                cfg=other_cfg,
+                num_envs=self._num_envs,
+                device=self._device,
+                dt=self._dt,
+                data_shape=data_shape,
+            )
+            self._ego_detection_pipelines[field_name].set_mode(
+                self._mode, self._progress
+            )
+            self._other_detection_pipelines[field_name].set_mode(
+                self._mode, self._progress
+            )
+
     def set_time(self, t: torch.Tensor):
         """Set current simulation time.
 
@@ -226,12 +268,21 @@ class UnifiedDelaySystem:
         else:
             data, timestamp = self._storage.get_raw(field_name)
 
-        # Select appropriate pipeline
+        # Select appropriate pipeline.
+        # Detection fields (bboxes_2d) use separate pipelines for the noisy
+        # path so that detector-replicator output is not overwritten by clean
+        # GT data when the raw path advances first in the same sim step.
         if perspective == "ego":
-            pipeline = self._ego_pipelines[field_name]
+            if use_noise and field_name in self._ego_detection_pipelines:
+                pipeline = self._ego_detection_pipelines[field_name]
+            else:
+                pipeline = self._ego_pipelines[field_name]
             cfg = self._cfg.ego
         else:
-            pipeline = self._other_pipelines[field_name]
+            if use_noise and field_name in self._other_detection_pipelines:
+                pipeline = self._other_detection_pipelines[field_name]
+            else:
+                pipeline = self._other_pipelines[field_name]
             cfg = self._cfg.other
 
         # Determine if dropout should be applied
@@ -271,6 +322,17 @@ class UnifiedDelaySystem:
         _, timestamp = self.get_delayed(field_name, perspective, use_noise)
         return self._t_current - timestamp
 
+    def _all_pipelines(self):
+        """Yield all pipeline instances (regular + detection)."""
+        for p in self._ego_pipelines.values():
+            yield p
+        for p in self._other_pipelines.values():
+            yield p
+        for p in self._ego_detection_pipelines.values():
+            yield p
+        for p in self._other_detection_pipelines.values():
+            yield p
+
     def set_delay_mode(
         self, mode: Literal["none", "fixed", "random"], progress: float = 1.0
     ):
@@ -283,10 +345,7 @@ class UnifiedDelaySystem:
         self._mode = mode
         self._progress = max(0.0, min(1.0, progress))
 
-        # Update all pipelines
-        for pipeline in self._ego_pipelines.values():
-            pipeline.set_mode(mode, progress)
-        for pipeline in self._other_pipelines.values():
+        for pipeline in self._all_pipelines():
             pipeline.set_mode(mode, progress)
 
     def set_dropout_rate(self, rate: float):
@@ -295,10 +354,27 @@ class UnifiedDelaySystem:
         Args:
             rate: Dropout probability [0, 1].
         """
+        for pipeline in self._all_pipelines():
+            pipeline.set_dropout_rate(rate)
+
+    def set_dropout_rate_by_perspective(self, ego_rate: float, other_rate: float):
+        """Set dropout rates separately for ego and other perspectives.
+
+        Used when burst dropout replaces i.i.d. dropout on "other" channels
+        but ego channels should keep independent dropout.
+
+        Args:
+            ego_rate: Dropout probability for ego pipelines [0, 1].
+            other_rate: Dropout probability for other pipelines [0, 1].
+        """
         for pipeline in self._ego_pipelines.values():
-            pipeline.set_dropout_rate(rate)
+            pipeline.set_dropout_rate(ego_rate)
+        for pipeline in self._ego_detection_pipelines.values():
+            pipeline.set_dropout_rate(ego_rate)
         for pipeline in self._other_pipelines.values():
-            pipeline.set_dropout_rate(rate)
+            pipeline.set_dropout_rate(other_rate)
+        for pipeline in self._other_detection_pipelines.values():
+            pipeline.set_dropout_rate(other_rate)
 
     def set_field_delay_mode(
         self,
@@ -315,12 +391,13 @@ class UnifiedDelaySystem:
         """
         progress = max(0.0, min(1.0, progress))
         dot_prefix = field_prefix + "."
-        for key, pipeline in self._ego_pipelines.items():
-            if key.startswith(dot_prefix):
-                pipeline.set_mode(mode, progress)
-        for key, pipeline in self._other_pipelines.items():
-            if key.startswith(dot_prefix):
-                pipeline.set_mode(mode, progress)
+        for pipe_dict in (
+            self._ego_pipelines, self._other_pipelines,
+            self._ego_detection_pipelines, self._other_detection_pipelines,
+        ):
+            for key, pipeline in pipe_dict.items():
+                if key.startswith(dot_prefix):
+                    pipeline.set_mode(mode, progress)
 
     def set_field_dropout_rate(self, field_prefix: str, rate: float):
         """Set dropout rate for pipelines whose key starts with field_prefix.
@@ -330,12 +407,13 @@ class UnifiedDelaySystem:
             rate: Dropout probability [0, 1].
         """
         dot_prefix = field_prefix + "."
-        for key, pipeline in self._ego_pipelines.items():
-            if key.startswith(dot_prefix):
-                pipeline.set_dropout_rate(rate)
-        for key, pipeline in self._other_pipelines.items():
-            if key.startswith(dot_prefix):
-                pipeline.set_dropout_rate(rate)
+        for pipe_dict in (
+            self._ego_pipelines, self._other_pipelines,
+            self._ego_detection_pipelines, self._other_detection_pipelines,
+        ):
+            for key, pipeline in pipe_dict.items():
+                if key.startswith(dot_prefix):
+                    pipeline.set_dropout_rate(rate)
 
     def reset(self, env_ids: Optional[torch.Tensor] = None):
         """Reset system for specified environments.
@@ -346,10 +424,8 @@ class UnifiedDelaySystem:
         # Reset storage
         self._storage.reset(env_ids)
 
-        # Reset all pipelines
-        for pipeline in self._ego_pipelines.values():
-            pipeline.reset(env_ids)
-        for pipeline in self._other_pipelines.values():
+        # Reset all pipelines (regular + detection)
+        for pipeline in self._all_pipelines():
             pipeline.reset(env_ids)
 
         # Reset time for specified environments
@@ -365,9 +441,7 @@ class UnifiedDelaySystem:
             reset_env_ids: Environments that were reset this step.
         """
         # Maybe resample parameters
-        for pipeline in self._ego_pipelines.values():
-            pipeline.maybe_resample(reset_env_ids)
-        for pipeline in self._other_pipelines.values():
+        for pipeline in self._all_pipelines():
             pipeline.maybe_resample(reset_env_ids)
 
 
