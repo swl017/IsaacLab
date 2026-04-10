@@ -26,18 +26,23 @@ class CurriculumCfg:
 
     The phases can overlap, allowing gradual transitions.
 
-    Step:    0k   20k   40k   60k   80k  100k  120k  140k  160k  180k
-             |     |     |     |     |     |     |     |     |     |
-    AgentVel:[──ramp──]full───────────────────────────────────────────
-    Safety:  [──ramp──]full───────────────────────────────────────────
-    Tracking:[────────ramp────────]full───────────────────────────────
-    Target:        [──────────ramp──────────]full─────────────────────
-    Coord:                  [────ramp────]full────────────────────────
-    Noise:                                [──ramp──]full─────────────
-    FixDelay:                                   [──ramp──]full───────
-    RndDelay:                                         [──ramp──]full─
-    Dropout:                                                [rmp]full
-    Dynamics:                                                  [ramp]
+    Compressed 2x schedule (min 20k/phase, FP/FN exempt — long 100k ramp):
+
+    Step:    0k   10k   30k   50k   70k   90k  110k  120k       200k  320k
+             |     |     |     |     |     |     |     |          |     |
+    AgentVel:     [──ramp──]full──────────────────────────────────────────
+    Safety:       [──ramp──]full──────────────────────────────────────────
+    Tracking:     [──ramp──]full──────────────────────────────────────────
+    Target:            [──ramp──]full─────────────────────────────────────
+    Coord:                  [──ramp──]full────────────────────────────────
+    Noise:                       [──ramp──]full──────────────────────────
+    FixDelay:                         [──ramp──]full─────────────────────
+    RndDelay:                              [──ramp──]full────────────────
+    Dropout:                                    [──ramp──]full───────────
+    Dynamics:                                        [──ramp──]full──────
+    Burst:                                                [──ramp──]full─
+    FP/FN:                                    [──────long ramp──────]full
+    Post:                                                          [120k]
 
     """
 
@@ -45,174 +50,168 @@ class CurriculumCfg:
     # Global Curriculum Settings
     # ==========================================================================
 
-    all_end_step: int = 400000
+    all_end_step: int = 320000
     """Step at which all curriculum factors reach their final values."""
 
     # ==========================================================================
     # Phase 0/1: Geometry + Formation (clean observations, static target)
     # ==========================================================================
 
-    tracking_start_step: int = 20000
+    tracking_start_step: int = 10000
     """Step to start increasing formation/initialization difficulty."""
 
-    tracking_end_step: int = 60000
+    tracking_end_step: int = 30000
     """Step when formation/initialization difficulty reaches maximum."""
 
     # ==========================================================================
     # Phase 0: Agent Velocity Ramp (learn tilt dynamics on slow target)
     # ==========================================================================
 
-    agent_velocity_start_step: int = 20000
+    agent_velocity_start_step: int = 10000
     """Step to start ramping agent max linear velocity."""
 
-    agent_velocity_end_step: int = 40000
-    """Step when agent velocity reaches its configured maximum.
-
-    Decoupled from target motion so the agent learns tilt compensation
-    and preemptive zoom-out before the target starts moving fast.
-    """
+    agent_velocity_end_step: int = 30000
+    """Step when agent velocity reaches its configured maximum."""
 
     # ==========================================================================
     # Phase 2: Noise Introduction (before delay)
     # ==========================================================================
 
-    noise_start_step: int = 100000
+    noise_start_step: int = 50000
     """Step to start introducing observation noise.
 
-    Starts after target motion ramp completes so the agent masters
-    fast-target tracking with clean observations first.
+    Starts after coordination ramp begins so the agent has basic
+    multi-agent geometry before observations degrade.
     """
 
-    noise_end_step: int = 120000
+    noise_end_step: int = 70000
     """Step when noise reaches maximum realistic values."""
 
     fp_fn_start_step: int = 100000
     """Step to start introducing false positives and miss rate.
 
-    Co-located with noise phase by default — FP/FN is another form
-    of observation degradation the policy should learn alongside noise.
+    Delayed until noise + delay + dropout are absorbed. Long 100k ramp
+    (100k-200k) gives the policy time to develop bbox-empty handling
+    strategies without a sudden observation cliff.
     """
 
-    fp_fn_end_step: int = 120000
-    """Step when FP/FN rates reach calibrated values."""
+    fp_fn_end_step: int = 200000
+    """Step when FP/FN rates reach calibrated values.
+
+    100k ramp (5x gentler than original 20k) — the policy needs gradual
+    exposure to FN misses because bbox-goes-to-zero is qualitatively
+    different from noise or delay.
+    """
 
     # ==========================================================================
     # Phase 3: Fixed Delay (Deterministic Latency)
     # ==========================================================================
 
-    fixed_delay_start_step: int = 120000
+    fixed_delay_start_step: int = 60000
     """Step to start introducing fixed (deterministic) delay."""
 
-    fixed_delay_end_step: int = 140000
+    fixed_delay_end_step: int = 80000
     """Step when fixed delay reaches maximum value (uses config latency means)."""
-
-    # NOTE: Fixed delay magnitude uses existing detection_latency_mean and
-    # inter_agent_comm_latency_mean from MultiAgentDelaySystemV2Cfg.
 
     # ==========================================================================
     # Phase 4: Random Delay + Staleness
     # ==========================================================================
 
-    random_delay_start_step: int = 140000
+    random_delay_start_step: int = 70000
     """Step to transition from fixed to random delay."""
 
-    random_delay_end_step: int = 160000
+    random_delay_end_step: int = 90000
     """Step when random delay variance reaches maximum."""
-
-    # NOTE: Random delay uses existing latency_std parameters from config.
 
     # ==========================================================================
     # Phase 5: Dropout (after delay phases)
     # ==========================================================================
 
-    dropout_start_step: int = 160000
+    dropout_start_step: int = 80000
     """Step to start introducing dropout."""
 
-    dropout_end_step: int = 180000
+    dropout_end_step: int = 100000
     """Step when dropout reaches maximum rate."""
 
     # ==========================================================================
     # Phase 6: Burst Dropout (after i.i.d. dropout)
     # ==========================================================================
 
-    burst_dropout_start_step: int = 200000
+    burst_dropout_start_step: int = 100000
     """Step to start introducing burst dropout (correlated packet loss).
 
     Placed after i.i.d. dropout phase so the policy first learns to handle
     isolated single-frame drops before experiencing sustained blackouts.
     """
 
-    burst_dropout_end_step: int = 220000
+    burst_dropout_end_step: int = 120000
     """Step when burst dropout onset probability reaches target value."""
 
     # Legacy alias for backward compatibility
-    delay_start_step: int = 120000
+    delay_start_step: int = 60000
     """[DEPRECATED] Use noise_start_step, fixed_delay_start_step, etc."""
 
-    delay_end_step: int = 160000
+    delay_end_step: int = 90000
     """[DEPRECATED] Use random_delay_end_step."""
 
     # ==========================================================================
     # Phase 0: Multi-Agent Coupling (triangulation geometry)
     # ==========================================================================
 
-    coordination_start_step: int = 60000
+    coordination_start_step: int = 30000
     """Step to start rewarding coordination (triangulation)."""
 
-    coordination_end_step: int = 100000
+    coordination_end_step: int = 50000
     """Step when coordination rewards reach full scale."""
 
     # ==========================================================================
     # Phase 2: Safety (CBF collision avoidance — after basic tracking is learned)
     # ==========================================================================
 
-    safety_start_step: int = 20000
+    safety_start_step: int = 10000
     """Step to start enforcing safety constraints (CBF penalty)."""
 
-    safety_end_step: int = 40000
+    safety_end_step: int = 30000
     """Step when safety penalties reach full scale."""
 
     # ==========================================================================
     # Phase 1: Target Dynamics (still clean observations)
     # ==========================================================================
 
-    moving_target_start_step: int = 40000
+    moving_target_start_step: int = 20000
     """Step to start introducing target motion.
 
-    Starts after agent velocity ramp completes (20k end),
-    so the agent has learned tilt compensation before tracking fast targets.
+    Starts after agent velocity ramp begins (10k),
+    so the agent has learned basic tilt compensation before tracking fast targets.
     """
 
-    moving_target_end_step: int = 80000
-    """Step when target reaches maximum speed/maneuverability.
-
-    40k-step ramp gives time to learn tilt-coupled tracking.
-    """
+    moving_target_end_step: int = 40000
+    """Step when target reaches maximum speed/maneuverability."""
 
     # ==========================================================================
     # Phase 3+: Robot/Camera Dynamics Randomization (last)
     # ==========================================================================
 
-    dynamics_start_step: int = 180000
+    dynamics_start_step: int = 90000
     """Step to start dynamics randomization (mass, inertia)."""
 
-    dynamics_end_step: int = 200000
+    dynamics_end_step: int = 110000
     """Step when dynamics randomization reaches full range."""
 
     # ==========================================================================
     # Task Reward Level Curriculum (FIM → GT-anchored → Composite)
     # ==========================================================================
 
-    task_level_2_start_step: int = 40000
+    task_level_2_start_step: int = 20000
     """Step to begin transitioning from Level 1 (FIM) to Level 2 (GT-anchored)."""
 
-    task_level_2_end_step: int = 80000
+    task_level_2_end_step: int = 40000
     """Step when Level 2 fully replaces Level 1."""
 
-    task_level_3_start_step: int = 80000
+    task_level_3_start_step: int = 40000
     """Step to begin blending in E2E component (Level 3 composite)."""
 
-    task_level_3_end_step: int = 120000
+    task_level_3_end_step: int = 60000
     """Step when Level 3 composite reaches full weight."""
 
     def get_progress(self, current_step: int, start_step: int, end_step: int) -> float:
