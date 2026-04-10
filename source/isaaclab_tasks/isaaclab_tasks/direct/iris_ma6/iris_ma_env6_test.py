@@ -380,8 +380,8 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 num_targets=1,
                 device=self.device,
             )
-            # Start with no delay — curriculum will ramp it up
-            self._delay_system.set_delay_mode("none", progress=0.0)
+            # Start with random delay at progress=0 (negligible delay)
+            self._delay_system.set_delay_mode("random", progress=0.0)
         else:
             self._delay_system = None
 
@@ -1309,18 +1309,10 @@ class IrisMA6TestEnv(DirectMARLEnv):
         )
         self.progress_agent_velocity = curr.get_agent_velocity_progress(current_step)
 
-        # Update delay system curriculum (none → fixed → random, noise/dropout ramp)
+        # Update delay system curriculum (random from step 0, progress-ramped)
         if self._delay_system is not None:
-            delay_mode = curr.get_delay_mode(current_step)
-            if delay_mode == "none":
-                self.progress_delay = 0.0
-                self._delay_system.set_delay_mode("none", progress=0.0)
-            elif delay_mode == "fixed":
-                self.progress_delay = curr.get_fixed_delay_progress(current_step)
-                self._delay_system.set_delay_mode("fixed", progress=self.progress_delay)
-            else:  # "random"
-                self.progress_delay = curr.get_random_delay_progress(current_step)
-                self._delay_system.set_delay_mode("random", progress=self.progress_delay)
+            self.progress_delay = curr.get_random_delay_progress(current_step)
+            self._delay_system.set_delay_mode("random", progress=self.progress_delay)
 
             # Ramp noise (phase 2: 80k-100k)
             self._curriculum_noise_scale = curr.get_noise_progress(current_step)

@@ -173,6 +173,37 @@
 
 ---
 
+## Post-Deployment: Residual Model Fine-Tuning
+
+### R1. Residual Dynamics Learning (Swift Approach)
+
+**What**: After initial sim-to-real deployment, collect real flight data and learn a residual correction to the simulation dynamics model, then retrain the policy in the corrected sim.
+
+**Evidence**: Kaufmann et al. (Nature 2023, "Swift") showed that DR alone achieved **0% track completion** on a real autonomous racing drone in realistic conditions, while residual model fine-tuning maintained ~100% completion. The residual approach learns `f_corrected = f_nominal + f_residual(state, action)` from real data, capturing unmodeled dynamics that DR cannot cover (aerodynamic interactions, flex, vibration modes, etc.). UZH RPG (arXiv: 2508.21065, RA-L 2026) showed a similar approach reduced hovering error by 55% (0.231m → 0.105m) with only 3 adaptation steps.
+
+**Why this matters for iris_ma6**: DR covers parameter uncertainty (mass ±10%, gains ±20%) but cannot model structural mismatches — unmodeled coupling between gimbal and body dynamics, propwash effects on gimbal vibration, antenna-dependent communication latency patterns, etc. These are systematic errors that no amount of randomization will average out. A residual model captures them from data.
+
+**What to do**:
+1. Deploy policy from sim training (with DR) on real hardware
+2. Collect 10-30 minutes of flight data with full state logging (PX4 `.ulg` + ROS2 bags)
+3. Train a small residual network: `Δf = MLP(state, action)` that maps (state, action) → correction to next-state prediction
+4. Inject the learned residual into the Isaac Sim environment's post-physics step (add `Δf` to the state after physics integration)
+5. Retrain policy in the corrected simulator
+6. Repeat 1-5 for 2-3 iterations (diminishing returns after that)
+
+**Implementation in iris_ma6**: Add a `residual_dynamics` module that:
+- Loads a trained residual MLP (or is bypassed when `None`)
+- Applies `state_corrected = state_physics + residual_mlp(state, action)` after `_post_physics_step()`
+- Gated by curriculum: residual correction strength ramps from 0→1 over `progress_dynamics` phase
+
+**Expected impact**: High, but only after first deployment. This is the final stage of sim-to-real, not the first. All preceding items (H1-H4, M1-M4) reduce the residual that needs learning — the smaller the initial sim-real gap, the less data needed for residual fine-tuning.
+
+**Prerequisite**: First real-world deployment with sufficient data collection infrastructure. Depends on all Phase 1-3 measurements being complete and baseline DR being tuned.
+
+**Reference**: Kaufmann et al., "Champion-level drone racing using deep reinforcement learning", Nature 2023; Song et al., "Learning on the Fly", arXiv: 2508.21065, RA-L 2026
+
+---
+
 ## Summary Matrix
 
 | ID | Item | Impact | Effort | Needs Measurement? | Blocks On |
@@ -190,6 +221,7 @@
 | L3 | Rolling shutter | Low | Low | None | - |
 | L4 | Gimbal hysteresis | Low | Low | D2,D3 | - |
 | L5 | Thermal IMU drift | Very Low | Low | None | - |
+| R1 | Residual dynamics learning | High (post-deploy) | High | Real flight data | H1-H4, M1-M4, first deployment |
 
 ## Recommended Execution Order
 
@@ -204,3 +236,5 @@
 9. **M3** (battery sag) — after A1 multi-battery data
 10. **Phase 3 measurements** (C3, C4) — multi-drone flights
 11. **M2** (detector realism) — after C4 data
+12. **First real-world deployment** — baseline policy with DR
+13. **R1** (residual dynamics) — collect real flight data, train residual, retrain policy. Iterate 2-3x
