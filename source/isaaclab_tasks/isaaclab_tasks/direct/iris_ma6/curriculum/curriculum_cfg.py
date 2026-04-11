@@ -26,23 +26,27 @@ class CurriculumCfg:
 
     The phases can overlap, allowing gradual transitions.
 
-    All-from-zero schedule: every difficulty knob ramps from step 0. No free
-    warmup, no curriculum shocks, no sigma collapse window. The policy never
-    sees a trivially easy or observation-clean world.
+    Two-track schedule: task-difficulty ramps start at 0, observation
+    corruption ramps start at 30-40k after base tracking is established.
 
-    Step:    0k        40k        60k       100k       320k
-             |          |          |          |          |
+    Sigma collapse is driven by the action→reward landscape being too flat
+    (any small action works) — fixed by ramping task difficulty from 0.
+    Bootstrappability requires clean observation→action mapping during
+    initial learning — fixed by delaying observation corruption.
+
+    Step:    0k        30k       40k        60k       100k       320k
+             |          |          |          |          |          |
     AgentVel:[────────ramp────────]full───────────────────
     Safety:  [────────ramp────────]full───────────────────
     Tracking:[────────ramp────────]full───────────────────
     Target:  [──────────────ramp──────────────]full───────
     Coord:   [──────────────ramp──────────────]full───────
-    Noise:   [──────────────────────ramp──────────────]full
-    Delay:   [──────────────────────ramp──────────────]full  (random from 0)
-    Dropout: [──────────────────────ramp──────────────]full
-    Burst:   [──────────────────────ramp──────────────]full
-    FP/FN:   [──────────────────────ramp──────────────]full
     DynDR:   [──────────────────────ramp──────────────]full
+    Noise:              [────────ramp─────────────]full
+    Delay:              [────────ramp─────────────]full  (random from 30k)
+    Dropout:            [────────ramp─────────────]full
+    Burst:                   [───────ramp─────────]full
+    FP/FN:                   [───────ramp─────────]full
     Post:                                    [───220k────]
 
     """
@@ -105,80 +109,80 @@ class CurriculumCfg:
     """Step when coordination rewards reach full scale."""
 
     # ==========================================================================
-    # Observation Noise (0-100k)
+    # Observation Noise (30-100k) — after base tracking is established
     # ==========================================================================
 
-    noise_start_step: int = 0
+    noise_start_step: int = 30000
     """Step to start introducing observation noise.
 
-    Ramps from zero — early steps have negligible noise.
+    Delayed until base bbox tracking is learned — the policy must know
+    'bbox tells me where the target is' before learning 'bbox is noisy'.
     """
 
     noise_end_step: int = 100000
     """Step when noise reaches maximum realistic values."""
 
     # ==========================================================================
-    # FP/FN — Detection Misses and False Positives (0-100k)
+    # FP/FN — Detection Misses and False Positives (40-100k)
     # ==========================================================================
 
-    fp_fn_start_step: int = 0
+    fp_fn_start_step: int = 40000
     """Step to start introducing false positives and miss rate.
 
-    From step 0 so the policy never knows a world without occasional
-    missed detections — prevents overfitting to 'bbox always valid'.
+    Most disruptive of all observation corruption (zeros bboxes), so
+    starts last — needs the most established base tracking skill.
     """
 
     fp_fn_end_step: int = 100000
     """Step when FP/FN rates reach calibrated values."""
 
     # ==========================================================================
-    # Random Delay + Staleness (0-100k, skip fixed delay)
+    # Random Delay + Staleness (30-100k, skip fixed delay)
     # ==========================================================================
 
     fixed_delay_start_step: int = 0
-    """[UNUSED] Fixed delay phase removed — random delay ramps from zero,
-    naturally passing through small-delay territory."""
+    """[UNUSED] Fixed delay phase removed — random delay handles all latency."""
 
     fixed_delay_end_step: int = 0
     """[UNUSED] Fixed delay phase removed."""
 
-    random_delay_start_step: int = 0
+    random_delay_start_step: int = 30000
     """Step to start introducing random delay with staleness.
 
-    Ramps from zero — at low progress, delays are negligible.
-    Replaces the old none→fixed→random state machine.
+    Delayed until base tracking is learned. Replaces the old
+    none→fixed→random state machine.
     """
 
     random_delay_end_step: int = 100000
     """Step when random delay variance reaches maximum."""
 
     # ==========================================================================
-    # Dropout (0-100k)
+    # Dropout (30-100k)
     # ==========================================================================
 
-    dropout_start_step: int = 0
+    dropout_start_step: int = 30000
     """Step to start introducing dropout."""
 
     dropout_end_step: int = 100000
     """Step when dropout reaches maximum rate."""
 
     # ==========================================================================
-    # Burst Dropout (0-100k)
+    # Burst Dropout (40-100k)
     # ==========================================================================
 
-    burst_dropout_start_step: int = 0
+    burst_dropout_start_step: int = 40000
     """Step to start introducing burst dropout (correlated packet loss).
 
-    At low progress, p_onset ≈ 0 so bursts never trigger.
-    Becomes meaningful around 30-40% progress.
+    Starts after iid dropout so the policy first handles single-frame
+    drops before sustained blackouts.
     """
 
     burst_dropout_end_step: int = 100000
     """Step when burst dropout onset probability reaches target value."""
 
     # Legacy aliases
-    delay_start_step: int = 0
-    """[DEPRECATED] Random delay starts from step 0."""
+    delay_start_step: int = 30000
+    """[DEPRECATED] Use random_delay_start_step."""
 
     delay_end_step: int = 100000
     """[DEPRECATED] Use random_delay_end_step."""
