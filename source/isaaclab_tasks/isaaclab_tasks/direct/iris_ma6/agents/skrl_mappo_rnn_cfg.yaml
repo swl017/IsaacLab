@@ -11,7 +11,7 @@ models:
     gru_num_layers: 1      # Tune it for robust final policy later. May take longer to train.
     gru_hidden_size: 64
     initial_log_std: -0.5  # σ ≈ 0.6
-    min_log_std: -5.0      # σ_min ≈ 0.007, prevents collapse
+    min_log_std: -1.0      # σ_min ≈ 0.37, hard floor (wide action space needs less normalized σ)
     max_log_std: 0.7       # σ_max ≈ 2.0, caps exploration
 
   value:
@@ -52,7 +52,7 @@ agent:
   clip_predicted_values: true
 
   # Loss scales
-  entropy_loss_scale: 0.01   # Entropy loss scaling
+  entropy_loss_scale: 0.02   # 2x baseline — counteracts exploitation gradient in wide action space
   value_loss_scale: 1.0      # Value loss scaling
 
   # KL divergence
@@ -84,7 +84,7 @@ agent:
   # Experiment tracking
   experiment:
     directory: iris_ma6
-    experiment_name: "2be3b9a3d9_control_gain_and_fidelity"
+    experiment_name: "91f5da3592_tune_reworked_curriculum"
     write_interval: auto
     checkpoint_interval: auto
     store_separately: false

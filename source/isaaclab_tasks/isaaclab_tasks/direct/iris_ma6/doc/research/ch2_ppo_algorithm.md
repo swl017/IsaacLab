@@ -406,4 +406,297 @@ Normalization to mean=0, std=1 decouples the gradient magnitude from the reward 
 
 ---
 
+## 2.10 Appendix: Why the Surrogate Objective Looks the Way It Does
+
+In §2.2 we wrote:
+
+$$L^{\text{surrogate}}(\theta) = \mathbb{E}_t\left[r_t(\theta) \cdot \hat{A}_t\right]$$
+
+and called it a "first-order approximation." This appendix explains *what* it approximates and *why* it's only first-order.
+
+### The real objective
+
+What we actually want to maximize is the expected return under the **new** policy:
+
+$$J(\theta) = \mathbb{E}_{\tau \sim \pi_\theta}\left[\sum_{t=0}^T \gamma^t r_t\right]$$
+
+The expectation is over trajectories sampled by $\pi_\theta$. But we don't have data from $\pi_\theta$ -- we only have data from $\pi_{\theta_\text{old}}$. So we need to express $J(\theta)$ in terms of quantities we can measure from the old rollouts.
+
+### The exact identity (Kakade & Langford, 2002)
+
+There is a beautiful exact result called the **policy improvement lemma**:
+
+$$J(\theta) - J(\theta_\text{old}) = \mathbb{E}_{s \sim \rho_\theta,\, a \sim \pi_\theta(\cdot|s)}\left[A^{\pi_{\theta_\text{old}}}(s, a)\right]$$
+
+In words: the *improvement* from $\theta_\text{old}$ to $\theta$ equals the expected advantage (computed under the old value function) of the actions taken by the new policy, at states the new policy visits.
+
+Two things to notice:
+1. The expectation is over $s \sim \rho_\theta$ -- the **state distribution** induced by the new policy. Different policies visit different states, and this matters.
+2. The action distribution is $\pi_\theta(\cdot|s)$ -- also the new policy.
+3. The advantage uses the *old* value function $V^{\pi_{\theta_\text{old}}}$, which is what we have.
+
+This is the *real* objective we'd love to optimize. The problem: $\rho_\theta$ is intractable. To compute it, we'd need to roll out the new policy in the environment -- which is exactly what we're trying to avoid. Each gradient step would require fresh rollouts, defeating the purpose of reusing the buffer for multiple epochs.
+
+### The surrogate's approximation
+
+The surrogate replaces $\rho_\theta$ with $\rho_{\theta_\text{old}}$ (the *old* policy's state distribution, which we can sample from -- it's the buffer we just collected):
+
+$$L^{\text{surrogate}}(\theta) = \mathbb{E}_{s \sim \rho_{\theta_\text{old}},\, a \sim \pi_\theta(\cdot|s)}\left[A^{\pi_{\theta_\text{old}}}(s, a)\right]$$
+
+Then it uses **importance sampling** to express the inner expectation over $\pi_\theta$ in terms of samples from $\pi_{\theta_\text{old}}$:
+
+$$\mathbb{E}_{a \sim \pi_\theta(\cdot|s)}\left[f(a)\right] = \mathbb{E}_{a \sim \pi_{\theta_\text{old}}(\cdot|s)}\left[\frac{\pi_\theta(a|s)}{\pi_{\theta_\text{old}}(a|s)} f(a)\right] = \mathbb{E}_{a \sim \pi_{\theta_\text{old}}(\cdot|s)}\left[r_t(\theta) f(a)\right]$$
+
+(This step is *exact* -- importance sampling has no error if the support is the same.)
+
+Plugging in $f(a) = A^{\pi_{\theta_\text{old}}}(s,a)$:
+
+$$L^{\text{surrogate}}(\theta) = \mathbb{E}_{s \sim \rho_{\theta_\text{old}},\, a \sim \pi_{\theta_\text{old}}(\cdot|s)}\left[r_t(\theta) \cdot A^{\pi_{\theta_\text{old}}}(s, a)\right]$$
+
+Replacing the true advantage with our GAE estimate $\hat{A}_t$ and the joint expectation with empirical averaging over the rollout buffer:
+
+$$L^{\text{surrogate}}(\theta) = \mathbb{E}_t\left[r_t(\theta) \cdot \hat{A}_t\right]$$
+
+That's where the formula in §2.2 comes from.
+
+### Why "first-order"
+
+The only approximation we made is replacing $\rho_\theta$ with $\rho_{\theta_\text{old}}$. How big is the error?
+
+When $\theta = \theta_\text{old}$, the two distributions are identical and the error is zero. As $\theta$ drifts from $\theta_\text{old}$, $\rho_\theta$ drifts from $\rho_{\theta_\text{old}}$. The relationship is approximately:
+
+$$\rho_\theta(s) \approx \rho_{\theta_\text{old}}(s) + \mathcal{O}(\|\theta - \theta_\text{old}\|)$$
+
+So the error in the surrogate is:
+
+$$L^{\text{surrogate}}(\theta) - (J(\theta) - J(\theta_\text{old})) = \mathcal{O}(\|\theta - \theta_\text{old}\|^2)$$
+
+The surrogate is correct **to first order in $\theta - \theta_\text{old}$**. Its gradient at $\theta = \theta_\text{old}$ exactly matches the true policy gradient. The error grows quadratically as $\theta$ drifts.
+
+### Why this matters for PPO
+
+The first-order accuracy is *only* valid near $\theta_\text{old}$. As the policy drifts, the surrogate becomes a less and less accurate proxy for the real objective. Maximizing it without restraint would push $\theta$ to a point where the surrogate value is high but the *true* objective $J(\theta)$ is actually low (because the state distribution has shifted in unexpected ways).
+
+This is the fundamental motivation for the trust region:
+
+> **The surrogate is trustworthy only when the new policy is close to the old one. So constrain the policies to stay close.**
+
+TRPO enforces this with a hard KL constraint:
+
+$$\max_\theta L^{\text{surrogate}}(\theta) \quad \text{s.t.} \quad D_\text{KL}(\pi_{\theta_\text{old}} \| \pi_\theta) \leq \delta$$
+
+PPO enforces it implicitly via clipping. When $|r_t - 1| > \epsilon$, the clip says "we don't trust the surrogate this far from the data; flatten the gradient." This is a soft, sample-wise version of the trust region: we restrict not the global KL, but the per-sample importance ratio.
+
+The KL-adaptive learning rate scheduler (Chapter 4) is yet another safety mechanism: it monitors the *actual* KL drift after each update and reduces the step size if the policy is moving too fast. Together, the three mechanisms (clip, KL scheduler, gradient norm clip) keep $\theta$ in the regime where the surrogate is a faithful proxy for the real objective.
+
+### Summary
+
+| Object | Formula | Status |
+|---|---|---|
+| Real objective | $J(\theta) - J(\theta_\text{old}) = \mathbb{E}_{s \sim \rho_\theta, a \sim \pi_\theta}[A^{\pi_{\theta_\text{old}}}]$ | Exact, but intractable ($\rho_\theta$ unknown) |
+| Surrogate objective | $L^{\text{surrogate}}(\theta) = \mathbb{E}_{s \sim \rho_{\theta_\text{old}}, a \sim \pi_{\theta_\text{old}}}[r_t(\theta) \hat{A}_t]$ | Tractable; first-order accurate |
+| Approximation | $\rho_\theta \to \rho_{\theta_\text{old}}$ | Error $\mathcal{O}(\|\theta - \theta_\text{old}\|^2)$ |
+| Clipped surrogate | $L^{\text{CLIP}}(\theta) = \mathbb{E}_t[\min(r_t \hat{A}_t, \text{clip}(r_t, 1\pm\epsilon)\hat{A}_t)]$ | Tractable; pessimistic; trust-region-like |
+
+The clip and the KL scheduler exist because the surrogate is a *first-order* approximation. If we had the exact objective, we could maximize it freely. Because we only have a local approximation, we must stay local.
+
+---
+
+## 2.11 Appendix: Two Small But Confusing Details About the Value Loss
+
+### Question 1: What is $\mathcal{B}$ in the value loss formula?
+
+Recall the value loss from §2.4:
+
+$$L^V(\phi) = \frac{1}{|\mathcal{B}|} \sum_{t \in \mathcal{B}} \left(V_\phi(s_t) - V_t^{\text{target}}\right)^2$$
+
+$\mathcal{B}$ is just a **mini-batch**: a subset of timesteps from the rollout buffer. The notation $|\mathcal{B}|$ is the mini-batch size, and $t \in \mathcal{B}$ means "for each timestep in the mini-batch." So the expression says "average squared error over the mini-batch."
+
+**Concrete example from your config**:
+- `rollouts = 32` (timesteps of data per update) × `num_envs` (say 2048 parallel environments) = 65,536 total samples in the rollout buffer
+- `mini_batches = 8` → each mini-batch is 65,536 / 8 = 8,192 samples
+- So $|\mathcal{B}| = 8{,}192$ and the sum runs over those 8,192 timesteps
+
+**Why mini-batches at all?** Two reasons:
+1. **Memory**: A full rollout buffer won't fit in GPU memory for the backward pass.
+2. **Gradient noise as regularization**: Mini-batch SGD introduces small stochastic perturbations that help escape local optima and regularize the optimization landscape. Full-batch gradient descent is theoretically cleaner but often performs worse in practice for neural networks.
+
+In the SKRL code (`ppo.py` line 431), `self.memory.sample_all(names=..., mini_batches=self._mini_batches)` splits the buffer into 8 mini-batches. The inner loop in `_update()` iterates over them:
+
+```python
+for (sampled_states, sampled_actions, ...) in sampled_batches:  # 8 mini-batches
+    ...
+    value_loss = self._value_loss_scale * F.mse_loss(sampled_returns, predicted_values)
+```
+
+`F.mse_loss` computes exactly the $\frac{1}{|\mathcal{B}|}\sum_{t \in \mathcal{B}}(\cdot)^2$ formula -- it's the mean squared error over the mini-batch.
+
+**Mini-batch vs epoch terminology**:
+- 1 **mini-batch** = one gradient step = one `loss.backward(); optimizer.step()`
+- 1 **epoch** = one full pass through all mini-batches = 8 mini-batches in your config
+- 1 **update** = `learning_epochs` epochs = 6 full passes = 48 gradient steps total (8 × 6)
+- 1 **iteration** / rollout cycle = collect 32 timesteps → do 1 update → repeat
+
+So each time the `_update()` function runs, it performs 48 gradient steps, and $\mathcal{B}$ refers to the particular mini-batch each of those 48 steps operates on.
+
+### Question 2: If clipping is PPO's core idea, why is value clipping optional?
+
+Good question -- and the answer reveals a subtlety about what "clipping" means and where it actually matters.
+
+**The clip on the policy is fundamental.** Without it, PPO degenerates into vanilla policy gradient, and the multi-epoch off-policy training becomes unstable. The policy clip is the *defining feature* of PPO. It cannot be turned off without changing the algorithm.
+
+**The clip on the value function is a separate, optional heuristic.** It was added in the original OpenAI baselines implementation of PPO, but the paper itself (Schulman et al., 2017) doesn't include it. It's an *implementation detail* that the community later debated.
+
+The two clips serve different purposes:
+
+| Clip | Purpose | Required? |
+|---|---|---|
+| **Policy clip** on $r_t(\theta)$ | Keep the importance sampling ratio bounded so the first-order surrogate remains trustworthy. Prevents the off-policy gradient from diverging. | **Yes** -- this is what makes PPO, PPO. |
+| **Value clip** on $V_\phi(s)$ | Prevent the value function from overshooting its previous prediction by more than $\epsilon_v$. A trust-region-like restriction on the critic. | **No** -- it's an optional stability trick. |
+
+### Why is the policy clip essential but the value clip optional?
+
+The reasons come from the structure of each loss:
+
+#### 1. The value loss is already a proper supervised objective
+
+The value loss $(V_\phi(s) - V^\text{target})^2$ is a standard regression loss. It has a well-defined optimum ($V_\phi(s) = V^\text{target}$) and a convex shape around that optimum (for a linear model; for neural networks the shape is more complex but still well-behaved). Standard SGD on a regression loss is *stable* as long as the learning rate is reasonable. There's no importance-sampling issue, no off-policy drift, no catastrophic failure mode that clipping must prevent.
+
+In contrast, the policy surrogate has an importance sampling ratio $r_t(\theta)$ that can explode or implode multiplicatively. A 10x ratio means the gradient for that sample is 10x larger than normal. Without clipping, a single outlier sample can swing the gradient wildly. The policy clip is a numerical safety mechanism that has no analogue in the value loss.
+
+#### 2. The value clip doesn't correspond to a trust region in the usual sense
+
+The policy clip is a *pessimistic* bound: we take the `min` of the clipped and unclipped terms. For positive advantages, the clip *lowers* the objective (making us less optimistic about gains); for negative advantages, it *raises* the objective (making us less optimistic about losses). Either way, the clip is **conservative** -- it penalizes over-confident updates.
+
+The value clip uses `max` of two squared errors:
+
+$$L^V = \max\left[(V_\phi - V^\text{targ})^2,\; (V_\phi^\text{clipped} - V^\text{targ})^2\right]$$
+
+This is also pessimistic in a sense: we take whichever error is *worse*, then minimize that. The effect is: if the unclipped prediction would improve beyond $V_{\phi_\text{old}} \pm \epsilon_v$ in a single step, the gradient is suppressed.
+
+But this isn't solving a fundamental stability problem -- it's just preventing the critic from updating "too fast." You could achieve the same effect with a lower learning rate for the value network, or with stronger gradient norm clipping, or just by being patient. There are *many* ways to slow down the critic, and value clipping is one of them.
+
+#### 3. Empirical evidence is mixed
+
+Engstrom et al. (2020), "Implementation Matters in Deep Policy Gradients," ran careful ablations on PPO's "code-level" optimizations. They found:
+
+- **Policy clip**: essential. Removing it breaks PPO.
+- **Advantage normalization**: important. Removing it destabilizes training.
+- **Value clip**: minor effect. Sometimes slightly helpful, sometimes slightly harmful, depending on the environment.
+- **Orthogonal weight initialization**: important. Removing it hurts.
+
+The value clip turned out to be one of the weaker contributions. It was added by the OpenAI baselines authors for symmetry with the policy clip (the thinking: "if we clip one, we should clip the other"), but the theoretical justification is much weaker.
+
+#### 4. Your config doesn't use it
+
+In your SKRL setup, `clip_predicted_values = False`. This means:
+
+```python
+value_loss = self._value_loss_scale * F.mse_loss(sampled_returns, predicted_values)
+```
+
+Just a plain MSE loss. No clipping. This works fine in practice for your drone task. If you ever see symptoms of **value function divergence** (growing value loss, wild advantage estimates), one fix would be to enable value clipping. But for stable training, it's not needed -- and adding it would slow down value learning slightly, which could hurt if the value function is struggling to keep up with a moving target (e.g., during curriculum shifts).
+
+### Summary
+
+| Question | Answer |
+|---|---|
+| What is $\mathcal{B}$? | A mini-batch -- a subset of timesteps from the rollout buffer. $|\mathcal{B}|$ is the mini-batch size. |
+| Why is the policy clip essential? | It solves a fundamental stability problem: importance sampling ratios can explode, and the first-order surrogate is only accurate near $\theta_\text{old}$. |
+| Why is the value clip optional? | The value loss is already a well-behaved regression objective. The clip is a heuristic speed limit, easily replaced by other stability measures (learning rate, gradient clipping). |
+| Should *you* enable value clipping? | Probably not, unless you observe value function divergence. Your current `clip_predicted_values = False` is the mainstream default. |
+
+**Key takeaway**: "PPO clips stuff" is a slogan, but only one of those clips is load-bearing. The policy clip defines the algorithm. The value clip is a bonus feature you can take or leave.
+
+---
+
+## 2.12 Appendix: Does a Clipped Sample Mean "Giving Up" On It?
+
+Yes, exactly. When a sample gets clipped, PPO effectively says "I've learned enough from this one, move on." This appendix makes that intuition precise.
+
+### What happens mechanically
+
+With positive advantage, $r_t = 1.35$, $\epsilon = 0.2$:
+
+$$L_t = \min(r_t \cdot \hat{A}_t,\; \text{clip}(r_t, 0.8, 1.2) \cdot \hat{A}_t) = \min(1.35 \hat{A}_t,\; 1.2 \hat{A}_t) = 1.2 \hat{A}_t$$
+
+The selected term is $1.2 \cdot \hat{A}_t$, which is a **constant** in $\theta$ (the clip has no $\theta$ dependence). Its gradient is:
+
+$$\frac{\partial}{\partial \theta}\big(1.2 \cdot \hat{A}_t\big) = 0$$
+
+PyTorch autodiff computes exactly this zero. When `optimizer.step()` runs, this sample contributes nothing to the parameter update. It's as if the sample had been deleted from the mini-batch.
+
+### The intuition: "given up" is the right mental model
+
+PPO is literally giving up on squeezing more gradient out of this sample. Why?
+
+**Because the sample came from $\pi_{\theta_\text{old}}$ and the current policy has already drifted 35% away from the data.** The first-order surrogate (see §2.10) is only trustworthy near $\theta_\text{old}$. At $r_t = 1.35$, we're already past the trust region. Any further update based on this sample would be extrapolating an approximation that's no longer valid.
+
+Think of it as a **local validity certificate**:
+
+- $r_t \in [0.8, 1.2]$: "This sample still represents what the current policy does. Use it."
+- $r_t \notin [0.8, 1.2]$: "This sample is from a policy too different from the current one. Stop trusting it."
+
+The gradient is zero not because the sample is *uninformative* -- it's because using it would be *dishonest*. The advantage estimate $\hat{A}_t$ was computed using the old value function, and its accuracy decays as the policy moves away from where the estimate was valid.
+
+### An important subtlety: only one direction is clipped
+
+The clip is **asymmetric per sample**. For a positive-advantage sample:
+
+- If $r_t > 1.2$: gradient is zero (can't increase probability further)
+- If $r_t < 0.8$: gradient is **not** clipped. PPO still allows this sample to *push* the probability back up.
+
+That asymmetry is the `min` operation doing its job:
+
+$$L_t = \min(r_t \hat{A}_t, \text{clip}(r_t, 0.8, 1.2) \hat{A}_t)$$
+
+At $r_t = 0.5$ with $\hat{A}_t > 0$:
+- $r_t \hat{A}_t = 0.5 \hat{A}_t$
+- $\text{clip}(0.5, 0.8, 1.2) \hat{A}_t = 0.8 \hat{A}_t$
+- $\min = 0.5 \hat{A}_t$ (unclipped wins)
+
+Gradient is nonzero, pushing $r_t$ back up toward 1. PPO says: "The current policy has drifted *away* from a good action. Pull it back."
+
+By symmetry, for a negative-advantage sample:
+- If $r_t < 0.8$: gradient is zero (can't decrease probability further)
+- If $r_t > 1.2$: gradient is **not** clipped -- PPO still lets the sample push probability down
+
+**So "giving up" is accurate only for the direction the policy has already moved *past* the trust region.** PPO is willing to undo bad drift, but not to compound good drift beyond the clip.
+
+### Connection to "per-sample early stopping"
+
+There's a useful analogy: PPO's clipping acts like a **per-sample early stopping** mechanism. Each sample contributes gradient signal until its importance ratio leaves the trust region, then it retires. Over the course of 6 epochs, samples progressively drop out as the policy drifts:
+
+| Epoch | Typical fraction of samples still contributing gradient |
+|---:|---:|
+| 1 | ~100% (just collected, $r_t \approx 1$) |
+| 2 | ~95% |
+| 3 | ~85% |
+| 4 | ~70% |
+| 5 | ~55% |
+| 6 | ~40% |
+
+(These numbers vary with the environment and learning rate, but the qualitative pattern is universal.)
+
+This is why reducing `learning_epochs` from 6 to 4 (your fix in `lr_collapse_analysis.md`) loses very little signal: epochs 5-6 are already mostly clipped out. You're skipping the epochs where most samples have already "given up." It also explains why epochs 5-6 primarily contribute to **KL accumulation** rather than useful learning -- the samples still producing gradient are the ones that drifted the furthest, and their gradients push the policy even further from $\theta_\text{old}$.
+
+### A second-order intuition: the clip as a self-regulating learning rate
+
+Here's another way to see it. The effective learning rate for each sample is:
+
+$$\alpha_{\text{effective},t} = \alpha \cdot \mathbb{1}[\text{sample } t \text{ is not clipped}]$$
+
+As the policy drifts, more samples get clipped, and the effective batch size shrinks. The optimizer is effectively taking smaller and smaller steps until the rollout is exhausted. PPO has a built-in mechanism for gradually reducing its update magnitude as it extracts more learning from a fixed dataset -- without needing an explicit LR schedule (though the KL-adaptive scheduler provides an additional layer on top).
+
+### Summary
+
+- "Clipped sample = zero gradient" = correct.
+- "Giving up on the sample" = correct.
+- **Why**: the sample's advantage estimate is only valid near $\theta_\text{old}$, and the policy has drifted too far to trust it.
+- **Asymmetry**: PPO gives up on *further exploitation* of a drifted sample, but still corrects *backward drift* from good actions (or *forward drift* from bad ones).
+- **Emergent behavior**: samples self-retire as they become unreliable, which is why PPO can run many epochs on the same data without exploding.
+- **Practical consequence**: reducing `learning_epochs` from 6 to 4 loses little signal because most samples have already clipped out by epoch 5.
+
+---
+
 **Next**: [Chapter 3 -- MAPPO & Your Training Dynamics](ch3_mappo_training_dynamics.md)

@@ -447,8 +447,14 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     enable_tracking_truncation: bool = True
     """Truncate episode when all agents lose detection for tracking_lost_timeout_s."""
 
-    tracking_lost_timeout_s: float = 2.0
-    """Seconds of all-agents-blind before truncation."""
+    tracking_lost_timeout_s: float = 3.0
+    """Seconds of all-agents-blind before truncation.
+
+    Increased from 2.0 → 3.0 to give the policy more time to recover from
+    temporary bbox blackouts during the FP/FN curriculum phase. Each
+    truncation cuts off the learning signal, so a longer grace window
+    lets the policy experience recovery gradients.
+    """
 
     tracking_truncation_grace_steps: int = 50
     """Steps after reset before the tracking-lost counter starts.

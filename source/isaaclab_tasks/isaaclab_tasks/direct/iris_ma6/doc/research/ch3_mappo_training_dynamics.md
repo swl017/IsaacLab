@@ -311,4 +311,231 @@ This is why your analysis doc correctly concludes "LR is the leading indicator" 
 
 ---
 
+## 3.7 Appendix: Curriculum Design Principles
+
+The Phase 4 curriculum shock in §3.4 is a concrete example of a more general principle: **curriculum design is an exercise in aligning the direction and speed of environment changes with the policy's current learning capacity.** This appendix formalizes that principle into a design framework.
+
+### A.0 The Bootstrap Principle (precondition)
+
+**Before any phase-matching can apply, the policy must learn at least one stable signal.** A randomly-initialized policy has no learned response to anything. It needs at least one perfectly reliable signal in the observation→reward chain to learn cause and effect. Curriculum stages that corrupt this bootstrap signal must wait until the bootstrap skill is established (typically 12-20k steps).
+
+**Why this matters**: The phase-matching framework (§A.2-A.3) assumes the policy is *already learning* and asks "what kind of difficulty change is compatible with the current learning state?" But if the policy hasn't bootstrapped yet, there is no "learning state" to match against — the framework simply doesn't apply.
+
+**Empirical evidence**: The 5ce56 and 91f5da experiments ramped observation corruption (noise, dropout, FN) from step 0 with the intent of preventing σ collapse. Both failed catastrophically. The policy never reached pair_valid > 0.62 (compared to 0.95+ in successful runs). The diagnosis: with bbox occasionally zeroed by FN from the first step, a randomly-initialized policy has no reliable mapping from "what I see" to "what I should do" — there's nothing to bootstrap from.
+
+**The principle**:
+
+> **At step 0, at least one signal in the observation→reward chain must be perfectly reliable so a randomly-initialized policy can learn cause and effect. Stages that corrupt this signal (observation noise, dropout, FN, FP, sensor failures) must wait until base bootstrap is complete.**
+
+**Practical rule**: During the bootstrap window (0-15k for iris_ma6), the observation→reward signal must be **identical to the deployment-target distribution minus all sensor corruption**. Physics randomization is OK (it perturbs dynamics, not observations). Reward shaping is OK (it perturbs the reward target, not the observation). What is *not* OK is anything that breaks the observation→action mapping the policy is trying to learn from random initialization.
+
+**Diagnostic**: If `pair_valid_rate` (or your task-equivalent core metric) is not above 0.85 by step 15-20k, the bootstrap has failed. No amount of subsequent curriculum tuning will recover it — the policy will just drift downward from a bad initial fit.
+
+### A.1 Classifying Curriculum Stages by Their Effect on the Optimal Policy
+
+A curriculum stage perturbs the environment, which shifts the optimal policy $\pi^*$. The nature of the shift falls into one of four categories:
+
+#### Shrinking curricula (narrow the acceptable action range)
+
+The new environment removes "forbidden zones" from action space. The optimal policy becomes **more concentrated**. σ should *decrease* to match.
+
+Examples from iris_ma6:
+- Safety constraints (CBF penalty, altitude penalty, target proximity)
+- Action magnitude penalties (action_sum, action_delta)
+- Collision penalties
+
+**Effect on σ**: downward pressure. The policy loss gradient pushes log_std down because narrow, specific actions have high advantage.
+
+#### Expanding curricula (require access to a wider action range)
+
+The new environment demands the policy *use* more of action space to cope. σ should *increase*, or at least not decrease.
+
+**Important sub-distinction**: expanding stages split into two categories that look similar but behave very differently in early training:
+
+**Physics-side expand** (perturbs dynamics, observation→action mapping preserved):
+- Domain randomization (mass, inertia, friction, controller gains)
+- Faster agent velocities (need larger control efforts)
+- Faster target dynamics
+- Wind/disturbance forces
+
+These are **safe in Phase 1 and during bootstrap** (§A.0) because the observation→reward chain stays intact. A randomized mass means "pitch forward" still moves the agent forward; only the magnitude varies. The policy can still learn cause and effect from random initialization. Physics-side perturbations produce *graceful degradation*: the action that was 80% correct under nominal dynamics is still 70% correct under randomized dynamics.
+
+**Observation-side expand** (corrupts the observation channel):
+- Sensor noise on positions/velocities/bboxes
+- Detection dropout (random frame loss)
+- False negatives (bbox zeroed)
+- False positives (spurious detections)
+- Communication delays
+- Burst dropout (correlated blackouts)
+
+These are **fatal in Phase 1 and must wait until bootstrap is complete** (§A.0). They don't perturb the action→state mapping — they break the observation channel itself. When a bbox is zeroed by a false negative, there's no "graceful degradation" — the entire downstream computation breaks. A randomly-initialized policy has no learned response to "no detection," so it cannot bootstrap from this.
+
+**The asymmetry**: Physics DR adds *bounded noise* to a *learned function*. Observation corruption *deletes information* from the *input space*. The first is recoverable by averaging; the second creates input states the policy has never seen and has no response for.
+
+**Effect on σ**: Both put upward pressure on σ in steady state. Physics-side does so by demanding broader action exploration to be robust to dynamics variation. Observation-side does so by demanding broader exploration to handle corrupted inputs. **But observation-side cannot apply this pressure during bootstrap** because the policy never establishes a baseline strategy to perturb.
+
+#### Shifting curricula (move the optimum laterally without changing its width)
+
+The new environment keeps the spread roughly constant but moves *where* the optimal actions lie.
+
+Examples from iris_ma6:
+- Triangulation reward introduction (different viewpoints needed from different agents)
+- Coordination penalties (role differentiation between drones)
+- Moving target acquisition (target bearing shifts over time)
+
+**Effect on σ**: mostly neutral, but the policy mean $\mu$ must move through policy space. Requires sufficient exploration budget to escape the old local optimum.
+
+#### Complex curricula (combinations of the above)
+
+Real curriculum stages often combine effects. For example, "faster target dynamics" is both expand (need wider action range) and shift (optimal actions are different). Classify by the dominant effect.
+
+### A.2 The Training Phase Framework
+
+From §3.4, training has natural phases:
+- **Phase 1** (0-20k): σ narrows as policy exploits obvious advantages
+- **Phase 2** (20k-92k): σ rebounds as entropy bonus dominates over weakened advantages
+- **Phase 3** (92k+): σ stabilizes at equilibrium; policy exploits refined strategies
+
+These phases have **different exploration budgets** (measured by the size of σ and the ability of the policy to visit new states):
+
+| Phase | σ range | Exploration budget | Best-suited curriculum type |
+|---|---|---|---|
+| Early Phase 1 (0-10k) | 0.5 → 0.4 | Low (narrowing fast) | Shrink (safety) |
+| Late Phase 1 (10k-20k) | 0.35 | Minimum | None (let policy stabilize) |
+| Early Phase 2 (20k-40k) | 0.35 → 0.5 | Growing | Expand (dynamics, velocity) |
+| Mid Phase 2 (40k-80k) | 0.5 → 1.0 | Moderate | Shift (coordination, new rewards) |
+| Late Phase 2 (80k-92k) | 1.0 → 1.2 | High | Shift, complex |
+| Phase 3 (92k+) | 1.2 (stable) | High but committed | Refinement, not new stages |
+
+**Important caveat: σ ceiling is action-space-scale-dependent.**
+
+The σ values in the table above (0.35 → 1.21) are from the 928b training run, which used a narrow action space (45 deg/s yaw, 180 deg/s gimbal, 1× zoom rate). The Phase 2 σ ceiling of ~1.2 is **not a universal constant** — it depends on the action scale.
+
+In a wider action space (e.g., 90 deg/s yaw, 360 deg/s gimbal, 4× zoom rate, as used in the 3461+ runs), the same sigma in normalized space corresponds to 2-4× larger physical effects. The policy discovers early that *small normalized actions suffice*, and the exploitation gradient is correspondingly stronger. Phase 2 σ caps at ~0.5-0.6 instead of 1.2.
+
+**Why this matters for curriculum design**: the σ ceiling determines the exploration budget available for late-phase shifts. With σ ≈ 0.5 in Phase 2, the policy cannot execute a shift that requires escaping a deep local optimum (e.g., observation corruption that invalidates the learned strategy). The framework's recommendation to introduce shifts in mid-Phase 2 assumes σ ≈ 1.0+ at that point. **In wide action spaces, you must either:**
+1. Move shifts to later (when σ has had more time to grow) — but σ may never reach 1.0+
+2. Reduce shift magnitude (so it fits within the available exploration budget)
+3. Increase entropy coefficient $c_e$ to push σ harder (the only direct lever)
+4. Compute σ in **physical units** rather than normalized units when reasoning about exploration capacity:
+
+$$\sigma_{\text{physical}} = \sigma_{\text{normalized}} \cdot s_i$$
+
+For yaw rate at the 928b ceiling: $1.21 \cdot 0.785 = 0.95$ rad/s. For yaw rate at the wide-action 3461 ceiling: $0.5 \cdot 1.571 = 0.79$ rad/s. These are physically comparable — the wide-action policy is *not* under-exploring in absolute terms. It just looks lower in normalized units.
+
+**The practical implication**: when porting a curriculum from one action space to another, **think in physical units**. A curriculum stage that requires "σ > 1.0 in Phase 2" in a narrow action space may require "σ > 0.4 in Phase 2" in a wide action space — the same physical exploration budget.
+
+### A.3 The Design Principle: Match Stage Type to Training Phase
+
+**Shrink stages** should be introduced when the policy has low exploration needs:
+- Early Phase 1: the policy is already collapsing onto a narrow optimum; shrinking is compatible
+- Late Phase 2: the policy has found good strategies and can afford to tighten
+- **Not in mid-Phase 2**: would fight the entropy-driven σ growth
+
+**Expand stages** should be introduced when the policy has room to grow:
+- Early Phase 2: σ is rebounding; expanding is aligned with the natural dynamic
+- Can be combined with shrink stages in Phase 2 to balance the forces (your 20k-40k window does this intentionally -- velocity expand + safety shrink)
+
+**Shift stages** are the riskiest and require maximum exploration budget:
+- Mid-to-late Phase 2: σ is near its peak, providing maximum exploration capacity to escape the old optimum
+- **Never in Phase 1**: the policy has collapsed and cannot escape the old local optimum
+- **Never in Phase 3**: the policy has committed to an equilibrium and won't move without a huge perturbation
+
+**Your iris_ma6 curriculum follows this framework well** (even if accidentally). The coordination curriculum activates at 60k -- mid Phase 2 -- exactly when the policy has the most exploration budget to discover new multi-agent strategies. If it had been introduced at 10k (deep Phase 1), the two drones would have converged to symmetric strategies and never escaped.
+
+### A.4 Stacking Multiple Stages: Compatibility Rules
+
+When multiple curriculum stages overlap, their effects on σ and the policy optimum combine. Design rules:
+
+1. **No more than 2-3 stages active simultaneously**. Each additional stage adds another dimension of perturbation to the value function, increasing the risk of divergence.
+
+2. **Shrink and expand can be combined in Phase 2**. They apply opposing pressures on σ, which can produce a stable equilibrium. Your 20k-40k window combines velocity expand + safety shrink + tracking-randomization expand -- three stages, two expanding and one shrinking. The net effect is a slight σ decrease (shrink slightly dominates) or stays flat, which is compatible with the natural Phase 1→2 transition.
+
+3. **Two shifts should not overlap**. Each shift tries to move the policy to a new optimum. Two simultaneous shifts create conflicting gradients and can leave the policy stuck between them. If you need multiple shifts, stagger them (shift A during 40k-60k, shift B during 60k-80k).
+
+4. **Shifts should not overlap with shrinks**. The shift needs exploration to escape the old optimum; the shrink reduces exploration. They fight each other.
+
+5. **Shifts can overlap with expands**. The expand increases exploration capacity, which the shift consumes. They're compatible.
+
+### A.5 Ramp Speed: The Value Function Tracking Heuristic
+
+From §3.4 Phase 4, the cascade begins when the value function cannot track the changing reward distribution fast enough. The ramp speed determines how much $V_\phi$ falls behind per update.
+
+**Heuristic**: the ramp duration should be at least **2x the value function settling time**.
+
+The settling time is the number of gradient steps needed for $V_\phi$ to adapt to a step change in the reward distribution. You can measure it empirically:
+1. Take a checkpoint at step $k$
+2. Apply an instantaneous reward change (e.g., flip on a new reward term at full weight)
+3. Train for $N$ steps and measure when value loss returns to baseline
+4. That's the settling time
+
+For iris_ma6, empirically this is ~5k-10k steps per update. So a curriculum ramp should span at least 10k-20k steps to let the value function follow smoothly.
+
+**Your curriculum phases are all 20k-40k long**, which satisfies the 2x-settling-time heuristic. Shorter ramps risk triggering the Phase 4 cascade; longer ramps are safer but waste training budget.
+
+#### Ramp speed is a Goldilocks problem (not "longer is better")
+
+The 2x-settling-time heuristic gives a *lower* bound on ramp duration. It does **not** mean "longer is always better." Excessively long ramps have a hidden failure mode:
+
+**The slow-ramp failure mode**: If a ramp is much longer than the value function settling time, the policy and value function adapt incrementally to each tiny difficulty increment. The gradient signal at any moment is small (because the next-step difficulty is barely different from the current). The policy *drifts along the ramp* without ever experiencing a strong enough gradient to commit to a robust strategy for the new regime.
+
+When the ramp completes, the policy has technically been trained on the full difficulty, but only at a single moment in time. It has not experienced sustained training under the full difficulty. If subsequent perturbations cause it to forget the late-ramp adaptation, there's no reservoir of training data to recover from.
+
+**Empirical evidence**: The 36700 experiment used a 100k FP/FN ramp (5x slower than the original 20k). The policy slowly drifted along the ramp, but when noise hit at 60k, the policy collapsed because it had only experienced low-rate FP/FN — never strong enough to develop robust bbox-empty handling. The long ramp gave V_φ time to settle, but also gave the policy time to forget bbox-empty handling between low-rate exposures.
+
+**The Goldilocks range**: Empirically, ramp duration should sit in $[2T_s, 5T_s]$ where $T_s$ is the value function settling time. Below $2T_s$, the value function lags and KL spikes (Phase 4 cascade). Above $5T_s$, the gradient signal becomes too weak per step and the policy drifts without committing.
+
+For iris_ma6 with $T_s \approx 5$-10k, this gives a ramp duration window of **10k–50k**. The 928b/36700 schedules at 20k-40k sit in this sweet spot. The 91f5da schedules at 40k-100k for several stages are above the Goldilocks range and contribute to the bootstrap failure (the gradient signal during 0-30k is fragmented across seven slow ramps, none of them strong enough to drive learning).
+
+**Diagnostic for over-slow ramps**: If a curriculum stage is in its ramp window but the corresponding metric (e.g., value loss, target reward term) is *not* changing, the ramp is too slow. The stage should produce a measurable signal — if it doesn't, the policy isn't learning from it.
+
+### A.6 Monitoring Signals for Curriculum Health
+
+When you add or modify a curriculum stage, check these signals in Tensorboard:
+
+| Signal | Healthy | Alarm |
+|---|---|---|
+| **Value loss** | Small bump (1.5-3x baseline), recovers within 5k steps | Large spike (>5x), persists beyond 10k steps |
+| **LR** | Small dip (10-30%), recovers within 5k steps | Crash to floor, stays there |
+| **KL divergence** | Stays in dead zone [0.01, 0.04] | Sustained > 0.04 for multiple epochs |
+| **Reward of the affected term** | Smooth trajectory, no discontinuity | Jump or cliff at the boundary |
+| **Policy std σ** | Continues its natural phase trajectory | Sharp reversal (e.g., was rising, suddenly drops) |
+
+If any signal is in the alarm column, the ramp is too fast, the stage is wrong for the current phase, or multiple stages are conflicting. Extend the ramp, delay the stage to a more compatible phase, or remove a conflicting concurrent stage.
+
+### A.7 The Checklist for Adding a New Curriculum Stage
+
+Before implementing a new curriculum stage, answer these questions:
+
+1. **Bootstrap safety**: Does this stage corrupt the observation→reward chain? If yes, it must start *after* bootstrap is complete (≥15-20k). Verify the policy reaches `pair_valid_rate > 0.85` (or task-equivalent core metric) before this stage activates (per §A.0).
+2. **Classification**: Is this stage shrink, expand, shift, or complex? If expand, is it physics-side or observation-side (per §A.1)?
+3. **Phase**: What training phase will it activate in? What is the expected σ at that time? Compute σ in **physical units** (per §A.2 caveat) — not just normalized.
+4. **Compatibility**: Does the stage type match the training phase (per §A.3)?
+5. **Stacking**: What other stages are active in the same window? Are their effects compatible (per §A.4)? Is the total active stage count ≤ 3?
+6. **Ramp speed**: Is the ramp duration in the Goldilocks range $[2T_s, 5T_s]$ (per §A.5)? Not just longer than $2T_s$ — also not longer than $5T_s$.
+7. **Value loss prediction**: What's the expected value loss bump at the ramp onset? Is it within the healthy range (per §A.6)?
+8. **Escape hatch**: If the stage fails, what's the rollback? Can you disable it mid-run and resume training?
+
+Treat these questions as a **pre-flight check**. Most curriculum problems are traceable to one of them being skipped — especially questions 1 and 5, which are the most commonly violated.
+
+### A.8 Worked Example: Adding a New Sensor Dropout Stage
+
+Suppose you want to add a new curriculum stage: "sensor dropout" -- randomly drop 20% of observation entries to simulate sensor failures.
+
+1. **Classification**: Expand (the policy needs to be more robust, wider action distribution to handle uncertainty). Also slight shift (optimal actions under noisy observations differ from clean observations).
+2. **Phase**: Where to insert? This is a robustness curriculum; sensor dropout is most compatible with Phase 2 (moderate σ) or early Phase 3.
+3. **Compatibility**: Expand + shift is best in mid-to-late Phase 2. Let's target 100k-120k.
+4. **Stacking**: Check what else is active at 100k. Your existing curriculum has noise (100k-120k) already in that window. Adding another noise-type stage doubles the challenge. Consider staggering to 120k-140k instead, or reducing the dropout maximum to 10%.
+5. **Ramp speed**: Settling time ~5k steps. Minimum ramp 10k steps. Use 20k ramp (120k-140k).
+6. **Value loss prediction**: 20% dropout is a significant perturbation. Expected bump ~3-4x baseline. Borderline healthy.
+7. **Escape hatch**: Make the dropout rate a config parameter so it can be set to 0 on the fly.
+
+**Decision**: Schedule the new dropout stage at 120k-140k, with max dropout 15% (conservative), ramped linearly over 20k steps. Monitor value loss, KL, and pair_valid_rate for the first 10k steps after activation.
+
+---
+
+**Key takeaway**: Curriculum design is not a post-hoc addition to an RL setup -- it's an integral part of the optimization problem. A well-designed curriculum is a smooth trajectory through policy space; a poorly-designed curriculum is a series of discontinuities the policy may fail to bridge. Before implementing any new stage, classify its effect on the optimal policy and match it to a compatible training phase.
+
+---
+
 **Next**: [Chapter 4 -- The KL-Adaptive LR & Collapse Analysis](ch4_kl_adaptive_lr_collapse.md)
