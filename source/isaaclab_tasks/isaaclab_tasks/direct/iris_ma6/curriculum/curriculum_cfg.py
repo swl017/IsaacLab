@@ -127,7 +127,7 @@ class CurriculumCfg:
     after coordination shift completes and sigma has had time to grow.
     """
 
-    fp_fn_end_step: int = 120000
+    fp_fn_end_step: int = 300000
     """Step when FP/FN rates reach calibrated full values."""
 
     fp_fn_start_step: int = 100000
