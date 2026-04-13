@@ -56,13 +56,13 @@ agent:
   value_loss_scale: 1.0      # Value loss scaling
 
   # KL divergence
-  kl_threshold: 0.03         # KL divergence threshold for early stopping
+  kl_threshold: 0.02         # KL divergence threshold for early stopping
 
   # Learning rate scheduler
   learning_rate_scheduler: KLAdaptiveLR
   learning_rate_scheduler_kwargs:
-    kl_threshold: 0.03       # Wider dead zone (0.02–0.08) absorbs curriculum transitions
-    min_lr: 3.0e-4           # Prevent LR collapse after curriculum shifts (default 1e-6 froze policy)
+    kl_threshold: 0.02       # Wider dead zone (0.02–0.08) absorbs curriculum transitions
+    min_lr: 1.0e-4           # Prevent LR collapse after curriculum shifts (default 1e-6 froze policy)
 
   # Preprocessors
   state_preprocessor: RunningStandardScaler
@@ -84,7 +84,7 @@ agent:
   # Experiment tracking
   experiment:
     directory: iris_ma6
-    experiment_name: "492f_revert_plus_fpfn_background"
+    experiment_name: "31d314bd69_revert_to_2be3"
     write_interval: auto
     checkpoint_interval: auto
     store_separately: false

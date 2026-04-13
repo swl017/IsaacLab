@@ -41,12 +41,13 @@ R  = │ sin ψ    cos ψ   0 │
 |-------|-------------|-------|
 | World (ENU) | `_w` | Critic observations, combined angular velocity |
 | Heading (vehicle-1) | `_v1` | Actor ego state, inter-agent relative state, triangulation tail |
-| Body | `_b` | Angular velocity (gyro), linear acceleration (accel), gimbal joints |
+| Body | `_b` | Angular velocity (gyro), linear acceleration (accel) |
+| Joint | `_j` | Gimbal joint angles (scalar angles along each joint's rotation axis) |
 | Image | `_img` | Bounding box (normalized pixel coordinates) |
 
 ---
 
-## 2. Ego Observation (Actor) — 29D
+## 2. Ego Observation (Actor) — 31D
 
 | # | Feature | Symbol | Frame | Dims | Source | Notes |
 |---|---------|--------|-------|------|--------|-------|
@@ -56,16 +57,18 @@ R  = │ sin ψ    cos ψ   0 │
 | 4 | World yaw | `[cos ψ, sin ψ]` | World | 2 | From quaternion | Continuous, no wrapping. Needed for multi-agent coordination geometry |
 | 5 | Angular velocity | `ω_b` | Body | 3 | Gyroscope (IMU native) | Body frame is correct for gyro; transforming to heading would mix in yaw rate noise |
 | 6 | Linear acceleration | `a_b` | Body | 3 | Accelerometer (IMU native) | Same rationale as angular velocity |
-| 7 | Camera ray direction | `ray_v1` | Heading | 3 | `Rz(ψ)^T @ ray_w` | LOS pointing for spatial reasoning. Replaces gimbal yaw joint (redundant with ray direction in heading frame) |
-| 8 | Gimbal pitch joint | `θ_pitch_b` | Body | 1 | `joint_positions_b[:, 0]` | Raw mechanical angle. Needed for pitch limit/saturation awareness (body tilt eats into pitch range) |
-| 9 | Gimbal roll joint | `θ_roll_b` | Body | 1 | `joint_positions_b[:, 2]` | Raw mechanical angle. Needed for roll limit awareness (auto-stabilized, but saturates under aggressive banking) |
-| 10 | Combined angular velocity | `ω_cam_w` | World | 3 | Camera sweep rate | Inertial LOS rate; determines image blur. World frame is natural (blur is frame-independent) |
-| 11 | Bbox age-of-information | `aoi` | — | 1 | `sim_time - timestamp_detection` | Scalar, frame-independent |
-| 12 | Zoom level | `z` | — | 1 | Current zoom state | Scalar |
-| 13 | Effective HFOV | `hfov` | — | 1 | Zoom-adjusted FOV | Scalar, radians |
-| 14 | Bounding box | `[cx, cy, w, h]` | Image | 4 | Normalized pixel coords | [0,1] range |
-| 15 | Bbox empty flag | `empty` | — | 1 | Detection validity | 1 if no detection, 0 if valid |
-| | **Total** | | | **29** | | Was 31 (removed: position 3D, yaw from Euler triplet; added: cos/sin yaw 2D, gimbal roll 1D; net -2) |
+| 7 | Unproject ray | `ray_v1` | Heading | 3 | `Rz(ψ)^T @ ray_w` | Ray from camera through bbox center (unprojected from 2D detection). LOS pointing for spatial reasoning |
+| 8 | Gimbal yaw joint | `θ_yaw_j` | Joint | 1 | `joint_positions[:, 1]` | Raw joint angle. Policy-commanded axis; subject to saturation at mechanical limits |
+| 9 | Gimbal pitch joint | `θ_pitch_j` | Joint | 1 | `joint_positions[:, 0]` | Raw joint angle. Needed for pitch limit/saturation awareness (body tilt eats into pitch range) |
+| 10 | Gimbal roll joint | `θ_roll_j` | Joint | 1 | `joint_positions[:, 2]` | Raw joint angle. Needed for roll limit awareness (auto-stabilized, but saturates under aggressive banking) |
+| 11 | Combined angular velocity | `ω_cam_w` | World | 3 | Camera sweep rate | Inertial LOS rate; determines image blur. World frame is natural (blur is frame-independent) |
+| 12 | Motion age-of-information | `aoi_motion` | — | 1 | `sim_time - timestamp_motion` | Staleness of ego motion state (e.g. delayed state estimation). Scalar, frame-independent |
+| 13 | Bbox age-of-information | `aoi_bbox` | — | 1 | `sim_time - timestamp_detection` | Staleness of detection. Scalar, frame-independent |
+| 14 | Zoom level | `z` | — | 1 | Current zoom state | Scalar |
+| 15 | Effective HFOV | `hfov` | — | 1 | Zoom-adjusted FOV | Scalar, radians |
+| 16 | Bounding box | `[cx, cy, w, h]` | Image | 4 | Normalized pixel coords | [0,1] range |
+| 17 | Bbox empty flag | `empty` | — | 1 | Detection validity | 1 if no detection, 0 if valid |
+| | **Total** | | | **31** | | Was 31 (removed: position 3D, yaw from Euler triplet; added: cos/sin yaw 2D, gimbal roll 1D, motion AoI 1D; net 0) |
 
 ### 2.1 Removed Features (with rationale)
 
@@ -73,14 +76,13 @@ R  = │ sin ψ    cos ψ   0 │
 |---------|----------|-------------|
 | Ego position (world) | 3 | Redundant for actor. Triangulation geometry and coordination are captured by inter-agent relative positions. Geofencing: add boundary-distance features if needed later |
 | Yaw as Euler angle | 1 (in 3D triplet) | Wrapping discontinuity at ±π. Replaced by continuous `[cos ψ, sin ψ]` (2D) |
-| Gimbal yaw joint (body) | 1 | Redundant with camera ray direction in heading frame. Ray already encodes horizontal pointing direction. Yaw joint rarely saturates (wide range or continuous) |
 
 ### 2.2 Added Features (with rationale)
 
 | Feature | Dims | Why Added |
 |---------|------|-----------|
 | `[cos ψ, sin ψ]` | 2 | Continuous world yaw for multi-agent coordination. Without it, two agents cannot distinguish flying-in-formation vs. head-on approach |
-| Gimbal roll joint (body) | 1 | Roll is auto-stabilized by the gimbal controller (`_compute_stabilizing_roll`), not policy-controlled. But aggressive banking can saturate the roll joint limit. Policy needs visibility to anticipate this |
+| Gimbal roll joint | 1 | Roll is auto-stabilized by the gimbal controller (`_compute_stabilizing_roll`), not policy-controlled. But aggressive banking can saturate the roll joint limit. Policy needs visibility to anticipate this |
 
 ### 2.3 Frame Change Summary
 
@@ -88,7 +90,7 @@ R  = │ sin ψ    cos ψ   0 │
 |---------|-----------|-----------|
 | Velocity | World | **Heading** |
 | Attitude | Euler [φ,θ,ψ] world (3D) | **[φ, θ] heading (2D) + [cos ψ, sin ψ] world (2D)** |
-| Camera ray | World | **Heading** |
+| Unproject ray | World | **Heading** |
 | Angular velocity | Body | Body (unchanged) |
 | Acceleration | Body | Body (unchanged) |
 | Combined ang vel | World | World (unchanged) |
@@ -101,7 +103,7 @@ R  = │ sin ψ    cos ψ   0 │
 |---|---------|--------|-------|------|-------|
 | 1 | Relative position | `Δpos_v1` | Heading | 3 | `Rz(ψ_ego)^T @ (pos_other - pos_ego)`. "Other drone is 20m ahead-right" |
 | 2 | Relative velocity | `Δvel_v1` | Heading | 3 | `Rz(ψ_ego)^T @ (vel_other - vel_ego)`. Closing rate in ego heading frame |
-| 3 | Other's camera ray | `ray_other_v1` | Heading (ego's) | 3 | `Rz(ψ_ego)^T @ ray_other_w`. "Other drone is looking in direction X from my perspective" |
+| 3 | Other's unproject ray | `ray_other_v1` | Heading (ego's) | 3 | `Rz(ψ_ego)^T @ ray_other_w`. "Other drone's LOS direction from my perspective" |
 | 4 | Combined angular velocity | `ω_cam_other_w` | World | 3 | Other's camera sweep rate (blur is inertial) |
 | 5 | Convergence angle | `α_conv` | — | 1 | `arccos(ray_ego_w · ray_other_w)`. Key triangulation quality metric: 0°=parallel (useless), 90°=optimal |
 | 6 | Baseline magnitude | `‖Δpos‖` | — | 1 | `‖pos_other - pos_ego‖`. Longer baseline = better triangulation |
@@ -143,7 +145,7 @@ alpha_base = torch.acos(torch.clamp(cos_base, -1.0 + 1e-6, 1.0 - 1e-6))  # [N, 1
 ### 3.3 Scaling to N > 2 Agents
 
 For N agents, each agent observes N-1 inter-agent blocks. With 3 agents:
-- Agent A sees: [ego 29D] + [B relative 19D] + [C relative 19D] + [tri tail] = 67D + tri
+- Agent A sees: [ego 31D] + [B relative 19D] + [C relative 19D] + [tri tail 4D] = 73D
 - Geometry features are computed per-pair: A-B convergence, A-C convergence, etc.
 
 ---
@@ -181,7 +183,7 @@ The MAPPO critic receives a **global state** for value estimation. Recommendatio
 | All agent positions | World | Absolute for global geometry |
 | All agent velocities | World | Consistent cross-agent comparison |
 | All agent yaws | World `[cos ψ, sin ψ]` | Formation geometry |
-| All camera rays | World | Shared frame for triangulation quality |
+| All unproject rays | World | Shared frame for triangulation quality |
 | Triangulation tail | World (6D) | Absolute target estimate |
 | Combined angular velocities | World | Image stability (all agents) |
 | All bbox empty flags | — | Detection state |
@@ -199,11 +201,11 @@ The critic does NOT need heading-frame transforms (no ego-centric reasoning need
 
 | Block | Current Dims | New Dims | Change |
 |-------|-------------|----------|--------|
-| Ego | 31 | 29 | -2 |
+| Ego | 31 | 31 | 0 |
 | Inter-agent (×1 for 2 agents) | 16 | 19 | +3 |
 | Triangulation tail | 6 | 4 | -2 |
-| **Total (2 agents)** | **53** | **52** | **-1** |
-| **Total (3 agents)** | **69** | **67** | **-2** |
+| **Total (2 agents)** | **53** | **54** | **+1** |
+| **Total (3 agents)** | **69** | **73** | **+4** |
 
 Net dimension is roughly unchanged, but information density per dimension is significantly higher due to frame-appropriate representations and pre-computed geometry features.
 
@@ -246,10 +248,9 @@ Total added cost: ~30 FLOPs per environment per step. Negligible compared to phy
 
 2. **Modify `_get_observations()`**:
    - Extract yaw from quaternion
-   - Apply heading-frame rotation to: ego velocity, ego camera ray, inter-agent relative pos/vel/ray, triangulation position
+   - Apply heading-frame rotation to: ego velocity, ego unproject ray, inter-agent relative pos/vel/ray, triangulation position
    - Replace Euler triplet with [φ, θ, cos ψ, sin ψ]
-   - Add gimbal roll joint
-   - Remove gimbal yaw joint
+   - Add gimbal roll joint (keep gimbal yaw joint — policy-commanded, subject to saturation)
    - Add geometry features to inter-agent block
    - Replace tri tail with heading-frame relative + scalar uncertainty
 

@@ -7,7 +7,6 @@
 2. **Euler angle yaw** has a wrapping discontinuity at ±π that corrupts RNN hidden state
 3. **No triangulation geometry features** — the policy must discover convergence angle and baseline quality from raw vectors, yet these are exactly what the FIM reward optimizes
 4. **Missing gimbal roll joint** — the auto-stabilizing roll can saturate under aggressive banking, but the policy has no visibility into this
-5. **Gimbal yaw joint** is redundant with the camera ray direction once the ray is in heading frame
 
 **Spec**: [doc/observation_redesign_spec.md](../observation_redesign_spec.md) — full specification including frame definitions, per-feature rationale, dimension tables, computation pseudocode, and migration plan.
 
@@ -15,10 +14,10 @@
 
 | Block | Current | Proposed | Change |
 |-------|---------|----------|--------|
-| Ego | 31D (world pos, world vel, Euler [φ,θ,ψ], body ω, body a, gimbal yaw+pitch, world ray, world cam_ω, aoi, zoom, hfov, bbox, empty) | 29D (heading vel, [φ,θ], [cos ψ, sin ψ], body ω, body a, heading ray, gimbal pitch+roll joints, world cam_ω, aoi, zoom, hfov, bbox, empty) | -2D |
-| Inter-agent (per other) | 16D (world pos, world vel, world ray, world cam_ω, zoom, empty, ages×2) | 19D (heading Δpos, heading Δvel, heading ray, world cam_ω, convergence angle, baseline mag, baseline-ray angle, zoom, empty, ages×2) | +3D |
+| Ego | 31D (world pos, world vel, Euler [φ,θ,ψ], body ω, body a, gimbal yaw+pitch, world unproject ray, world cam_ω, bbox_aoi, zoom, hfov, bbox, empty) | 31D (heading vel, [φ,θ], [cos ψ, sin ψ], body ω, body a, heading unproject ray, gimbal yaw+pitch+roll joints, world cam_ω, motion_aoi, bbox_aoi, zoom, hfov, bbox, empty) | 0D |
+| Inter-agent (per other) | 16D (world pos, world vel, world unproject ray, world cam_ω, zoom, empty, ages×2) | 19D (heading Δpos, heading Δvel, heading unproject ray, world cam_ω, convergence angle, baseline mag, baseline-ray angle, zoom, empty, ages×2) | +3D |
 | Tri tail (actor) | 6D (world pos, world std) | 4D (heading Δpos, scalar uncertainty) | -2D |
-| **Total (2 agents)** | **53D** | **52D** | **-1D** |
+| **Total (2 agents)** | **53D** | **54D** | **+1D** |
 
 **Scope boundary**:
 - DO change: `_get_observations()` in `iris_ma_env6_test.py` (both delay and GT paths)
@@ -39,7 +38,7 @@
 - New utility: heading frame rotation function (in env file or shared utils)
 
 **Acceptance criteria**:
-- All observations match spec dimensions (ego 29D, inter-agent 19D, tri tail 4D)
+- All observations match spec dimensions (ego 31D, inter-agent 19D, tri tail 4D)
 - Heading-frame rotation identity test: `rotate_to_heading_frame(v_w, ψ=0) == v_w`
 - Geometry features: convergence angle = 0 for parallel rays, π/2 for perpendicular
 - Triangulation round-trip: `Rz(ψ) @ tri_pos_v1 + ego_pos_w ≈ tri_pos_w` (atol=1e-5)

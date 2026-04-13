@@ -288,14 +288,8 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     max_lin_vel_min: float = 3.0
     """Minimum linear velocity (m/s) at curriculum progress=0. Ramps to max_lin_vel with agent velocity curriculum."""
 
-    max_yaw_rate: float = math.radians(90.0)
+    max_yaw_rate: float = math.radians(45.0)
     """Maximum yaw rate (rad/s)."""
-
-    max_gimbal_rate: float = math.radians(360.0)
-    """Maximum gimbal rate (rad/s)."""
-
-    max_zoom_rate: float = 4.0
-    """Maximum zoom rate (zoom levels per second)."""
 
     # ==========================================================================
     # CBF Safety Configuration
@@ -401,7 +395,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # Reward Scales (migrated from iris_ma5)
     # ==========================================================================
 
-    action_sum_penalty_scale: float = -10.0
+    action_sum_penalty_scale: float = -30.0
     """Penalty scale for total action magnitude."""
 
     # [0 vx, 1 vy, 2 vz, 3 yaw_rate, 4 gimbal_yaw_rate, 5 gimbal_pitch_rate, 6 zoom_rate]
@@ -411,7 +405,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     action_delta_weight: list = [1, 1, 1, 1, 0.5, 0.5, 0.5]
     """Weights for action delta (smoothness) penalty."""
 
-    action_delta_penalty_scale: float = -5.0
+    action_delta_penalty_scale: float = -15.0
     """Penalty scale for action changes (smoothness)."""
 
     bbox_center_reward_scale: float = 60.0
@@ -447,7 +441,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     enable_tracking_truncation: bool = True
     """Truncate episode when all agents lose detection for tracking_lost_timeout_s."""
 
-    tracking_lost_timeout_s: float = 3.0
+    tracking_lost_timeout_s: float = 2.0
     """Seconds of all-agents-blind before truncation.
 
     Increased from 2.0 → 3.0 to give the policy more time to recover from
@@ -516,9 +510,9 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # ==========================================================================
 
     initial_states: InitialStatesCfg = InitialStatesCfg(
-        agent_velocity_scale_max=0.0,
-        target_velocity_scale_max=0.0,
-        max_yaw_rate=0.0,
+        # agent_velocity_scale_max=0.0,
+        # target_velocity_scale_max=0.0,
+        # max_yaw_rate=0.0,
     )
     """Initial states configuration for reset randomization.
 

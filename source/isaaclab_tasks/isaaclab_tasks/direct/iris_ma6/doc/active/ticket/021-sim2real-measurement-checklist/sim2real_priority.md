@@ -4,6 +4,8 @@
 
 **Current iris_ma6 status**: Extensive curriculum-gated DR (mass, gains, gimbal, camera, delay, noise, dropout). Aerodynamic model implemented at 4 fidelity levels. Missing: drag DR, wind activation, sys-id validation, some sensor pipeline measurements.
 
+**Reference**: [`checklist.md`](checklist.md), [`Aerial_To_Aerial_Interception/`](/home/usrg/source/Aerial_To_Aerial_Interception/)
+
 ---
 
 ## High Impact

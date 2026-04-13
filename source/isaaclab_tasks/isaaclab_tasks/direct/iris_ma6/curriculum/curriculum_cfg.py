@@ -102,7 +102,7 @@ class CurriculumCfg:
     # so it has a learned response when the full FP/FN ramp hits at 100k.
     # ==========================================================================
 
-    fp_fn_background_start_step: int = 15000
+    fp_fn_background_start_step: int = 4000000
     """Step to start constant-rate background FP/FN exposure.
 
     Starts at 15k (just after bootstrap completes) so the policy encounters
@@ -120,17 +120,17 @@ class CurriculumCfg:
     frequent enough for RNN sequences (length 32) to encounter bbox-empty.
     """
 
-    fp_fn_ramp_start_step: int = 100000
+    fp_fn_ramp_start_step: int = 4000000
     """Step to start ramping FP/FN from background (0.1) to full calibrated (1.0).
 
     Aligned with noise onset at 100k — observation corruption starts
     after coordination shift completes and sigma has had time to grow.
     """
 
-    fp_fn_end_step: int = 300000
+    fp_fn_end_step: int = 4000000
     """Step when FP/FN rates reach calibrated full values."""
 
-    fp_fn_start_step: int = 100000
+    fp_fn_start_step: int = 4000000
     """[DEPRECATED] Use fp_fn_ramp_start_step. Kept for backward compatibility."""
 
     # ==========================================================================
@@ -233,7 +233,7 @@ class CurriculumCfg:
     dynamics_start_step: int = 180000
     """Step to start dynamics randomization (mass, inertia)."""
 
-    dynamics_end_step: int = 200000
+    dynamics_end_step: int = 220000
     """Step when dynamics randomization reaches full range."""
 
     # ==========================================================================

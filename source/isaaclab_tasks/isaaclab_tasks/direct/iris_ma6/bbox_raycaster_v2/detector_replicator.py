@@ -136,7 +136,7 @@ class NoiseModelParams:
 class DetectorReplicatorCfg:
     """Configuration for the detector replicator."""
 
-    enabled: bool = True
+    enabled: bool = False
     """Enable calibrated bbox noise (replaces delay system bbox_std)."""
 
     params_path: str = ""

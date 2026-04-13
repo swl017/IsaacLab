@@ -27,11 +27,11 @@ class GimbalControllerCfg:
     maintaining parallel integrated state.
     """
 
-    max_gimbal_rate: float = 2.0 * math.pi
+    max_gimbal_rate: float = 1.0 * math.pi
     """Maximum gimbal angular rate [rad/s]. Default 2*pi (360 deg/s)."""
 
-    yaw_limits: tuple[float, float] = (-math.radians(120), math.radians(120))
-    """Yaw joint limits [min, max] [rad]. Default +-120 deg."""
+    yaw_limits: tuple[float, float] = (-math.radians(160), math.radians(160))
+    """Yaw joint limits [min, max] [rad]. Default +-160 deg."""
 
     pitch_limits: tuple[float, float] = (-math.radians(45), math.radians(45))
     """Pitch joint limits [min, max] [rad]. Default -45 to 45 deg.
