@@ -15,9 +15,9 @@
 | Block | Current | Proposed | Change |
 |-------|---------|----------|--------|
 | Ego | 31D (world pos, world vel, Euler [φ,θ,ψ], body ω, body a, gimbal yaw+pitch, world unproject ray, world cam_ω, bbox_aoi, zoom, hfov, bbox, empty) | 31D (heading vel, [φ,θ], [cos ψ, sin ψ], body ω, body a, heading unproject ray, gimbal yaw+pitch+roll joints, world cam_ω, motion_aoi, bbox_aoi, zoom, hfov, bbox, empty) | 0D |
-| Inter-agent (per other) | 16D (world pos, world vel, world unproject ray, world cam_ω, zoom, empty, ages×2) | 19D (heading Δpos, heading Δvel, heading unproject ray, world cam_ω, convergence angle, baseline mag, baseline-ray angle, zoom, empty, ages×2) | +3D |
-| Tri tail (actor) | 6D (world pos, world std) | 4D (heading Δpos, scalar uncertainty) | -2D |
-| **Total (2 agents)** | **53D** | **54D** | **+1D** |
+| Inter-agent (per other) | 16D (world pos, world vel, world unproject ray, world cam_ω, zoom, empty, ages×2) | 19D (heading(ego, not other agents') Δpos, heading Δvel, heading unproject ray, world cam_ω, convergence angle, baseline mag, baseline-ray angle, zoom, empty, ages×2) | +3D |
+| Tri tail (actor) | 6D (world pos, world std) | 6D (heading Δpos, heading frame std uncertainty) | 0D |
+| **Total (2 agents)** | **53D** | **56D** | **+3D** |
 
 **Scope boundary**:
 - DO change: `_get_observations()` in `iris_ma_env6_test.py` (both delay and GT paths)
