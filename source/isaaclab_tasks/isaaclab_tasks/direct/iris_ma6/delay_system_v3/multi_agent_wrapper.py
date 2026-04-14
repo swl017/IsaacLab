@@ -56,6 +56,15 @@ GIMBAL_WORLD_FIELDS = [
 ]
 
 DETECTION_FIELDS = [
+    # Single bbox field, dual-payload:
+    # - raw  = raycaster geometric GT (read by reward path, use_noise=False).
+    # - noisy = detector-replicator output with calibrated noise/FP/FN
+    #           (read by observation path, use_noise=True). When the replicator
+    #           is disabled, noisy mirrors raw so obs receives a valid clean bbox.
+    # Both payloads flow through ONE pipeline with ONE delay realization per
+    # sim step (shared latency, staleness, and dropout draws). See ticket 029
+    # post-mortem addendum for the rationale on collapsing the earlier field
+    # split back into a single dual-payload field.
     ("bboxes_2d", None),  # Shape depends on num_targets: (num_targets, 4)
 ]
 
@@ -243,10 +252,13 @@ class MultiAgentDelaySystemV3:
         Args:
             agent_id: Agent identifier.
             states: Current ground truth state.
-            replicated_bboxes: Pre-noised bboxes from detector replicator, shape (N, T, 4).
-                When provided, stored as the noisy version of bboxes_2d instead of
-                applying Gaussian noise. The clean GT bboxes from states.data.bboxes_2d
-                are still stored as raw (for reward path).
+            replicated_bboxes: Detector-replicator bboxes, shape (N, T, 4). Stored
+                as the ``noisy`` payload of the ``bboxes_2d`` field (read by the
+                observation path). When ``None``, the noisy payload explicitly
+                mirrors the raw raycaster payload so obs still sees a valid clean
+                bbox. The raycaster GT from ``states.data.bboxes_2d`` is always
+                stored as the ``raw`` payload (read by the reward path). Both
+                payloads share one timestamp and one delay realization per step.
         """
         # Store ground truth
         self._gt_states[agent_id] = states
@@ -380,25 +392,23 @@ class MultiAgentDelaySystemV3:
             noise_std=0.0,
         )
 
-        # Detection fields (bbox)
-        # When replicated_bboxes is provided (from detector replicator), store it
-        # as the noisy version directly — skip Gaussian noise generation.
-        if replicated_bboxes is not None:
-            self._delay_system.store(
-                prefix + "bboxes_2d",
-                data.bboxes_2d,
-                timestamp=ts_detection,
-                noise_std=0.0,
-                noisy_data=replicated_bboxes,
-            )
-        else:
-            bbox_noise = self._get_noise_std("bbox", agent_id)
-            self._delay_system.store(
-                prefix + "bboxes_2d",
-                data.bboxes_2d,
-                timestamp=ts_detection,
-                noise_std=bbox_noise,
-            )
+        # Detection field — single bbox field with dual payload so reward and
+        # observation paths share ONE delay realization (latency/staleness/
+        # dropout draws) via the pipeline's dual-cache advance.
+        # - raw   = raycaster geometric GT  (read by reward path).
+        # - noisy = detector-replicator output (read by observation path). When
+        #   the replicator is disabled we explicitly mirror raw, so obs sees a
+        #   valid clean bbox and the noisy cache slot is kept populated.
+        replicator_payload = (
+            replicated_bboxes if replicated_bboxes is not None else data.bboxes_2d
+        )
+        self._delay_system.store(
+            prefix + "bboxes_2d",
+            data.bboxes_2d,
+            timestamp=ts_detection,
+            noise_std=0.0,
+            noisy_data=replicator_payload,
+        )
 
     def _get_noise_std(
         self, noise_type: str, agent_id: Optional[AgentID] = None
@@ -645,9 +655,14 @@ class MultiAgentDelaySystemV3:
         )
         data.camera_orientation_w = cam_ori
 
-        # Bounding boxes
+        # Bounding boxes — single field with dual payload. Reward path
+        # (use_noise=False) reads the raycaster cache slot; observation path
+        # (use_noise=True) reads the replicator cache slot. Both slots are
+        # populated by one pipeline advance per sim step, so latency /
+        # staleness / dropout realizations are shared between the two paths.
         bbox, bbox_ts = self._delay_system.get_delayed(
-            prefix + "bboxes_2d", perspective, use_noise, allow_dropout,
+            prefix + "bboxes_2d", perspective,
+            use_noise=use_noise, allow_dropout=allow_dropout,
             burst_dropout_mask=burst_mask,
         )
         data.bboxes_2d = bbox
@@ -892,8 +907,12 @@ class MultiAgentDelaySystemV3:
         perspective: Literal["ego", "other"] = (
             "ego" if target_agent_id == ego_agent_id else "other"
         )
+        # AoI reads the timestamp from whichever cache slot the consumer uses;
+        # raw and noisy share a single timestamp per advance, so the timestamp
+        # itself is invariant under use_noise — but we pass it through for
+        # symmetry with the data read.
         return self._delay_system.get_aoi(
-            f"{target_agent_id}.bboxes_2d", perspective, use_noise
+            f"{target_agent_id}.bboxes_2d", perspective, use_noise=use_noise
         )
 
     def set_delay_mode(

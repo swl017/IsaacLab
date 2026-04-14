@@ -11,6 +11,21 @@ This test suite validates the V3 delay system implementation, focusing on the cr
   - Pipeline tests (5 tests)
   - Timestamp synchronization tests (4 tests)
   - Curriculum mode tests (5 tests)
+  - Dual-cache regression tests (6 tests, ticket 029)
+- **test_dual_cache.py**: Ticket 029 regression suite. Locks in:
+  shared delay realization across raw/noisy payloads; idempotency no-op on
+  same-step second `advance`; reward-then-obs queries return distinct
+  payloads; clean-only fields mirror raw into the noisy cache; shared
+  dropout mask holds both payloads jointly; shape-mismatch assertion.
+- **plot_dual_cache.py**: Standalone (no Isaac Sim) 4-panel visualization
+  of the ticket-029 invariants — renders `dual_cache_invariants.png`.
+  See [dual_cache_invariants.png](dual_cache_invariants.png).
+- **plot_burst_dropout.py**: Gilbert-Elliott burst dropout characterization
+  — renders `burst_dropout_analysis.png`.
+- **detection_pipeline_split.png**: Archived visualization of the pre-029
+  shared-pipeline bug. Retained for the post-mortem paper trail — the code
+  that produced it has been removed (ticket 029 made the bug structurally
+  impossible).
 
 ## Running Tests
 

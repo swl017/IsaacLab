@@ -41,19 +41,52 @@ None (standalone module).
 - `reset()`: Call from `_reset_idx()`.
 
 ### DelayPipelineV3 (per-field pipeline)
-- `advance(data, timestamp, t_current)`: **WRITE**. Runs all stateful stages
-  (staleness, latency buffer append, FOL filter, dropout mask sample) exactly once.
-  Idempotent within a sim step via `_last_advance_time` guard.
-- `query(allow_dropout)`: **READ**. Returns cached output from last advance().
-  `allow_dropout=False` returns pre-dropout data (for rewards).
-  Safe to call any number of times.
-- `process(data, timestamp, t_current, allow_dropout)`: Convenience wrapper —
-  calls advance() then query(). Backward compatible. Safe for multi-call patterns.
+- `advance(raw_data, noisy_data, timestamp, t_current, burst_dropout_mask=None)`:
+  **WRITE**. Runs all stateful stages (staleness, latency buffer append, FOL
+  filter, dropout mask sample) exactly once. Idempotent within a sim step via
+  `_last_advance_time` guard.
+  - Both payloads share ONE delay realization: one staleness mask, one latency
+    draw, one dropout mask. Raw and noisy cannot diverge in delay.
+  - `noisy_data=None` is the clean-only case (e.g. `bboxes_2d_raycaster` /
+    `bboxes_2d_replicator` — each has a single source). Both cache slots are
+    filled with the raw payload.
+- `query(use_noise, allow_dropout)`: **READ**. Returns the matching cache slot
+  of the last advance(). Four data slots (raw/noisy × with/no dropout), two
+  shared timestamp slots. Safe to call any number of times.
+- `process(raw_data, noisy_data, timestamp, t_current, use_noise, allow_dropout,
+  burst_dropout_mask=None)`: Convenience wrapper — advance() then query().
+- `process_single(data, timestamp, t_current, allow_dropout=True, ...)`:
+  Clean-only shortcut equivalent to `process(data, None, ...)`. Used by tests
+  and single-source teleop / diagnostic code paths.
 
 **Pipeline stage order**: staleness → latency → FOL → dropout.
 FOL is placed before dropout so the sensor filter operates on the channel signal
 before packet-loss masking (physically correct: filter runs on received data,
-dropout holds previously-filtered value on dropped steps).
+dropout holds previously-filtered value on dropped steps). FOL maintains
+independent filter state per payload (`_lag_output_raw` / `_lag_output_noisy`)
+so each signal smooths to itself; staleness / latency / dropout use shared
+masks and buffers.
+
+**Dual-cache invariant (ticket 029)**: reward and observation queries at the
+same sim step share ONE delay realization. The first `advance()` call populates
+both caches from the `(raw, noisy)` pair. Subsequent `advance()` calls at the
+same `t_current` are no-ops (idempotency guard). This is the structural fix
+for the shared-pipeline bug that ticket 020 worked around with a separate
+detection pipeline. Regression test: `tests/test_dual_cache.py`.
+
+### Bbox as a dual-payload field (ticket 029)
+Bounding boxes model one physical detection event with two views — the
+raycaster geometric GT and the detector-replicator output. Both views are
+stored in a SINGLE field `bboxes_2d` using the dual-payload storage:
+- raw   = raycaster GT (read by reward path, `use_noise=False`).
+- noisy = detector-replicator output (read by observation path, `use_noise=True`).
+  When the replicator is disabled, the noisy payload explicitly mirrors the
+  raw payload so the obs cache slot stays populated.
+One timestamp (`ts_detection`) and one pipeline instance per perspective apply
+a single latency / staleness / dropout realization to both payloads — they
+cannot diverge in delay by construction. Storage-side latency is zero; all
+delay is owned by the pipeline and configured via
+`PerspectiveCfg.field_overrides["bboxes_2d"]`.
 
 ## Spec
 None (self-documented via docstrings and `doc/` directory).

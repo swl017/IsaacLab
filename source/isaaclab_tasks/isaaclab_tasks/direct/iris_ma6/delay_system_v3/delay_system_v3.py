@@ -11,18 +11,19 @@ This module provides a unified delay system that handles all four paths:
 - Noisy + Ego (for observations, self-view)
 - Noisy + Other (for observations, other-view)
 
-Instead of maintaining 4 separate delay systems (as in V2), we use:
-- One storage with raw/noisy data
-- One pipeline per field per perspective (ego/other)
-- Separate detection pipelines for bbox fields (noisy path only)
-- Perspective and noise mode specified at query time
+Design: one pipeline per (field, perspective). The pipeline consumes the
+raw and noisy payloads together and caches both under a single delay
+realization (shared staleness, latency, and dropout samples). The
+``use_noise`` flag at query time picks the matching cache slot. This
+structurally prevents the shared-pipeline idempotency bug that ticket 020
+worked around with a separate detection pipeline.
 
-Detection pipelines carry their own latency buffers so that detector-
-replicator output (FN/noise/FP) is not overwritten by clean GT data
-when rewards query the raw path first in the same sim step. In ``fixed``
-mode the sampled delay values are deterministic from config, so both
-paths produce identical delay characteristics. These detection pipelines
-can later be replaced by real YOLO inference buffers.
+For fields that carry two related payloads at the same timestamp (e.g. the
+``bboxes_2d`` field with raycaster GT as ``raw`` and detector-replicator
+output as ``noisy``), the two payloads share one pipeline instance and
+therefore one delay realization per sim step. ``use_noise`` at query time
+selects the matching cache slot. This models the physical reality that
+both payloads describe the same detection event.
 """
 
 from __future__ import annotations
@@ -39,18 +40,12 @@ class UnifiedDelaySystem:
     """Unified delay system handling all delay paths.
 
     This system:
-    1. Stores raw (ground truth) and noisy data with timestamps
-    2. Maintains separate pipelines for ego and other perspectives
-    3. Maintains separate detection pipelines for bbox fields (noisy path)
-    4. Returns delayed data with correct timestamps at query time
-
-    Detection fields (suffix ``bboxes_2d``) get extra pipelines so the
-    noisy observation path has independent latency buffers from the raw
-    reward path.  All other fields share a single pipeline per perspective.
+    1. Stores raw (ground truth) and noisy data with a shared timestamp.
+    2. Maintains one pipeline per (field, perspective) — all fields use the
+       same dual-cache advance mechanism, so reward and observation calls at
+       the same sim step share one latency / staleness / dropout draw.
+    3. Returns delayed data with correct timestamps at query time.
     """
-
-    # Field suffixes that get separate detection pipelines
-    _DETECTION_SUFFIXES = ("bboxes_2d",)
 
     def __init__(
         self,
@@ -70,18 +65,13 @@ class UnifiedDelaySystem:
         self._device = device
         self._dt = cfg.dt
 
-        # Field storage (raw + noisy with timestamps)
+        # Field storage (raw + optional noisy, with shared timestamps)
         self._storage = FieldStorage(num_envs, device)
 
-        # Pipelines: separate for ego and other perspectives, per field
+        # Pipelines: one per (field, perspective). The pipeline handles raw
+        # and noisy payloads internally via dual-cache advance.
         self._ego_pipelines: Dict[str, DelayPipelineV3] = {}
         self._other_pipelines: Dict[str, DelayPipelineV3] = {}
-
-        # Detection pipelines: separate buffers for noisy bbox path only.
-        # Keyed by the same field_name as regular pipelines but only
-        # populated for detection fields (bboxes_2d).
-        self._ego_detection_pipelines: Dict[str, DelayPipelineV3] = {}
-        self._other_detection_pipelines: Dict[str, DelayPipelineV3] = {}
 
         # Track registered fields and their shapes
         self._field_shapes: Dict[str, Tuple[int, ...]] = {}
@@ -137,7 +127,7 @@ class UnifiedDelaySystem:
         self._field_shapes[field_name] = data_shape
 
         # Extract field suffix for override lookup
-        # field_name is like "agent_0.bboxes_2d" -> suffix is "bboxes_2d"
+        # field_name is like "agent_0.bboxes_2d" -> suffix is the tail
         field_suffix = field_name.split(".")[-1] if "." in field_name else field_name
 
         # Determine pipeline configs using perspective-specific overrides
@@ -174,29 +164,6 @@ class UnifiedDelaySystem:
         self._ego_pipelines[field_name].set_mode(self._mode, self._progress)
         self._other_pipelines[field_name].set_mode(self._mode, self._progress)
 
-        # Create detection pipelines for bbox fields (noisy observation path)
-        if field_suffix in self._DETECTION_SUFFIXES:
-            self._ego_detection_pipelines[field_name] = DelayPipelineV3(
-                cfg=ego_cfg,
-                num_envs=self._num_envs,
-                device=self._device,
-                dt=self._dt,
-                data_shape=data_shape,
-            )
-            self._other_detection_pipelines[field_name] = DelayPipelineV3(
-                cfg=other_cfg,
-                num_envs=self._num_envs,
-                device=self._device,
-                dt=self._dt,
-                data_shape=data_shape,
-            )
-            self._ego_detection_pipelines[field_name].set_mode(
-                self._mode, self._progress
-            )
-            self._other_detection_pipelines[field_name].set_mode(
-                self._mode, self._progress
-            )
-
     def set_time(self, t: torch.Tensor):
         """Set current simulation time.
 
@@ -215,6 +182,11 @@ class UnifiedDelaySystem:
         noisy_data: Optional[torch.Tensor] = None,
     ):
         """Store field data with optional noise.
+
+        When neither ``noisy_data`` nor ``noise_std > 0`` is provided, the
+        field is treated as clean-only: the pipeline fills the noisy cache
+        slot with the raw payload so observation queries still return valid
+        delayed data (the same data the reward query gets).
 
         Args:
             field_name: Field identifier.
@@ -244,10 +216,16 @@ class UnifiedDelaySystem:
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Get delayed data with specified perspective and noise mode.
 
+        Reads both raw and (if present) noisy payloads from storage and feeds
+        them into the pipeline as a pair. The pipeline's idempotency guard
+        ensures both payloads are cached on the first advance call per step;
+        the ``use_noise`` flag then selects the matching cache slot.
+
         Args:
             field_name: Field identifier.
             perspective: "ego" or "other" (determines delay parameters).
-            use_noise: If True, use noisy data. If False, use raw.
+            use_noise: If True, return the noisy cache slot (observations).
+                       If False, return the raw cache slot (rewards).
             allow_dropout: Whether to allow dropout (typically False for rewards).
             burst_dropout_mask: Optional external dropout mask of shape (num_envs,),
                 dtype bool. When provided, replaces per-pipeline i.i.d. dropout
@@ -262,27 +240,20 @@ class UnifiedDelaySystem:
         if field_name not in self._field_shapes:
             raise KeyError(f"Field '{field_name}' not registered")
 
-        # Get data from storage
-        if use_noise:
-            data, timestamp = self._storage.get_noisy(field_name)
+        # Read both payloads from storage. Timestamps are shared by construction
+        # (FieldStorage has one _timestamps[field_name] entry per field).
+        raw_data, timestamp = self._storage.get_raw(field_name)
+        if self._storage.has_noisy(field_name):
+            noisy_data, _ = self._storage.get_noisy(field_name)
         else:
-            data, timestamp = self._storage.get_raw(field_name)
+            noisy_data = None  # clean-only field; pipeline will mirror raw→noisy cache
 
-        # Select appropriate pipeline.
-        # Detection fields (bboxes_2d) use separate pipelines for the noisy
-        # path so that detector-replicator output is not overwritten by clean
-        # GT data when the raw path advances first in the same sim step.
+        # Select pipeline
         if perspective == "ego":
-            if use_noise and field_name in self._ego_detection_pipelines:
-                pipeline = self._ego_detection_pipelines[field_name]
-            else:
-                pipeline = self._ego_pipelines[field_name]
+            pipeline = self._ego_pipelines[field_name]
             cfg = self._cfg.ego
         else:
-            if use_noise and field_name in self._other_detection_pipelines:
-                pipeline = self._other_detection_pipelines[field_name]
-            else:
-                pipeline = self._other_pipelines[field_name]
+            pipeline = self._other_pipelines[field_name]
             cfg = self._cfg.other
 
         # Determine if dropout should be applied
@@ -294,7 +265,8 @@ class UnifiedDelaySystem:
         # Process through pipeline (burst mask only passed when dropout is active)
         effective_burst_mask = burst_dropout_mask if apply_dropout else None
         delayed_data, delayed_timestamp = pipeline.process(
-            data, timestamp, self._t_current,
+            raw_data, noisy_data, timestamp, self._t_current,
+            use_noise=use_noise,
             allow_dropout=apply_dropout,
             burst_dropout_mask=effective_burst_mask,
         )
@@ -323,14 +295,10 @@ class UnifiedDelaySystem:
         return self._t_current - timestamp
 
     def _all_pipelines(self):
-        """Yield all pipeline instances (regular + detection)."""
+        """Yield all pipeline instances."""
         for p in self._ego_pipelines.values():
             yield p
         for p in self._other_pipelines.values():
-            yield p
-        for p in self._ego_detection_pipelines.values():
-            yield p
-        for p in self._other_detection_pipelines.values():
             yield p
 
     def set_delay_mode(
@@ -369,11 +337,7 @@ class UnifiedDelaySystem:
         """
         for pipeline in self._ego_pipelines.values():
             pipeline.set_dropout_rate(ego_rate)
-        for pipeline in self._ego_detection_pipelines.values():
-            pipeline.set_dropout_rate(ego_rate)
         for pipeline in self._other_pipelines.values():
-            pipeline.set_dropout_rate(other_rate)
-        for pipeline in self._other_detection_pipelines.values():
             pipeline.set_dropout_rate(other_rate)
 
     def set_field_delay_mode(
@@ -391,10 +355,7 @@ class UnifiedDelaySystem:
         """
         progress = max(0.0, min(1.0, progress))
         dot_prefix = field_prefix + "."
-        for pipe_dict in (
-            self._ego_pipelines, self._other_pipelines,
-            self._ego_detection_pipelines, self._other_detection_pipelines,
-        ):
+        for pipe_dict in (self._ego_pipelines, self._other_pipelines):
             for key, pipeline in pipe_dict.items():
                 if key.startswith(dot_prefix):
                     pipeline.set_mode(mode, progress)
@@ -407,10 +368,7 @@ class UnifiedDelaySystem:
             rate: Dropout probability [0, 1].
         """
         dot_prefix = field_prefix + "."
-        for pipe_dict in (
-            self._ego_pipelines, self._other_pipelines,
-            self._ego_detection_pipelines, self._other_detection_pipelines,
-        ):
+        for pipe_dict in (self._ego_pipelines, self._other_pipelines):
             for key, pipeline in pipe_dict.items():
                 if key.startswith(dot_prefix):
                     pipeline.set_dropout_rate(rate)
@@ -424,7 +382,7 @@ class UnifiedDelaySystem:
         # Reset storage
         self._storage.reset(env_ids)
 
-        # Reset all pipelines (regular + detection)
+        # Reset all pipelines
         for pipeline in self._all_pipelines():
             pipeline.reset(env_ids)
 

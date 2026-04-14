@@ -5,22 +5,31 @@
 
 """Delay pipeline V3 with timestamp guarantees and advance/query split.
 
-This module implements the core delay pipeline with the fundamental invariant:
-**Timestamp always travels with its associated data through all stages.**
+This module implements the core delay pipeline with two fundamental invariants:
+1. **Timestamp always travels with its associated data through all stages.**
+2. **Raw and noisy payloads share a single delay realization.** Staleness masks,
+   latency draws, dropout masks, and first-order lag filters are sampled once
+   per sim step and applied to both payloads in lockstep. The payloads may
+   differ in content but are always delayed by the same amount.
 
 Pipeline stages (in advance order):
-1. Staleness (FPS limiting) - holds data and timestamp together
-2. Latency (communication delay) - parallel buffers for data and timestamp
-3. First-order lag (smoothing) - filters channel signal before dropout
-4. Dropout (missed detections) - holds both data and timestamp together
+1. Staleness (FPS limiting) - single mask held across both payloads
+2. Latency (communication delay) - parallel raw/noisy buffers, one timestamp buffer
+3. First-order lag (smoothing) - independent filter state per payload
+4. Dropout (missed detections) - single mask applied to both payloads
 
 Calling contract:
 - advance(): WRITE — runs all stateful stages once. Idempotent within a sim step.
 - query(): READ — returns cached output. Safe to call multiple times.
 - process(): Convenience wrapper (advance + query). Backward compatible.
 
-Key design principle: Data and timestamp are ALWAYS processed together,
-ensuring AoI (Age-of-Information) = t_current - timestamp is always correct.
+When a field has no separate noisy payload, ``advance`` accepts
+``noisy_data=None`` and both cache slots are filled with the raw payload —
+the observation query then returns the same delayed clean data as the
+reward query. Fields with a noisy payload (e.g. state fields with curriculum
+Gaussian noise, or the ``bboxes_2d`` detection field carrying raycaster GT
+as raw and detector-replicator output as noisy) receive distinct cache
+slots populated under one shared delay realization.
 """
 
 from __future__ import annotations
@@ -77,7 +86,7 @@ class DelayPipelineV3:
         # Latency Stage
         # =================================================================
         # Compute max buffer size needed
-        max_latency = cfg.latency.distribution.mean + 3 * cfg.latency.distribution.std
+        max_latency = cfg.latency.distribution.mean + 4 * cfg.latency.distribution.std
         max_steps = max(int(max_latency / dt) + 5, cfg.latency.min_steps + 5)
 
         # Latency sampler
@@ -90,9 +99,11 @@ class DelayPipelineV3:
             min_steps=cfg.latency.min_steps,
         )
 
-        # Parallel circular buffers for data and timestamp
-        # Using CircularBuffer from Isaac Lab
-        self._data_buffer = CircularBuffer(max_steps, num_envs, device)
+        # Parallel circular buffers for raw/noisy payloads + a single timestamp
+        # buffer. Both data buffers are indexed by the same `time_lags` tensor
+        # so raw and noisy stay synchronized in delay.
+        self._raw_data_buffer = CircularBuffer(max_steps, num_envs, device)
+        self._noisy_data_buffer = CircularBuffer(max_steps, num_envs, device)
         self._timestamp_buffer = CircularBuffer(max_steps, num_envs, device)
         self._buffer_initialized = False
         # Guard against multiple appends per sim step (bug fix: process() may
@@ -109,10 +120,10 @@ class DelayPipelineV3:
             device=device,
         )
 
-        # Held data and timestamp during staleness
-        self._staleness_held_data = torch.zeros(
-            num_envs, *data_shape, device=device
-        )
+        # Held data (raw + noisy) and timestamp during staleness. Update mask
+        # is shared so raw and noisy stay in lockstep.
+        self._staleness_held_raw = torch.zeros(num_envs, *data_shape, device=device)
+        self._staleness_held_noisy = torch.zeros(num_envs, *data_shape, device=device)
         self._staleness_held_timestamp = torch.zeros(num_envs, device=device)
         self._last_detection_time = torch.zeros(num_envs, device=device)
         self._staleness_initialized = False
@@ -128,29 +139,36 @@ class DelayPipelineV3:
             device=device,
         )
 
-        # Held data and timestamp during dropout
-        self._dropout_held_data = torch.zeros(
-            num_envs, *data_shape, device=device
-        )
+        # Held data (raw + noisy) and timestamp during dropout. One drop mask
+        # is sampled per step and applied to both payloads.
+        self._dropout_held_raw = torch.zeros(num_envs, *data_shape, device=device)
+        self._dropout_held_noisy = torch.zeros(num_envs, *data_shape, device=device)
         self._dropout_held_timestamp = torch.zeros(num_envs, device=device)
         self._dropout_initialized = False
 
         # =================================================================
-        # First-order lag (optional smoothing)
+        # First-order lag (optional smoothing) — independent state per payload
+        # so each signal smooths to itself, but the filter coefficient is shared.
         # =================================================================
         self._lag_enabled = cfg.first_order_lag.enabled and cfg.first_order_lag.tau > 0
         self._lag_tau = cfg.first_order_lag.tau
-        self._lag_output = torch.zeros(num_envs, *data_shape, device=device)
-        self._lag_initialized = False
+        self._lag_output_raw = torch.zeros(num_envs, *data_shape, device=device)
+        self._lag_output_noisy = torch.zeros(num_envs, *data_shape, device=device)
+        self._lag_initialized_raw = False
+        self._lag_initialized_noisy = False
 
         # =================================================================
-        # Advance/query cache (ensures idempotent multi-call per step)
+        # Advance/query cache — four data slots (raw/noisy × with/no dropout)
+        # plus two timestamp slots (with/no dropout). Timestamps are shared
+        # across raw and noisy since both payloads follow the same delay.
         # =================================================================
         self._last_advance_time = torch.full((num_envs,), -1.0, device=device)
-        self._cached_data_with_dropout = torch.zeros(num_envs, *data_shape, device=device)
-        self._cached_ts_with_dropout = torch.zeros(num_envs, device=device)
-        self._cached_data_no_dropout = torch.zeros(num_envs, *data_shape, device=device)
+        self._cached_raw_no_dropout = torch.zeros(num_envs, *data_shape, device=device)
+        self._cached_noisy_no_dropout = torch.zeros(num_envs, *data_shape, device=device)
+        self._cached_raw_with_dropout = torch.zeros(num_envs, *data_shape, device=device)
+        self._cached_noisy_with_dropout = torch.zeros(num_envs, *data_shape, device=device)
         self._cached_ts_no_dropout = torch.zeros(num_envs, device=device)
+        self._cached_ts_with_dropout = torch.zeros(num_envs, device=device)
 
         # Initialize samplers
         self._latency_sampler.initialize()
@@ -235,12 +253,19 @@ class DelayPipelineV3:
 
     def advance(
         self,
-        data: torch.Tensor,
+        raw_data: torch.Tensor,
+        noisy_data: Optional[torch.Tensor],
         timestamp: torch.Tensor,
         t_current: torch.Tensor,
         burst_dropout_mask: Optional[torch.Tensor] = None,
     ) -> None:
         """Advance all stateful pipeline stages. WRITE — call once per sim step.
+
+        Raw and noisy payloads are processed together under a single delay
+        realization (shared staleness mask, shared latency draw, shared dropout
+        mask). This is the invariant that makes reward / observation queries
+        consistent: when both are taken at the same ``t_current`` they refer to
+        the same physical detection event.
 
         Idempotent: if called again at the same t_current, skips all state mutation
         and keeps the previously cached results.
@@ -251,72 +276,163 @@ class DelayPipelineV3:
         for the with/without-dropout query paths.
 
         Args:
-            data: Input data tensor of shape (num_envs, ...).
-            timestamp: Capture timestamp of shape (num_envs,).
+            raw_data: Clean input tensor of shape (num_envs, ...).
+            noisy_data: Optional noisy input with the same shape. When ``None``
+                the field has no separate noisy payload; both caches are filled
+                with the raw payload.
+            timestamp: Capture timestamp of shape (num_envs,). Shared by both
+                raw and noisy — they describe the same event.
             t_current: Current simulation time of shape (num_envs,).
             burst_dropout_mask: Optional external dropout mask of shape (num_envs,),
                 dtype bool. When provided, replaces the internal i.i.d. sampler for
                 this step (used by burst dropout from multi-agent wrapper).
         """
-        data = data.to(self._device)
+        raw_data = raw_data.to(self._device)
         timestamp = timestamp.to(self._device)
         t_current = t_current.to(self._device)
+        if noisy_data is None:
+            # Field has no separate noisy payload — mirror raw into the noisy
+            # cache slots so query(use_noise=True) is still well-defined.
+            noisy_data = raw_data
+        else:
+            noisy_data = noisy_data.to(self._device)
+            if noisy_data.shape != raw_data.shape:
+                raise ValueError(
+                    f"DelayPipelineV3.advance: raw/noisy shape mismatch "
+                    f"{raw_data.shape} vs {noisy_data.shape}"
+                )
 
-        # Idempotency guard — skip if already advanced at this time
+        # Idempotency guard — skip if already advanced at this time.
+        # A subsequent call with a different `noisy_data` at the same t_current
+        # is intentionally ignored; this is the single-advance-per-step contract.
         time_advanced = (t_current - self._last_advance_time).abs() > 1e-6
         if not time_advanced.any():
             return
         self._last_advance_time = t_current.clone()
 
-        # "none" mode: only FOL
+        # "none" mode: only FOL (applied independently to each payload)
         if self._mode == "none":
             if self._lag_enabled:
-                data = self._apply_first_order_lag(data)
-            self._cached_data_no_dropout = data.clone()
+                raw_out = self._apply_first_order_lag(raw_data, payload="raw")
+                noisy_out = self._apply_first_order_lag(noisy_data, payload="noisy")
+            else:
+                raw_out = raw_data
+                noisy_out = noisy_data
+            self._cached_raw_no_dropout = raw_out.clone()
+            self._cached_noisy_no_dropout = noisy_out.clone()
             self._cached_ts_no_dropout = timestamp.clone()
-            self._cached_data_with_dropout = data.clone()
+            self._cached_raw_with_dropout = raw_out.clone()
+            self._cached_noisy_with_dropout = noisy_out.clone()
             self._cached_ts_with_dropout = timestamp.clone()
             return
 
-        # Stage 1: Staleness (only in random mode)
+        # Stage 1: Staleness (only in random mode). Single update mask drives
+        # both payloads' held buffers.
         if self._cfg.staleness.enabled and self._mode == "random":
-            data, timestamp = self._apply_staleness(data, timestamp, t_current)
+            raw_data, noisy_data, timestamp = self._apply_staleness_pair(
+                raw_data, noisy_data, timestamp, t_current
+            )
 
-        # Stage 2: Latency (buffer append guarded internally)
+        # Stage 2: Latency (parallel raw/noisy buffers, shared time_lags)
         if self._cfg.latency.enabled:
-            data, timestamp = self._apply_latency(data, timestamp, t_current)
+            raw_data, noisy_data, timestamp = self._apply_latency_pair(
+                raw_data, noisy_data, timestamp, t_current
+            )
 
-        # Stage 3: FOL (before dropout — smooths channel signal)
+        # Stage 3: FOL (independent filter state per payload, shared alpha)
         if self._lag_enabled:
-            data = self._apply_first_order_lag(data)
+            raw_data = self._apply_first_order_lag(raw_data, payload="raw")
+            noisy_data = self._apply_first_order_lag(noisy_data, payload="noisy")
 
-        # Cache pre-dropout result (used by reward queries with allow_dropout=False)
-        self._cached_data_no_dropout = data.clone()
+        # Cache pre-dropout (reward queries use allow_dropout=False)
+        self._cached_raw_no_dropout = raw_data.clone()
+        self._cached_noisy_no_dropout = noisy_data.clone()
         self._cached_ts_no_dropout = timestamp.clone()
 
-        # Stage 4: Dropout (mask sampled once per step)
+        # Stage 4: Dropout — single mask sampled once per step, applied to both.
         if self._cfg.dropout.enabled:
-            data, timestamp = self._apply_dropout(data, timestamp, external_mask=burst_dropout_mask)
+            raw_data, noisy_data, timestamp = self._apply_dropout_pair(
+                raw_data, noisy_data, timestamp, external_mask=burst_dropout_mask,
+            )
 
-        self._cached_data_with_dropout = data.clone()
+        self._cached_raw_with_dropout = raw_data.clone()
+        self._cached_noisy_with_dropout = noisy_data.clone()
         self._cached_ts_with_dropout = timestamp.clone()
 
-    def query(self, allow_dropout: bool = True) -> Tuple[torch.Tensor, torch.Tensor]:
+    def query(
+        self,
+        use_noise: bool = False,
+        allow_dropout: bool = True,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Return cached pipeline output. READ — safe to call multiple times.
 
         Args:
+            use_noise: If True, return the noisy-payload cache (observations).
+                       If False, return the raw-payload cache (rewards).
             allow_dropout: If True, return post-dropout data.
-                          If False, return pre-dropout data (for rewards).
+                           If False, return pre-dropout data (for rewards).
+
+        Returns:
+            Tuple of (delayed_data, delayed_timestamp). Timestamp is shared
+            across raw/noisy because both payloads were delayed together.
+        """
+        if allow_dropout:
+            ts = self._cached_ts_with_dropout
+            data = (
+                self._cached_noisy_with_dropout if use_noise
+                else self._cached_raw_with_dropout
+            )
+        else:
+            ts = self._cached_ts_no_dropout
+            data = (
+                self._cached_noisy_no_dropout if use_noise
+                else self._cached_raw_no_dropout
+            )
+        return data.clone(), ts.clone()
+
+    def process(
+        self,
+        raw_data: torch.Tensor,
+        noisy_data: Optional[torch.Tensor],
+        timestamp: torch.Tensor,
+        t_current: torch.Tensor,
+        use_noise: bool = False,
+        allow_dropout: bool = True,
+        burst_dropout_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Process raw/noisy payload pair through the delay pipeline.
+
+        ``advance`` is idempotent, so multiple ``process()`` calls at the same
+        ``t_current`` only advance once. The first call populates both caches;
+        subsequent calls (including observation call after reward call) read
+        from the cache. This is the structural fix for the shared-pipeline
+        idempotency bug: both payloads are cached on the first advance, so
+        the second call's ``use_noise`` flag selects the right cache slot.
+
+        **CRITICAL INVARIANT**: The returned timestamp is ALWAYS the capture
+        time of the returned data, and raw/noisy queries at the same step
+        share a single timestamp.
+
+        Args:
+            raw_data: Clean input tensor of shape (num_envs, ...).
+            noisy_data: Optional noisy input with the same shape. Pass ``None``
+                for clean-only fields.
+            timestamp: Capture timestamp of shape (num_envs,).
+            t_current: Current simulation time of shape (num_envs,).
+            use_noise: Which cache slot to return on the query side.
+            allow_dropout: Whether to return post-dropout data.
+            burst_dropout_mask: Optional external dropout mask from burst model.
 
         Returns:
             Tuple of (delayed_data, delayed_timestamp).
         """
-        if allow_dropout:
-            return self._cached_data_with_dropout.clone(), self._cached_ts_with_dropout.clone()
-        else:
-            return self._cached_data_no_dropout.clone(), self._cached_ts_no_dropout.clone()
+        self.advance(
+            raw_data, noisy_data, timestamp, t_current,
+            burst_dropout_mask=burst_dropout_mask,
+        )
+        return self.query(use_noise=use_noise, allow_dropout=allow_dropout)
 
-    def process(
+    def process_single(
         self,
         data: torch.Tensor,
         timestamp: torch.Tensor,
@@ -324,63 +440,62 @@ class DelayPipelineV3:
         allow_dropout: bool = True,
         burst_dropout_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Process data through the delay pipeline (advance + query).
+        """Convenience wrapper for clean-only fields (no noisy payload).
 
-        Backward-compatible convenience wrapper. advance() is idempotent,
-        so multiple process() calls at the same t_current only advance once.
-
-        **CRITICAL INVARIANT**: The returned timestamp is ALWAYS the capture
-        time of the returned data.
-
-        Args:
-            data: Input data tensor of shape (num_envs, ...).
-            timestamp: Capture timestamp of shape (num_envs,).
-            t_current: Current simulation time of shape (num_envs,).
-            allow_dropout: Whether to return post-dropout data.
-            burst_dropout_mask: Optional external dropout mask from burst model.
-
-        Returns:
-            Tuple of (delayed_data, delayed_timestamp).
+        Equivalent to ``process(data, noisy_data=None, timestamp, t_current,
+        use_noise=False, allow_dropout=allow_dropout, ...)`` — both caches are
+        populated with the raw payload and the raw cache is returned. Useful
+        for test suites, teleop visualization, and any consumer that does not
+        carry a separate noisy stream.
         """
-        self.advance(data, timestamp, t_current, burst_dropout_mask=burst_dropout_mask)
-        return self.query(allow_dropout=allow_dropout)
+        return self.process(
+            data, None, timestamp, t_current,
+            use_noise=False, allow_dropout=allow_dropout,
+            burst_dropout_mask=burst_dropout_mask,
+        )
 
-    def _apply_staleness(
+    def _apply_staleness_pair(
         self,
-        data: torch.Tensor,
+        raw: torch.Tensor,
+        noisy: torch.Tensor,
         timestamp: torch.Tensor,
         t_current: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Apply staleness (FPS limiting).
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Apply staleness (FPS limiting) to a raw/noisy payload pair.
 
-        Simulates limited sensor update rates. Data is only updated when
-        the time since last detection exceeds the detection period.
+        Simulates limited sensor update rates. A single update mask is computed
+        from the staleness sampler and applied to BOTH payloads in lockstep —
+        raw and noisy are always held-or-refreshed together, so their
+        timestamps stay synchronized.
 
-        **KEY**: Both data AND timestamp are held together during staleness.
+        **KEY**: All three (raw, noisy, timestamp) share a single update mask.
         """
         if not self._staleness_initialized:
-            # First call - initialize held values
-            self._staleness_held_data = data.clone()
+            # First call - initialize held values with incoming pair
+            self._staleness_held_raw = raw.clone()
+            self._staleness_held_noisy = noisy.clone()
             self._staleness_held_timestamp = timestamp.clone()
             self._last_detection_time = t_current.clone()
             self._staleness_initialized = True
-            return data.clone(), timestamp.clone()
+            return raw.clone(), noisy.clone(), timestamp.clone()
 
-        # Compute time since last detection
+        # Compute time since last detection (shared across payloads)
         time_since_last = t_current - self._last_detection_time
         detection_period = self._staleness_sampler.period_values
 
-        # Determine which environments get a new detection
+        # Shared update mask — raw and noisy refresh on the same step
         should_update = time_since_last >= detection_period
 
-        # Update BOTH data and timestamp together
         # Shape handling for data (may have multiple dims)
         should_update_data = should_update
-        for _ in range(len(data.shape) - 1):
+        for _ in range(len(raw.shape) - 1):
             should_update_data = should_update_data.unsqueeze(-1)
 
-        self._staleness_held_data = torch.where(
-            should_update_data, data, self._staleness_held_data
+        self._staleness_held_raw = torch.where(
+            should_update_data, raw, self._staleness_held_raw
+        )
+        self._staleness_held_noisy = torch.where(
+            should_update_data, noisy, self._staleness_held_noisy
         )
         self._staleness_held_timestamp = torch.where(
             should_update, timestamp, self._staleness_held_timestamp
@@ -391,34 +506,43 @@ class DelayPipelineV3:
             should_update, t_current, self._last_detection_time
         )
 
-        return self._staleness_held_data.clone(), self._staleness_held_timestamp.clone()
+        return (
+            self._staleness_held_raw.clone(),
+            self._staleness_held_noisy.clone(),
+            self._staleness_held_timestamp.clone(),
+        )
 
-    def _apply_latency(
+    def _apply_latency_pair(
         self,
-        data: torch.Tensor,
+        raw: torch.Tensor,
+        noisy: torch.Tensor,
         timestamp: torch.Tensor,
         t_current: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Apply latency using parallel circular buffers.
 
-        Data and timestamp are put through SEPARATE buffers with the
-        SAME delay, ensuring they stay synchronized.
+        Raw and noisy payloads flow through SEPARATE buffers but share a
+        single timestamp buffer and a single latency draw, ensuring both
+        payloads exit the stage with the same delay and the same timestamp.
 
-        **KEY**: Parallel buffers maintain the data-timestamp correspondence.
+        **KEY**: One latency sample drives BOTH buffer reads. Raw and noisy
+        cannot diverge in delay.
 
-        **GUARD**: Only appends to buffer once per sim step. process() may be
-        called multiple times at the same t_current (rewards, observations,
+        **GUARD**: Only appends to the buffers once per sim step. process() may
+        be called multiple times at the same t_current (rewards, observations,
         teleop visualization). Without this guard the buffer advances N times
         per real step, dividing effective delay by N.
         """
         # Flatten data for buffer storage
-        flat_data = data.reshape(self._num_envs, -1)
+        flat_raw = raw.reshape(self._num_envs, -1)
+        flat_noisy = noisy.reshape(self._num_envs, -1)
         flat_ts = timestamp.unsqueeze(-1)  # (num_envs, 1)
 
         if not self._buffer_initialized:
-            # Initialize buffers with first data
+            # Initialize buffers with first payload
             # CircularBuffer will fill all slots with this data
-            self._data_buffer.append(flat_data)
+            self._raw_data_buffer.append(flat_raw)
+            self._noisy_data_buffer.append(flat_noisy)
             self._timestamp_buffer.append(flat_ts)
             self._last_append_time = t_current.clone()
             self._buffer_initialized = True
@@ -426,49 +550,56 @@ class DelayPipelineV3:
         # Only append if simulation time has advanced since last append
         time_advanced = (t_current - self._last_append_time).abs() > 1e-6
         if time_advanced.any():
-            self._data_buffer.append(flat_data)
+            self._raw_data_buffer.append(flat_raw)
+            self._noisy_data_buffer.append(flat_noisy)
             self._timestamp_buffer.append(flat_ts)
             self._last_append_time = t_current.clone()
 
-        # Retrieve with the same time lag
+        # Retrieve with a single time lag — shared across raw/noisy.
         time_lags = self._latency_sampler.step_values
 
-        # CircularBuffer uses __getitem__ with time_lags tensor
-        delayed_flat_data = self._data_buffer[time_lags]
+        delayed_flat_raw = self._raw_data_buffer[time_lags]
+        delayed_flat_noisy = self._noisy_data_buffer[time_lags]
         delayed_flat_ts = self._timestamp_buffer[time_lags]
 
         # Reshape back
-        delayed_data = delayed_flat_data.reshape(self._num_envs, *self._data_shape)
+        delayed_raw = delayed_flat_raw.reshape(self._num_envs, *self._data_shape)
+        delayed_noisy = delayed_flat_noisy.reshape(self._num_envs, *self._data_shape)
         delayed_timestamp = delayed_flat_ts.squeeze(-1)
 
-        return delayed_data, delayed_timestamp
+        return delayed_raw, delayed_noisy, delayed_timestamp
 
-    def _apply_dropout(
+    def _apply_dropout_pair(
         self,
-        data: torch.Tensor,
+        raw: torch.Tensor,
+        noisy: torch.Tensor,
         timestamp: torch.Tensor,
         external_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Apply dropout (missed detections).
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Apply dropout (missed detections) to a raw/noisy payload pair.
 
-        When dropout occurs, the previous data AND timestamp are retained.
+        One drop mask is sampled (or supplied via ``external_mask``) and applied
+        to BOTH payloads plus the timestamp. When dropout occurs, the previous
+        held raw, noisy, and timestamp are all retained together.
 
-        **KEY**: Both data and timestamp are held together during dropout.
+        **KEY**: One drop mask drives all three held buffers.
 
         Args:
-            data: Input data tensor.
+            raw: Clean input tensor.
+            noisy: Noisy input tensor (same shape as raw).
             timestamp: Capture timestamp tensor.
             external_mask: Optional external dropout mask of shape (num_envs,),
                 dtype bool. When provided, replaces the internal i.i.d. sampler
                 (used by burst dropout). True = dropped.
         """
         if not self._dropout_initialized:
-            # First call - initialize held values with incoming data
+            # First call - initialize held values with incoming pair
             # This ensures we never return zeros on first step
-            self._dropout_held_data = data.clone()
+            self._dropout_held_raw = raw.clone()
+            self._dropout_held_noisy = noisy.clone()
             self._dropout_held_timestamp = timestamp.clone()
             self._dropout_initialized = True
-            return data.clone(), timestamp.clone()
+            return raw.clone(), noisy.clone(), timestamp.clone()
 
         # Use external mask (burst dropout) or internal i.i.d. sampler
         if external_mask is not None:
@@ -478,37 +609,56 @@ class DelayPipelineV3:
 
         # Shape handling
         drop_mask_data = drop_mask
-        for _ in range(len(data.shape) - 1):
+        for _ in range(len(raw.shape) - 1):
             drop_mask_data = drop_mask_data.unsqueeze(-1)
 
-        # On drop: keep previous held value
-        # On no drop: update held value with new data
-        self._dropout_held_data = torch.where(
-            drop_mask_data, self._dropout_held_data, data
+        # On drop: keep previous held value. On no drop: refresh with new data.
+        self._dropout_held_raw = torch.where(
+            drop_mask_data, self._dropout_held_raw, raw
+        )
+        self._dropout_held_noisy = torch.where(
+            drop_mask_data, self._dropout_held_noisy, noisy
         )
         self._dropout_held_timestamp = torch.where(
             drop_mask, self._dropout_held_timestamp, timestamp
         )
 
-        return self._dropout_held_data.clone(), self._dropout_held_timestamp.clone()
+        return (
+            self._dropout_held_raw.clone(),
+            self._dropout_held_noisy.clone(),
+            self._dropout_held_timestamp.clone(),
+        )
 
-    def _apply_first_order_lag(self, data: torch.Tensor) -> torch.Tensor:
+    def _apply_first_order_lag(
+        self,
+        data: torch.Tensor,
+        payload: Literal["raw", "noisy"],
+    ) -> torch.Tensor:
         """Apply first-order lag filter for smoothing.
 
-        This smooths sudden changes in data. Note that this does NOT
-        affect the timestamp - the timestamp still represents when
+        Each payload has independent filter state (``_lag_output_raw`` /
+        ``_lag_output_noisy``) so each signal smooths to itself. The filter
+        coefficient ``alpha = dt / (tau + dt)`` is shared. Initialization is
+        tracked per payload so raw and noisy each seed their filter from
+        their own first input.
+
+        Does NOT affect the timestamp — the timestamp still represents when
         the underlying data was captured.
         """
-        if not self._lag_initialized:
-            self._lag_output = data.clone()
-            self._lag_initialized = True
+        init_attr = f"_lag_initialized_{payload}"
+        state_attr = f"_lag_output_{payload}"
+
+        if not getattr(self, init_attr):
+            setattr(self, state_attr, data.clone())
+            setattr(self, init_attr, True)
             return data.clone()
 
         # First-order lag: y = y_prev + dt/tau * (x - y_prev)
         alpha = self._dt / (self._lag_tau + self._dt)
-        self._lag_output = self._lag_output + alpha * (data - self._lag_output)
-
-        return self._lag_output.clone()
+        prev = getattr(self, state_attr)
+        new = prev + alpha * (data - prev)
+        setattr(self, state_attr, new)
+        return new.clone()
 
     def reset(self, env_ids: Optional[torch.Tensor] = None):
         """Reset pipeline state for specified environments.
@@ -520,58 +670,72 @@ class DelayPipelineV3:
             # Reset all
             env_ids = torch.arange(self._num_envs, device=self._device)
 
-            # Reset buffers
-            self._data_buffer.reset()
+            # Reset latency buffers
+            self._raw_data_buffer.reset()
+            self._noisy_data_buffer.reset()
             self._timestamp_buffer.reset()
             self._buffer_initialized = False
             self._last_append_time.fill_(-1.0)
 
-            # Reset staleness
-            self._staleness_held_data.zero_()
+            # Reset staleness (both payloads + shared timestamp/state)
+            self._staleness_held_raw.zero_()
+            self._staleness_held_noisy.zero_()
             self._staleness_held_timestamp.zero_()
             self._last_detection_time.zero_()
             self._staleness_initialized = False
 
-            # Reset dropout
-            self._dropout_held_data.zero_()
+            # Reset dropout (both payloads + shared timestamp)
+            self._dropout_held_raw.zero_()
+            self._dropout_held_noisy.zero_()
             self._dropout_held_timestamp.zero_()
             self._dropout_initialized = False
 
-            # Reset lag
-            self._lag_output.zero_()
-            self._lag_initialized = False
+            # Reset lag (independent init per payload)
+            self._lag_output_raw.zero_()
+            self._lag_output_noisy.zero_()
+            self._lag_initialized_raw = False
+            self._lag_initialized_noisy = False
 
-            # Reset advance/query cache
+            # Reset advance/query cache (4 data slots + 2 timestamp slots)
             self._last_advance_time.fill_(-1.0)
-            self._cached_data_with_dropout.zero_()
-            self._cached_ts_with_dropout.zero_()
-            self._cached_data_no_dropout.zero_()
+            self._cached_raw_no_dropout.zero_()
+            self._cached_noisy_no_dropout.zero_()
+            self._cached_raw_with_dropout.zero_()
+            self._cached_noisy_with_dropout.zero_()
             self._cached_ts_no_dropout.zero_()
+            self._cached_ts_with_dropout.zero_()
 
         else:
             # Reset specific environments
-            self._data_buffer.reset(env_ids)
+            self._raw_data_buffer.reset(env_ids)
+            self._noisy_data_buffer.reset(env_ids)
             self._timestamp_buffer.reset(env_ids)
             self._last_append_time[env_ids] = -1.0
 
             # Reset staleness for specific envs
-            self._staleness_held_data[env_ids] = 0
+            self._staleness_held_raw[env_ids] = 0
+            self._staleness_held_noisy[env_ids] = 0
             self._staleness_held_timestamp[env_ids] = 0
             self._last_detection_time[env_ids] = 0
 
             # Reset dropout for specific envs
-            self._dropout_held_data[env_ids] = 0
+            self._dropout_held_raw[env_ids] = 0
+            self._dropout_held_noisy[env_ids] = 0
             self._dropout_held_timestamp[env_ids] = 0
 
-            # Reset lag for specific envs
-            self._lag_output[env_ids] = 0
+            # Reset lag for specific envs (cannot partially mark initialized;
+            # zero the state rows and let the next advance rebuild from input)
+            self._lag_output_raw[env_ids] = 0
+            self._lag_output_noisy[env_ids] = 0
 
             # Reset advance/query cache for specific envs
             self._last_advance_time[env_ids] = -1.0
-            self._cached_data_with_dropout[env_ids] = 0
-            self._cached_ts_with_dropout[env_ids] = 0
-            self._cached_data_no_dropout[env_ids] = 0
+            self._cached_raw_no_dropout[env_ids] = 0
+            self._cached_noisy_no_dropout[env_ids] = 0
+            self._cached_raw_with_dropout[env_ids] = 0
+            self._cached_noisy_with_dropout[env_ids] = 0
             self._cached_ts_no_dropout[env_ids] = 0
+            self._cached_ts_with_dropout[env_ids] = 0
 
         # Resample parameters for reset environments
         self._latency_sampler.reset(env_ids)

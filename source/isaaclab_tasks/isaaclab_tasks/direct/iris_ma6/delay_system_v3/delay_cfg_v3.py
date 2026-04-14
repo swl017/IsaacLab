@@ -666,7 +666,9 @@ def create_delay_cfg_from_params(params: DelaySystemKeyParams) -> MultiAgentDela
     )
 
     # Build perspective configs
-    # Ego: motion pipeline as default, detection fields use override
+    # Ego: motion pipeline as default, detection (bbox) field uses override.
+    # The bbox field carries both raycaster (raw) and replicator (noisy)
+    # payloads; one pipeline applies one delay realization to both.
     cfg.delay_cfg.ego = PerspectiveCfg(
         pipeline=ego_motion_pipeline,
         field_overrides={

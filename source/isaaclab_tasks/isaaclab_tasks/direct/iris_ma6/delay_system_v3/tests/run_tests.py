@@ -41,12 +41,14 @@ from typing import List, Tuple, Optional
 try:
     from .test_per_agent import run_per_agent_randomization_tests
     from .test_reward_modes import run_reward_mode_tests
+    from .test_dual_cache import run_dual_cache_tests
 except ImportError:
     # Running as script, add parent to path
     import sys as _sys
     _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from test_per_agent import run_per_agent_randomization_tests
     from test_reward_modes import run_reward_mode_tests
+    from test_dual_cache import run_dual_cache_tests
 
 # Output file path (same directory as this script)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -510,19 +512,19 @@ def run_pipeline_tests(results: TestResults, device: torch.device, verbose: bool
         # Step 0: initial data
         data_0 = torch.ones(num_envs, 3, device=device) * 0.0
         ts_0 = t_current.clone()
-        out_0, out_ts_0 = pipeline.process(data_0, ts_0, t_current)
+        out_0, out_ts_0 = pipeline.process_single(data_0, ts_0, t_current)
 
         # Step 1
         t_current = t_current + dt
         data_1 = torch.ones(num_envs, 3, device=device) * 1.0
         ts_1 = t_current.clone()
-        out_1, out_ts_1 = pipeline.process(data_1, ts_1, t_current)
+        out_1, out_ts_1 = pipeline.process_single(data_1, ts_1, t_current)
 
         # Step 2
         t_current = t_current + dt
         data_2 = torch.ones(num_envs, 3, device=device) * 2.0
         ts_2 = t_current.clone()
-        out_2, out_ts_2 = pipeline.process(data_2, ts_2, t_current)
+        out_2, out_ts_2 = pipeline.process_single(data_2, ts_2, t_current)
 
         # With 2-step delay, output at step 2 should be data from step 0
         assert torch.allclose(out_2, data_0), f"Expected {data_0[0]}, got {out_2[0]}"
@@ -550,7 +552,7 @@ def run_pipeline_tests(results: TestResults, device: torch.device, verbose: bool
         data_first = torch.ones(num_envs, 3, device=device) * 5.0
         ts_first = t_current.clone()
 
-        out, out_ts = pipeline.process(data_first, ts_first, t_current)
+        out, out_ts = pipeline.process_single(data_first, ts_first, t_current)
 
         # CircularBuffer fills all slots with first data, so output should be data_first
         assert torch.allclose(out, data_first), f"Warmup: expected {data_first[0]}, got {out[0]}"
@@ -577,13 +579,13 @@ def run_pipeline_tests(results: TestResults, device: torch.device, verbose: bool
         # Step 0: first data (becomes held data)
         data_0 = torch.ones(num_envs, 3, device=device) * 10.0
         ts_0 = t_current.clone()
-        out_0, out_ts_0 = pipeline.process(data_0, ts_0, t_current)
+        out_0, out_ts_0 = pipeline.process_single(data_0, ts_0, t_current)
 
         # Step 1: new data (should be dropped, held data returned)
         t_current = t_current + dt
         data_1 = torch.ones(num_envs, 3, device=device) * 20.0
         ts_1 = t_current.clone()
-        out_1, out_ts_1 = pipeline.process(data_1, ts_1, t_current)
+        out_1, out_ts_1 = pipeline.process_single(data_1, ts_1, t_current)
 
         # With 100% dropout, output should still be data_0 with ts_0
         assert torch.allclose(out_1, data_0), f"Dropout: expected {data_0[0]}, got {out_1[0]}"
@@ -610,13 +612,13 @@ def run_pipeline_tests(results: TestResults, device: torch.device, verbose: bool
         # Step 0: first data
         data_0 = torch.ones(num_envs, 3, device=device) * 100.0
         ts_0 = t_current.clone()
-        out_0, out_ts_0 = pipeline.process(data_0, ts_0, t_current)
+        out_0, out_ts_0 = pipeline.process_single(data_0, ts_0, t_current)
 
         # Steps 1: within staleness period (0.04s < 0.1s period)
         t_current = t_current + dt  # 0.04s
         data_1 = torch.ones(num_envs, 3, device=device) * 200.0
         ts_1 = t_current.clone()
-        out_1, out_ts_1 = pipeline.process(data_1, ts_1, t_current)
+        out_1, out_ts_1 = pipeline.process_single(data_1, ts_1, t_current)
 
         # Output should still be data_0 with ts_0 (stale)
         assert torch.allclose(out_1, data_0), f"Staleness: expected {data_0[0]}, got {out_1[0]}"
@@ -666,7 +668,7 @@ def run_timestamp_sync_tests(results: TestResults, device: torch.device, verbose
         for i in range(5):
             data = torch.ones(num_envs, 3, device=device) * float(i)
             ts = t_current.clone()
-            out, out_ts = pipeline.process(data, ts, t_current)
+            out, out_ts = pipeline.process_single(data, ts, t_current)
 
             # AoI should be approximately 3 * dt = 0.12s after warmup
             aoi = t_current - out_ts
@@ -700,7 +702,7 @@ def run_timestamp_sync_tests(results: TestResults, device: torch.device, verbose
         for i in range(20):
             data = torch.ones(num_envs, 3, device=device) * float(i)
             ts = t_current.clone()
-            out, out_ts = pipeline.process(data, ts, t_current)
+            out, out_ts = pipeline.process_single(data, ts, t_current)
 
             aoi = t_current - out_ts
 
@@ -745,7 +747,7 @@ def run_timestamp_sync_tests(results: TestResults, device: torch.device, verbose
             data_history.append(data.clone())
             ts_history.append(ts.clone())
 
-            out, out_ts = pipeline.process(data, ts, t_current)
+            out, out_ts = pipeline.process_single(data, ts, t_current)
 
             # After warmup, verify output timestamp matches stored timestamp
             if i >= 2:
@@ -787,7 +789,7 @@ def run_timestamp_sync_tests(results: TestResults, device: torch.device, verbose
         for i in range(10):
             data = torch.ones(num_envs, 3, device=device) * float(i)
             ts = t_current.clone()
-            out, out_ts = pipeline.process(data, ts, t_current)
+            out, out_ts = pipeline.process_single(data, ts, t_current)
 
             aoi = t_current - out_ts
             aoi_values.append(aoi[0].item())
@@ -840,7 +842,7 @@ def run_curriculum_tests(results: TestResults, device: torch.device, verbose: bo
         data = torch.ones(num_envs, 3, device=device) * 42.0
         ts = t_current.clone()
 
-        out, out_ts = pipeline.process(data, ts, t_current)
+        out, out_ts = pipeline.process_single(data, ts, t_current)
 
         # In 'none' mode, should pass through immediately
         assert torch.allclose(out, data), "Mode 'none' should pass through data"
@@ -893,13 +895,13 @@ def run_curriculum_tests(results: TestResults, device: torch.device, verbose: bo
         # First data
         data_0 = torch.ones(num_envs, 3, device=device) * 1.0
         ts_0 = t_current.clone()
-        out_0, _ = pipeline.process(data_0, ts_0, t_current)
+        out_0, _ = pipeline.process_single(data_0, ts_0, t_current)
 
         # Second step (within staleness period since 20FPS = 0.05s > dt=0.04s)
         t_current = t_current + dt
         data_1 = torch.ones(num_envs, 3, device=device) * 2.0
         ts_1 = t_current.clone()
-        out_1, out_ts_1 = pipeline.process(data_1, ts_1, t_current)
+        out_1, out_ts_1 = pipeline.process_single(data_1, ts_1, t_current)
 
         # Due to staleness, output should still be related to first data
         # (Exact check is complex due to latency buffer, just verify no crash)
@@ -951,7 +953,7 @@ def run_curriculum_tests(results: TestResults, device: torch.device, verbose: bo
         t_current = torch.zeros(num_envs, device=device)
         for i in range(num_samples):
             data = torch.ones(num_envs, 3, device=device)
-            out, _ = pipeline.process(data, t_current, t_current)
+            out, _ = pipeline.process_single(data, t_current, t_current)
             t_current = t_current + dt
 
         # No assertion, just verify it runs without error
@@ -1002,9 +1004,9 @@ def run_idempotency_tests(results: TestResults, device: torch.device, verbose: b
         t = torch.full((num_envs,), dt, device=device)
 
         # Simulate 3 calls at same time (rewards, obs, teleop)
-        r1, ts1 = pipeline.process(data, t, t)
-        r2, ts2 = pipeline.process(data, t, t)
-        r3, ts3 = pipeline.process(data, t, t)
+        r1, ts1 = pipeline.process_single(data, t, t)
+        r2, ts2 = pipeline.process_single(data, t, t)
+        r3, ts3 = pipeline.process_single(data, t, t)
 
         assert torch.allclose(r1, r2), f"Call 1 vs 2 differ: max diff={( r1 - r2).abs().max().item()}"
         assert torch.allclose(r2, r3), f"Call 2 vs 3 differ: max diff={(r2 - r3).abs().max().item()}"
@@ -1031,26 +1033,26 @@ def run_idempotency_tests(results: TestResults, device: torch.device, verbose: b
 
         # Step 0: initial
         data_0 = torch.zeros(num_envs, 3, device=device)
-        pipeline.process(data_0, t_current.clone(), t_current.clone())
+        pipeline.process_single(data_0, t_current.clone(), t_current.clone())
 
         # Step 1: new data, call 3 times (simulating rewards + obs + teleop)
         t_current += dt
         data_1 = torch.ones(num_envs, 3, device=device)
-        pipeline.process(data_1, t_current.clone(), t_current.clone())
-        pipeline.process(data_1, t_current.clone(), t_current.clone())
-        pipeline.process(data_1, t_current.clone(), t_current.clone())
+        pipeline.process_single(data_1, t_current.clone(), t_current.clone())
+        pipeline.process_single(data_1, t_current.clone(), t_current.clone())
+        pipeline.process_single(data_1, t_current.clone(), t_current.clone())
 
         # Step 2: new data, call 3 times
         t_current += dt
         data_2 = torch.ones(num_envs, 3, device=device) * 2.0
-        pipeline.process(data_2, t_current.clone(), t_current.clone())
-        pipeline.process(data_2, t_current.clone(), t_current.clone())
-        pipeline.process(data_2, t_current.clone(), t_current.clone())
+        pipeline.process_single(data_2, t_current.clone(), t_current.clone())
+        pipeline.process_single(data_2, t_current.clone(), t_current.clone())
+        pipeline.process_single(data_2, t_current.clone(), t_current.clone())
 
         # Step 3: new data, retrieve result — with 2-step delay, should get data_1
         t_current += dt
         data_3 = torch.ones(num_envs, 3, device=device) * 3.0
-        result, _ = pipeline.process(data_3, t_current.clone(), t_current.clone())
+        result, _ = pipeline.process_single(data_3, t_current.clone(), t_current.clone())
 
         # With 2-step latency and proper guarding, result should be data_1 (from 2 steps ago)
         expected = data_1
@@ -1080,12 +1082,12 @@ def run_idempotency_tests(results: TestResults, device: torch.device, verbose: b
         t = torch.full((num_envs,), dt, device=device)
 
         # First call: should append
-        pipeline.process(data, t, t)
+        pipeline.process_single(data, t, t)
         last_time_after_first = pipeline._last_append_time.clone()
 
         # Second and third calls: should NOT append (same t_current)
-        pipeline.process(data, t, t)
-        pipeline.process(data, t, t)
+        pipeline.process_single(data, t, t)
+        pipeline.process_single(data, t, t)
         last_time_after_third = pipeline._last_append_time.clone()
 
         assert torch.allclose(last_time_after_first, last_time_after_third), (
@@ -1111,14 +1113,14 @@ def run_idempotency_tests(results: TestResults, device: torch.device, verbose: b
         # Feed initial data to initialize FOL
         data_init = torch.zeros(num_envs, 3, device=device)
         t0 = torch.zeros(num_envs, device=device)
-        pipeline.process(data_init, t0, t0)
+        pipeline.process_single(data_init, t0, t0)
 
         # Feed new data and call process() 3 times at same t_current
         data_new = torch.ones(num_envs, 3, device=device) * 10.0
         t1 = torch.full((num_envs,), dt, device=device)
-        r1, _ = pipeline.process(data_new, t1, t1)
-        r2, _ = pipeline.process(data_new, t1, t1)
-        r3, _ = pipeline.process(data_new, t1, t1)
+        r1, _ = pipeline.process_single(data_new, t1, t1)
+        r2, _ = pipeline.process_single(data_new, t1, t1)
+        r3, _ = pipeline.process_single(data_new, t1, t1)
 
         assert torch.allclose(r1, r2, atol=1e-6), (
             f"FOL not idempotent: call 1 vs 2 differ by {(r1 - r2).abs().max().item()}"
@@ -1152,14 +1154,14 @@ def run_idempotency_tests(results: TestResults, device: torch.device, verbose: b
         for i in range(5):
             t = torch.full((num_envs,), dt * i, device=device)
             data = torch.ones(num_envs, 3, device=device) * float(i)
-            pipeline.process(data, t, t, allow_dropout=True)
+            pipeline.process_single(data, t, t, allow_dropout=True)
 
         # Now call process() 3 times at same t_current with dropout enabled
         t_now = torch.full((num_envs,), dt * 5, device=device)
         data_now = torch.ones(num_envs, 3, device=device) * 5.0
-        r1, ts1 = pipeline.process(data_now, t_now, t_now, allow_dropout=True)
-        r2, ts2 = pipeline.process(data_now, t_now, t_now, allow_dropout=True)
-        r3, ts3 = pipeline.process(data_now, t_now, t_now, allow_dropout=True)
+        r1, ts1 = pipeline.process_single(data_now, t_now, t_now, allow_dropout=True)
+        r2, ts2 = pipeline.process_single(data_now, t_now, t_now, allow_dropout=True)
+        r3, ts3 = pipeline.process_single(data_now, t_now, t_now, allow_dropout=True)
 
         assert torch.allclose(r1, r2), (
             f"Dropout inconsistent: call 1 vs 2 max diff={( r1 - r2).abs().max().item()}"
@@ -1190,17 +1192,17 @@ def run_idempotency_tests(results: TestResults, device: torch.device, verbose: b
         for i in range(5):
             t = torch.full((num_envs,), dt * i, device=device)
             data = torch.ones(num_envs, 3, device=device) * float(i)
-            pipeline.process(data, t, t, allow_dropout=True)
+            pipeline.process_single(data, t, t, allow_dropout=True)
 
         # At new step: first call with allow_dropout=False (rewards), then True (obs)
         t_now = torch.full((num_envs,), dt * 5, device=device)
         data_now = torch.ones(num_envs, 3, device=device) * 5.0
-        r_reward, _ = pipeline.process(data_now, t_now, t_now, allow_dropout=False)
-        r_obs, _ = pipeline.process(data_now, t_now, t_now, allow_dropout=True)
+        r_reward, _ = pipeline.process_single(data_now, t_now, t_now, allow_dropout=False)
+        r_obs, _ = pipeline.process_single(data_now, t_now, t_now, allow_dropout=True)
 
         # Repeat calls should be consistent
-        r_reward2, _ = pipeline.process(data_now, t_now, t_now, allow_dropout=False)
-        r_obs2, _ = pipeline.process(data_now, t_now, t_now, allow_dropout=True)
+        r_reward2, _ = pipeline.process_single(data_now, t_now, t_now, allow_dropout=False)
+        r_obs2, _ = pipeline.process_single(data_now, t_now, t_now, allow_dropout=True)
 
         assert torch.allclose(r_reward, r_reward2), "Reward path not idempotent"
         assert torch.allclose(r_obs, r_obs2), "Observation path not idempotent"
@@ -1239,6 +1241,9 @@ def main():
             run_pipeline_tests(results, device, verbose)
             run_timestamp_sync_tests(results, device, verbose)
             run_curriculum_tests(results, device, verbose)
+
+            # Dual-cache regression (ticket 029 — shared-pipeline idempotency bug)
+            run_dual_cache_tests(results, device, verbose)
 
             # New feature tests
             run_per_agent_randomization_tests(results, device, verbose)

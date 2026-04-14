@@ -1,7 +1,7 @@
 {
   "project": "iris_ma6",
-  "last_updated": "2026-04-09",
-  "last_session_ticket": "017-batch-controller",
+  "last_updated": "2026-04-14",
+  "last_session_ticket": "029-delay-system-redesign",
   "features": [
     {
       "id": "controller",
@@ -15,7 +15,7 @@
       "name": "Multi-agent delay/staleness/dropout simulation",
       "status": "done",
       "spec": null,
-      "notes": "Ringbuffer-based with timestamp guarantees. Fixed calling contract: advance/query split ensures idempotent multi-call per step. Stage order: staleness→latency→FOL→dropout. Ticket-015: continuous AoI — jittered capture timestamps propagated via explicit store() timestamp arg. Ticket-018: AgentStates.zero_() for buffer reuse, eliminates ~50 GPU allocs/step. (2026-04-09)"
+      "notes": "Ringbuffer-based with timestamp guarantees. Fixed calling contract: advance/query split ensures idempotent multi-call per step. Stage order: staleness→latency→FOL→dropout. Ticket-015: continuous AoI — jittered capture timestamps propagated via explicit store() timestamp arg. Ticket-018: AgentStates.zero_() for buffer reuse, eliminates ~50 GPU allocs/step. Ticket-029: DelayPipelineV3 dual-cache advance(raw, noisy) with one shared delay realization; structurally fixes the shared-pipeline idempotency bug (reward/obs cached together on first advance). Bbox modeled as single field bboxes_2d with dual payload: raw=raycaster GT, noisy=detector-replicator output (mirrors raw when replicator disabled); one pipeline applies shared latency/staleness/dropout to both payloads. detection_pipeline_split flag removed. Regression test test_dual_cache.py locks in invariants; plot_dual_cache.py renders dual_cache_invariants.png. (2026-04-14)"
     },
     {
       "id": "cbf-safety",

@@ -1,0 +1,38 @@
+================================================================================
+DELAY PIPELINE · min_steps=0 VALIDATION
+================================================================================
+torch 2.5.1+cu118 | device=cuda
+started 2026-04-14 22:42:04
+
+================================================================================
+DelayPipelineV3 · min_steps=0 validation
+================================================================================
+device: cuda
+  ✓ 1. identity-signal lag sweep, min_steps=0
+  ✓ 2. AoI = lag * dt (timestamp buffer tracks data buffer)
+  ✓ 3. min_steps={0,2} differ only for lags <2; agree for lags ≥2
+  ✓ 4. same-step read-after-write with min_steps=0 → no delay
+  ✓ 5. deterministic with dropout=off, min_steps=0 (rerun matches)
+  ✓ 6. raw/noisy caches share timing under min_steps=0
+    lag seq:  [0, 0, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0, 0, 0]
+    ret ts:   ['0.000', '0.020', '0.020', '0.040', '0.060', '0.060', '0.080', '0.100', '0.120', '0.120', '0.140', '0.160', '0.180', '0.180', '0.200', '0.220', '0.240', '0.240', '0.260', '0.280', '0.300', '0.420', '0.440', '0.460']
+    ↑ timestamps are monotonically non-decreasing (stale holds when lag grows, jump forward when it drops).
+  ✓ 7. time-varying latency — correct x_{t - lag[t]} per step
+    lag seq: [0, 0, 0, 0, 0, 2, 2, 2]
+    ret ts:  ['0.000', '0.020', '0.040', '0.060', '0.080', '0.060', '0.080', '0.100']
+    regression: step 4→5: 0.080 → 0.060
+    ↑ returned timestamp stepped backward because the latency sample grew by more than 1 in a single step.
+  ✓ 7b. lag-jump +2 causes timestamp regression (contract check)
+    buffer max_length ≈ 9, asked lag=15 at t=31
+    returned 25.0 (a wrapped slot, not 16.0) — expected silent wrap
+  ✓ 8. lag > buffer capacity wraps silently (known contract)
+
+================================================================================
+TEST SUMMARY
+================================================================================
+Total: 9
+Passed: 9 (100.0%)
+Failed: 0 (0.0%)
+Errors: 0 (0.0%)
+================================================================================
+

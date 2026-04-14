@@ -85,6 +85,12 @@ class FieldStorage:
     ):
         """Store field data with optional noise injection.
 
+        The noisy payload is only populated when the caller actually provides
+        one (via ``noisy_data``) or requests Gaussian injection (``noise_std > 0``).
+        Fields stored without a noisy payload return ``False`` from :meth:`has_noisy`,
+        signalling to the delay pipeline that there is no separate noisy stream
+        to cache — the observation path will read the raw cache instead.
+
         Args:
             field_name: Name of the field (e.g., "agent_0.body_position_w").
             data: Data tensor of shape (num_envs, ...). Stored as ground truth.
@@ -101,14 +107,16 @@ class FieldStorage:
         # Store raw (ground truth)
         self._raw[field_name] = data.clone()
 
-        # Store noisy version
+        # Store noisy version only when caller provides noise (explicit payload
+        # or positive std). Clean-only fields leave _noisy unpopulated so the
+        # pipeline can skip the noisy cache path entirely.
         if noisy_data is not None:
             self._noisy[field_name] = noisy_data.to(self._device).clone()
         elif noise_std > 0:
             noise = torch.randn_like(data) * noise_std
             self._noisy[field_name] = data + noise
         else:
-            self._noisy[field_name] = data.clone()
+            self._noisy.pop(field_name, None)
 
         # Store timestamp
         if timestamp is None:
@@ -174,6 +182,21 @@ class FieldStorage:
             True if field exists.
         """
         return field_name in self._raw
+
+    def has_noisy(self, field_name: str) -> bool:
+        """Check if a field has a separate noisy payload.
+
+        Returns False for clean-only fields (stored without ``noise_std`` or
+        ``noisy_data``). The delay pipeline uses this to decide whether the
+        observation path needs its own cache slot.
+
+        Args:
+            field_name: Name of the field.
+
+        Returns:
+            True if a distinct noisy payload exists for this field.
+        """
+        return field_name in self._noisy
 
     def clear_field(self, field_name: str):
         """Remove a field from storage.

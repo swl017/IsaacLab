@@ -104,14 +104,14 @@ def run_tests(results: TestResults, device: torch.device):
 
         # First advance: initialize
         data1 = torch.ones(num_envs, 3, device=device) * 1.0
-        pipe.advance(data1, t, t)
+        pipe.advance(data1, None, t, t)
         out1, _ = pipe.query(allow_dropout=True)
 
         # Second advance with external mask = all True (force drop)
         t2 = t + 0.04
         data2 = torch.ones(num_envs, 3, device=device) * 99.0
         mask_all_drop = torch.ones(num_envs, dtype=torch.bool, device=device)
-        pipe.advance(data2, t2, t2, burst_dropout_mask=mask_all_drop)
+        pipe.advance(data2, None, t2, t2, burst_dropout_mask=mask_all_drop)
         out2, _ = pipe.query(allow_dropout=True)
 
         # With all-drop mask, output should hold previous data (1.0), not new data (99.0)
@@ -131,13 +131,13 @@ def run_tests(results: TestResults, device: torch.device):
 
         # First advance: initialize
         data1 = torch.ones(num_envs, 3, device=device) * 1.0
-        pipe.advance(data1, t, t)
+        pipe.advance(data1, None, t, t)
 
         # Second advance with external mask = all False (force pass)
         t2 = t + 0.04
         data2 = torch.ones(num_envs, 3, device=device) * 42.0
         mask_no_drop = torch.zeros(num_envs, dtype=torch.bool, device=device)
-        pipe.advance(data2, t2, t2, burst_dropout_mask=mask_no_drop)
+        pipe.advance(data2, None, t2, t2, burst_dropout_mask=mask_no_drop)
         out2, _ = pipe.query(allow_dropout=True)
 
         # With all-pass mask, output should be new data (42.0), overriding internal 100% drop
@@ -156,11 +156,11 @@ def run_tests(results: TestResults, device: torch.device):
         t = torch.zeros(num_envs, device=device)
 
         data1 = torch.ones(num_envs, 3, device=device) * 1.0
-        pipe.advance(data1, t, t)
+        pipe.advance(data1, None, t, t)
 
         t2 = t + 0.04
         data2 = torch.ones(num_envs, 3, device=device) * 77.0
-        pipe.advance(data2, t2, t2)  # No burst_dropout_mask
+        pipe.advance(data2, None, t2, t2)  # No burst_dropout_mask
         out2, _ = pipe.query(allow_dropout=True)
 
         # With internal 0% drop and no external mask, data should pass
@@ -179,12 +179,12 @@ def run_tests(results: TestResults, device: torch.device):
         t = torch.zeros(num_envs, device=device)
 
         data1 = torch.ones(num_envs, 3, device=device) * 1.0
-        pipe.advance(data1, t, t)
+        pipe.advance(data1, None, t, t)
 
         t2 = t + 0.04
         data2 = torch.ones(num_envs, 3, device=device) * 50.0
         mask_all_drop = torch.ones(num_envs, dtype=torch.bool, device=device)
-        pipe.advance(data2, t2, t2, burst_dropout_mask=mask_all_drop)
+        pipe.advance(data2, None, t2, t2, burst_dropout_mask=mask_all_drop)
 
         # Pre-dropout query should return new data regardless of mask
         out_no_drop, _ = pipe.query(allow_dropout=False)

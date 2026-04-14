@@ -915,3 +915,175 @@ Next:
 - Run training to verify no regression (functional correctness)
 - Benchmark with torch.cuda.Event timing to measure _apply_action speedup
 - Expected: ~15-20% wall-clock reduction per step (eliminates 2 redundant kernel launches)
+
+----------------------------------------
+2026-04-14 — Ticket 028: Gate detection-pipeline split behind a config flag
+----------------------------------------
+Done:
+- Added `detection_pipeline_split: bool = True` to `UnifiedDelayCfgV3`
+  (delay_system_v3/delay_cfg_v3.py). Default True preserves ticket-020
+  behavior; False reproduces pre-020 shared-pipeline override.
+- Added mirror field on `DelaySystemKeyParams` and wired it through
+  `create_delay_cfg_from_params()`.
+- `UnifiedDelaySystem` reads cfg flag into `self._detection_pipeline_split`;
+  `register_field()` skips creating `_ego/_other_detection_pipelines` when
+  flag is off. `get_delayed()` routes fall through to the regular pipelines
+  automatically (detection dicts empty ⇒ membership check false).
+- `_all_pipelines()`, `set_dropout_rate_by_perspective()`,
+  `set_field_delay_mode()`, `set_field_dropout_rate()` get explicit
+  no-op branches when flag is off (not just empty iteration).
+- `MultiAgentDelaySystemV3` wrapper needed no change — cfg.delay_cfg
+  forwards the flag to UnifiedDelaySystem.
+- Surfaced in `iris_ma_env6_test_cfg.delay_system_params`
+  (detection_pipeline_split=True kwarg) for runtime override.
+
+Why: diagnostic for 120k-cliff post-mortem. With flag=False, the
+observation path's `advance(noisy_data)` call hits the idempotency guard
+set by the reward path's prior `advance(raw_data)`, so the cached clean
+data is returned — reproducing the pre-ticket-020 behavior where Gaussian
+bbox noise / FP/FN / detection delay were silently overridden on the
+observation side.
+
+Files modified:
+- delay_system_v3/delay_cfg_v3.py (flag on UnifiedDelayCfgV3 and DelaySystemKeyParams)
+- delay_system_v3/delay_system_v3.py (conditional register, _all_pipelines skip, set_*_by_perspective skip)
+- iris_ma_env6_test_cfg.py (surface flag in delay_system_params)
+
+Next:
+- Teleop smoke: force set_noise_scale(1.0) with flag off → yellow overlay should match green GT.
+  With flag on → overlay should diverge. Repeat with FP/FN enabled.
+- 20k parity run (flag off, seed-matched to 2be3) — pair_valid at 16k must match 2be3.
+- 220k full run with flag off — decision criterion: pair_valid at 140k. If stays >0.75, cliff is ticket-020-induced.
+
+----------------------------------------
+2026-04-14 — Ticket 029: delay system redesign (bbox field-split + dual-cache)
+----------------------------------------
+Done:
+- Replaced ticket-020 detection-pipeline workaround with structural fix for
+  the shared-pipeline idempotency bug that caused the 120k cliff in every
+  post-3461991973 run (see post-mortem
+  doc/experiments/2026-04-14_01-23-40_mappo_rnn_torch_2695ffe1e3_revert_to_2be3.md).
+- `DelayPipelineV3.advance` now accepts `(raw_data, noisy_data, timestamp,
+  t_current)`; a single advance call populates four cache slots (raw/noisy ×
+  with/no dropout) plus two shared timestamp slots. Staleness, latency, and
+  dropout use ONE sample per step, applied to both payloads in lockstep.
+- `DelayPipelineV3.query(use_noise, allow_dropout)` selects the matching
+  cache slot. Added `process_single(data, ts, t_current, ...)` convenience
+  wrapper for clean-only callers (tests, teleop).
+- FOL maintains independent filter state per payload (`_lag_output_raw`,
+  `_lag_output_noisy`) with per-payload init flags; staleness / latency /
+  dropout use shared masks.
+- `UnifiedDelaySystem.get_delayed` reads both payloads from storage and
+  passes them into the pipeline. Detection-pipeline split machinery removed:
+  `_DETECTION_SUFFIXES`, `_ego_detection_pipelines`,
+  `_other_detection_pipelines`, `detection_pipeline_split` flag,
+  `set_dropout_rate_by_perspective`'s split-aware branch all deleted.
+- `FieldStorage` now populates `_noisy[field]` only when the caller provides
+  one (`noisy_data=…` or `noise_std > 0`). Added `has_noisy()` so the
+  delay system can route clean-only fields as `noisy_data=None`.
+- Bbox split into two physical source fields at the wrapper layer:
+  `bboxes_2d_raycaster` (geometric GT, reward path) and
+  `bboxes_2d_replicator` (detector output or raycaster fallback, obs path).
+  Both stamped at `ts_detection` at capture time (zero latency at storage);
+  delay owned by pipeline via field_overrides.
+  - `DETECTION_FIELDS` registration list updated to include both.
+  - `update_ground_truth` performs two `store()` calls, one per source.
+  - `_build_all_states` picks the right field based on `use_noise`.
+  - `get_bbox_aoi` picks the right field based on `use_noise`.
+- Config cleanup: removed `detection_pipeline_split` from
+  `UnifiedDelayCfgV3`, `MultiAgentDelayCfgV3`, `DelaySystemKeyParams`, and
+  all plumbing in `create_delay_cfg_from_params`. `field_overrides` entry
+  for `"bboxes_2d"` migrated to separate `"bboxes_2d_raycaster"` and
+  `"bboxes_2d_replicator"` entries (same cfg as baseline; divergent cfgs
+  are a future tuning concern).
+- Tests: added `delay_system_v3/tests/test_dual_cache.py` covering the six
+  core invariants (shared delay realization, idempotency no-op,
+  reward-then-obs ordering returns distinct payloads, clean-only field
+  mirroring, shared dropout mask, shape-mismatch assertion). Updated
+  existing tests to new API: `pipeline.process(...)` → `process_single(...)`
+  in all test files; `pipe.advance(data, ts, t)` →
+  `pipe.advance(data, None, ts, t)` in `test_pipeline_external_mask.py`.
+  Deleted superseded `tests/plot_detection_pipeline_split.py` (the PNG it
+  produced is retained in-tree as the bug visualization referenced by the
+  post-mortem). Hooked `run_dual_cache_tests` into the test suite.
+- Test run: 64/65 pass. The one remaining failure ("GT with noise mode
+  (use_delay=False, use_noise=True)" in test_reward_modes.py) is pre-existing
+  and unrelated to ticket 029 — the test omits a `system.set_noise_scale(1.0)`
+  call. Verified same failure is present in committed `test_result.txt` under
+  HEAD~. Deferred (not in scope of 029).
+- CONTEXT.md updated with the dual-cache invariant, new signatures, and
+  the bbox field-split contract.
+- Ticket 028 retained in-tree for the paper trail; post-mortem §8 documents
+  the resolution.
+
+Next:
+- Teleop smoke: confirm `bboxes_2d_replicator` → observation AoI overlay
+  now diverges from `bboxes_2d_raycaster` → reward AoI overlay when
+  detector replicator is enabled (noise reaches the policy).
+- Re-tune curriculum for the corrected effective difficulty: observation
+  corruption now actually reaches the policy (see post-mortem §8 note).
+  Consider moving noise/FP/FN/delay phases after base-tracking bootstrap per
+  the 5ce56e3ae8 lesson.
+- Short-term: 20k headless run to confirm training loop still boots and
+  the state-field delay path works correctly with the new dual-cache.
+- Medium-term: 220k training run to measure whether the 120k cliff shifts
+  (expected: cliff softens; curriculum timing needs re-tuning).
+
+----------------------------------------
+2026-04-14 — Ticket 029 follow-up: collapse bbox field split into dual-payload single field
+----------------------------------------
+Done:
+- Reverted the `bboxes_2d_raycaster` / `bboxes_2d_replicator` field split
+  introduced earlier in ticket 029. The two bboxes model ONE physical
+  detection event with two views; separate fields produced independent
+  latency/staleness/dropout realizations under `random` curriculum mode,
+  which is physically wrong.
+- Single field `bboxes_2d` per agent with dual payload via the storage's
+  `_raw` / `_noisy` slots:
+  - raw   = raycaster geometric GT (reward path, `use_noise=False`).
+  - noisy = detector-replicator output (obs path, `use_noise=True`).
+    Explicitly mirrors raw when the replicator is disabled
+    (`noisy_data=data.bboxes_2d`) so the obs cache slot stays populated.
+- One pipeline per perspective applies one delay realization to both
+  payloads via `_apply_staleness_pair` / `_apply_latency_pair` /
+  `_apply_dropout_pair`. Shared timestamp, shared latency draw, shared
+  dropout mask — structurally impossible to diverge.
+- Changes:
+  - `multi_agent_wrapper.DETECTION_FIELDS` → `[("bboxes_2d", None)]`.
+  - `update_ground_truth` does ONE `store("bboxes_2d", data.bboxes_2d,
+    timestamp=ts_detection, noisy_data=replicator_payload)` call.
+  - `_build_all_states` and `get_bbox_aoi` read `bboxes_2d` with
+    `use_noise=use_noise` passed through to the pipeline query.
+  - `delay_cfg_v3.create_delay_cfg_from_params` `field_overrides`
+    collapses the two entries back to `{"bboxes_2d": ego_detection_pipeline}`.
+- `plot_dual_cache.py` Panel 4 reworked. Old "two pipelines, independent
+  latency" illustration no longer represents any in-use scenario. New
+  Panel 4 shows the shared-dropout-mask invariant: under heavy dropout,
+  raw and noisy post-dropout outputs plateau jointly with shared
+  timestamps (vertical gray lines mark dropped steps; both traces hold
+  their value across each drop event together). Regenerated
+  `dual_cache_invariants.png`.
+- Docstrings cleaned up: `delay_pipeline_v3.py`, `delay_system_v3.py`,
+  `multi_agent_wrapper.update_ground_truth`, `test_dual_cache.py`.
+- Test suite: 64/65 pass. Same pre-existing `GT with noise mode` failure
+  (missing `set_noise_scale(1.0)` in test setup) — unrelated to this change.
+
+Why this matters:
+- Per-env latency is drawn from `Normal(mean, std)` at episode reset.
+  With two separate pipelines, the reward and obs paths experienced
+  DIFFERENT latency draws per env under `random` curriculum mode — the
+  obs bbox could arrive at a different sim time than the reward bbox,
+  despite modeling the same camera capture event.
+- With the collapsed single-field / dual-payload design, reward and obs
+  paths always exit the pipeline with the same `time_lags[env]` and
+  therefore the same delayed timestamp per env per step. The two views
+  differ only in content (raycaster truth vs. simulated detector output),
+  not in timing.
+
+Next:
+- No blocking work. Ticket 029 is complete.
+- Teleop smoke verification (forced `set_noise_scale(1.0)` + enabled
+  detector replicator) — yellow overlay on `bboxes_2d_replicator`-style
+  payload should diverge from the raycaster green.
+- Curriculum re-tune for the corrected effective difficulty remains the
+  outstanding training concern.
