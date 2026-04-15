@@ -54,3 +54,17 @@ class IrisMA6V1EnvCfg(IrisMA6TestEnvCfg):
         if self.enable_triangulation:
             obs_dim += 4  # tri_pos_v1 (3) + scalar_unc (1)
         self.observation_spaces = {a: obs_dim for a in self.possible_agents}
+
+        # Centralized critic state (ticket 022): world-frame, delayed, clean (no-noise).
+        # Sourced from delay_system.get_all_states_for_rewards so the critic
+        # shares the reward's state distribution exactly.
+        # Per-agent block (34D):
+        #   body_pos_w(3), body_vel_w(3), [cos psi, sin psi](2), roll(1), pitch(1),
+        #   ang_vel_b(3), lin_acc_b(3), camera_ray_w(3),
+        #   gimbal yaw/pitch/roll joint(3), combined_ang_vel_w(3),
+        #   motion_aoi(1), bbox_aoi(1), zoom(1), hfov(1), bbox(4), empty(1)
+        # Global tail (7D): tri_pos_w(3), tri_std_xyz(3), valid(1).
+        state_dim = 34 * self.num_agents
+        if self.enable_triangulation:
+            state_dim += 7
+        self.state_space = state_dim

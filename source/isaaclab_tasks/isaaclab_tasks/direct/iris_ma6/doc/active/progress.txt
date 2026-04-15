@@ -1263,3 +1263,54 @@ Behavior at level flight is IDENTICAL to the prior implementation, so
 existing training checkpoints and sysid-tuned gains should transfer
 without retuning. The divergence only appears under significant tilt,
 which is rare in the tracking task but now physically correct.
+
+----------------------------------------
+2026-04-15 — Ticket 022 follow-up: centralized critic state defined
+----------------------------------------
+Done:
+- Implemented IrisMA6V1Env._get_states() — returns the shared critic
+  state tensor (N, state_dim). Reuses the same delayed, no-noise data
+  that rewards consume: delay_system.get_all_states_for_rewards() which
+  reads the `raw` cache slot (raycaster GT bbox, un-noised motion) per
+  the ticket-029 dual-cache design. Aligns critic's state distribution
+  with the reward distribution and avoids training the critic to model
+  the actor's detector noise.
+- Schema — per-agent block (34D), world frame:
+  body_position_w(3), body_linear_velocity_w(3),
+  [cos psi, sin psi](2), roll(1), pitch(1),
+  body_angular_velocity_b(3), body_linear_acceleration_b(3),
+  camera_ray_w(3), gimbal yaw/pitch/roll joint(3),
+  body_combined_angular_velocity_w(3), motion_aoi(1), bbox_aoi(1),
+  zoom(1), effective_hfov(1), bbox(4), bbox_empty(1).
+  Global tail (7D) when triangulation enabled:
+  tri_pos_w(3), tri_std_xyz(3), valid(1). Full 3D directional
+  uncertainty (vs actor's scalar). Reuses the same
+  self._triangulation_result_obs computed during _get_observations so
+  the critic sees exactly what the actor's tri tail was derived from.
+- Totals: 2 agents + tri -> 75D; 3 agents + tri -> 109D.
+- v1_cfg.IrisMA6V1EnvCfg.__post_init__ now sets
+  self.state_space = 34 * num_agents + (7 if enable_triangulation).
+  Overrides the inherited state_space=-1 (obs-concat default).
+- Frame convention: WORLD, shared across agents. No per-agent heading
+  rotation. Natural for multi-agent centralized state — all agents
+  described in one frame. Matches spec §4.2 / §5 (critic world frame).
+- Deliberately NOT privileged: critic does not see GT target position
+  or un-delayed motion. The user's instruction was "states used in
+  reward computation: delayed but without noise". This matches the
+  reward path. If privileged critic (GT target) is wanted later, it's
+  a separate follow-up.
+
+Verification:
+- Syntax OK (ast.parse).
+- env smoke test /tmp/test_v1_env_obs.py:
+    cfg.observation_spaces = {'drone_0': 54, 'drone_1': 54}
+    critic state shape = (4, 75)  (num_envs=4, state_dim=75)
+    cfg.state_space = 75
+    all obs + state finite.
+
+Next:
+- Confirm MAPPO training loop consumes the new state correctly (when
+  state_space is a positive int, DirectMARLEnv calls _get_states();
+  skrl mappo_rnn reads it as "shared_states" from infos dict).
+- First controlled run: v1 env with new obs + new critic state, fixed
+  seeds. Compare learning curves vs _test baseline.

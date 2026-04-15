@@ -1965,6 +1965,135 @@ class IrisMA6V1Env(DirectMARLEnv):
 
         return obs
 
+    def _get_states(self) -> torch.Tensor:
+        """Shared critic state (ticket 022).
+
+        Per the CTDE design, the centralized critic sees the *same* data the
+        reward function uses: delayed (same delay realization as actor), but
+        WITHOUT the noisy-payload path — i.e., the raycaster's clean bbox and
+        the delay system's un-noised motion fields. This aligns the value
+        target distribution with the reward distribution and avoids training
+        the critic to model the actor's detector noise.
+
+        Frame: WORLD (shared across agents — no per-agent heading rotation).
+        This is the natural choice for a multi-agent centralized state.
+
+        Per-agent block (34D):
+            body_position_w (3), body_linear_velocity_w (3),
+            [cos psi, sin psi] (2), roll (1), pitch (1),
+            ang_vel_b (3), lin_acc_b (3),
+            camera_ray_w (3), gimbal yaw/pitch/roll joint (3),
+            combined_ang_vel_w (3), motion_aoi (1), bbox_aoi (1),
+            zoom (1), effective_hfov (1), bbox (4), bbox_empty (1)
+
+        Global tail (7D) when triangulation enabled:
+            tri_pos_w (3), tri_std_xyz (3), valid (1)
+            (Full 3D directional uncertainty, unlike the actor's scalar.)
+
+        Totals: 2 agents + tri -> 75D; 3 agents + tri -> 109D.
+        """
+        if self._delay_system is not None:
+            clean_states = self._delay_system.get_all_states_for_rewards(
+                ego_agent_id=self.cfg.possible_agents[0]
+            )
+        else:
+            clean_states = self._build_gt_states()
+
+        img_h, img_w = self._camera_image_shape
+        per_agent_blocks = []
+
+        for agent_id in self.cfg.possible_agents:
+            data = clean_states[agent_id].data
+
+            # Attitude decomposition: roll + pitch (world ≡ heading roll/pitch)
+            # plus continuous yaw as [cos psi, sin psi].
+            roll, pitch, yaw = euler_xyz_from_quat(data.body_orientation_w)
+            roll = wrap_to_pi(roll).unsqueeze(-1)
+            pitch = wrap_to_pi(pitch).unsqueeze(-1)
+            cos_yaw = torch.cos(yaw).unsqueeze(-1)
+            sin_yaw = torch.sin(yaw).unsqueeze(-1)
+
+            # Gimbal joints (match actor convention)
+            gimbal_yaw_j = (data.joint_positions_b[:, 1] - YAW_JOINT_OFFSET).unsqueeze(-1)
+            gimbal_pitch_j = data.joint_positions_b[:, 0:1]
+            gimbal_roll_j = data.joint_positions_b[:, 2:3]
+
+            # Unproject ray in world frame (raycaster clean path)
+            ray_w = data.camera_ray_directions_w[:, 0, :]
+
+            # Age-of-information
+            motion_aoi = (self._sim_time - data.timestamp_motion).unsqueeze(-1)
+            bbox_aoi = (self._sim_time - data.timestamp_detection).unsqueeze(-1)
+
+            # Clean bbox (raycaster path since use_noise=False in the reward pipeline)
+            bbox_pixel = data.bboxes_2d[:, 0, :]
+            bbox_empty = (bbox_pixel.abs().sum(dim=-1) < 1e-6).float().unsqueeze(-1)
+            bbox = bbox_pixel.clone()
+            bbox[:, 0] /= img_w
+            bbox[:, 1] /= img_h
+            bbox[:, 2] /= img_w
+            bbox[:, 3] /= img_h
+
+            block = torch.cat(
+                [
+                    data.body_position_w,                      # (N, 3)
+                    data.body_linear_velocity_w,               # (N, 3)
+                    cos_yaw, sin_yaw,                          # (N, 2)
+                    roll, pitch,                               # (N, 2)
+                    data.body_angular_velocity_b,              # (N, 3)
+                    data.body_linear_acceleration_b,           # (N, 3)
+                    ray_w,                                     # (N, 3)
+                    gimbal_yaw_j, gimbal_pitch_j, gimbal_roll_j,  # (N, 3)
+                    data.body_combined_angular_velocity_w,     # (N, 3)
+                    motion_aoi, bbox_aoi,                      # (N, 2)
+                    data.camera_zoom_level.unsqueeze(-1),      # (N, 1)
+                    data.camera_effective_hfov.unsqueeze(-1),  # (N, 1)
+                    bbox,                                      # (N, 4)
+                    bbox_empty,                                # (N, 1)
+                ],
+                dim=-1,
+            )
+            per_agent_blocks.append(block)
+
+        state = torch.cat(per_agent_blocks, dim=-1)
+
+        # Global triangulation tail: actor-visible estimate in world frame,
+        # with FULL 3D std (directional uncertainty, not scalar).
+        if self.cfg.enable_triangulation:
+            # Reuse the obs-path triangulation result computed this step;
+            # it was assigned to self._triangulation_result_obs by _get_observations.
+            result = getattr(self, "_triangulation_result_obs", None)
+            if result is None:
+                # Defensive fallback: compute from the same clean reward states.
+                result = self._compute_triangulation(
+                    states=clean_states, use_gt_target=False
+                )
+
+            is_valid = result.is_valid[:, 0]
+            tri_pos_w = result.position[:, 0, :]
+            tri_pos_w = torch.where(
+                is_valid.unsqueeze(-1).expand(-1, 3),
+                tri_pos_w,
+                torch.zeros_like(tri_pos_w),
+            )
+
+            cov = result.covariance[:, 0, :, :]
+            cov_diag = torch.diagonal(cov, dim1=-2, dim2=-1)
+            cov_diag_safe = torch.where(
+                torch.isnan(cov_diag), torch.ones_like(cov_diag), cov_diag
+            )
+            cov_diag_safe = torch.clamp(cov_diag_safe, min=1e-12)
+            tri_std_xyz = torch.where(
+                is_valid.unsqueeze(-1).expand(-1, 3),
+                torch.sqrt(cov_diag_safe),
+                torch.full_like(cov_diag_safe, -1.0),
+            )
+
+            valid_flag = is_valid.float().unsqueeze(-1)
+            state = torch.cat([state, tri_pos_w, tri_std_xyz, valid_flag], dim=-1)
+
+        return state
+
     def _get_dones(self) -> tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         """Get termination and truncation flags for all agents.
 

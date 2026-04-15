@@ -1430,7 +1430,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
             # Accumulate per-dimension squared deltas for RMS logging
             self._action_delta_sq_acc[agent_id] += action_delta_per_dim
 
-            # ---- BBox rewards (using delayed/observed state) ----
+            # ---- BBox rewards (using delayed state without noise) ----
             bbox_center_raw = delayed_state.data.bboxes_2d[:, 0, 0:2]  # [N, 2] pixel center
             bbox_size_raw = delayed_state.data.bboxes_2d[:, 0, 2:4]    # [N, 2] pixel w,h
             bbox_raw = delayed_state.data.bboxes_2d[:, 0, :]  # [N, 4]
