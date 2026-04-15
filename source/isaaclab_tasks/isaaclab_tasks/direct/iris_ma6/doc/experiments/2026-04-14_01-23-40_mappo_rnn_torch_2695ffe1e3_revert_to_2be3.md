@@ -147,7 +147,7 @@ Sigma stagnation makes the policy brittle to any real observation corruption. Ti
 ## 8. Resolution (ticket 029)
 
 The diagnostic path (ticket 028) was replaced by a structural fix landed in
-**ticket 029** (`doc/active/ticket/029-delay-system-redesign/`):
+**ticket 029** (`doc/active/ticket/029-delay-system-redesign-DONE/`):
 
 1. `DelayPipelineV3.advance` now accepts a `(raw, noisy)` payload pair and
    maintains four cache slots (raw/noisy × with/no dropout) plus two shared

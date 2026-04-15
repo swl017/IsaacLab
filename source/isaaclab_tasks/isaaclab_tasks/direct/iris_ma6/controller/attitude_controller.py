@@ -12,8 +12,12 @@ Frame Convention:
 - Body: FLU (Forward-Left-Up)
 - Quaternion: wxyz (scalar first)
 
-Control Law (P-only):
-    rate_setpoint = -Kp * attitude_error + yaw_rate_feedforward
+Control Law (P-only, matches PX4 mc_att_control):
+    rate_setpoint = -Kp * attitude_error + R^T @ [0, 0, yaw_rate_world] * yaw_rate_des
+
+`yaw_rate_des` is a WORLD-frame angular rate about the world z-axis (psi_dot).
+It is projected into the body frame via the world z-axis expressed in the body
+frame before being added to the body-rate setpoint.
 
 The rate setpoint is then fed to the inner rate controller (RateController)
 which computes actual torque commands via PID.
@@ -22,7 +26,7 @@ which computes actual torque commands via PID.
 from __future__ import annotations
 
 import torch
-from isaaclab.utils.math import quat_mul, quat_inv
+from isaaclab.utils.math import quat_mul, quat_inv, quat_rotate_inverse
 
 from .attitude_controller_cfg import AttitudeControllerCfg
 
@@ -109,7 +113,8 @@ class AttitudeController:
 
         Args:
             q_des: (N, 4) desired attitude quaternion (wxyz).
-            yaw_rate_des: (N,) desired yaw rate [rad/s].
+            yaw_rate_des: (N,) desired yaw rate [rad/s]. WORLD-frame psi_dot
+                (rotation about world z-axis), matching PX4's yawspeed_setpoint.
             q_current: (N, 4) current attitude quaternion (wxyz).
 
         Returns:
@@ -118,14 +123,24 @@ class AttitudeController:
         # Compute attitude error
         attitude_error = self.compute_attitude_error(q_des, q_current)
 
-        # P control law: rate_sp = -Kp * att_err
+        # P control law: rate_sp = -Kp * att_err  (body-frame rate setpoint)
         rate_setpoint = -self._Kp_att * attitude_error
 
-        # Add yaw rate feedforward
-        rate_setpoint[:, 2] = rate_setpoint[:, 2] + yaw_rate_des
+        # Yaw rate feedforward (PX4 convention: yaw_rate_des is WORLD-frame psi_dot,
+        # i.e. rotation about the world z-axis). Project the world z-axis into the
+        # body frame and scale by yaw_rate_des, then add as a 3D body-rate vector.
+        # Matches PX4 AttitudeControl.cpp:
+        #     rate_setpoint += q.inversed().dcm_z() * _yawspeed_setpoint
+        # (q.inversed().dcm_z() == world z-axis expressed in the body frame).
+        world_z = torch.zeros_like(rate_setpoint)
+        world_z[:, 2] = 1.0
+        world_z_in_body = quat_rotate_inverse(q_current, world_z)  # (N, 3)
+        rate_setpoint = rate_setpoint + world_z_in_body * yaw_rate_des.unsqueeze(-1)
 
-        # Apply yaw weight (deprioritize yaw when roll/pitch error is large)
-        # This helps prevent yaw from interfering with attitude recovery
+        # Apply yaw weight (deprioritize yaw when roll/pitch error is large).
+        # At level flight world_z_in_body ≈ [0, 0, 1], so this is identical to the
+        # previous behavior; under tilt it scales the body-z component of the
+        # combined P + world-yaw feedforward, which is the direct analogue.
         roll_pitch_error_mag = torch.norm(attitude_error[:, :2], dim=-1)
         yaw_scale = torch.clamp(1.0 - roll_pitch_error_mag / 0.5, min=self._yaw_weight, max=1.0)
         rate_setpoint[:, 2] = rate_setpoint[:, 2] * yaw_scale

@@ -83,7 +83,7 @@ class LatencyCfg:
     )
     """Distribution for latency values (in seconds)."""
 
-    min_steps: int = 0
+    min_steps: int = 2
     """Minimum delay in simulation steps.
 
     This handles CircularBuffer warmup - the buffer needs at least 2 steps

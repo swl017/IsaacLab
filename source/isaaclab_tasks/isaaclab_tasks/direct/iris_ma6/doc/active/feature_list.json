@@ -1,7 +1,7 @@
 {
   "project": "iris_ma6",
-  "last_updated": "2026-04-14",
-  "last_session_ticket": "029-delay-system-redesign",
+  "last_updated": "2026-04-15",
+  "last_session_ticket": "030-v1-observation-integration",
   "features": [
     {
       "id": "controller",
@@ -85,14 +85,14 @@
       "name": "Full environment integration and training",
       "status": "in_progress",
       "spec": "doc/iris_ma6_env_spec.md",
-      "notes": "Obs: 31D ego (pos, vel, rpy, ang_vel_b, lin_acc_b, gimbal joints, ray_dir_w, combined_ang_vel_w, bbox_aoi, zoom, effective_hfov, bbox) + 16D*(N-1) inter-agent [+6D tri]. Ticket-012: added effective HFOV (1D, radians) to ego obs — physical quantity, deployment-ready from camera calibration (2026-04-09)"
+      "notes": "Obs: 31D ego (pos, vel, rpy, ang_vel_b, lin_acc_b, gimbal joints, ray_dir_w, combined_ang_vel_w, bbox_aoi, zoom, effective_hfov, bbox) + 16D*(N-1) inter-agent [+6D tri]. Ticket-012: added effective HFOV (1D, radians) to ego obs — physical quantity, deployment-ready from camera calibration (2026-04-09). Ticket-030: registered heading-frame v1 env as separate gym task (`Isaac-Iris-MA6-Direct-V1-v0`) and wired experiment/eval task selection so short A/B validation can target baseline vs v1 without code edits. (2026-04-15)"
     },
     {
       "id": "experiments",
       "name": "Experiment registry, training runners, and evaluation pipeline",
       "status": "done",
       "spec": "doc/experiments_spec.md",
-      "notes": "42 experiments (A1/A3/A4/A5/A6/A7/baselines/sweeps), 4 suites, metric tracker with CBF metrics, greedy baseline with gimbal tracking. Ported from iris_ma5, dropped MLP path. (2026-03-23)"
+      "notes": "42 experiments (A1/A3/A4/A5/A6/A7/baselines/sweeps), 4 suites, metric tracker with CBF metrics, greedy baseline with gimbal tracking. Ported from iris_ma5, dropped MLP path. Ticket-030: ExperimentCfg now carries a `task` field; run/eval resolve task precedence as CLI `--task` > experiment task > default baseline task. Added `validation_obs_v1_short` for short heading-frame A/B validation. (2026-04-15)"
     },
     {
       "id": "controller-tuning",

@@ -1087,3 +1087,179 @@ Next:
   payload should diverge from the raycaster green.
 - Curriculum re-tune for the corrected effective difficulty remains the
   outstanding training concern.
+
+----------------------------------------
+2026-04-14 — Ticket 022: observation redesign (heading frame) — Q phase
+----------------------------------------
+Done:
+- Spec finalized at doc/observation_redesign_spec.md (ticket 022). Final
+  actor layout: 31D ego + 19D per other + 4D tri tail = 54D for 2 agents.
+  Frame conventions: World (_w), Heading/Vehicle-1 (_v1, yaw-only rotation
+  of world), Body (_b, gyro/accel native), Joint (_j, raw gimbal joint
+  angles). Literature survey archived at
+  doc/active/ticket/022-observation-redesign/literature_survey.md.
+- Created iris_ma_env6_v1.py and iris_ma_env6_v1_cfg.py as the v1 env
+  pair (copy-on-write from _test). v1 is the target for this ticket;
+  _test remains the stable baseline for comparison runs.
+- Rewrote _get_observations() in v1.py — both delay and GT paths:
+  - Ego (31D): vel_v1, [roll, pitch], [cos yaw, sin yaw] (continuous,
+    no wrap), body ω_b/a_b (IMU native), ray_v1 (unprojection ray in
+    heading frame), gimbal yaw+pitch+roll joint angles, combined_ang_vel_w,
+    motion AoI + bbox AoI (separate staleness channels), zoom,
+    effective HFOV, bbox (4), bbox_empty.
+  - Inter-agent (19D per other): ego-heading-frame Δpos/Δvel/other_ray,
+    world combined_ang_vel, 3 rotation-invariant geometry features
+    (convergence angle α_conv, baseline magnitude, baseline-ray angle
+    α_base) matching the FIM reward objective, zoom, bbox_empty,
+    data_age, bbox_age.
+  - Tri tail (4D): per-agent heading-frame relative triangulated position
+    + scalar uncertainty √trace(Σ) (rotation-invariant). Each agent
+    rotates the world-frame tri position into its own heading frame
+    using yaw_quat(ego_quat_w) + quat_rotate_inverse.
+- v1_cfg.IrisMA6V1EnvCfg inherits from IrisMA6TestEnvCfg, overrides
+  __post_init__ with obs_dim = 31 + 19*(N-1) + 4 (when triangulation).
+  Reuses all other config (scene, delay, DR, curriculum, rewards) so the
+  only A/B-testable change is the observation space.
+- Renamed class IrisMA6TestEnv → IrisMA6V1Env in v1.py. Updated import
+  to use v1_cfg.IrisMA6V1EnvCfg.
+- Smoke tests (AppLauncher-guarded, headless):
+  - /tmp/test_v1_obs_dim.py: cfg.observation_spaces = 54 for 2 agents +
+    triangulation (31 + 19 + 4 = 54). OK.
+  - /tmp/test_v1_env_obs.py: full env instantiation (4 envs),
+    env.reset() + env.step(zero actions) + _get_observations().
+    drone_0/drone_1 shape = (4, 54), all finite. OK.
+
+Frame transform helpers: yaw_quat + quat_rotate_inverse from
+isaaclab.utils.math (already imported in v1.py, no new utility module
+needed).
+
+Not in scope / deferred:
+- Reward structure (ticket scope: DO NOT change)
+- Critic-specific state path (spec §4.2 notes 6D world tail for critic;
+  ticket scope defers to a later ticket)
+- SKRL config adjustment — not needed: env_cfg's observation_spaces is
+  the source of truth; no hard-coded dim in skrl_mappo_rnn_cfg.yaml
+- Environment registration under the iris_ma6 __init__.py — no gym
+  registry entry added for v1 yet; will add alongside an experiment
+  registry entry in the next session (R phase)
+
+Next:
+- R phase: register Isaac-Gym task id for v1 env + cfg in __init__.py;
+  add an entry in experiments/registry so training scripts can select it.
+- I phase: headless training run (20k–50k steps) to confirm learning
+  signal with heading-frame obs; compare against _test baseline.
+- Follow-up: consider separate critic state path (ticket scope 'DO NOT
+  change critic obs') — revisit after seeing whether the shared 4D tail
+  hurts critic value estimation.
+
+----------------------------------------
+2026-04-15 — Ticket 030: v1 observation integration + short A/B validation
+----------------------------------------
+Done:
+- Registered `Isaac-Iris-MA6-Direct-V1-v0` in `iris_ma6/__init__.py`,
+  pointing at `iris_ma_env6_v1:IrisMA6V1Env` and
+  `iris_ma_env6_v1_cfg:IrisMA6V1EnvCfg`. RL config entry points remain
+  identical to the `_test` task so only the env/cfg pair changes.
+- Extended `experiments/experiment_cfg.py` with `ExperimentCfg.task`
+  (default: `Isaac-Iris-MA6-Direct-Test-v0`) so task selection is part
+  of the registered experiment definition instead of only CLI state.
+- Updated `experiments/run_experiment.py` and `experiments/evaluate.py`
+  task resolution precedence to:
+  CLI `--task` > `ExperimentCfg.task` > baseline default task.
+  This resolution happens before `@hydra_task_config(...)` and before
+  `gym.make(...)`, so Hydra and env construction both see the same task.
+- Added `validation_obs_v1_short` experiment in
+  `experiments/experiment_registry.py`:
+  - group: `validation`
+  - task: `Isaac-Iris-MA6-Direct-V1-v0`
+  - total_timesteps: 20000
+  - no additional env overrides (v1 cfg is the only intended change)
+- Preserved existing experiments by leaving their task implicit; they
+  continue to resolve to `Isaac-Iris-MA6-Direct-Test-v0`.
+
+Validation protocol for the next run:
+- Baseline: existing experiment/task on `Isaac-Iris-MA6-Direct-Test-v0`
+- V1: `validation_obs_v1_short` on `Isaac-Iris-MA6-Direct-V1-v0`
+- Keep seed, `num_envs`, and agent config fixed; compare only early-signal
+  metrics (obs shape, finiteness, bbox metrics, pair-valid metrics).
+
+Next:
+- Run static import / gym registration checks for both task IDs.
+- Run a headless smoke launch for baseline and `validation_obs_v1_short`.
+- If both launch cleanly, inspect early metrics only; do not make
+  superiority claims until longer comparison runs exist.
+- Running now: `2026-04-15_00-39-46_validation_obs_v1_short_087be7697c_seed42`
+  (`validation_obs_v1_short`, seed 42).
+
+----------------------------------------
+2026-04-15 — Ticket 022 follow-up: action-frame consistency + PX4 yaw_rate finding
+----------------------------------------
+Done:
+- Action frame for linear velocity: v_cmd[0:3] is now interpreted as
+  HEADING (vehicle-1) frame, matching obs vel_v1. Rotation heading->world
+  happens in _pre_physics_step using yaw_quat(root_quat_w) +
+  quat_rotate. cmd_vel[:, :, 0:3] remains semantically world-frame for
+  downstream consumers (DroneController + CBF compute_training_penalty),
+  so no changes needed at consumer sites.
+- Removed broken placeholder `v_cmd_w_batch = R * v_cmd_v1_batch` from
+  _apply_action. Renamed v_cmd_v1_batch -> v_cmd_w_batch (now correctly
+  describes world-frame content).
+- Smoke test: AppLauncher-guarded env reset+step+_get_observations with
+  the new rotation — drone_0/drone_1 obs shape (4, 54), all finite.
+- Frame audit completed: every obs/action channel has a documented,
+  consistent frame. Only remaining divergence is yaw_rate (see below).
+
+Open question raised: PX4 yaw_rate convention mismatch
+- PX4 AttitudeControl.cpp:94-101 treats `yawspeed_setpoint` as
+  WORLD-frame psi_dot (rotation about world z-axis), projecting into
+  body via R^T @ [0, 0, yaw_rate] = q.inversed().dcm_z() * _yawspeed_sp.
+- iris_ma6 attitude_controller.py:125 adds yaw_rate_des directly to
+  rate_setpoint[:, 2] (body z component) — treats it as body omega_z.
+- These agree only for roll = pitch = 0. For aggressive tilt they
+  diverge by cos(tilt) plus off-axis coupling. sysid_replicator would
+  not have caught this (PX4 SITL CSVs are near-level).
+- Decision pending from user: (1) fix attitude_controller.py to match
+  PX4 (project world-z yaw rate into body, most correct, likely no
+  re-tune needed), or (2) keep body omega_z and document the divergence.
+
+Next:
+- Await user decision on yaw_rate semantics.
+- If (1): patch attitude_controller.py to use quat_rotate_inverse of
+  world-z by current body quaternion; re-run sysid smoke to confirm
+  near-level tracking unchanged.
+- If (2): add a note in the controller docstring + spec.
+
+----------------------------------------
+2026-04-15 — Ticket 022 follow-up: attitude_controller.py PX4-aligned yaw_rate
+----------------------------------------
+Done:
+- Patched controller/attitude_controller.py to match PX4's yaw_rate
+  semantics. `yaw_rate_des` now interpreted as WORLD-frame psi_dot
+  (rotation about world z-axis), matching PX4 mc_att_control
+  AttitudeControl.cpp:94-101:
+      rate_setpoint += q.inversed().dcm_z() * _yawspeed_setpoint
+  Implementation:
+      world_z = [0, 0, 1] (world)
+      world_z_in_body = quat_rotate_inverse(q_current, world_z)
+      rate_setpoint += world_z_in_body * yaw_rate_des
+  yaw_weight (existing ad-hoc "deprioritize yaw under attitude error"
+  feature) preserved, now scales the body-z component of the combined
+  P + world-yaw FF rate setpoint.
+- Imports: added quat_rotate_inverse to
+  controller/attitude_controller.py.
+- Docstrings updated: module-level and compute_control's yaw_rate_des
+  parameter doc both now state "WORLD-frame psi_dot, matches PX4
+  yawspeed_setpoint".
+- Sanity test (/tmp/test_yaw_rate_frame.py):
+  - Level flight (q=identity): yaw_rate_des = [0.5, 1.0, -0.3] →
+    rate_sp = [[0,0,0.5], [0,0,1.0], [0,0,-0.3]]. Pure body-z.
+    Identical to previous body-frame implementation at level flight.
+  - Pitch +90°: yaw_rate_des projects to body -x (world_z_in_body =
+    [-1, 0, 0]). Matches expected physics.
+- Env smoke test (/tmp/test_v1_env_obs.py): obs shape (4, 54), all
+  finite, no regression.
+
+Behavior at level flight is IDENTICAL to the prior implementation, so
+existing training checkpoints and sysid-tuned gains should transfer
+without retuning. The divergence only appears under significant tilt,
+which is rare in the tracking task but now physically correct.

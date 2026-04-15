@@ -25,12 +25,15 @@ import subprocess
 import sys
 import os
 
+sys.path.insert(0, os.path.dirname(__file__))
+from experiment_registry import get_experiment
+
 # Parse experiment-specific args before AppLauncher
 parser = argparse.ArgumentParser(description="Run a named experiment from the iris_ma6 registry.")
 parser.add_argument("--experiment", type=str, default=None, help="Experiment name from registry")
 parser.add_argument("--seed", type=int, default=None, help="Override seed (else uses experiment default)")
 parser.add_argument("--num_envs", type=int, default=None, help="Override num_envs")
-parser.add_argument("--task", type=str, default="Isaac-Iris-MA6-Direct-Test-v0", help="Task name")
+parser.add_argument("--task", type=str, default=None, help="Task name (overrides experiment task)")
 parser.add_argument("--headless", action="store_true", default=True)
 parser.add_argument("--checkpoint", type=str, default=None,
                     help="Path to checkpoint file to resume training from")
@@ -39,8 +42,7 @@ args_cli, hydra_args = parser.parse_known_args()
 
 # Handle --list before AppLauncher
 if args_cli.list:
-    sys.path.insert(0, os.path.dirname(__file__))
-    from experiment_registry import list_experiments, list_suites, get_experiment
+    from experiment_registry import list_experiments, list_suites
     print("\n=== Registered Experiments ===")
     for name in list_experiments():
         exp = get_experiment(name)
@@ -52,6 +54,14 @@ if args_cli.list:
 
 if args_cli.experiment is None:
     parser.error("--experiment is required (or use --list)")
+
+_selected_experiment = get_experiment(args_cli.experiment) if not args_cli.list else None
+_resolved_task = (
+    args_cli.task
+    if args_cli.task is not None
+    else (_selected_experiment.task if _selected_experiment is not None else "Isaac-Iris-MA6-Direct-Test-v0")
+)
+args_cli.task = _resolved_task
 
 sys.argv = [sys.argv[0]] + hydra_args
 
@@ -305,11 +315,12 @@ def _train_rnn(env, possible_agents, agent_cfg, exp_cfg, seed, log_dir, env_cfg,
 @hydra_task_config(args_cli.task, "skrl_mappo_rnn_cfg_entry_point")
 def main(env_cfg, agent_cfg: dict):
     """Run a named experiment."""
-    exp_cfg = get_experiment(args_cli.experiment)
+    exp_cfg = _selected_experiment
     print(f"\n{'='*80}")
     print(f"[EXPERIMENT] Name:        {exp_cfg.name}")
     print(f"[EXPERIMENT] Group:       {exp_cfg.group}")
     print(f"[EXPERIMENT] Description: {exp_cfg.description}")
+    print(f"[EXPERIMENT] Task:        {args_cli.task}")
     print(f"{'='*80}\n")
 
     if exp_cfg.env_overrides:

@@ -5,6 +5,32 @@ Unified multi-agent communication latency simulation with staleness tracking,
 dropout modeling, and ringbuffer-based state storage. Simulates realistic
 sensor/communication delays for sim-to-real transfer.
 
+## ⚠ Known footgun — `LatencyCfg.min_steps ≥ 2`
+
+`LatencyCfg.min_steps` **must stay ≥ 2**. Setting it to `0` crashes training
+from step 0, even though the latency stage is short-circuited in
+`mode="none"`. B1 bisect (`bisect/min_steps` branch) collapsed at 4k:
+reward −6265, pair_valid 0.03, sigma at the 2.0 ceiling, tracking_lost 0.999.
+The proximate mechanism is RNG-consumption drift at sampler / buffer init
+(buffer depth and clamped step values differ between 0 and 2), which lands
+episode-init randomization on a trajectory the policy cannot recover from.
+
+Do **not** use `min_steps=0` to get zero latency. Use `set_delay_mode("none")`
+instead — that bypasses the latency stage end-to-end.
+
+**Curriculum-forgetting caveat**: flipping between `mode="none"` (pass-through)
+and `mode="fixed"/"random"` (latency active) causes a discontinuous jump in
+observation semantics that the policy cannot smoothly adapt to — it often
+forgets the no-latency setup when latency turns on. See the 120k-cliff
+post-mortem (`doc/experiments/2026-04-14_01-23-40_mappo_rnn_torch_2695ffe1e3_revert_to_2be3.md`)
+for the failure mode. The robust fix is to introduce latency gradually from
+step 0 with a non-zero `min_steps` floor — delayed channel exists but small,
+not absent — instead of flipping it on mid-curriculum. Curriculum re-tuning
+for this is a future-ticket (030) concern.
+
+See also the bisect writeup
+[`doc/experiments/2026-04-15_bisect_min_steps_vs_ticket029.md`](../doc/experiments/2026-04-15_bisect_min_steps_vs_ticket029.md).
+
 ## Inputs
 - Ground-truth agent states per timestep:
   - Position `(N, A, 3)`, velocity `(N, A, 3)`, orientation `(N, A, 4)` (wxyz)

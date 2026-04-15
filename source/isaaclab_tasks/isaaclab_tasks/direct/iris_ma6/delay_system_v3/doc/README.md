@@ -2,6 +2,39 @@
 
 A simplified, unified delay system with configurable per-step/per-episode sampling and guaranteed timestamp-data synchronization.
 
+## ⚠ Known footgun: `LatencyCfg.min_steps`
+
+`LatencyCfg.min_steps` **must stay ≥ 2**. Setting it to `0` destroys training
+even in the `mode="none"` curriculum window where the latency stage is
+short-circuited. Empirically, `min_steps=0` crashed a 50k-step bisect run
+(`bisect/min_steps` — reward −6265 at 40k, pair_valid 0.03, sigma at the
+2.0 ceiling; see
+[`doc/experiments/2026-04-15_bisect_min_steps_vs_ticket029.md`](../../doc/experiments/2026-04-15_bisect_min_steps_vs_ticket029.md)).
+The proximate mechanism is RNG-consumption drift at sampler / buffer init
+(buffer depth and sampled-then-clamped step values differ between
+`min_steps=0` and `min_steps=2` even when the latency stage itself is
+bypassed), which lands episode-init randomization on a trajectory the
+policy cannot recover from.
+
+**Do not use `min_steps=0` to get "zero latency"** — even if the
+`_apply_latency` read-after-write semantics are correct in isolation
+(validated in `tests/test_min_steps_zero.py`). If you need pass-through,
+call `set_delay_mode("none")` instead; that bypasses the latency stage
+end-to-end.
+
+### Curriculum-forgetting caveat
+
+Using `mode="none"` for early curriculum and only later switching to
+`fixed`/`random` creates a second hazard: the policy learned in `"none"`
+mode has never encountered latency, and may catastrophically forget its
+no-latency behavior (or simply fail to adapt) when the mode transition
+fires. This is what the 120k-cliff in the post-mortem
+(`2026-04-14_01-23-40_mappo_rnn_torch_2695ffe1e3_revert_to_2be3.md`)
+captured. The long-term fix is to introduce latency gradually from step 0
+with a non-zero `min_steps` floor (so the delayed channel exists but is
+small, not absent), rather than flipping between "no latency at all" and
+"full latency". Curriculum re-tuning for this is ticket 030 territory.
+
 ## Key Features
 
 ### 1. Unified Architecture

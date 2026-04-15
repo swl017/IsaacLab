@@ -20,7 +20,10 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
-from .experiment_cfg import ExperimentCfg, ExperimentSuiteCfg
+try:
+    from .experiment_cfg import ExperimentCfg, ExperimentSuiteCfg
+except ImportError:
+    from experiment_cfg import ExperimentCfg, ExperimentSuiteCfg
 
 # ===========================================================================
 # Global registries
@@ -457,6 +460,15 @@ register_experiment(ExperimentCfg(
         "enable_triangulation": False,
         "triangulation_reward_scale": 0.0,
     },
+))
+
+register_experiment(ExperimentCfg(
+    name="validation_obs_v1_short",
+    description="Short A/B validation run for heading-frame v1 observations",
+    group="validation",
+    task="Isaac-Iris-MA6-Direct-V1-v0",
+    total_timesteps=20000,
+    env_overrides={},
 ))
 
 

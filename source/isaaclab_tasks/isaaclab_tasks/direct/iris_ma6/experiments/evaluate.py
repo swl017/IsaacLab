@@ -42,13 +42,18 @@ Usage examples:
 import argparse
 import json
 import sys
+import os
+
+sys.path.insert(0, os.path.dirname(__file__))
+from experiment_registry import get_experiment
 
 parser = argparse.ArgumentParser(description="Evaluate trained policy with paper metrics (iris_ma6).")
 parser.add_argument("--experiment", type=str, required=True, help="Experiment name from registry")
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to trained checkpoint (.pt)")
 parser.add_argument("--num_episodes", type=int, default=1, help="Episodes per env")
 parser.add_argument("--num_envs", type=int, default=4096, help="Number of parallel eval envs")
-parser.add_argument("--task", type=str, default="Isaac-Iris-MA6-Direct-Test-v0")
+parser.add_argument("--task", type=str, default=None,
+                    help="Task name (overrides experiment task)")
 parser.add_argument("--output", type=str, default=None, help="Output JSON path")
 parser.add_argument("--headless", action="store_true", default=False)
 parser.add_argument("--enable_cameras", action="store_true", default=False)
@@ -90,6 +95,14 @@ parser.add_argument("--video-resolution", type=int, nargs=2, default=[1920, 1080
                     metavar=("WIDTH", "HEIGHT"), help="Video resolution")
 args_cli, hydra_args = parser.parse_known_args()
 
+_selected_experiment = get_experiment(args_cli.experiment)
+_resolved_task = (
+    args_cli.task
+    if args_cli.task is not None
+    else _selected_experiment.task
+)
+args_cli.task = _resolved_task
+
 sys.argv = [sys.argv[0]] + hydra_args
 
 from isaaclab.app import AppLauncher
@@ -117,7 +130,6 @@ simulation_app = app_launcher.app
 
 """Rest follows after Isaac Sim is initialized."""
 
-import os
 import torch
 import gymnasium as gym
 import numpy as np
@@ -477,8 +489,9 @@ def _load_rnn_policy(checkpoint_path, env, agent_cfg, possible_agents, policy_co
 @hydra_task_config(args_cli.task, "skrl_mappo_rnn_cfg_entry_point")
 def main(env_cfg, agent_cfg: dict):
     """Evaluate a trained policy."""
-    exp_cfg = get_experiment(args_cli.experiment)
+    exp_cfg = _selected_experiment
     print(f"[EVAL] Experiment: {exp_cfg.name} — {exp_cfg.description}")
+    print(f"[EVAL] Task: {args_cli.task}")
 
     if args_cli.output is None:
         from datetime import datetime

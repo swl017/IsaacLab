@@ -84,7 +84,7 @@ agent:
   # Experiment tracking
   experiment:
     directory: iris_ma6
-    experiment_name: "31d314bd69_revert_to_2be3"
+    experiment_name: "087be7697c_revert_to_2be3"
     write_interval: auto
     checkpoint_interval: auto
     store_separately: false

@@ -32,6 +32,9 @@ class ExperimentCfg:
     group: str = ""
     """Experiment group (e.g., 'A1', 'A3', 'A5', 'baseline', 'sweep')."""
 
+    task: str = "Isaac-Iris-MA6-Direct-Test-v0"
+    """Gym task ID for this experiment."""
+
     # Environment overrides (applied to IrisMA6TestEnvCfg)
     env_overrides: Dict[str, Any] = field(default_factory=dict)
     """Dictionary of dotted-path overrides for IrisMA6TestEnvCfg.

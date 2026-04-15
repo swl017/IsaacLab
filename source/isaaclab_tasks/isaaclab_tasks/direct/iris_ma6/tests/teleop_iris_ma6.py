@@ -521,7 +521,7 @@ def main():
         env_cfg.debug_lock_gimbal_to_target = True
         print("[INFO] Gimbal locked to target (debug_lock_gimbal_to_target=True)")
     env_cfg.use_debug_initial_step = True
-    env_cfg.debug_initial_step = 400000
+    env_cfg.debug_initial_step = 10000
 
     # Detector replicator uses hardcoded defaults from NoiseModelParams dataclass
     # (calibrated from experiments/calibrate_detector.py, no JSON loading needed)
