@@ -1369,31 +1369,31 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self._detection_stats["pair_valid_count"] += (num_valid_detections >= 2).float()
 
         # Compute triangulation for all active task reward levels
-        if self.cfg.enable_triangulation:
-            task_level = self.cfg.task_reward_level
+        # (reward-only; obs tail is gated separately by cfg.enable_triangulation)
+        task_level = self.cfg.task_reward_level
 
-            # Level 1 (FIM): covariance at GT target position
-            self._triangulation_result_gt = self._compute_triangulation(
-                states=reward_states, use_gt_target=True
+        # Level 1 (FIM): covariance at GT target position
+        self._triangulation_result_gt = self._compute_triangulation(
+            states=reward_states, use_gt_target=True
+        )
+
+        # Level 2 (GT-anchored estimation error): triangulate with GT drone positions
+        if task_level >= 2 or self.cfg.curriculum_task_levels:
+            gt_states = self._build_gt_states()
+            self._tri_result_l2 = self._compute_triangulation(
+                states=gt_states, use_gt_target=False
             )
+        else:
+            self._tri_result_l2 = None
 
-            # Level 2 (GT-anchored estimation error): triangulate with GT drone positions
-            if task_level >= 2 or self.cfg.curriculum_task_levels:
-                gt_states = self._build_gt_states()
-                self._tri_result_l2 = self._compute_triangulation(
-                    states=gt_states, use_gt_target=False
-                )
-            else:
-                self._tri_result_l2 = None
-
-            # Level 3 (E2E estimation error): triangulate with delayed drone positions
-            if task_level >= 3 or self.cfg.curriculum_task_levels:
-                delayed_states_e2e = self._get_delayed_states_for_e2e()
-                self._tri_result_l3 = self._compute_triangulation(
-                    states=delayed_states_e2e, use_gt_target=False
-                )
-            else:
-                self._tri_result_l3 = None
+        # Level 3 (E2E estimation error): triangulate with delayed drone positions
+        if task_level >= 3 or self.cfg.curriculum_task_levels:
+            delayed_states_e2e = self._get_delayed_states_for_e2e()
+            self._tri_result_l3 = self._compute_triangulation(
+                states=delayed_states_e2e, use_gt_target=False
+            )
+        else:
+            self._tri_result_l3 = None
 
         # Stack GT positions for CBF computation: (E, N, 3)
         gt_positions = torch.stack(
@@ -1452,7 +1452,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
             bbox_size_mapped = torch.exp(-torch.abs(bbox_area - 0.2)) * bbox_valid.float()
 
             # ---- Triangulation / task reward (3 switchable levels) ----
-            if self.cfg.enable_triangulation and self._triangulation_result_gt is not None:
+            if self._triangulation_result_gt is not None:
                 task_level = self.cfg.task_reward_level
 
                 # Level 1: FIM (always computed for logging/curriculum)
@@ -2417,7 +2417,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
         # Draw covariance ellipsoids for triangulation uncertainty
         # GT path: center on actual target position (not midpoint triangulation)
         # Covariance is evaluated at GT position, so ellipsoid shows uncertainty there
-        if self.cfg.enable_triangulation and self._triangulation_result_gt is not None:
+        if self._triangulation_result_gt is not None:
             result = self._triangulation_result_gt
             self._visualization.update_covariance_ellipsoids(
                 translations=self._target_pos_w,  # GT target position — stable

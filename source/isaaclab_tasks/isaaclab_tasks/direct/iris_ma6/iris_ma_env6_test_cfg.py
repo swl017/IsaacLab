@@ -385,8 +385,10 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     triangulation: TriangulationCfg = TriangulationCfg()
     """Triangulation module configuration for multi-camera target localization."""
 
-    enable_triangulation: bool = True
-    """Enable triangulation-based rewards and observations. Default False for backward compatibility."""
+    enable_triangulation: bool = False
+    """Append triangulation tail to the actor observation (and draw the observed-triangulation
+    ellipsoid in viz). Reward-side triangulation (_triangulation_result_gt / _tri_result_l2 /
+    _tri_result_l3) is always computed, independent of this flag."""
 
     triangulation_reward_scale: float = 5.0
     """Scale factor for triangulation quality reward (analytical mode: 1/sqrt(trace))."""
@@ -395,7 +397,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # Reward Scales (migrated from iris_ma5)
     # ==========================================================================
 
-    action_sum_penalty_scale: float = -1.0
+    action_sum_penalty_scale: float = -30.0
     """Penalty scale for total action magnitude."""
 
     # [0 vx, 1 vy, 2 vz, 3 yaw_rate, 4 gimbal_yaw_rate, 5 gimbal_pitch_rate, 6 zoom_rate]
@@ -405,7 +407,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     action_delta_weight: list = [1, 1, 1, 1, 0.5, 0.5, 0.5]
     """Weights for action delta (smoothness) penalty."""
 
-    action_delta_penalty_scale: float = -2.0
+    action_delta_penalty_scale: float = -15.0
     """Penalty scale for action changes (smoothness)."""
 
     bbox_center_reward_scale: float = 60.0
