@@ -579,8 +579,8 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # ==========================================================================
 
     domain_randomization: DomainRandomizationCfg = DomainRandomizationCfg(
-        enabled=True,
-        mount_offset=MountOffsetRandomizationCfg(enabled=True),
+        enabled=False,
+        mount_offset=MountOffsetRandomizationCfg(enabled=False),
     )
     """Domain randomization for sim-to-real transfer.
 
