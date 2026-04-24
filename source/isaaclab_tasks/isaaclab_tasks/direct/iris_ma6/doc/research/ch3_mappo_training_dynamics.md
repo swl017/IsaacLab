@@ -131,7 +131,9 @@ Now let's walk through your `7e46515b39` training run with the understanding fro
 | LR | 0.00297 | 0.00087 | Scheduler cutting: small σ → large KL per update |
 | Reward | 1656 | 3086 | Rapidly learning basic behaviors |
 
-**Why value loss drops 100x**: Initially $V_\phi \approx 0$ but actual returns are ~1656. The MSE loss $(1656 - 0)^2$ is enormous. After a few updates, $V_\phi$ learns to predict ~3000, and the residual drops to ~10, giving loss $\sim 10^2 / 3000^2 \approx 0.00001$. (The value preprocessor normalizes, so the actual scale is different, but the ratio is similar.)
+**Why value loss drops 100x**: Initially $V_\phi \approx 0$ but actual returns are ~1656. The MSE loss $(1656 - 0)^2$ is enormous. After a few updates, $V_\phi$ learns to predict ~3000, and the residual drops to ~10, giving loss $\sim 10^2 / 3000^2 \approx 0.00001$.
+
+**Remember: the value loss in your Tensorboard is in normalized units, not raw reward units** (see Ch 2 §2.4 for details). A value loss of 0.003 means the critic's RMSE is $\sqrt{0.003} \approx 0.055$ *standard deviations* of the return distribution. In raw reward units, that's $0.055 \times \sigma_\text{return}$, which is ~80-100 for your return scale. This normalization is what keeps the value loss curve in a stable range (0.0001 - 0.01) even as raw rewards quadruple across training.
 
 **Why σ drops**: The policy gradient pushes the mean $\mu$ toward good actions. Simultaneously, the gradient of $L^{\text{CLIP}}$ with respect to $\sigma$ is negative when the policy is clearly improving (tighter distribution = higher log-probability of the mean action = higher $r_t$ for those actions). The entropy bonus ($c_e = 0.01$) pushes back, but too weakly.
 

@@ -157,6 +157,17 @@ if self._clip_predicted_values:
 value_loss = self._value_loss_scale * F.mse_loss(sampled_returns, predicted_values)
 ```
 
+**Important caveat: value loss is in *normalized* units, not raw reward units.**
+
+In your iris_ma6 config (`skrl_mappo_rnn_cfg.yaml`), the `value_preprocessor` is set to `RunningStandardScaler`. Before reaching the MSE computation:
+- Returns are stored **z-score normalized** in memory: `memory.set_tensor_by_name("returns", self._value_preprocessor(returns, train=True))` (`mappo.py` line 476)
+- The value network's output is also in normalized space (because it was trained against normalized targets)
+- So `F.mse_loss(sampled_returns, predicted_values)` computes MSE between two normalized tensors
+
+**What this means for Tensorboard interpretation**: when you see `Loss/Value loss = 0.003`, that's $\sqrt{0.003} \approx 0.055$ *standard deviations* of the return distribution, not 0.055 reward units. To recover the raw reward-scale error, multiply by the preprocessor's running std of returns. If $\sigma_\text{return} \approx 1500$ (typical for a 3000-reward-scale task like iris_ma6), the raw error is $0.055 \times 1500 \approx 82$ reward units.
+
+This is why your value loss curve stays in the range 0.0001 - 0.01 throughout all training phases, even as raw rewards quadruple from 1000 to 4200 -- the preprocessor normalizes out the scale shift, and you see the *relative* error in units of return-standard-deviations. If `value_preprocessor` were set to `None`, the value loss would be in raw (reward)² units and would scale up dramatically with the reward magnitude.
+
 ---
 
 ## 2.5 Entropy Bonus

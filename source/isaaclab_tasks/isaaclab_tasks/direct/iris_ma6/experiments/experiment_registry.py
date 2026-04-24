@@ -625,6 +625,28 @@ register_suite(ExperimentSuiteCfg(
     ],
 ))
 
+# ===========================================================================
+# Phase A: Minimum Viable Task (MVT)
+# Narrowed initial-state distribution, non-obs curriculum ramps frozen.
+# Isolates observation-corruption (noise/delay/dropout/burst) as the sole
+# study axis en route to sim-to-sim (IsaacSim + PX4 + ROS2) transfer.
+# ===========================================================================
+
+register_experiment(ExperimentCfg(
+    name="phase_a_mvt_baseline",
+    description=(
+        "Phase-A MVT baseline: narrowed init-state distribution, non-obs "
+        "curriculum frozen, obs-corruption ramps (100k-220k) live."
+    ),
+    group="phase_a",
+    task="Isaac-Iris-MA6-Direct-MVT-v0",
+    env_overrides={},
+    agent_overrides={},
+    seeds=[42],
+    total_timesteps=400_000,
+))
+
+
 register_suite(ExperimentSuiteCfg(
     name="iros2026_sweeps",
     experiments=(
