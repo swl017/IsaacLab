@@ -1314,3 +1314,62 @@ Next:
   skrl mappo_rnn reads it as "shared_states" from infos dict).
 - First controlled run: v1 env with new obs + new critic state, fixed
   seeds. Compare learning curves vs _test baseline.
+
+----------------------------------------
+2026-04-27 — Gimbal sim-to-sim diagnostic (graduation refocus)
+----------------------------------------
+Done:
+- Built numerical step-response comparison of IL `gimbal_controller_jacobian`
+  vs ROS2 `gimbal_stabilizer/los_rate_controller` (math-port + as-deployed
+  config). 6 scenarios, 100 Hz, 2 s each. Pure controller-law comparison
+  (no physics, no rclpy).
+- Files:
+    - controller/sysid_output/gimbal/ros2_los_math.py   (numpy port of ROS2)
+    - controller/sysid_output/gimbal/compare_gimbal.py  (harness)
+    - controller/sysid_output/gimbal/results/REPORT.md  (raw numbers)
+    - doc/sim-to-sim/gimbal_diagnostic.md               (synthesis + actions)
+- Findings:
+    1. `jacobian` mode math is identical (Δ=0 in every internal-frame metric).
+       The control-law port is correct; rules out a class of bugs.
+    2. **YAW_JOINT_OFFSET differs by sign** — IL: −π/2, ROS2: +π/2. Joint
+       command differs by exactly 180° in every scenario. Both environments
+       use the same iris_gimbal3.usda, so one side is wrong.
+    3. **ROS2 `_run_control` negates pitch+roll joint readings**, IL does not.
+       Same usd-shared situation — one side is wrong (or compensating for a
+       sign convention difference in the joint_states publisher pipeline).
+    4. Deployed `gimbal_controller_mode='combined'` (not `jacobian`).
+       Different control law than training: analytical IK position + J⁻¹
+       velocity FF, vs J⁻¹-integrated everything in training.
+    5. Deployed `servo_rate_limit=6 rad/s` clips omega_cmd; training had no
+       limit. Saturates whenever |att_error| > 0.18 rad (≈10°).
+
+Recommended next steps (in priority order, graduation-relevant):
+  (a) Fix config issues 4+5 in los_rate_config.yaml — set
+      gimbal_controller_mode: jacobian, servo_rate_limit: 56.5 (or 0).
+      No code change; immediate retest with trained policy.
+  (b) Inspect iris_gimbal3.usda + ROS2Backend joint_state publisher to
+      determine which side of the sign mismatches (1, 2) is wrong.
+      USD has axes Z (yaw), X (roll), Y (pitch), all positive.
+      gimbal_stabilizer/joint_sign_test.py already exists for hardware
+      verification. Use it.
+  (c) Re-run the diagnostic with corrected config; expect joint-frame Δ ≤ 1°
+      across all six scenarios.
+  (d) Only then run end-to-end SITL stationary-target test.
+
+Reframe (PhD timeline):
+  - MVT v1 failed (proximity-trap in narrowed init distribution; report at
+    doc/experiments/2026-04-24_19-46-25_*_mvt.md).
+  - User decided graduation needs sim-to-sim transfer of slow tracking, not
+    obs-corruption robustness study. Obs corruption deferred to thesis
+    "future work".
+  - Path forward: close gimbal gap (this work) → close drone-controller
+    gap (followup, sysid_output/ already partially populated) → minimum
+    viable training (no obs corruption, slow target, heavy controller DR
+    around measured gap) → SITL validation → real flight if time permits.
+
+Not done / followups:
+  - Port `_compute_stabilizing_roll` into the numpy harness so scenario S6
+    (body roll stabilization) reflects deployed behavior accurately. Currently
+    shows artifactual 40° gap for ROS2-deployed in S6.
+  - Live ROS2-node-in-the-loop variant of the diagnostic.
+  - Drone-controller comparison (PX4 attitude vs IL attitude_controller.py).

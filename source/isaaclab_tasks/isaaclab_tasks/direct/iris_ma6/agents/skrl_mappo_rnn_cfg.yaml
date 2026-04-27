@@ -84,7 +84,7 @@ agent:
   # Experiment tracking
   experiment:
     directory: iris_ma6
-    experiment_name: "e72c116d6b_obs_wo_tri_action_penalty_tuning" 
+    experiment_name: "d49b10c62d_mvt" 
     write_interval: auto
     checkpoint_interval: auto
     store_separately: false

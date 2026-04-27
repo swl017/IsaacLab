@@ -53,16 +53,15 @@ class IrisMA6MVTCfg(IrisMA6TestEnvCfg):
         cylinder_height_range_min=2.0,
         cylinder_height_range_max=5.0,  # KEPT baseline for sim-to-sim
         # target placement
-        target_distance_min=10.0,
-        target_distance_max=15.0,
+        target_distance_min=25.0,
+        target_distance_max=30.0,
         target_height_offset_min=0.0,
         target_height_offset_max=4.0,  # KEPT baseline for sim-to-sim
-        # velocities (halved)
+        # velocities (don't half)
         agent_max_velocity=5.0,
-        agent_velocity_scale_max=0.5,
-        target_max_velocity=0.5,
-        target_velocity_scale_max=0.5,
-        max_yaw_rate=math.radians(20.0),
+        agent_velocity_scale_max=1.0,
+        target_max_velocity=1.0,
+        target_velocity_scale_max=1.0,
         # orientation
         designated_observer_faces_target=True,
         other_agents_orientation_mode="face_target",
@@ -73,10 +72,10 @@ class IrisMA6MVTCfg(IrisMA6TestEnvCfg):
         zoom_min=1.0,
         zoom_max=6.0,
         zoom_initial_min=1.0,
-        zoom_initial_max_start=1.0,
-        zoom_initial_max_end=2.0,
+        zoom_initial_max_start=2.0,
+        zoom_initial_max_end=3.0,
         # observer role
-        designated_observer_mode="fixed",
+        designated_observer_mode="random",
     )
 
     # ==========================================================================
@@ -86,10 +85,10 @@ class IrisMA6MVTCfg(IrisMA6TestEnvCfg):
     curriculum: CurriculumCfg = CurriculumCfg(
         all_end_step=400_000,
         # Non-obs ramps pushed past all_end_step (progress stays at 0)
-        tracking_start_step=2_000_000,
-        tracking_end_step=2_000_000,
-        agent_velocity_start_step=2_000_000,
-        agent_velocity_end_step=2_000_000,
+        tracking_start_step=20_000_000,
+        tracking_end_step=60_000_000,
+        agent_velocity_start_step=20_000,
+        agent_velocity_end_step=40_000,
         moving_target_start_step=2_000_000,
         moving_target_end_step=2_000_000,
         coordination_start_step=2_000_000,
