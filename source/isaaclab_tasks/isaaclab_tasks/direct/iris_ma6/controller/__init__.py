@@ -20,6 +20,7 @@ from .attitude_controller_cfg import AttitudeControllerCfg
 from .controller_cfg import DroneControllerCfg
 from .gain_randomization_cfg import GainRandomizationCfg
 from .gimbal_controller_cfg import GimbalControllerCfg
+from .gimbal_rate_loop_cfg import GimbalRateLoopCfg
 from .motor_dynamics_cfg import MotorDynamicsCfg
 from .rate_controller_cfg import RateControllerCfg
 from .velocity_controller_cfg import VelocityControllerCfg
@@ -30,6 +31,7 @@ from .aerodynamics import AerodynamicEffects
 from .attitude_controller import AttitudeController
 from .drone_controller import DroneController
 from .gimbal_controller import GimbalController
+from .gimbal_rate_loop import GimbalRateLoop
 from .mixer import MixerMatrix
 from .motor_dynamics import MotorDynamics
 from .rate_controller import RateController
@@ -46,6 +48,7 @@ __all__ = [
     "DroneControllerCfg",
     "GainRandomizationCfg",
     "GimbalControllerCfg",
+    "GimbalRateLoopCfg",
     "MotorDynamicsCfg",
     "RateControllerCfg",
     "VelocityControllerCfg",
@@ -55,6 +58,7 @@ __all__ = [
     "AttitudeController",
     "DroneController",
     "GimbalController",
+    "GimbalRateLoop",
     "MixerMatrix",
     "MotorDynamics",
     "RateController",

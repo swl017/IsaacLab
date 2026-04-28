@@ -12,6 +12,7 @@ from isaaclab.utils import configclass
 from .aerodynamics_cfg import AerodynamicsCfg
 from .attitude_controller_cfg import AttitudeControllerCfg
 from .gimbal_controller_cfg import GimbalControllerCfg
+from .gimbal_rate_loop_cfg import GimbalRateLoopCfg
 from .motor_dynamics_cfg import MotorDynamicsCfg
 from .rate_controller_cfg import RateControllerCfg
 from .velocity_controller_cfg import VelocityControllerCfg
@@ -40,6 +41,11 @@ class DroneControllerCfg:
 
     gimbal: GimbalControllerCfg = GimbalControllerCfg()
     """Gimbal controller configuration."""
+
+    gimbal_rate_loop: GimbalRateLoopCfg = GimbalRateLoopCfg()
+    """SIYI gimbal rate-loop configuration (mas/035). Sits between policy
+    rate command and the gimbal controller's world-frame setpoint
+    integration; models the measured first-order user-command path."""
 
     zoom: ZoomControllerCfg = ZoomControllerCfg()
     """Zoom controller configuration."""

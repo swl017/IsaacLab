@@ -120,17 +120,17 @@ class CurriculumCfg:
     frequent enough for RNN sequences (length 32) to encounter bbox-empty.
     """
 
-    fp_fn_ramp_start_step: int = 2200000
+    fp_fn_ramp_start_step: int = 2_200_000
     """Step to start ramping FP/FN from background (0.1) to full calibrated (1.0).
 
     Aligned with noise onset at 100k — observation corruption starts
     after coordination shift completes and sigma has had time to grow.
     """
 
-    fp_fn_end_step: int = 3000000
+    fp_fn_end_step: int = 3_000_000
     """Step when FP/FN rates reach calibrated full values."""
 
-    fp_fn_start_step: int = 4000000
+    fp_fn_start_step: int = 4_000_000
     """[DEPRECATED] Use fp_fn_ramp_start_step. Kept for backward compatibility."""
 
     # ==========================================================================
@@ -235,6 +235,28 @@ class CurriculumCfg:
 
     dynamics_end_step: int = 220000
     """Step when dynamics randomization reaches full range."""
+
+    # ==========================================================================
+    # Phase 3+: Gimbal command-to-first-move dead time (mas/036)
+    #
+    # Independent of `dynamics_*` so dead time and rate-loop τ can ramp on
+    # different cadences. Defaults match mas/034's nominal full-bring-up
+    # cadence (5e6 steps): full delay only late in training.
+    # ==========================================================================
+
+    gimbal_dead_time_start_step: int = 240000
+    """Step to start ramping the gimbal dead-time curriculum scale (0 → 1).
+
+    Starts where dynamics_end_step lands so the policy first masters the
+    rate-loop lag (mas/035) on its own before the input-side dead time
+    (mas/036) is layered on top.
+    """
+
+    gimbal_dead_time_end_step: int = 280000
+    """Step when the gimbal dead-time curriculum scale reaches 1.0
+    (full measured distribution). 5e6-step ramp matches the mas/034
+    nominal cadence.
+    """
 
     # ==========================================================================
     # Task Reward Level Curriculum (FIM → GT-anchored → Composite)
@@ -347,6 +369,31 @@ class CurriculumCfg:
         Used to ramp burst onset probability (p_onset) from 0 to target value.
         """
         return self.get_progress(current_step, self.burst_dropout_start_step, self.burst_dropout_end_step)
+
+    def get_dynamics_progress(self, current_step: int) -> float:
+        """Get progress within the dynamics-randomization phase [0, 1].
+
+        Used by mas/035 to gate the gimbal rate-loop (and any future
+        actuator-dynamics knobs) so the policy first learns with instant
+        gimbal response, then transitions to the measured first-order lag
+        between `dynamics_start_step` and `dynamics_end_step`.
+        """
+        return self.get_progress(current_step, self.dynamics_start_step, self.dynamics_end_step)
+
+    def get_gimbal_dead_time_progress(self, current_step: int) -> float:
+        """Get progress within the gimbal dead-time phase [0, 1] (mas/036).
+
+        Drives ``GimbalRateLoop.set_dead_time_curriculum_scale`` so the
+        per-env dead-time samples ramp from 0 (no delay) at
+        ``gimbal_dead_time_start_step`` to the full measured Gaussian at
+        ``gimbal_dead_time_end_step``. Independent of the rate-loop τ
+        ramp (``dynamics_*``) so the two effects can be staged separately.
+        """
+        return self.get_progress(
+            current_step,
+            self.gimbal_dead_time_start_step,
+            self.gimbal_dead_time_end_step,
+        )
 
     def get_task_level_progress(self, current_step: int) -> tuple:
         """Get task reward level curriculum progress.

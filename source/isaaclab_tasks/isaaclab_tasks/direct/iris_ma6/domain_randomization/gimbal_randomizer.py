@@ -23,6 +23,8 @@ from .domain_randomization_cfg import GimbalRandomizationCfg
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
+    from ..controller.gimbal_rate_loop import GimbalRateLoop
+    from ..controller.gimbal_rate_loop_cfg import GimbalRateLoopCfg
 
 
 class GimbalRandomizer:
@@ -318,3 +320,47 @@ class GimbalRandomizer:
         if env_ids is None:
             return self.damping_scales.clone()
         return self.damping_scales[env_ids].clone()
+
+    # ------------------------------------------------------------------
+    # mas/035: Rate-loop τ randomization (replaces retired stiffness/damping DR)
+    # ------------------------------------------------------------------
+
+    def randomize_rate_loop_tau(
+        self,
+        rate_loop: "GimbalRateLoop",
+        rate_loop_cfg: "GimbalRateLoopCfg",
+        env_ids: torch.Tensor | None = None,
+    ):
+        """Sample per-env τ for the gimbal rate loop and write into the loop.
+
+        Multiplicative scale factors are drawn from
+        `rate_loop_cfg.tau_scale_range_yaw / tau_scale_range_pitch`. The
+        nominal τ values come from `rate_loop_cfg.tau_yaw_s / tau_pitch_s`.
+        Use this in place of the legacy `randomize_dynamics` path; that one
+        is a no-op now that joint-PD scale ranges are retired.
+
+        Args:
+            rate_loop: The `GimbalRateLoop` instance to write into.
+            rate_loop_cfg: Source config for τ nominals and scale ranges.
+            env_ids: Environment indices to randomize. None randomizes all.
+        """
+        if not self.cfg.enabled or not self.cfg.randomize_dynamics_per_episode:
+            return
+
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+        else:
+            env_ids = env_ids.to(self.device)
+
+        n = len(env_ids)
+        scale_yaw = torch.empty(n, device=self.device).uniform_(
+            rate_loop_cfg.tau_scale_range_yaw[0],
+            rate_loop_cfg.tau_scale_range_yaw[1],
+        )
+        scale_pitch = torch.empty(n, device=self.device).uniform_(
+            rate_loop_cfg.tau_scale_range_pitch[0],
+            rate_loop_cfg.tau_scale_range_pitch[1],
+        )
+        tau_yaw = scale_yaw * rate_loop_cfg.tau_yaw_s
+        tau_pitch = scale_pitch * rate_loop_cfg.tau_pitch_s
+        rate_loop.set_tau_per_env(tau_yaw, tau_pitch, env_ids=env_ids)

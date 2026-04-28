@@ -25,9 +25,12 @@ simulation_app = app_launcher.app
 
 # Now import other modules
 import math
+import os
+import subprocess
 import sys
 import traceback
 from datetime import datetime
+from pathlib import Path
 
 import torch
 from isaaclab.utils.math import quat_rotate
@@ -1449,8 +1452,71 @@ def main():
     except Exception as e:
         results.add_error("Integration suite", traceback.format_exc())
 
+    # mas/035: sim-to-sim regression vs deployed ROS2 controller, run as a
+    # subprocess because compare_gimbal.py owns its own AppLauncher init.
+    try:
+        run_compare_gimbal_subprocess(results)
+    except Exception as e:
+        results.add_error("compare_gimbal subprocess", traceback.format_exc())
+
     success = results.print_summary()
     sys.exit(0 if success else 1)
+
+
+def run_compare_gimbal_subprocess(results: TestResults):
+    """Invoke compare_gimbal.py and surface its pass/fail into the test suite.
+
+    Sub-process: the script owns its own AppLauncher; running in-process would
+    double-initialize Isaac Sim. Acceptable cost (~10s startup) for a one-time
+    sim-to-sim regression check.
+    """
+    print("\n" + "=" * 80)
+    print("Sim-to-sim regression: compare_gimbal.py (mas/035)")
+    print("=" * 80)
+    repo_root = Path(__file__).resolve().parents[6]
+    compare_script = (
+        repo_root
+        / "source"
+        / "isaaclab_tasks"
+        / "isaaclab_tasks"
+        / "direct"
+        / "iris_ma6"
+        / "controller"
+        / "sysid_output"
+        / "gimbal"
+        / "compare_gimbal.py"
+    )
+    if not compare_script.exists():
+        results.add_error("compare_gimbal subprocess", f"missing {compare_script}")
+        return
+    try:
+        proc = subprocess.run(
+            ["./isaaclab.sh", "-p", str(compare_script), "--headless"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        results.add_fail("compare_gimbal: 300s timeout", "ran past timeout")
+        return
+
+    # Surface the script's gate-summary block for this suite's log
+    last_lines = proc.stdout.splitlines()
+    summary_idx = next(
+        (i for i, line in enumerate(last_lines) if "Merge-gate summary" in line),
+        None,
+    )
+    if summary_idx is not None:
+        for line in last_lines[summary_idx : summary_idx + 12]:
+            print(f"  {line}")
+    if proc.returncode == 0:
+        results.add_pass("compare_gimbal: ≤1° on all gated scenarios")
+    else:
+        results.add_fail(
+            f"compare_gimbal: exit {proc.returncode}",
+            proc.stderr[-500:] if proc.stderr else "no stderr",
+        )
 
 
 if __name__ == "__main__":

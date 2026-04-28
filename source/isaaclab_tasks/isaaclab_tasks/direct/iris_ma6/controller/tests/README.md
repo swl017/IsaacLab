@@ -14,6 +14,24 @@ This test suite validates the iris_ma6 controller module, which provides a reali
   - AerodynamicEffects tests (4 tests)
   - DroneController integration tests (4 tests)
 
+- **test_gimbal_rate_loop.py** (mas/035): SIYI rate-loop bench-trace match
+  (5 amplitudes × 2 axes × τ + w_ss), saturation, curriculum + DR hooks,
+  reset (23 tests total)
+- **test_gimbal_rate_loop_physics.py** (mas/035): physics-in-the-loop on
+  iris_gimbal3 — sim trace overlays analytical first-order math, 10/10
+  amplitudes within 5% w_ss
+- **test_los_stabilization_bypass.py** (mas/035): LOS-stabilization invariant —
+  body-comp path bypasses the rate loop (4 tests, including bit-exact
+  invariance of progress=0 vs 1)
+- **test_gimbal_dead_time_buffer.py** (mas/036): per-env dead-time buffer
+  step-input timing, scale=0 bit-exact regression vs pre-mas/036, cold start,
+  buffer-cap clipping, partial reset (7 tests)
+- **test_gimbal_dead_time_distribution.py** (mas/036): 10k env-resets at
+  scale=1 hit configured Gaussian within ±5 ms; half-scale + zero-scale
+  property checks (3 tests)
+- **test_los_stabilization_unaffected.py** (mas/036): same body-comp
+  invariant as mas/035 but with the dead-time buffer fully active (3 tests)
+
 ## Running Tests
 
 ### Run All Tests

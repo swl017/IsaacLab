@@ -151,7 +151,8 @@ def run_config_tests(results: TestResults, device: torch.device):
         cam_cfg = CameraRandomizationCfg()
         assert cam_cfg.render_width == 1920
         assert cam_cfg.render_height == 1080
-        assert cam_cfg.fov_scale_range == (0.5, 1.0)
+        assert cam_cfg.fov_scale_range == (0.9, 1.0)
+        assert cam_cfg.focal_length_range == (970.0, 1135.0)
         assert len(cam_cfg.discrete_resolutions) == 3
         results.add_pass("CameraRandomizationCfg defaults")
     except Exception as e:

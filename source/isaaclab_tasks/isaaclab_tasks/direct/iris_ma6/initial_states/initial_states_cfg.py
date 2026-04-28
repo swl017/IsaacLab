@@ -164,13 +164,13 @@ class InitialStatesCfg:
     # Gimbal Configuration
     # ==========================================================================
 
-    gimbal_yaw_min: float = -math.pi
+    gimbal_yaw_min: float = -math.pi / 2
     """Minimum gimbal yaw angle (radians)."""
 
-    gimbal_yaw_max: float = math.pi
+    gimbal_yaw_max: float = math.pi / 2
     """Maximum gimbal yaw angle (radians)."""
 
-    gimbal_pitch_min: float = -math.radians(45.0)
+    gimbal_pitch_min: float = -math.radians(25.0)
     """Minimum gimbal pitch angle (radians)."""
 
     gimbal_pitch_max: float = math.radians(45.0)
@@ -194,16 +194,16 @@ class InitialStatesCfg:
     zoom_min: float = 1.0
     """Minimum zoom level."""
 
-    zoom_max: float = 6.0
+    zoom_max: float = 5.0
     """Maximum zoom level."""
 
     zoom_initial_min: float = 1.0
     """Minimum initial zoom level for sampling."""
 
-    zoom_initial_max_start: float = 1.0
+    zoom_initial_max_start: float = 2.0
     """Maximum initial zoom level at curriculum progress 0."""
 
-    zoom_initial_max_end: float = 6.0
+    zoom_initial_max_end: float = 4.0
     """Maximum initial zoom level at curriculum progress 1."""
 
     # ==========================================================================

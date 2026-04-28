@@ -31,12 +31,18 @@ from .cbf_safety import CBFManager
 from .domain_randomization import DomainRandomizer
 from .controller import DroneController
 from .controller.gimbal_controller import YAW_JOINT_OFFSET
+from .controller.zoom_controller import compute_z_eff
 from .delay_system_v3 import MultiAgentDelaySystemV3, AgentStates
 from .initial_states import InitialStates
 from .delay_system_v3.derived_field_computers import compute_combined_angular_velocity, compute_ray_directions_from_bbox
 from .iris_ma_env6_test_cfg import IrisMA6TestEnvCfg
 from .target_controller import TargetController
-from .triangulation import TriangulationResult, compute_full_triangulation
+from .triangulation import (
+    TriangulationResult,
+    compute_full_triangulation,
+    compute_sigma_K_from_zoom,
+    compute_sigma_drift,
+)
 from .visualization import CustomVisualization
 from .visualization.frame_visualizer import FRAME_LINKS
 
@@ -906,9 +912,13 @@ class IrisMA6TestEnv(DirectMARLEnv):
             camera_quat_w = quat_mul(camera_quat_physics, self._camera_offset_rotation_b)
             camera_poses[agent_id] = (camera_pos_w, camera_quat_w)
 
-            # Compute zoomed+DR intrinsics in pre-allocated tensor (no clone)
+            # Compute zoomed+DR intrinsics in pre-allocated tensor (no clone).
+            # zoom_level here is the operator zoom command; map it to the
+            # measured effective focal multiplier (SIYI zoom curve) before
+            # multiplying fx/fy.
             dr_scale = self._dr_intrinsic_scale[:, idx]
-            combined_scale = self.zoom_level[:, idx] * dr_scale
+            z_eff = compute_z_eff(self.zoom_level[:, idx])
+            combined_scale = z_eff * dr_scale
             self._dr_intrinsics_per_agent[:, idx] = self._camera_intrinsics_base
             self._dr_intrinsics_per_agent[:, idx, 0, 0] *= combined_scale
             self._dr_intrinsics_per_agent[:, idx, 1, 1] *= combined_scale
@@ -916,11 +926,11 @@ class IrisMA6TestEnv(DirectMARLEnv):
             image_shapes[agent_id] = self._camera_image_shape
             agent_poses[agent_id] = (root_pos, root_quat)
 
-            # Update TiledCamera intrinsics based on zoom level
+            # Update TiledCamera intrinsics based on effective focal multiplier
             if agent_id in self._cameras:
                 self._cameras[agent_id].set_intrinsic_matrices_batched(
                     self._dr_intrinsics_per_agent[:, idx],
-                    self.cfg.camera.spawn.focal_length * self.zoom_level[:, idx],
+                    self.cfg.camera.spawn.focal_length * z_eff,
                 )
 
         self.bbox_raycaster_v2.update(
@@ -1015,9 +1025,10 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 gt_data.camera_base_intrinsics[:, 0, 0] *= dr_scale
                 gt_data.camera_base_intrinsics[:, 1, 1] *= dr_scale
                 # effective_hfov = 2 * atan(image_width / (2 * fx_effective))
-                # where fx_effective = fx_nominal * dr_scale * zoom
+                # where fx_effective = fx_nominal * dr_scale * z_eff(zoom_cmd)
                 img_w = self._camera_image_shape[1]
-                fx_eff = self._camera_intrinsics_base[:, 0, 0] * dr_scale * self.zoom_level[:, idx]
+                z_eff_gt = compute_z_eff(self.zoom_level[:, idx])
+                fx_eff = self._camera_intrinsics_base[:, 0, 0] * dr_scale * z_eff_gt
                 gt_data.camera_effective_hfov.copy_(2.0 * torch.atan2(
                     torch.tensor(img_w * 0.5, device=self.device), fx_eff
                 ))
@@ -1091,18 +1102,20 @@ class IrisMA6TestEnv(DirectMARLEnv):
         base_intrinsics: torch.Tensor,
         zoom_level: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute camera intrinsics with zoom applied.
+        """Compute camera intrinsics with measured zoom curve applied.
 
         Args:
             base_intrinsics: Base camera intrinsics [N, 3, 3]
-            zoom_level: Zoom level multiplier [N]
+            zoom_level: Operator zoom command [N] (1.0 = 1x).
+                Internally mapped to z_eff via the SIYI zoom curve.
 
         Returns:
-            Zoomed intrinsics [N, 3, 3] with fx, fy scaled by zoom
+            Zoomed intrinsics [N, 3, 3] with fx, fy scaled by z_eff(zoom_level)
         """
+        z_eff = compute_z_eff(zoom_level)
         intrinsics = base_intrinsics.clone()
-        intrinsics[:, 0, 0] *= zoom_level  # fx
-        intrinsics[:, 1, 1] *= zoom_level  # fy
+        intrinsics[:, 0, 0] *= z_eff  # fx
+        intrinsics[:, 1, 1] *= z_eff  # fy
         return intrinsics
 
     def _build_gt_states(self) -> Dict[AgentID, AgentStates]:
@@ -1160,8 +1173,10 @@ class IrisMA6TestEnv(DirectMARLEnv):
             data.camera_base_intrinsics[:, 1, 1] *= dr_scale
             data.camera_zoom_level.copy_(self.zoom_level[:, idx])
             # effective_hfov = 2 * atan(image_width / (2 * fx_effective))
+            # fx_effective = fx_nominal * dr_scale * z_eff(zoom_cmd)
             img_w = self._camera_image_shape[1]
-            fx_eff = self._camera_intrinsics_base[:, 0, 0] * dr_scale * self.zoom_level[:, idx]
+            z_eff_b = compute_z_eff(self.zoom_level[:, idx])
+            fx_eff = self._camera_intrinsics_base[:, 0, 0] * dr_scale * z_eff_b
             data.camera_effective_hfov.copy_(2.0 * torch.atan2(
                 torch.tensor(img_w * 0.5, device=self.device), fx_eff
             ))
@@ -1252,6 +1267,47 @@ class IrisMA6TestEnv(DirectMARLEnv):
         # Target position (GT): [N, T, 3]
         target_pos_gt = self._target_pos_w.unsqueeze(1) if use_gt_target else None
 
+        # Per-camera intrinsic covariance from the measured per-zoom mrcal
+        # std-devs (mas/029). Build only when the cfg requests it.
+        Sigma_K_per_camera = None
+        if self.cfg.triangulation.include_intrinsics_uncertainty:
+            zoom_per_camera = torch.stack(
+                [
+                    states[agent_id].data.camera_zoom_level
+                    for agent_id in self.cfg.possible_agents
+                ],
+                dim=1,
+            )  # [N, C]
+            Sigma_K_per_camera = compute_sigma_K_from_zoom(zoom_per_camera)
+
+        obs_age_per_camera = torch.stack(
+            [
+                (self._sim_time - states[agent_id].data.timestamp_detection).clamp_min(0.0)
+                for agent_id in self.cfg.possible_agents
+            ],
+            dim=1,
+        )  # [N, C]
+        vel_mag_per_camera = torch.stack(
+            [
+                torch.linalg.vector_norm(states[agent_id].data.body_linear_velocity_w, dim=-1)
+                for agent_id in self.cfg.possible_agents
+            ],
+            dim=1,
+        )  # [N, C]
+        ang_vel_mag_per_camera = torch.stack(
+            [
+                torch.linalg.vector_norm(states[agent_id].data.body_combined_angular_velocity_w, dim=-1)
+                for agent_id in self.cfg.possible_agents
+            ],
+            dim=1,
+        )  # [N, C]
+        pos_std_per_camera, ori_std_per_camera = compute_sigma_drift(
+            obs_age_per_camera,
+            vel_mag_per_camera,
+            ang_vel_mag_per_camera,
+            self.cfg.triangulation,
+        )
+
         # Call triangulation
         result = compute_full_triangulation(
             bbox_2d=bbox_2d,
@@ -1264,6 +1320,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
             camera_intrinsics=camera_intrinsics,
             cfg=self.cfg.triangulation,
             target_positions_gt=target_pos_gt,
+            pos_std_per_camera=pos_std_per_camera,
+            ori_std_per_camera=ori_std_per_camera,
+            Sigma_K_per_camera=Sigma_K_per_camera,
         )
 
         return result
@@ -1342,6 +1401,19 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     p_onset=burst_progress * self.cfg.delay_system_params.burst_p_onset,
                     p_recovery=self.cfg.delay_system_params.burst_p_recovery,
                 )
+
+        # mas/035: ramp gimbal rate-loop τ during the dynamics phase (180k-220k).
+        # progress=0 → pass-through (instant gimbal); progress=1 → measured τ.
+        # self._controller.gimbal_rate_loop.set_progress(
+        #     curr.get_dynamics_progress(current_step)
+        # )
+
+        # mas/036: ramp gimbal command-to-first-move dead-time scale.
+        # 0 → no delay at the rate-loop input; 1 → full measured Gaussian
+        # sampled per env at episode reset. Independent of τ ramp above.
+        self._controller.gimbal_rate_loop.set_dead_time_curriculum_scale(
+            curr.get_gimbal_dead_time_progress(current_step)
+        )
 
         # Get states for reward computation
         if self._delay_system is not None:
@@ -2053,20 +2125,13 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
                 robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
 
-                # Reset controller state and sync gimbal internal state
-                # Use batch indices: agent idx maps env_ids into the batched controller
-                batch_ids = self._batch_idx(env_ids, idx)
-                self._controller.reset(batch_ids)
-                # Sync gimbal controller internal state to initial body-frame angles
-                self._controller._gimbal._yaw[batch_ids] = gimbal_angles[:, 0]
-                self._controller._gimbal._pitch[batch_ids] = gimbal_angles[:, 2]
-
                 # Compute world-frame azimuth/elevation from the ACTUAL initial
                 # body-frame gimbal angles (not always the target direction).
                 # When curriculum randomizes gimbal, the initial angles may NOT
-                # point at the target.  Using _body_to_world_angles ensures
-                # _azimuth_world/_elevation_world are consistent with _yaw/_pitch,
-                # so the first compute_control() produces no gimbal movement.
+                # point at the target. Seeding _azimuth_world/_elevation_world
+                # from the body→world conversion ensures the first
+                # compute_control() produces no gimbal movement (mas/035
+                # smooth-reset invariant).
                 azimuth_world, elevation_world = (
                     self._controller._gimbal._body_to_world_angles(
                         gimbal_angles[:, 0],   # body-frame yaw
@@ -2075,8 +2140,22 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     )
                 )
 
-                self._controller._gimbal._azimuth_world[batch_ids] = azimuth_world
-                self._controller._gimbal._elevation_world[batch_ids] = elevation_world
+                # Reset controller state via public API; the new mas/035 reset
+                # signature seeds the world-frame setpoint instead of the env
+                # poking into private fields.
+                # Use batch indices: agent idx maps env_ids into the batched controller
+                batch_ids = self._batch_idx(env_ids, idx)
+                self._controller.reset(
+                    batch_ids,
+                    gimbal_az_initial=azimuth_world,
+                    gimbal_el_initial=elevation_world,
+                )
+                # Sync the controller's body-frame joint state too. (The
+                # _yaw/_pitch attributes are convenience caches and are
+                # rewritten on the first compute_control(); seeding them
+                # here just keeps reset-time observations consistent.)
+                self._controller._gimbal._yaw[batch_ids] = gimbal_angles[:, 0]
+                self._controller._gimbal._pitch[batch_ids] = gimbal_angles[:, 2]
 
                 # Set zoom level (both env tracking tensor AND controller internal state).
                 # The controller.reset() above resets zoom to 1.0, so we must

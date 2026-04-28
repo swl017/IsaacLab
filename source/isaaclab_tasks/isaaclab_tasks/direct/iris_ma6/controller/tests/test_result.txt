@@ -1,11 +1,12 @@
 [3gH    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H   [INFO] Using python from: /home/usrg/IsaacPX4/IsaacLab/_isaac_sim/python.sh
 Loading user config located at: '/home/usrg/isaacsim/kit/data/Kit/Isaac-Sim/4.5/user.config.json'
-[Info] [carb] Logging to file: /home/usrg/isaacsim/kit/logs/Kit/Isaac-Sim/4.5/kit_20260311_171925.log
-2026-03-11 08:19:25 [0ms] [Warning] [omni.kit.app.plugin] No crash reporter present, dumps uploading isn't available.
-2026-03-11 08:19:25 [4ms] [Warning] [omni.ext.plugin] [ext: driver_artifacts] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts' or '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts/config'
-2026-03-11 08:19:25 [4ms] [Warning] [omni.ext.plugin] [ext: rendering_modes] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes' or '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes/config'
-2026-03-11 08:19:25 [486ms] [Warning] [omni.usd_config.extension] Enable omni.materialx.libs extension to use MaterialX
-2026-03-11 08:19:26 [922ms] [Warning] [omni.isaac.dynamic_control] omni.isaac.dynamic_control is deprecated as of Isaac Sim 4.5. No action is needed from end-users.
+[Info] [carb] Logging to file: /home/usrg/isaacsim/kit/logs/Kit/Isaac-Sim/4.5/kit_20260428_051131.log
+2026-04-27 20:11:31 [0ms] [Warning] [omni.kit.app.plugin] No crash reporter present, dumps uploading isn't available.
+2026-04-27 20:11:31 [2ms] [Warning] [omni.ext.plugin] [ext: driver_artifacts] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts' or '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts/config'
+2026-04-27 20:11:31 [2ms] [Warning] [omni.ext.plugin] [ext: rendering_modes] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes' or '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes/config'
+2026-04-27 20:11:32 [536ms] [Warning] [omni.usd_config.extension] Enable omni.materialx.libs extension to use MaterialX
+2026-04-27 20:11:32 [650ms] [Warning] [omni.platforminfo.plugin] failed to open the default display.  Can't verify X Server version.
+2026-04-27 20:11:32 [977ms] [Warning] [omni.isaac.dynamic_control] omni.isaac.dynamic_control is deprecated as of Isaac Sim 4.5. No action is needed from end-users.
 
 |---------------------------------------------------------------------------------------------|
 | Driver Version: 535.230.02    | Graphics API: Vulkan
@@ -19,103 +20,45 @@ Loading user config located at: '/home/usrg/isaacsim/kit/data/Kit/Isaac-Sim/4.5/
 |     |                                  |        |     |            | 9         |            |
 |=============================================================================================|
 | OS: 20.04.6 LTS (Focal Fossa) ubuntu, Version: 20.04.6, Kernel: 5.15.0-139-generic
-| XServer Vendor: The X.Org Foundation, XServer Version: 12013000 (1.20.13.0)
 | Processor: AMD Ryzen 9 5950X 16-Core Processor
 | Cores: 16 | Logical Cores: 32
 |---------------------------------------------------------------------------------------------|
-| Total Memory (MB): 64194 | Free Memory: 42785
-| Total Page/Swap (MB): 13730 | Free Page/Swap: 13730
+| Total Memory (MB): 64194 | Free Memory: 19318
+| Total Page/Swap (MB): 13730 | Free Page/Swap: 17592186044415
 |---------------------------------------------------------------------------------------------|
+2026-04-27 20:11:37 [5,485ms] [Warning] [omni.kvdb.plugin] Disabling key-value database because another kit process is locking it
 [WARN][AppLauncher]: There are no arguments attached to the ArgumentParser object. If you have your own arguments, please load your own arguments before calling the `AppLauncher.add_app_launcher_args` method. This allows the method to check the validity of the arguments and perform checks for argument names.
 [INFO][AppLauncher]: Using device: cuda:0
 [INFO][AppLauncher]: Loading experience file: /home/usrg/IsaacPX4/IsaacLab/apps/isaaclab.python.headless.kit
 ================================================================================
-IRIS_MA6 CONTROLLER TEST SUITE
+LOS-STABILIZATION-BYPASS TEST SUITE (mas/035)
 ================================================================================
 Device:        cuda
-Torch version: 2.5.1+cu118
-CUDA version:  11.8
-GPU name:      NVIDIA GeForce RTX 3090
-Started:       2026-03-11 17:19:31
+Started:       2026-04-28 05:11:37
 
 ================================================================================
-Testing MixerMatrix
+Body yaws at 60 deg/s for 0.5 s; policy zero
 ================================================================================
-  ✓ Initialization
-  ✓ Aggregate - equal thrusts
-  ✓ Aggregate - roll moment generation
-  ✓ Aggregate - pitch moment generation
-  ✓ Aggregate - yaw moment generation (ENU)
-  ✓ Allocate - thrust only
-  ✓ Round-trip - allocate then aggregate
-  ✓ Thrust to omega conversion
+  ✓ body yaw 60 deg/s: max|d_az|=0.60 deg, max|d_el|=0.00 deg ≤ 2
 
 ================================================================================
-Testing MotorDynamics
+Body pitches at 60 deg/s for 0.5 s; policy zero
 ================================================================================
-  ✓ Initialization
-  ✓ First-order step response (63% in tau)
-  ✓ Saturation at omega_max
-  ✓ Saturation at omega_min
-  ✓ Thrust/torque computation
-  ✓ Body wrench computation
-  ✓ Reset functionality (partial)
+  ✓ body pitch 60 deg/s: max|d_az|=0.00 deg, max|d_el|=0.60 deg ≤ 2
 
 ================================================================================
-Testing ZoomController
+Body yaws + pitches at 60 deg/s combined; policy zero
 ================================================================================
-  ✓ Initialization
-  ✓ First-order response
-  ✓ Range limits
-  ✓ FOV computation
+  ✓ body yaw+pitch 60 deg/s: max|d_az|=3.42 deg, max|d_el|=8.78 deg ≤ 10
 
 ================================================================================
-Testing GimbalController
+Invariance: rate-loop progress 0 vs 1 produces same body-comp residual
 ================================================================================
-  ✓ Initialization
-  ✓ Rate integration
-  ✓ Joint limits
-  ✓ First-order dynamics
+  ✓ rate-loop invariance: |Δ_az|=0.00e+00, |Δ_el|=0.00e+00
 
 ================================================================================
-Testing AttitudeController
+TEST SUMMARY (mas/035 LOS-stabilization-bypass)
 ================================================================================
-  ✓ Initialization
-  ✓ Identity quaternion (no error)
-  ✓ Roll error generates corrective moment
-  ✓ Attitude error computation
-
-================================================================================
-Testing VelocityController
-================================================================================
-  ✓ Initialization
-  ✓ Hover (zero velocity)
-  ✓ Forward velocity tilts attitude
-  ✓ Integral anti-windup
-
-================================================================================
-Testing AerodynamicEffects
-================================================================================
-  ✓ Level 0 - disabled
-  ✓ Level 1 - basic drag
-  ✓ Set fidelity level
-  ✓ Reset clears gust state
-
-================================================================================
-Testing DroneController (Integration)
-================================================================================
-  ✓ Initialization
-  ✓ Hover step
-  ✓ Inner loop (4 substeps)
-  ✓ Reset functionality
-
-================================================================================
-TEST SUMMARY
-================================================================================
-Total Tests: 39
-Passed:      39 (100.0%)
-Failed:      0 (0.0%)
-Errors:      0 (0.0%)
-================================================================================
-2026-03-11 08:19:33 [8,327ms] [Warning] [omni.fabric.plugin] gFabricState->gUsdStageToSimStageWithHistoryMap had 1 outstanding SimStageWithHistory(s) at shutdown
-2026-03-11 08:19:33 [8,351ms] [Warning] [carb] Recursive unloadAllPlugins() detected!
+Total: 4, Passed: 4, Failed: 0
+2026-04-27 20:11:39 [7,984ms] [Warning] [omni.fabric.plugin] gFabricState->gUsdStageToSimStageWithHistoryMap had 1 outstanding SimStageWithHistory(s) at shutdown
+2026-04-27 20:11:39 [8,011ms] [Warning] [carb] Recursive unloadAllPlugins() detected!

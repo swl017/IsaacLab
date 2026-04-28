@@ -30,6 +30,7 @@ from .attitude_controller import AttitudeController
 from .controller_cfg import DroneControllerCfg
 from .gain_randomization_cfg import GainRandomizationCfg
 from .gimbal_controller import GimbalController
+from .gimbal_rate_loop import GimbalRateLoop
 from .mixer import MixerMatrix
 from .motor_dynamics import MotorDynamics
 from .rate_controller import RateController
@@ -120,6 +121,17 @@ class DroneController:
             device=self.device,
         )
 
+        # Rate loop (mas/035): models the SIYI hardware user-command path —
+        # first-order lag and saturation on the policy's (yaw_rate, pitch_rate)
+        # command BEFORE it enters the gimbal controller. Body-motion
+        # compensation downstream remains instantaneous (LOS-stabilization
+        # bypass invariant).
+        self._gimbal_rate_loop = GimbalRateLoop(
+            cfg=cfg.gimbal_rate_loop,
+            num_envs=num_envs,
+            device=self.device,
+        )
+
         self._zoom = ZoomController(
             cfg=cfg.zoom,
             num_envs=num_envs,
@@ -156,6 +168,11 @@ class DroneController:
     def gimbal_controller(self) -> GimbalController:
         """Get gimbal controller component."""
         return self._gimbal
+
+    @property
+    def gimbal_rate_loop(self) -> GimbalRateLoop:
+        """Get gimbal rate-loop component (mas/035)."""
+        return self._gimbal_rate_loop
 
     @property
     def zoom_controller(self) -> ZoomController:
@@ -274,11 +291,25 @@ class DroneController:
         F_body = F_motor + F_aero
         tau_body = tau_motor + tau_aero
 
+        # mas/035: route the policy's normalized rate commands through the
+        # SIYI rate loop (saturation + first-order lag) before they reach the
+        # gimbal controller. The controller's signature is unchanged — the
+        # rate loop preserves the normalized-[-1, 1] convention by
+        # converting to rad/s, applying dynamics, and converting back.
+        max_rate = self.cfg.gimbal.max_gimbal_rate
+        omega_cmd_radps = torch.stack(
+            [gimbal_yaw_rate_cmd * max_rate, gimbal_pitch_rate_cmd * max_rate],
+            dim=-1,
+        )
+        omega_actual_radps = self._gimbal_rate_loop.step(omega_cmd_radps, _physics_dt)
+        gimbal_yaw_rate_cmd_filtered = omega_actual_radps[:, 0] / max_rate
+        gimbal_pitch_rate_cmd_filtered = omega_actual_radps[:, 1] / max_rate
+
         # Gimbal controller — uses physics_dt for correct rate integration
         # since it's called every physics step, not every policy step.
         gimbal_pos, gimbal_vel = self._gimbal.compute_control(
-            gimbal_yaw_rate_cmd=gimbal_yaw_rate_cmd,
-            gimbal_pitch_rate_cmd=gimbal_pitch_rate_cmd,
+            gimbal_yaw_rate_cmd=gimbal_yaw_rate_cmd_filtered,
+            gimbal_pitch_rate_cmd=gimbal_pitch_rate_cmd_filtered,
             q_body=q_body,
             dt=_physics_dt,
             omega_body=omega_body,
@@ -295,17 +326,29 @@ class DroneController:
         # Return forces in body frame (Isaac Lab expects local frame)
         return F_body, tau_body, (gimbal_yaw, gimbal_roll, gimbal_pitch), gimbal_vel, zoom_level
 
-    def reset(self, env_ids: torch.Tensor | None = None):
+    def reset(
+        self,
+        env_ids: torch.Tensor | None = None,
+        gimbal_az_initial: torch.Tensor | None = None,
+        gimbal_el_initial: torch.Tensor | None = None,
+    ):
         """Reset all controller states.
 
         Args:
             env_ids: Environment indices to reset. If None, reset all.
+            gimbal_az_initial: Optional world-frame azimuth to seed the
+                gimbal controller from at reset (mas/035 smooth-reset
+                semantics). When None, the controller falls back to its
+                configured `initial_yaw`.
+            gimbal_el_initial: Optional world-frame elevation to seed the
+                gimbal controller from. Pairs with `gimbal_az_initial`.
         """
         self._motor.reset_to_hover(self.mass, self.gravity, env_ids)
         self._rate.reset(env_ids)
         self._attitude.reset(env_ids)
         self._velocity.reset(env_ids)
-        self._gimbal.reset(env_ids)
+        self._gimbal.reset(env_ids, az_initial=gimbal_az_initial, el_initial=gimbal_el_initial)
+        self._gimbal_rate_loop.reset(env_ids)
         self._zoom.reset(env_ids)
         self._aerodynamics.reset(env_ids)
 

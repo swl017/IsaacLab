@@ -27,13 +27,22 @@ class GimbalControllerCfg:
     maintaining parallel integrated state.
     """
 
-    max_gimbal_rate: float = 1.0 * math.pi
-    """Maximum gimbal angular rate [rad/s]. Default 2*pi (360 deg/s)."""
+    max_gimbal_rate: float = 1.28
+    """Maximum gimbal angular rate for the user / LOS-rate command channel
+    [rad/s]. 1.28 rad/s ≈ 73.3 deg/s matches the measured SIYI A8 mini
+    rate-loop saturation `k_deg_s_per_u` from
+    /home/usrg/mas/src/gimbal_controller/scripts/gimbal_rate_step_followspeed_tune/rate_model.json
+    (yaw 73.31, pitch 73.40 deg/s per unit u).
 
-    yaw_limits: tuple[float, float] = (-math.radians(160), math.radians(160))
+    NOTE: This caps only the policy-emitted rate command. The internal
+    motor speed available for body-motion stabilization is much higher
+    (see iris_gimbal3.py velocity_limit_sim ≈ 18.85 rad/s); do not
+    conflate the two."""
+
+    yaw_limits: tuple[float, float] = (-math.radians(90), math.radians(90))
     """Yaw joint limits [min, max] [rad]. Default +-160 deg."""
 
-    pitch_limits: tuple[float, float] = (-math.radians(45), math.radians(45))
+    pitch_limits: tuple[float, float] = (-math.radians(25), math.radians(45))
     """Pitch joint limits [min, max] [rad]. Default -45 to 45 deg.
     Limited to stay away from 90 deg gimbal lock singularity."""
 

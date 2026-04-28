@@ -39,7 +39,7 @@ class TriangulationCfg:
     Typical values: 0.05-0.2 m depending on localization quality.
     """
 
-    ori_std: float = 0.001
+    ori_std: float = 0.01
     """Camera orientation uncertainty standard deviation (radians).
 
     Models uncertainty in robot/camera orientation from state estimation.
@@ -53,7 +53,7 @@ class TriangulationCfg:
     Typical values: 0.001-0.005 rad depending on encoder resolution.
     """
 
-    intrinsics_std: float = 10.0
+    intrinsics_std: float = 25.0
     """Camera intrinsics uncertainty standard deviation.
 
     Models uncertainty in focal length and principal point.

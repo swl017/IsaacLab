@@ -485,18 +485,46 @@ class GimbalController:
 
         return torch.stack([x3, y3, z3], dim=-1)
 
-    def reset(self, env_ids: torch.Tensor | None = None):
-        """Reset gimbal state."""
+    def reset(
+        self,
+        env_ids: torch.Tensor | None = None,
+        az_initial: torch.Tensor | None = None,
+        el_initial: torch.Tensor | None = None,
+    ):
+        """Reset gimbal state.
+
+        Args:
+            env_ids: Environment indices to reset. If None, reset all.
+            az_initial: Optional [N] or [len(env_ids)] world-frame azimuth
+                to seed `_azimuth_world` from. When None, falls back to
+                `cfg.initial_yaw`. Used by the env at episode reset to
+                start the controller from the spawned gimbal pose so the
+                world-frame setpoint does not jump (mas/035).
+            el_initial: Optional [N] or [len(env_ids)] world-frame elevation
+                to seed `_elevation_world` from. When None, falls back to 0.
+        """
         init_yaw = self.cfg.initial_yaw
         if env_ids is None:
             self._yaw.fill_(init_yaw)
             self._roll.zero_()
             self._pitch.zero_()
-            self._azimuth_world.fill_(init_yaw)
-            self._elevation_world.zero_()
+            if az_initial is None:
+                self._azimuth_world.fill_(init_yaw)
+            else:
+                self._azimuth_world.copy_(az_initial.to(self._azimuth_world))
+            if el_initial is None:
+                self._elevation_world.zero_()
+            else:
+                self._elevation_world.copy_(el_initial.to(self._elevation_world))
         else:
             self._yaw[env_ids] = init_yaw
             self._roll[env_ids] = 0.0
             self._pitch[env_ids] = 0.0
-            self._azimuth_world[env_ids] = init_yaw
-            self._elevation_world[env_ids] = 0.0
+            if az_initial is None:
+                self._azimuth_world[env_ids] = init_yaw
+            else:
+                self._azimuth_world[env_ids] = az_initial.to(self._azimuth_world)
+            if el_initial is None:
+                self._elevation_world[env_ids] = 0.0
+            else:
+                self._elevation_world[env_ids] = el_initial.to(self._elevation_world)

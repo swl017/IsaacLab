@@ -12,6 +12,31 @@ import torch
 from .zoom_controller_cfg import ZoomControllerCfg
 
 
+# Measured zoom curve from the SIYI camera bench fit:
+#   z_eff = 1 + a * (exp(b * (cmd - 1)) - 1)
+# Source: /home/usrg/mas/src/scripts/camera_calibration/zoom_curve.json
+# Trustworthy domain: cmd in [1.0, 5.0]. cmd > 5 is clamped because the 6x
+# calibration uncertainty exceeds the trust threshold (mas/028).
+ZOOM_CURVE_A: float = 0.32489
+ZOOM_CURVE_B: float = 0.4767
+ZOOM_CURVE_CMD_MAX: float = 5.0
+
+
+def compute_z_eff(zoom_cmd: torch.Tensor) -> torch.Tensor:
+    """Operator zoom command -> effective focal-length multiplier.
+
+    Maps the operator-facing zoom command (1.0 = 1x, 5.0 = 5x) to the
+    actual focal-length multiplier the real SIYI camera applies. The
+    relationship is sub-linear: cmd=5 corresponds to z_eff ≈ 2.86, not 5.
+
+    Inputs above ZOOM_CURVE_CMD_MAX (5.0) are clamped before the exponential
+    is applied. cmd ∈ [1, 5] is the trust region of the underlying mrcal
+    calibration.
+    """
+    cmd = torch.clamp(zoom_cmd, min=1.0, max=ZOOM_CURVE_CMD_MAX)
+    return 1.0 + ZOOM_CURVE_A * (torch.exp(ZOOM_CURVE_B * (cmd - 1.0)) - 1.0)
+
+
 class ZoomController:
     """Zoom controller with first-order dynamics.
 
@@ -105,10 +130,14 @@ class ZoomController:
     def get_focal_length_multiplier(self) -> torch.Tensor:
         """Get focal length multiplier relative to base lens.
 
+        Applies the measured SIYI zoom curve so that zoom command 5.0 maps
+        to ~2.86x effective focal multiplier (not 5.0x). Use the raw
+        operator command via `self.zoom` when feeding observations.
+
         Returns:
-            multiplier: (N,) focal length multiplier (= zoom level).
+            multiplier: (N,) effective focal length multiplier (z_eff).
         """
-        return self._zoom
+        return compute_z_eff(self._zoom)
 
     def reset(self, env_ids: torch.Tensor | None = None):
         """Reset zoom state.

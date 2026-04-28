@@ -12,6 +12,35 @@ This module provides randomization of system properties to bridge the sim-to-rea
 | **Physics** | Mass, friction, restitution | Account for manufacturing variations |
 | **Gimbal** | Joint offsets, dynamics | Model calibration errors |
 
+## Measured-Model Provenance (ticket mas/029)
+
+The defaults below were grounded in real-system measurements rather than
+left as placeholders. Each entry points back to the bench artifact and the
+fit/aggregator script that emits the value the sim ingests.
+
+| iris_ma6 site | Default | Source artifact |
+|---|---|---|
+| `CameraRandomizationCfg.focal_length_range` (1x render-resolution fx) | `(970.0, 1135.0)` | `datasets/camera_calibration/2026-04-17/1x/intrinsics_summary.json` (fx = 1053.04 ± 26.49 px) → `src/scripts/sim2real_model_fitting/summarize_intrinsics_for_sim.py` |
+| `CameraRandomizationCfg.fov_scale_range` (inter-unit FOV variation only — optical zoom now handled by `compute_z_eff`) | `(0.9, 1.0)` | Narrowed from prior `(0.5, 1.0)` after wiring the SIYI zoom curve. |
+| Operator zoom command → effective focal multiplier (`controller/zoom_controller.compute_z_eff`) | `1 + 0.32489·(exp(0.4767·(cmd-1)) - 1)`, clamped to cmd ∈ [1, 5] | `src/scripts/camera_calibration/zoom_curve.json` (mrcal per-zoom fit, 1x..5x; 6x excluded). |
+| Triangulation `Sigma_K` (per-zoom intrinsic-calibration covariance over `(fx, fy, cx, cy)`) | `triangulation/intrinsic_uncertainty.compute_sigma_K_from_zoom(zoom_cmd)` (piecewise-linear over measured anchors at cmd ∈ {1, 2, 4, 5}) | mrcal per-zoom `intrinsics_stddev` (σ_fx grows from 26 px @ 1x → 204 px @ 5x). MC-validated at cmd ∈ {1, 4, 5} to ≤ 0.2 % trace error vs empirical (`triangulation/tests/test_intrinsic_uncertainty_mc.py`). |
+| `delay_system_params.ego_detection_latency_mean / std` | `0.31 / 0.03 s` (glass-to-topic E2E) | `src/scripts/latency_measurement.py` QR-bench (mas/031, 245 ms p50 bias-corrected) + phase7 inference + backlog. Single Gaussian for now; the three-regime YOLO split (low/mid/high) wires in via the latency curriculum. |
+| `GimbalControllerCfg.max_gimbal_rate` (user / LOS-rate command channel only) | `1.28 rad/s` (≈ 73 deg/s) | `src/gimbal_controller/scripts/gimbal_rate_step_followspeed_tune/rate_model.json` k_deg_s_per_u: yaw 73.31, pitch 73.40. Internal motor speed for body-motion stabilization stays at the asset `velocity_limit_sim` (≈ 1080 deg/s) — do not conflate. |
+| `GimbalRateLoopCfg` (mas/035) — first-order user-command lag with τ_yaw=0.0995s, τ_pitch=0.0954s, sat=1.28 rad/s | placed between policy rate command and gimbal controller's world-frame setpoint integration | rate_model.json. **Architectural invariant**: rate loop applies ONLY to the policy-emitted user-rate path. Body-motion compensation (the existing IK using `q_body_NOW` inside `gimbal_controller_jacobian`) bypasses the loop entirely so LOS stabilization stays instantaneous. Validated by `controller/tests/test_los_stabilization_bypass.py` (Δ_az/el ≤ 0 deg with policy zero rate at 60 deg/s body rotation), `test_gimbal_rate_loop.py` (rate-loop math: ≤ 10% τ / ≤ 5% w_ss vs rate_step_summary.csv), and `test_gimbal_rate_loop_physics.py` (closed-loop with asset PD + Isaac Sim physics: 10/10 amplitudes within 5%; plots in `controller/tests/plots_mas035/`). Curriculum-gated by `dynamics_start_step / dynamics_end_step`. |
+| `GimbalRateLoopCfg.dead_time_*` (mas/036) — command-to-first-move dead-time buffer at the rate-loop input | `mean=0.066 s, std=0.016 s, max=0.120 s` (Gaussian sample per env per episode, clipped to `[0, max]`) | `src/scripts/sim2real_model_fitting/output/gimbal_dead_time_fit.json` (re-fit of `rate_step_summary.csv` `latency_s` column — 20 step responses across yaw + pitch, all amplitudes). Same architectural invariant as mas/035 — buffer is on the user-rate command path only, body-motion compensation bypasses it. Validated by `controller/tests/test_gimbal_dead_time_buffer.py` (step-input dead-time, scale=0 bit-exact regression, cold-start, partial reset), `test_gimbal_dead_time_distribution.py` (10k env-resets at scale=1 hit mean 65.9 ms / std 16.0 ms), and `test_los_stabilization_unaffected.py` (≤ 2° camera drift at body 60 deg/s × 100 ms dead time + bit-exact scale=0/1 invariance). Curriculum-gated by `gimbal_dead_time_start_step / gimbal_dead_time_end_step` via `set_dead_time_curriculum_scale(scale)`. |
+| `iris_gimbal3.py` joint stiffness / damping (gimbal PD) | `2e3 / 1e2` (stiff position tracker) | With `GimbalRateLoop` owning user-command dynamics, the joint PD reverts to stiff position tracking so it doesn't add a second time constant. Replaces the mas/029 coarse `5e2 / 5e1` c/k=0.10s match. |
+| `GimbalRandomizationCfg.stiffness_scale_range / damping_scale_range` | `(1.0, 1.0)` retired in mas/035 | DR moved to `GimbalRateLoopCfg.tau_scale_range_yaw / pitch = (0.8, 1.2)` (per-axis, per-episode) since dynamics now live in the rate loop. Joint PD is a fixed stiff tracker and doesn't need DR. |
+| Sim-to-sim regression vs deployed ROS2 controller | gated at `≤ 1°` internal-frame Δ on body-comp scenarios | `controller/sysid_output/gimbal/compare_gimbal.py --rate-loop` (default on); auto-invoked from `controller/tests/run_tests.py`. User-slew scenarios (S2, S3) intentionally diverge by the rate-loop lag and are informational-only. |
+
+Aggregator outputs (consumed by sim, regenerable from the artifacts):
+- `src/scripts/sim2real_model_fitting/output/intrinsics_for_sim.json`
+- `src/scripts/sim2real_model_fitting/output/detection_latency_fit.json`
+- `src/scripts/sim2real_model_fitting/output/gimbal_dead_time_fit.json`
+
+Tests:
+- `iris_ma6/tests/test_measured_model_defaults.py` — asserts each default above is wired correctly.
+- `iris_ma6/triangulation/tests/test_intrinsic_uncertainty_mc.py` — MC-validates the new `Sigma_K` block.
+
 ### Scope Distinction
 
 - **Domain Randomization** (this module): *What* the system is (mass, friction, camera FOV)

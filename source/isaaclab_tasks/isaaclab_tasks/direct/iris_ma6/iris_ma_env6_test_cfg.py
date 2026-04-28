@@ -326,9 +326,12 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
         ego_motion_latency_mean=0.005,    # 5ms mean transport latency
         ego_motion_latency_std=0.002,     # 2ms std
         ego_motion_fol_tau=0.005,          # 5ms time constant for smoothing
-        # === Ego Detection Latency (NN inference) ===
-        ego_detection_latency_mean=0.1,   # 100ms mean (GPU inference time)
-        ego_detection_latency_std=0.015,   # 15ms std
+        # === Ego Detection Latency (glass -> detection output) ===
+        # LOW:  0.296 / 0.022
+        # MID: 	0.310 / 0.021
+        # HIGH: 0.386 / 0.021
+        ego_detection_latency_mean=0.31,   # 310 ms — glass-to-topic p50
+        ego_detection_latency_std=0.021,    # 30 ms — std of QR-bench distribution
         # === Other Agent Latency (communication) ===
         other_latency_mean=0.5,            # 500ms mean for other agents (network delay)
         other_latency_std=0.08,            # 80ms std

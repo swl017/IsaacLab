@@ -153,18 +153,23 @@ def compute_ray_directions_from_bbox(
         camera_orientation_w: Camera orientation in world frame [N, 4] (w, x, y, z)
         camera_base_intrinsics: Base camera intrinsics matrix [N, 3, 3] (unzoomed)
             This should be the intrinsic calibration matrix K with fx, fy, cx, cy
-        camera_zoom_level: Zoom level multiplier [N] (1.0 = no zoom)
-            Applied to focal lengths (fx, fy) to compute zoomed intrinsics
+        camera_zoom_level: Operator zoom command [N] (1.0 = 1x, 5.0 = 5x).
+            Internally mapped to the measured effective focal multiplier
+            via the SIYI zoom curve before scaling fx/fy. Inputs above 5.0
+            are clamped (untrusted calibration region).
         bboxes_2d: Bounding boxes in pixel coordinates [N, T, 4] (x, y, w, h)
 
     Returns:
         ray_directions_w: Normalized ray directions in world frame [N, T, 3]
 
     Note:
-        - Zoom is applied by multiplying the base focal lengths (fx, fy) by zoom_level
+        - Zoom is applied by multiplying base fx/fy by z_eff(camera_zoom_level),
+          where z_eff is the measured exponential SIYI zoom curve.
         - Principal point (cx, cy) is not affected by zoom
         - All rays are normalized to unit vectors
     """
+    # Lazy import to avoid a hard cross-module dep at import time
+    from ..controller.zoom_controller import compute_z_eff
     N, T, _ = bboxes_2d.shape
     device = bboxes_2d.device
 
@@ -199,9 +204,12 @@ def compute_ray_directions_from_bbox(
     assert not torch.any(camera_base_intrinsics[:, 2, 2] == 0), \
         "camera_base_intrinsics[2,2] must be non-zero (should be 1.0)"
 
+    # Map operator zoom command to measured effective focal multiplier
+    z_eff = compute_z_eff(camera_zoom_level)
+
     # Convert 2D bbox center to normalized image coordinates
-    fx = camera_base_intrinsics[..., 0, 0].unsqueeze(-1) * camera_zoom_level.unsqueeze(-1)  # (N, 1)
-    fy = camera_base_intrinsics[..., 1, 1].unsqueeze(-1) * camera_zoom_level.unsqueeze(-1)  # (N, 1)
+    fx = camera_base_intrinsics[..., 0, 0].unsqueeze(-1) * z_eff.unsqueeze(-1)  # (N, 1)
+    fy = camera_base_intrinsics[..., 1, 1].unsqueeze(-1) * z_eff.unsqueeze(-1)  # (N, 1)
     cx = camera_base_intrinsics[..., 0, 2].unsqueeze(-1)
     cy = camera_base_intrinsics[..., 1, 2].unsqueeze(-1)
 

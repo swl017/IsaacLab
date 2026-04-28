@@ -228,21 +228,29 @@ class CameraRandomizationCfg:
     # FOV Simulation
     # =========================================================================
 
-    fov_scale_range: tuple[float, float] = (0.5, 1.0)
-    """FOV scale range. 1.0 = full FOV, smaller = zoom in (narrower FOV).
+    fov_scale_range: tuple[float, float] = (0.9, 1.0)
+    """FOV scale range. 1.0 = full FOV, smaller = crop in (narrower FOV).
 
-    Example: 0.5 means crop to 50% of rendered image (2x zoom effect).
+    Models inter-unit FOV variation only — optical zoom is now handled by the
+    measured SIYI zoom curve in `controller/zoom_controller.compute_z_eff`,
+    not by widening this range. Narrowed from the prior (0.5, 1.0) to avoid
+    double-counting zoom.
     """
 
     # =========================================================================
     # Focal Length
     # =========================================================================
 
-    focal_length_range: tuple[float, float] = (800.0, 1200.0)
-    """Focal length range in pixels at render resolution.
+    focal_length_range: tuple[float, float] = (970.0, 1135.0)
+    """1x focal length range in pixels at render resolution (1920x1080).
 
-    Scaled appropriately for 1080p. Typical range corresponds to ~35-50mm
-    equivalent on 35mm format.
+    Centered on the measured 1x mrcal calibration: fx = 1053.04 ± 26.49 px.
+    Range is approximately mean ± 3σ, widened to account for unmeasured
+    inter-unit variation. Per-zoom focal multiplier is applied separately
+    via the SIYI zoom curve (`compute_z_eff`).
+
+    Source: /home/usrg/mas/datasets/camera_calibration/2026-04-17/1x/intrinsics_summary.json
+    Aggregator: /home/usrg/mas/src/scripts/sim2real_model_fitting/output/intrinsics_for_sim.json
     """
 
     # =========================================================================
@@ -291,11 +299,20 @@ class GimbalRandomizationCfg:
     # Joint Dynamics Randomization
     # =========================================================================
 
-    stiffness_scale_range: tuple[float, float] = (0.8, 1.2)
-    """Stiffness scale factor range for gimbal actuators."""
+    stiffness_scale_range: tuple[float, float] = (1.0, 1.0)
+    """[RETIRED in mas/035] Joint-PD stiffness scale factor range.
 
-    damping_scale_range: tuple[float, float] = (0.8, 1.2)
-    """Damping scale factor range for gimbal actuators."""
+    With the GimbalRateLoop now owning the user-command dynamics, the joint
+    PD acts as a stiff position tracker and does not need DR jitter.
+    Rate-loop τ DR replaces this knob — see
+    `controller.gimbal_rate_loop_cfg.GimbalRateLoopCfg.tau_scale_range_*`.
+    Kept at (1.0, 1.0) as a no-op to preserve the cfg shape; will be
+    removed in a follow-up."""
+
+    damping_scale_range: tuple[float, float] = (1.0, 1.0)
+    """[RETIRED in mas/035] Joint-PD damping scale factor range.
+
+    See `stiffness_scale_range` above for the migration note."""
 
     friction_range: tuple[float, float] = (0.0, 0.1)
     """Joint friction coefficient range."""

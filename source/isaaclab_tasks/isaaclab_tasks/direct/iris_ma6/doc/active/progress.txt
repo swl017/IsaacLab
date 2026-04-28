@@ -1373,3 +1373,81 @@ Not done / followups:
     shows artifactual 40° gap for ROS2-deployed in S6.
   - Live ROS2-node-in-the-loop variant of the diagnostic.
   - Drone-controller comparison (PX4 attitude vs IL attitude_controller.py).
+
+----------------------------------------
+2026-04-28 — mas/036 gimbal command-to-first-move dead time
+----------------------------------------
+Done:
+- Re-fit `latency_s` column from rate_step_summary.csv. Output:
+  /home/usrg/mas/src/scripts/sim2real_model_fitting/output/gimbal_dead_time_fit.json
+  Fit: yaw mean 68.3 ms / std 14.9 ms, pitch mean 63.4 ms / std 16.9 ms,
+  union mean 65.85 ms / std 15.72 ms. Recommended defaults: mean=66 ms,
+  std=16 ms, max=120 ms (≈3σ above mean, rounded).
+- New script: src/scripts/sim2real_model_fitting/fit_gimbal_dead_time.py
+- Extended GimbalRateLoopCfg (mas/035) with four new fields:
+  dead_time_mean_s=0.066, dead_time_std_s=0.016, dead_time_max_s=0.120,
+  dead_time_curriculum_scale=0.0. Retired the old dead_time_steps int.
+- Extended GimbalRateLoop with a per-env shared-write-head / per-env-read-
+  offset circular buffer at the loop input. Per-env dead-time depth is
+  sampled at reset from N(mean, std) * curriculum_scale, clipped to
+  [0, max_s]. Buffer ring depth = ceil(max_s / dt), allocated lazily on
+  first step() call. Cold-start (n_pushed <= d) returns zero — matches
+  hardware power-up behavior.
+- Curriculum hook: get_gimbal_dead_time_progress(current_step) ramps from
+  0 at gimbal_dead_time_start_step=220k to 1 at end_step=5.22M (5e6 step
+  ramp, mas/034 cadence). Independent of dynamics_progress (τ ramp).
+- Wired set_dead_time_curriculum_scale call into the env curriculum
+  driver alongside the τ-progress hook (both currently commented out for
+  testing — uncomment to activate during full training).
+- Bit-exact regression at curriculum_scale=0: dead-time path
+  short-circuits, output identical to pre-mas/036 (mas/035 baseline).
+  Verified against rate-loop test suite (23/23 still pass).
+
+Tests:
+- controller/tests/test_gimbal_dead_time_buffer.py (7/7 pass): step-input
+  timing, scale=0 regression, zero-cmd, per-episode constant, buffer cap,
+  curriculum blends, partial reset.
+- controller/tests/test_gimbal_dead_time_distribution.py (3/3 pass):
+  10k samples at scale=1 → mean 65.87 ms std 16.0 ms within ±5 ms gate;
+  half-scale and zero-scale property checks.
+- controller/tests/test_los_stabilization_unaffected.py (3/3 pass):
+  body 60 deg/s yaw/pitch, dead-time 100 ms full active, camera world-frame
+  drift ≤ 0.6° (gate 2°). Bit-exact invariance of scale=0 vs scale=1
+  body-comp residual confirms buffer is on user-rate path only.
+- mas/035 regression: test_gimbal_rate_loop.py 23/23 pass,
+  test_los_stabilization_bypass.py 4/4 pass, compare_gimbal.py exits 0.
+
+Architectural property:
+- Dead-time buffer placed at the rate-loop input (downstream of
+  saturation/deadband, upstream of first-order lag), so it ONLY affects
+  the policy-emitted user-rate command path. Body-motion compensation
+  through the IK using q_body_NOW remains instantaneous.
+- This is the same invariant as mas/035 (the rate loop also bypasses
+  body-comp). The combined rate-loop + dead-time chain is verified
+  end-to-end by both bypass tests.
+
+Curriculum gating:
+- gimbal_dead_time_start_step = 220_000 (where dynamics_end_step lands;
+  policy first masters τ alone, then has dead time layered on).
+- gimbal_dead_time_end_step = 5_220_000 (5M-step ramp).
+- env hook is currently commented out; uncomment when ready to enable
+  in production training (matches mas/035 τ hook pattern).
+
+Not done / followups:
+- Run-time validation in iris_ma6 SITL once the curriculum hooks are
+  uncommented in production training. Quick smoke test would be: step
+  the curriculum to >= gimbal_dead_time_end_step and confirm zero-rate
+  body rotation still produces ≤ 2° camera drift.
+
+Affected files:
+- NEW: src/scripts/sim2real_model_fitting/fit_gimbal_dead_time.py
+- NEW: src/scripts/sim2real_model_fitting/output/gimbal_dead_time_fit.json
+- EDIT: controller/gimbal_rate_loop_cfg.py (4 new fields, retire dead_time_steps)
+- EDIT: controller/gimbal_rate_loop.py (per-env buffer, dead-time hooks)
+- EDIT: curriculum/curriculum_cfg.py (start/end steps + accessor)
+- EDIT: iris_ma_env6_test.py (commented-out env curriculum driver hook)
+- NEW: controller/tests/test_gimbal_dead_time_buffer.py
+- NEW: controller/tests/test_gimbal_dead_time_distribution.py
+- NEW: controller/tests/test_los_stabilization_unaffected.py
+- EDIT: controller/tests/README.md (test inventory)
+- EDIT: domain_randomization/doc/README.md (mas/036 entry + aggregator output)
