@@ -244,7 +244,7 @@ class CurriculumCfg:
     # cadence (5e6 steps): full delay only late in training.
     # ==========================================================================
 
-    gimbal_dead_time_start_step: int = 240000
+    gimbal_dead_time_start_step: int = 180000
     """Step to start ramping the gimbal dead-time curriculum scale (0 → 1).
 
     Starts where dynamics_end_step lands so the policy first masters the
@@ -252,7 +252,7 @@ class CurriculumCfg:
     (mas/036) is layered on top.
     """
 
-    gimbal_dead_time_end_step: int = 280000
+    gimbal_dead_time_end_step: int = 220000
     """Step when the gimbal dead-time curriculum scale reaches 1.0
     (full measured distribution). 5e6-step ramp matches the mas/034
     nominal cadence.
