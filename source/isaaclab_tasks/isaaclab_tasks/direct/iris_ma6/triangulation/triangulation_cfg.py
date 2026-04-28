@@ -70,7 +70,7 @@ class TriangulationCfg:
     include_gimbal_uncertainty: bool = True
     """Include gimbal angle (yaw + pitch) uncertainty in covariance."""
 
-    include_intrinsics_uncertainty: bool = False
+    include_intrinsics_uncertainty: bool = True
     """Include camera intrinsics uncertainty in covariance.
 
     Usually disabled as intrinsics are well-calibrated and stable.

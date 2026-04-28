@@ -588,6 +588,7 @@ def compute_triangulation_covariance(
     cfg: TriangulationCfg,
     pos_std_per_camera: Optional[torch.Tensor] = None,
     ori_std_per_camera: Optional[torch.Tensor] = None,
+    Sigma_K_per_camera: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute triangulation covariance for target positions.
 
@@ -613,6 +614,12 @@ def compute_triangulation_covariance(
             from compute_sigma_drift(). When None, uses cfg.pos_std for all cameras.
         ori_std_per_camera: [N, C] Optional per-camera orientation std (radians).
             When provided, overrides cfg.ori_std. When None, uses cfg.ori_std.
+        Sigma_K_per_camera: [N, C, 4, 4] Optional per-camera intrinsic covariance
+            over (fx, fy, cx, cy). When provided AND
+            cfg.include_intrinsics_uncertainty is True, an intrinsic-Jacobian
+            block is added to the nuisance parameter assembly. When None and
+            cfg.include_intrinsics_uncertainty is True, falls back to an
+            isotropic Sigma_K = (cfg.intrinsics_std)² I₄.
 
     Returns:
         Sigma_X: [N, T, 3, 3] Covariance matrices (NaN where invalid)
@@ -737,6 +744,41 @@ def compute_triangulation_covariance(
         ) * mask_exp
         J_blocks.append(J_pitch)
         Sig_blocks.append(Sigma_gimbal)
+
+    if cfg.include_intrinsics_uncertainty:
+        # Intrinsic Jacobian J_K maps δ(fx, fy, cx, cy) → δ(u, v):
+        #   u = fx · x_n + cx,  v = fy · y_n + cy   with  x_n = X/Z, y_n = Y/Z
+        # J_K = [[x_n, 0, 1, 0],
+        #        [0, y_n, 0, 1]]
+        # Port of iris_ma5 triang_cov_reward_torch.py:251-262.
+        Z_raw = Xc[..., 2]
+        Z = torch.where(
+            Z_raw.abs() >= cfg.min_z_threshold,
+            Z_raw,
+            torch.full_like(Z_raw, cfg.min_z_threshold),
+        )
+        x_n = Xc[..., 0] / Z
+        y_n = Xc[..., 1] / Z
+        zeros = torch.zeros_like(x_n)
+        ones = torch.ones_like(x_n)
+        J_K = torch.stack(
+            [
+                torch.stack([x_n, zeros, ones, zeros], dim=-1),
+                torch.stack([zeros, y_n, zeros, ones], dim=-1),
+            ],
+            dim=-2,
+        ) * mask_exp  # [N, T, C, 2, 4]
+        if Sigma_K_per_camera is None:
+            Sigma_K_block = (
+                torch.eye(4, device=device, dtype=dtype).view(1, 1, 4, 4).expand(N, C, 4, 4)
+                * (cfg.intrinsics_std**2)
+            )
+        else:
+            assert Sigma_K_per_camera.shape == (N, C, 4, 4), \
+                f"Sigma_K_per_camera must be [N, C, 4, 4]={[N, C, 4, 4]}, got {tuple(Sigma_K_per_camera.shape)}"
+            Sigma_K_block = Sigma_K_per_camera.to(device=device, dtype=dtype)
+        J_blocks.append(J_K)
+        Sig_blocks.append(Sigma_K_block)
 
     # Concatenate nuisance Jacobians
     if len(J_blocks) > 0:
@@ -897,6 +939,7 @@ def compute_full_triangulation(
     target_positions_gt: Optional[torch.Tensor] = None,
     pos_std_per_camera: Optional[torch.Tensor] = None,
     ori_std_per_camera: Optional[torch.Tensor] = None,
+    Sigma_K_per_camera: Optional[torch.Tensor] = None,
 ) -> TriangulationResult:
     """Perform full triangulation with uncertainty estimation.
 
@@ -918,6 +961,12 @@ def compute_full_triangulation(
             Computed by compute_sigma_drift(). When None, uses cfg.pos_std.
         ori_std_per_camera: [N, C] Optional AoI-inflated orientation std per camera.
             Computed by compute_sigma_drift(). When None, uses cfg.ori_std.
+        Sigma_K_per_camera: [N, C, 4, 4] Optional per-camera intrinsic covariance
+            over (fx, fy, cx, cy). Build via
+            `intrinsic_uncertainty.compute_sigma_K_from_zoom(zoom_cmd)` to get
+            zoom-conditional values. When None and
+            cfg.include_intrinsics_uncertainty=True, falls back to isotropic
+            (cfg.intrinsics_std)² I₄.
 
     Returns:
         TriangulationResult containing all outputs with validity masks
@@ -956,6 +1005,7 @@ def compute_full_triangulation(
         cfg,
         pos_std_per_camera=pos_std_per_camera,
         ori_std_per_camera=ori_std_per_camera,
+        Sigma_K_per_camera=Sigma_K_per_camera,
     )
 
     # Combined validity: triangulation valid AND covariance valid
