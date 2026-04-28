@@ -90,6 +90,8 @@ ZOOM_CURVE_LOOKUP = [
 # 1x mrcal intrinsics — see datasets/camera_calibration/2026-04-17/1x/intrinsics_summary.json
 MEASURED_FX_1X_MEAN = 1053.044591
 MEASURED_FX_1X_STD = 26.49069557730026
+MEASURED_IMAGE_WIDTH = 1920
+MEASURED_IMAGE_HEIGHT = 1080
 
 # Glass-to-topic detection latency = upstream A8/RTSP transit (~245 ms,
 # mas/031 QR bench) + YOLO inference (mas/021 §C2 / phase7). std combines
@@ -215,6 +217,30 @@ def run_camera_dr_tests(results: TestResults):
         results.add_pass(f"fov_scale_range {cfg.fov_scale_range} narrowed (zoom no longer double-counted)")
     except Exception:
         results.add_fail("fov_scale_range narrowed", traceback.format_exc())
+
+    # TiledCameraCfg resolution + (focal_length, horizontal_aperture) realize
+    # the measured 1x fx within ±1 px. This is the regression that closes the
+    # prior gap where focal_length_range was updated but the camera spawn
+    # never repointed to the calibrated 1920×1080 / fx≈1053 setup.
+    try:
+        from isaaclab_tasks.direct.iris_ma6.iris_ma_env6_test_cfg import IrisMA6TestEnvCfg
+
+        cam = IrisMA6TestEnvCfg().camera
+        assert cam.width == MEASURED_IMAGE_WIDTH, \
+            f"camera.width = {cam.width}, expected {MEASURED_IMAGE_WIDTH} (mrcal 1x calibration)"
+        assert cam.height == MEASURED_IMAGE_HEIGHT, \
+            f"camera.height = {cam.height}, expected {MEASURED_IMAGE_HEIGHT} (mrcal 1x calibration)"
+        fx_realized = (cam.spawn.focal_length / cam.spawn.horizontal_aperture) * cam.width
+        assert abs(fx_realized - MEASURED_FX_1X_MEAN) < 1.0, (
+            f"realized fx = {fx_realized:.4f} px deviates from measured 1x mean "
+            f"{MEASURED_FX_1X_MEAN:.4f} px by > 1 px"
+        )
+        results.add_pass(
+            f"TiledCameraCfg realizes fx = {fx_realized:.2f} px @ "
+            f"{cam.width}×{cam.height} (target {MEASURED_FX_1X_MEAN:.2f})"
+        )
+    except Exception:
+        results.add_fail("TiledCameraCfg realizes measured 1x fx", traceback.format_exc())
 
 
 def run_latency_dr_tests(results: TestResults):

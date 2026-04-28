@@ -124,24 +124,24 @@ def run_camera_frustum_tests(results: TestResults, device: torch.device, verbose
 
     # Test 2: create_camera_cfg_tensor
     try:
-        # Create a mock camera config using a simple class
+        # Mock matches iris_ma6 production cfg (mrcal 1x calibration: 1920×1080, fx≈1053).
         class MockSpawn:
-            focal_length = 24.0
+            focal_length = 11.493
             horizontal_aperture = 20.955
             clipping_range = (0.1, 1.0e5)
 
         class MockCameraCfg:
-            width = 640
-            height = 480
+            width = 1920
+            height = 1080
             spawn = MockSpawn()
 
         camera_cfg = MockCameraCfg()
         cfg_tensor = create_camera_cfg_tensor(camera_cfg, num_envs, device=device)
 
         assert cfg_tensor.shape == (num_envs, 6), f"Expected shape ({num_envs}, 6), got {cfg_tensor.shape}"
-        assert cfg_tensor[0, 0] == 640.0, f"Expected width 640, got {cfg_tensor[0, 0]}"
-        assert cfg_tensor[0, 1] == 480.0, f"Expected height 480, got {cfg_tensor[0, 1]}"
-        assert cfg_tensor[0, 2] == 24.0, f"Expected focal_length 24, got {cfg_tensor[0, 2]}"
+        assert cfg_tensor[0, 0] == 1920.0, f"Expected width 1920, got {cfg_tensor[0, 0]}"
+        assert cfg_tensor[0, 1] == 1080.0, f"Expected height 1080, got {cfg_tensor[0, 1]}"
+        assert abs(cfg_tensor[0, 2].item() - 11.493) < 1e-4, f"Expected focal_length 11.493, got {cfg_tensor[0, 2]}"
 
         if verbose:
             print(f"    Camera config tensor shape: {cfg_tensor.shape}")
@@ -290,15 +290,15 @@ def run_custom_visualization_tests(results: TestResults, device: torch.device, v
     num_envs = 4
     possible_agents = ["drone_0", "drone_1", "drone_2"]
 
-    # Create mock camera config
+    # Mock matches iris_ma6 production cfg (mrcal 1x calibration: 1920×1080, fx≈1053).
     class MockSpawn:
-        focal_length = 24.0
+        focal_length = 11.493
         horizontal_aperture = 20.955
         clipping_range = (0.1, 1.0e5)
 
     class MockCameraCfg:
-        width = 640
-        height = 480
+        width = 1920
+        height = 1080
         spawn = MockSpawn()
 
     camera_cfg = MockCameraCfg()

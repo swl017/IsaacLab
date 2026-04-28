@@ -124,14 +124,25 @@ class TestResults:
 
 
 def create_test_intrinsics(
-    num_envs: int, num_cameras: int, fx: float = 500.0, device: torch.device = None
+    num_envs: int,
+    num_cameras: int,
+    fx: float = 500.0,
+    image_width: int = 1920,
+    image_height: int = 1080,
+    device: torch.device = None,
 ) -> torch.Tensor:
-    """Create test camera intrinsic matrices.
+    """Create test camera intrinsic matrices with a centered principal point.
+
+    Defaults align with iris_ma6 production cfg (mrcal 1x calibration:
+    1920×1080, fx≈1053). The fx default of 500.0 is intentionally generic
+    for unit-test geometry; only image_width/height drive (cx, cy).
 
     Args:
         num_envs: Number of environments
         num_cameras: Number of cameras
         fx: Focal length (pixels)
+        image_width: Image width in pixels (used for cx = W/2)
+        image_height: Image height in pixels (used for cy = H/2)
         device: Torch device
 
     Returns:
@@ -140,8 +151,8 @@ def create_test_intrinsics(
     K = torch.eye(3, device=device).unsqueeze(0).unsqueeze(0).expand(num_envs, num_cameras, 3, 3).clone()
     K[..., 0, 0] = fx
     K[..., 1, 1] = fx
-    K[..., 0, 2] = 320.0  # cx
-    K[..., 1, 2] = 240.0  # cy
+    K[..., 0, 2] = image_width / 2.0   # cx
+    K[..., 1, 2] = image_height / 2.0  # cy
     return K
 
 
@@ -779,10 +790,10 @@ def run_full_pipeline_tests(results: TestResults, device: torch.device):
         gimbal_pitches = torch.zeros(N, C, device=device)
         camera_intrinsics = create_test_intrinsics(N, C, device=device)
 
-        # Target at center, create bbox centered at image center
+        # Target at center, create bbox centered at image center (1920×1080)
         bbox_2d = torch.zeros(N, C, T, 4, device=device)
-        bbox_2d[..., 0] = 320.0  # x center
-        bbox_2d[..., 1] = 240.0  # y center
+        bbox_2d[..., 0] = 960.0  # x center
+        bbox_2d[..., 1] = 540.0  # y center
         bbox_2d[..., 2] = 50.0   # width
         bbox_2d[..., 3] = 50.0   # height
 
@@ -838,8 +849,8 @@ def run_full_pipeline_tests(results: TestResults, device: torch.device):
         camera_intrinsics = create_test_intrinsics(N, C, device=device)
 
         bbox_2d = torch.zeros(N, C, T, 4, device=device)
-        bbox_2d[..., 0] = 320.0
-        bbox_2d[..., 1] = 240.0
+        bbox_2d[..., 0] = 960.0
+        bbox_2d[..., 1] = 540.0
         bbox_2d[..., 2] = 50.0
         bbox_2d[..., 3] = 50.0
 
@@ -905,10 +916,10 @@ def run_ray_direction_tests(results: TestResults, device: torch.device):
         gimbal_pitches = torch.zeros(N, C, device=device)
         camera_intrinsics = create_test_intrinsics(N, C, fx=500.0, device=device)
 
-        # Bbox at image center
+        # Bbox at image center (1920×1080)
         bbox_2d = torch.zeros(N, C, T, 4, device=device)
-        bbox_2d[..., 0] = 320.0  # cx
-        bbox_2d[..., 1] = 240.0  # cy
+        bbox_2d[..., 0] = 960.0  # cx
+        bbox_2d[..., 1] = 540.0  # cy
 
         ray_dirs, R_wc = get_ray_directions_from_bbox(
             bbox_2d, camera_intrinsics, robot_positions, robot_quats,
@@ -938,15 +949,15 @@ def run_ray_direction_tests(results: TestResults, device: torch.device):
         gimbal_pitches = torch.zeros(N, C, device=device)
         camera_intrinsics = create_test_intrinsics(N, C, fx=500.0, device=device)
 
-        # Test multiple bbox positions
+        # Test multiple bbox positions (1920×1080 image)
         T_multi = 3
         bbox_2d = torch.zeros(N, C, T_multi, 4, device=device)
-        bbox_2d[..., 0, 0] = 320.0  # center
-        bbox_2d[..., 0, 1] = 240.0
-        bbox_2d[..., 1, 0] = 0.0    # left edge
-        bbox_2d[..., 1, 1] = 240.0
-        bbox_2d[..., 2, 0] = 640.0  # right edge
-        bbox_2d[..., 2, 1] = 240.0
+        bbox_2d[..., 0, 0] = 960.0  # center
+        bbox_2d[..., 0, 1] = 540.0
+        bbox_2d[..., 1, 0] = 0.0     # left edge
+        bbox_2d[..., 1, 1] = 540.0
+        bbox_2d[..., 2, 0] = 1920.0  # right edge
+        bbox_2d[..., 2, 1] = 540.0
 
         ray_dirs, _ = get_ray_directions_from_bbox(
             bbox_2d, camera_intrinsics, robot_positions, robot_quats,
@@ -978,8 +989,8 @@ def run_ray_direction_tests(results: TestResults, device: torch.device):
         camera_intrinsics = create_test_intrinsics(N, C, device=device)
 
         bbox_2d = torch.zeros(N, C, T, 4, device=device)
-        bbox_2d[..., 0] = 320.0
-        bbox_2d[..., 1] = 240.0
+        bbox_2d[..., 0] = 960.0
+        bbox_2d[..., 1] = 540.0
 
         # No gimbal rotation
         gimbal_yaws_0 = torch.zeros(N, C, device=device)

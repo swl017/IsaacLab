@@ -1404,9 +1404,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         # mas/035: ramp gimbal rate-loop τ during the dynamics phase (180k-220k).
         # progress=0 → pass-through (instant gimbal); progress=1 → measured τ.
-        # self._controller.gimbal_rate_loop.set_progress(
-        #     curr.get_dynamics_progress(current_step)
-        # )
+        self._controller.gimbal_rate_loop.set_progress(
+            curr.get_dynamics_progress(current_step)
+        )
 
         # mas/036: ramp gimbal command-to-first-move dead-time scale.
         # 0 → no delay at the rate-loop input; 1 → full measured Gaussian

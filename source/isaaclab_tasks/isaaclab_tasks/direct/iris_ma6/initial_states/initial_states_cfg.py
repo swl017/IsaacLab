@@ -200,7 +200,7 @@ class InitialStatesCfg:
     zoom_initial_min: float = 1.0
     """Minimum initial zoom level for sampling."""
 
-    zoom_initial_max_start: float = 2.0
+    zoom_initial_max_start: float = 3.0
     """Maximum initial zoom level at curriculum progress 0."""
 
     zoom_initial_max_end: float = 4.0

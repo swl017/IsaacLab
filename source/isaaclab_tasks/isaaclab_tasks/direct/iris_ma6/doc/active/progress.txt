@@ -1451,3 +1451,66 @@ Affected files:
 - NEW: controller/tests/test_los_stabilization_unaffected.py
 - EDIT: controller/tests/README.md (test inventory)
 - EDIT: domain_randomization/doc/README.md (mas/036 entry + aggregator output)
+
+----------------------------------------
+2026-04-28 — Camera resolution + intrinsics aligned to mrcal 1x calibration
+----------------------------------------
+Done:
+- Repointed iris_ma_env6_test_cfg.py TiledCameraCfg from 640×480 to
+  1920×1080 with focal_length=11.493, horizontal_aperture=20.955 (kept).
+  Realized fx = (11.493/20.955)·1920 = 1053.045 px — matches mrcal 1x
+  intrinsics_summary.json mean (1053.044591) within 1e-3 px. HFOV moves
+  from 47.2° to 84.7° — the prior gap was the dominant sim2real bbox
+  mismatch source.
+- iris_ma_env6_v1_cfg.py inherits — no edit needed.
+- Bumped bbox_raycaster_v2_cfg.py min_bbox_area_pixels 4.0 → 36.0 to
+  preserve the same effective gating fraction (~0.0013% of frame area)
+  at the 9× larger image. Now equivalent to a 6×6 px box.
+- Updated mock-intrinsic test fixtures:
+    - visualization/tests/run_tests.py: two MockCameraCfg sites updated
+      (width/height/focal_length); cfg_tensor asserts updated.
+    - triangulation/tests/run_tests.py: parameterized create_test_intrinsics()
+      with image_width/image_height defaults (1920, 1080) and updated all
+      five bbox-fixture sites (cx/cy 320,240 → 960,540; right edge 640 → 1920).
+- Added regression assertion in tests/test_measured_model_defaults.py:
+  realized_fx from the env cfg must be within 1 px of measured 1x mean.
+  This is the test that would have caught the original miss.
+
+Decisions (locked in via AskUserQuestion):
+- Principal point stays centered at (W/2, H/2). Measured ~13 px / 20 px
+  offset deferred to a follow-up (would require breaking the existing
+  centered-cx/cy convention used across DR + projection).
+- Render at full 1920×1080 (single source of truth) — pays ~6.75× per
+  camera GPU rendering cost during training even though the RGB tensor
+  is not consumed in the hot path. Decoupling render res from projection
+  res is a possible follow-up if perf becomes a bottleneck.
+- min_bbox_area_pixels scaled to 36 (preserve effective gating fraction).
+
+Verification:
+- tests/test_measured_model_defaults.py: 13/13 pass (incl. new fx-realized
+  assertion: fx = 1053.05 px @ 1920×1080).
+- visualization/tests/run_tests.py: 16/16 pass.
+- triangulation/tests/run_tests.py: 22/22 pass.
+- tests/test_env.py headless smoke: env constructs at 1920×1080, 100
+  steps run cleanly (4 envs × 2 agents), bboxes flow, rewards finite,
+  zoom DR functions through `set_intrinsic_matrices_batched(focal_length×z_eff)`.
+
+Affected files:
+- EDIT: iris_ma_env6_test_cfg.py (TiledCameraCfg + comment block)
+- EDIT: bbox_raycaster_v2/bbox_raycaster_v2_cfg.py (min_bbox_area_pixels)
+- EDIT: visualization/tests/run_tests.py (mock fixtures + asserts)
+- EDIT: triangulation/tests/run_tests.py (helper signature + 5 fixture sites)
+- EDIT: tests/test_measured_model_defaults.py (fx-realized assertion +
+        MEASURED_IMAGE_WIDTH / MEASURED_IMAGE_HEIGHT constants)
+- EDIT: domain_randomization/doc/README.md (camera-resolution row)
+
+Followups not done in this patch:
+- Honor measured off-center principal point (cx=973.35, cy=560.07).
+  Requires breaking the centered-cx/cy convention or adding an explicit
+  override post `create_intrinsic_matrix_tensor`. Per-zoom (cx, cy) drift
+  is documented in intrinsics_for_sim.json: cx (973→1001), cy (560→627)
+  from 1x to 5x.
+- Decouple render resolution from projection resolution. Only worth
+  doing if the 6.75× rendering cost becomes a measured bottleneck.
+- Wire camera_processor.py / domain_randomization process_images() into
+  the test/v1 hot path if imitation-learning crops are added later.

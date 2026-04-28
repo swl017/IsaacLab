@@ -94,10 +94,13 @@ class BBoxRayCasterV2Cfg:
     If True, bboxes are computed even if some corners are outside the FOV.
     """
 
-    min_bbox_area_pixels: float = 4.0
-    """Minimum bounding box area in pixels to be considered valid. Defaults to 4.0.
-    
-    This prevents degenerate bounding boxes (e.g., 2x2 pixels or smaller) from being marked valid.
+    min_bbox_area_pixels: float = 36.0
+    """Minimum bounding box area in pixels to be considered valid. Defaults to 36.0.
+
+    Scaled with the image-area ratio (1920·1080)/(640·480) = 9 from the prior
+    4.0 default when the camera resolution moved from 640×480 to 1920×1080
+    (mrcal 1x calibration alignment). Preserves the same effective gating
+    fraction (~0.0013% of frame area, equivalent to a 6×6-pixel box).
     """
 
     # Occlusion detection

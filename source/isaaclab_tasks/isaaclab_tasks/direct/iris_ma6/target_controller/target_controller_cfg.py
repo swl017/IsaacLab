@@ -97,7 +97,7 @@ class TargetControllerCfg:
     max_tilt: float = 30.0
     """Maximum tilt angle for targets [deg]. Lower than agents (45) for stability."""
 
-    max_lin_vel: float = 15.0
+    max_lin_vel: float = 5.0
     """Maximum linear velocity for controller [m/s]."""
 
     attitude_kp: Tuple[float, float, float] = (4.0, 4.0, 2.0)

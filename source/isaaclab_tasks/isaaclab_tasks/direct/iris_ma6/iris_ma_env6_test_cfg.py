@@ -168,7 +168,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # Aesthetic Scene
     # ==========================================================================
 
-    debug_vis: bool = True
+    debug_vis: bool = False
     """Enable debug visualization."""
 
     debug_lock_gimbal_to_target: bool = False
@@ -236,11 +236,20 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     camera: TiledCameraCfg = TiledCameraCfg(
         prim_path="/World/envs/env_.*/{robot_name}/pitch_link/camera",
         update_period=0.04,
-        height=480,
-        width=640,
+        # Resolution + intrinsics aligned to mrcal 1x calibration
+        # (see /home/usrg/mas/datasets/camera_calibration/2026-04-17/1x/intrinsics_summary.json
+        # and src/scripts/sim2real_model_fitting/output/intrinsics_for_sim.json:trustworthy_zooms.1x).
+        # Real camera: 1920x1080 with fx ~ 1053 px (HFOV ~ 85 deg).
+        # focal_length / horizontal_aperture * width = fx_px:
+        #   (11.493 / 20.955) * 1920 = 1053.0446 px (target 1053.044591).
+        # horizontal_aperture kept at the prior 20.955 mm "sensor-size" convention;
+        # focal_length solved to satisfy the fx target. Principal point stays
+        # centered (W/2, H/2) per domain_randomization/doc/README.md design choice.
+        height=1080,
+        width=1920,
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
-            focal_length=24.0,
+            focal_length=11.493,
             focus_distance=400.0,
             horizontal_aperture=20.955,
             clipping_range=(0.1, 1.0e5),
@@ -526,6 +535,8 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
         # agent_velocity_scale_max=0.0,
         # target_velocity_scale_max=0.0,
         # max_yaw_rate=0.0,
+        cylinder_diameter_max=60.0,
+        target_distance_max=25.0,
     )
     """Initial states configuration for reset randomization.
 
