@@ -23,6 +23,7 @@ from isaaclab_assets import IRIS_GIMBAL3_CFG
 
 from .bbox_raycaster_v2 import BBoxRayCasterV2Cfg, DetectorReplicatorCfg
 from .cbf_safety import CBFManagerCfg
+from .cbf_safety.cbf_cfg import CPARewardShaperCfg
 from .controller import DroneControllerCfg
 from .controller.gain_randomization_cfg import GainRandomizationCfg
 from .controller.tuning.tuning_results.px4_matched import PX4_MATCHED_CONTROLLER_CFG
@@ -312,7 +313,9 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # CBF Safety Configuration
     # ==========================================================================
 
-    cbf_safety: CBFManagerCfg = CBFManagerCfg()
+    cbf_safety: CBFManagerCfg = CBFManagerCfg(
+        cpa_cfg=CPARewardShaperCfg(lambda_cbf=2.0),
+    )
     """CBF safety filter configuration for collision avoidance.
 
     Training mode (default):
@@ -417,7 +420,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # Reward Scales (migrated from iris_ma5)
     # ==========================================================================
 
-    action_sum_penalty_scale: float = -30.0
+    action_sum_penalty_scale: float = -22.0
     """Penalty scale for total action magnitude."""
 
     # [0 vx, 1 vy, 2 vz, 3 yaw_rate, 4 gimbal_yaw_rate, 5 gimbal_pitch_rate, 6 zoom_rate]
@@ -427,7 +430,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     action_delta_weight: list = [1, 1, 1, 1, 0.5, 0.5, 0.5]
     """Weights for action delta (smoothness) penalty."""
 
-    action_delta_penalty_scale: float = -15.0
+    action_delta_penalty_scale: float = -10.0
     """Penalty scale for action changes (smoothness)."""
 
     bbox_center_reward_scale: float = 60.0
