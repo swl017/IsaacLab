@@ -313,9 +313,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # CBF Safety Configuration
     # ==========================================================================
 
-    cbf_safety: CBFManagerCfg = CBFManagerCfg(
-        cpa_cfg=CPARewardShaperCfg(lambda_cbf=2.0),
-    )
+    cbf_safety: CBFManagerCfg = CBFManagerCfg()
     """CBF safety filter configuration for collision avoidance.
 
     Training mode (default):
@@ -420,7 +418,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # Reward Scales (migrated from iris_ma5)
     # ==========================================================================
 
-    action_sum_penalty_scale: float = -22.0
+    action_sum_penalty_scale: float = -20.0
     """Penalty scale for total action magnitude."""
 
     # [0 vx, 1 vy, 2 vz, 3 yaw_rate, 4 gimbal_yaw_rate, 5 gimbal_pitch_rate, 6 zoom_rate]
