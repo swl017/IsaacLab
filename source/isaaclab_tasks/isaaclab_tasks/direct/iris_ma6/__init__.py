@@ -35,6 +35,7 @@ gym.register(
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
         "skrl_mappo_cfg_entry_point": f"{agents.__name__}:skrl_mappo_cfg.yaml",
         "skrl_mappo_rnn_cfg_entry_point": f"{agents.__name__}:skrl_mappo_rnn_cfg.yaml",
+        "skrl_mappo_rnn_aux_cfg_entry_point": f"{agents.__name__}:skrl_mappo_rnn_aux_cfg.yaml",
     },
 )
 
@@ -52,6 +53,7 @@ gym.register(
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
         "skrl_mappo_cfg_entry_point": f"{agents.__name__}:skrl_mappo_cfg.yaml",
         "skrl_mappo_rnn_cfg_entry_point": f"{agents.__name__}:skrl_mappo_rnn_cfg.yaml",
+        "skrl_mappo_rnn_aux_cfg_entry_point": f"{agents.__name__}:skrl_mappo_rnn_aux_cfg.yaml",
     },
 )
 
@@ -67,5 +69,6 @@ gym.register(
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
         "skrl_mappo_cfg_entry_point": f"{agents.__name__}:skrl_mappo_cfg.yaml",
         "skrl_mappo_rnn_cfg_entry_point": f"{agents.__name__}:skrl_mappo_rnn_cfg.yaml",
+        "skrl_mappo_rnn_aux_cfg_entry_point": f"{agents.__name__}:skrl_mappo_rnn_aux_cfg.yaml",
     },
 )

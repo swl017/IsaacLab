@@ -485,6 +485,20 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self._triangulation_result_gt: TriangulationResult | None = None
         self._triangulation_result_obs: TriangulationResult | None = None
 
+        # Per-agent bbox-non-empty flag, cached during _get_rewards from the same
+        # source the policy/reward pipeline uses (delayed if delay system on, else GT).
+        # Read by get_aux_supervision() for the per-agent half of the policy tri head's
+        # validity mask. Shape: [num_envs, num_agents], bool. None until first step.
+        self._per_agent_bbox_nonempty: torch.Tensor | None = None
+
+        # Auxiliary-supervision caches for the policy tri head (ticket 031). Populated
+        # in _get_rewards and intentionally NOT cleared by _reset_idx so that
+        # get_aux_supervision() — called externally after env.step() — sees the data
+        # from the just-completed _get_rewards even when some envs reset in this step.
+        # Shapes: position (N, A, 3) float32, valid (N, A) bool. None until first step.
+        self._aux_target_position_w_cache: torch.Tensor | None = None
+        self._aux_target_valid_cache: torch.Tensor | None = None
+
         # Cache for camera intrinsics per agent (updated each step with zoom)
         self._camera_intrinsics_cache: Dict[str, torch.Tensor] = {}
 
@@ -1431,11 +1445,17 @@ class IrisMA6TestEnv(DirectMARLEnv):
         # Track detection dropout statistics
         # bbox_valid per agent for target 0: count how many agents see the target
         num_valid_detections = torch.zeros(self.num_envs, device=self.device)
-        for agent_id in self.cfg.possible_agents:
+        per_agent_nonempty = torch.zeros(
+            self.num_envs, self.cfg.num_agents, dtype=torch.bool, device=self.device
+        )
+        for agent_idx, agent_id in enumerate(self.cfg.possible_agents):
             bbox_raw = reward_states[agent_id].data.bboxes_2d[:, 0, :]  # [N, 4]
             agent_valid = bbox_raw.abs().sum(dim=-1) > 1e-6  # [N]
+            per_agent_nonempty[:, agent_idx] = agent_valid
             num_valid_detections += agent_valid.float()
         self._num_valid_detections = num_valid_detections
+        # Cache for get_aux_supervision() — read by the trainer wrapper after env.step().
+        self._per_agent_bbox_nonempty = per_agent_nonempty
         self._detection_stats["total_steps"] += 1.0
         self._detection_stats["invalid_all_agents"] += (num_valid_detections == 0).float()
         self._detection_stats["pair_valid_count"] += (num_valid_detections >= 2).float()
@@ -1448,6 +1468,28 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self._triangulation_result_gt = self._compute_triangulation(
             states=reward_states, use_gt_target=True
         )
+
+        # Cache aux-head supervision for the policy tri head (ticket 031). These
+        # are NOT cleared in _reset_idx, so get_aux_supervision() — called externally
+        # after env.step() returns — always sees the data from the most recent
+        # _get_rewards, even if some envs reset in this same step.
+        #
+        # Source of truth for the GT target world position is `self._target_pos_w`
+        # (snapshot of `self.target.data.root_pos_w`, updated each step in
+        # `_update_state_cache`). The `_triangulation_result_gt.position` field is
+        # the *triangulated estimate* (X_tri), which is NaN when the geometric
+        # solve is invalid — the wrong source for supervising the head.
+        gt_pos_target = self._target_pos_w                                             # (N, 3)
+        scene_valid = self._triangulation_result_gt.is_valid[:, 0]                     # (N,)
+        self._aux_target_position_w_cache = (
+            gt_pos_target.unsqueeze(1)
+            .expand(-1, self.cfg.num_agents, -1)
+            .contiguous()
+            .to(dtype=torch.float32)
+        )                                                                              # (N, A, 3)
+        self._aux_target_valid_cache = (
+            self._per_agent_bbox_nonempty & scene_valid.unsqueeze(-1)
+        )                                                                              # (N, A) bool
 
         # Level 2 (GT-anchored estimation error): triangulate with GT drone positions
         if task_level >= 2 or self.cfg.curriculum_task_levels:
@@ -1740,6 +1782,44 @@ class IrisMA6TestEnv(DirectMARLEnv):
         else:
             # Fallback to GT when no delay system is configured
             return self._build_gt_states()
+
+    def get_aux_supervision(self) -> Dict[str, torch.Tensor]:
+        """Per-agent supervision for the policy triangulation head (ticket 031).
+
+        Pure READ on env state cached during ``_get_rewards``. Safe to call
+        multiple times within a sim step. Returns the GT target world position
+        broadcast across agents, plus a per-agent validity mask combining
+        the scene-level FIM ``is_valid`` flag with per-agent bbox-non-empty.
+
+        Reads from ``_aux_target_position_w_cache`` /
+        ``_aux_target_valid_cache``, which are populated by ``_get_rewards``
+        and **intentionally not cleared by ``_reset_idx``** so that callers
+        invoking this method after ``env.step()`` returns always see the
+        most recent supervision — even on steps where some envs reset.
+
+        Returns:
+            ``{
+                "tri_target_position_w": [num_envs, num_agents, 3] float32,
+                "tri_target_valid":      [num_envs, num_agents]     bool,
+            }``
+
+        If called before the first ``_get_rewards`` (e.g. during reset), both
+        tensors are zero-filled and ``tri_target_valid`` is all False.
+        """
+        N = self.num_envs
+        A = self.cfg.num_agents
+        device = self.device
+
+        if self._aux_target_position_w_cache is None or self._aux_target_valid_cache is None:
+            return {
+                "tri_target_position_w": torch.zeros(N, A, 3, dtype=torch.float32, device=device),
+                "tri_target_valid": torch.zeros(N, A, dtype=torch.bool, device=device),
+            }
+
+        return {
+            "tri_target_position_w": self._aux_target_position_w_cache,
+            "tri_target_valid": self._aux_target_valid_cache,
+        }
 
     def _get_observations(self) -> Dict[str, torch.Tensor]:
         """Get observations for all agents.

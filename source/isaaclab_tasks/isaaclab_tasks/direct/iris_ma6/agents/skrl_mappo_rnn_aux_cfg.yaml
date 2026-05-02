@@ -1,0 +1,105 @@
+# MAPPO-RNN + AUX configuration for iris_ma6 (ticket 031).
+#
+# Based on skrl_mappo_rnn_cfg.yaml as of 2026-05-02. The two changes vs the base
+# config are: (1) `models.policy.tri_head` block enabling the auxiliary
+# triangulation head; (2) `agent.aux_loss_scale` and `agent.aux_nll_clamp` for
+# the corresponding NLL term.
+#
+# For slice 2 (this commit) `aux_loss_scale` defaults to 0.0 — the head is
+# wired but contributes no gradient, so training is bit-exact-equivalent to the
+# base MAPPO-RNN baseline (modulo one extra forward through the inactive head).
+# Slice 3 will flip the default to 0.1 once the `_update` override and the
+# bit-exact regression test land.
+
+seed: 42
+
+# Model parameters
+models:
+  policy:
+    class_name: mappo_with_aux  # Uses MAPPOWithAuxPolicy from scripts/reinforcement_learning/skrl/mappo_with_aux.py
+    hidden_size: 64
+    gru_num_layers: 1
+    gru_hidden_size: 64
+    initial_log_std: -0.5
+    min_log_std: -5.0
+    max_log_std: 0.7
+    # Auxiliary triangulation head (ticket 031)
+    tri_head:
+      enabled: true
+      hidden: [128]
+      log_var_clamp: [-10.0, 4.0]
+
+  value:
+    class_name: mappo_with_aux  # Uses MAPPOWithAuxValue (== MAPPORNNValue)
+    hidden_size: 64
+    gru_num_layers: 1
+    gru_hidden_size: 64
+
+# Agent configuration
+agent:
+  # RNN-specific parameters
+  sequence_length: 32
+  burn_in_steps: 0
+  episode_start_mask_steps: 8
+
+  # PPO parameters
+  rollouts: 32
+  learning_epochs: 6
+  mini_batches: 8
+
+  discount_factor: 0.99
+  lambda: 0.95
+
+  learning_rate: 0.0003
+  random_timesteps: 0
+  learning_starts: 0
+
+  grad_norm_clip: 0.3
+  ratio_clip: 0.2
+  value_clip: 0.2
+  clip_predicted_values: true
+
+  entropy_loss_scale: 0.01
+  value_loss_scale: 1.0
+
+  kl_threshold: 0.02
+
+  learning_rate_scheduler: KLAdaptiveLR
+  learning_rate_scheduler_kwargs:
+    kl_threshold: 0.02
+    min_lr: 1.0e-4
+
+  state_preprocessor: RunningStandardScaler
+  state_preprocessor_kwargs: null
+
+  shared_state_preprocessor: RunningStandardScaler
+  shared_state_preprocessor_kwargs: null
+
+  value_preprocessor: RunningStandardScaler
+  value_preprocessor_kwargs:
+    size: 1
+    device: null
+
+  rewards_shaper: null
+  time_limit_bootstrap: true
+  mixed_precision: false
+
+  # Auxiliary loss (ticket 031). Default 0.1 (slice 3); set to 0.0 to keep the
+  # head wired but contribute no gradient (used by the bit-exact regression
+  # gate and as the head-active baseline ablation).
+  aux_loss_scale: 0.1
+  aux_nll_clamp: 1000.0
+
+  experiment:
+    directory: iris_ma6
+    experiment_name: "ticket031_aux_head"
+    write_interval: auto
+    checkpoint_interval: auto
+    store_separately: false
+    wandb: false
+    wandb_kwargs: {}
+
+trainer:
+  timesteps: 400000
+  headless: true
+  environment_info: log
