@@ -530,6 +530,11 @@ def compute_sigma_drift(
         pos_std_inflated: [N, C] Inflated position std per camera (meters)
         ori_std_inflated: [N, C] Inflated orientation std per camera (radians)
     """
+    if not cfg.include_drift_uncertainty:
+        pos_std = torch.full_like(observation_age, cfg.pos_std)
+        ori_std = torch.full_like(observation_age, cfg.ori_std)
+        return pos_std, ori_std
+
     dt = observation_age
     v = velocity_magnitude
     w = angular_velocity_magnitude

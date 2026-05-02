@@ -143,9 +143,12 @@ def create_yaw_quat(yaw: float, device: torch.device) -> torch.Tensor:
 
 
 def create_test_intrinsics(
-    num_envs: int, num_cameras: int, fx: float = 500.0, device: Optional[torch.device] = None
+    num_envs: int, num_cameras: int, fx: float = 1053.04, device: Optional[torch.device] = None
 ) -> torch.Tensor:
     """Create test camera intrinsic matrices.
+
+    Defaults match the iris_ma6 training env's SIYI A8 mini at 1× zoom on
+    1920×1080 (mrcal calibration: fx ≈ 1053.04 px, principal point centered).
 
     Returns:
         [N, C, 3, 3] Intrinsic matrices
@@ -153,8 +156,8 @@ def create_test_intrinsics(
     K = torch.eye(3, device=device).unsqueeze(0).unsqueeze(0).expand(num_envs, num_cameras, 3, 3).clone()
     K[..., 0, 0] = fx
     K[..., 1, 1] = fx
-    K[..., 0, 2] = 320.0  # cx
-    K[..., 1, 2] = 240.0  # cy
+    K[..., 0, 2] = 960.0  # cx
+    K[..., 1, 2] = 540.0  # cy
     return K
 
 
@@ -396,9 +399,21 @@ def run_monte_carlo_batched(
     # ==========================================================================
     camera_intrinsics = create_test_intrinsics(N, C, device=device)
 
+    # Sample intrinsic perturbations (fx, fy, cx, cy) — diagonal Σ_K = σ_K² I₄
+    # matching the analytical fallback in compute_triangulation_covariance.
+    # Empirical projection uses K_pert; triangulation downstream uses nominal K.
+    if cfg.include_intrinsics_uncertainty:
+        K_pert = camera_intrinsics.clone()
+        K_pert[..., 0, 0] = K_pert[..., 0, 0] + sample_perturbation(cfg.intrinsics_std, (N, C), device)
+        K_pert[..., 1, 1] = K_pert[..., 1, 1] + sample_perturbation(cfg.intrinsics_std, (N, C), device)
+        K_pert[..., 0, 2] = K_pert[..., 0, 2] + sample_perturbation(cfg.intrinsics_std, (N, C), device)
+        K_pert[..., 1, 2] = K_pert[..., 1, 2] + sample_perturbation(cfg.intrinsics_std, (N, C), device)
+    else:
+        K_pert = camera_intrinsics
+
     # Project target to pixel coordinates using PERTURBED camera state
     pixels, depths, depth_valid = project_points_batched(
-        target_pos, camera_positions_pert, R_wc_pert, camera_intrinsics
+        target_pos, camera_positions_pert, R_wc_pert, K_pert
     )
 
     # Add pixel noise: [N, C, 2]
@@ -920,21 +935,24 @@ def run_validation(device: torch.device) -> Tuple[bool, List[Dict]]:
     print(f"Samples:       {N_SAMPLES}")
     print(f"Started:       {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # Configuration
+    # Configuration — matches iris_ma6 training env (SIYI A8 mini, 1× zoom)
     cfg = TriangulationCfg(
         pix_std=7.0,          # Pixel noise std
         pos_std=0.1,          # Position noise std (m)
         ori_std=0.01,         # Orientation noise std (rad)
         gimbal_std=0.005,     # Gimbal angle noise std (rad)
+        intrinsics_std=26.0,  # Intrinsics noise std (px) — mrcal 1×-zoom σ_fx
         include_pose_uncertainty=True,
         include_gimbal_uncertainty=True,
+        include_intrinsics_uncertainty=True,
     )
 
     print(f"\nUncertainty parameters:")
-    print(f"  Pixel std:   {cfg.pix_std} px")
-    print(f"  Position std: {cfg.pos_std} m")
+    print(f"  Pixel std:       {cfg.pix_std} px")
+    print(f"  Position std:    {cfg.pos_std} m")
     print(f"  Orientation std: {math.degrees(cfg.ori_std):.2f}°")
-    print(f"  Gimbal std:  {math.degrees(cfg.gimbal_std):.2f}°")
+    print(f"  Gimbal std:      {math.degrees(cfg.gimbal_std):.2f}°")
+    print(f"  Intrinsics std:  {cfg.intrinsics_std} px")
 
     scenarios = create_test_scenarios()
     all_passed = True

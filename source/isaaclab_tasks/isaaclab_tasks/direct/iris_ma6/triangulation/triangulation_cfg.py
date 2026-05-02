@@ -158,6 +158,10 @@ class TriangulationCfg:
     # Age-of-Information (AoI) Parameters
     # ==========================================================================
 
+    include_drift_uncertainty: bool = False
+    """Enable AoI-based drift inflation in compute_sigma_drift().
+    When False, σ_pos and σ_ori stay at fixed base values regardless of age."""
+
     aoi_process_model: Literal["random_walk", "constant_velocity", "ou"] = "constant_velocity"
     """Process model for AoI-based covariance inflation.
 
