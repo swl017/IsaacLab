@@ -230,10 +230,10 @@ class CurriculumCfg:
     # Phase 3+: Robot/Camera Dynamics Randomization (last)
     # ==========================================================================
 
-    dynamics_start_step: int = 180000
+    dynamics_start_step: int = 220000
     """Step to start dynamics randomization (mass, inertia)."""
 
-    dynamics_end_step: int = 220000
+    dynamics_end_step: int = 240000
     """Step when dynamics randomization reaches full range."""
 
     # ==========================================================================

@@ -27,7 +27,7 @@ models:
     tri_head:
       enabled: true
       hidden: [128]
-      log_var_clamp: [-10.0, 4.0]
+      log_var_clamp: [-10.0, 10.0]
 
   value:
     class_name: mappo_with_aux  # Uses MAPPOWithAuxValue (== MAPPORNNValue)

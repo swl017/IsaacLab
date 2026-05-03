@@ -63,6 +63,7 @@ def _create_target_cfg() -> RigidObjectCfg:
         prim_path="/World/envs/env_.*/target",
         spawn=sim_utils.UsdFileCfg(
             usd_path="/home/usrg/IsaacPX4/PegasusSimulator/extensions/pegasus.simulator/pegasus/simulator/assets/Robots/Iris/iris_body.usda",
+            # usd_path="/workspace/isaaclab/source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/asset/iris_body.usda",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,  # Enable gravity for physics-based movement
                 max_depenetration_velocity=10.0,
@@ -169,7 +170,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # Aesthetic Scene
     # ==========================================================================
 
-    debug_vis: bool = False
+    debug_vis: bool = True
     """Enable debug visualization."""
 
     debug_lock_gimbal_to_target: bool = False
@@ -204,18 +205,18 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     target_cfg: RigidObjectCfg = IRIS_TARGET_CFG
     """Target rigid object configuration with gravity enabled."""
 
-    # viewer: ViewerCfg = ViewerCfg(
-    #     eye=(-10.0, 0.0, 1.0),
-    #     lookat=(0.0, 0.0, 0.0),
-    #     origin_type="asset_body",
-    #     env_index=0,
-    #     asset_name="Robot_0",
-    #     body_name="body",
-    # )
     viewer: ViewerCfg = ViewerCfg(
-        eye=(120.0, 120.0, 95.0),
-        lookat=(0.0, 0.0, 32.0),
+        eye=(-10.0, 0.0, 1.0),
+        lookat=(0.0, 0.0, 0.0),
+        origin_type="asset_body",
+        env_index=0,
+        asset_name="Robot_0",
+        body_name="body",
     )
+    # viewer: ViewerCfg = ViewerCfg(
+    #     eye=(120.0, 120.0, 95.0),
+    #     lookat=(0.0, 0.0, 32.0),
+    # )
     # viewer: ViewerCfg = ViewerCfg(
     #     eye=(-2.0, 2.0, 2.0),
     #     lookat=(0.0, 0.0, 0.0),
@@ -418,7 +419,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # Reward Scales (migrated from iris_ma5)
     # ==========================================================================
 
-    action_sum_penalty_scale: float = -1.0
+    action_sum_penalty_scale: float = -2.0
     """Penalty scale for total action magnitude."""
 
     # [0 vx, 1 vy, 2 vz, 3 yaw_rate, 4 gimbal_yaw_rate, 5 gimbal_pitch_rate, 6 zoom_rate]
@@ -428,7 +429,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     action_delta_weight: list = [1, 1, 1, 1, 0.5, 0.5, 0.5]
     """Weights for action delta (smoothness) penalty."""
 
-    action_delta_penalty_scale: float = -1.0
+    action_delta_penalty_scale: float = -2.0
     """Penalty scale for action changes (smoothness)."""
 
     bbox_center_reward_scale: float = 60.0
