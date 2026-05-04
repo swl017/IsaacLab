@@ -30,8 +30,6 @@ parser.add_argument("--video_length", type=int, default=200, help="Length of rec
 parser.add_argument("--real_time", action="store_true", default=False, help="Run in real-time")
 parser.add_argument("--deterministic", action="store_true", default=True,
                     help="Use deterministic (mean) actions instead of sampling (default: True)")
-parser.add_argument("--stochastic", action="store_true", default=False,
-                    help="Use stochastic (sampled) actions instead of deterministic")
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
@@ -42,6 +40,13 @@ parser.add_argument(
     choices=["torch", "jax", "jax-numpy"],
     help="The ML framework used for training the skrl agent.",
 )
+parser.add_argument(
+    "--step",
+    type=str,
+    default=None,
+    help="The environment step at which to evaluate the agent. If not specified, evaluates from step 0",
+)
+
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -201,6 +206,9 @@ def main():
         num_envs=args_cli.num_envs, 
         use_fabric=not args_cli.disable_fabric
     )
+    env_cfg.enable_tiled_cameras = True
+    env_cfg.use_debug_initial_step = True
+    env_cfg.debug_initial_step = int(args_cli.step)
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     
     # Verify this is a multi-agent environment
@@ -449,8 +457,8 @@ def main():
     episode_rewards = {agent_id: 0.0 for agent_id in possible_agents}
     episode_count = 0
     
-    # Resolve deterministic mode (--stochastic overrides --deterministic)
-    use_deterministic = args_cli.deterministic and not args_cli.stochastic
+    # Resolve deterministic mode (--deterministic)
+    use_deterministic = args_cli.deterministic
 
     print("[INFO] Starting evaluation...")
     print(f"[INFO] Number of environments: {args_cli.num_envs}")
