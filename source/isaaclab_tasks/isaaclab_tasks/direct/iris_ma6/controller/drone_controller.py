@@ -144,6 +144,66 @@ class DroneController:
             device=self.device,
         )
 
+        # Snapshot nominal gains at construction time so per-env randomization
+        # always references the configured values, not whatever the env may
+        # have written into the per-env tensors via curriculum gating later.
+        # See iris_ma6 dynamics-curriculum bug 4.
+        self._nominal_gains = self._snapshot_nominal_gains()
+        # Promote per-env gain tensors to (num_envs, ...) shape so randomize_gains
+        # can write to per-env rows without reshaping the controllers each call.
+        # Clone on hand-off: the sub-controllers' setters store references, and
+        # in-place randomization on the live tensors must not alias the
+        # never-mutated _nominal_gains snapshot.
+        self._velocity.set_gains(
+            Kp_vel=self._nominal_gains["Kp_vel"].clone(),
+            Ki_vel=self._nominal_gains["Ki_vel"].clone(),
+        )
+        self._attitude.set_gains(Kp_att=self._nominal_gains["Kp_att"].clone())
+        self._rate.set_gains(
+            Kp_rate=self._nominal_gains["Kp_rate"].clone(),
+            Ki_rate=self._nominal_gains["Ki_rate"].clone(),
+            Kd_rate=self._nominal_gains["Kd_rate"].clone(),
+        )
+        self._motor.set_tau_motor(self._nominal_gains["tau_motor"].clone())
+        self._zoom.set_tau_zoom(self._nominal_gains["tau_zoom"].clone())
+        self._zoom.set_max_zoom_rate(self._nominal_gains["max_zoom_rate"].clone())
+
+    def _snapshot_nominal_gains(self) -> dict[str, torch.Tensor]:
+        """Capture per-env nominal gains from the freshly-constructed sub-controllers.
+
+        All vector gains are expanded to (num_envs, 3) and all scalar/per-env
+        gains are expanded to (num_envs,). The resulting tensors are owned by
+        ``self._nominal_gains`` and never mutated; randomize_gains samples
+        scaled copies into the live controller buffers.
+        """
+        def _expand_vec(g: torch.Tensor) -> torch.Tensor:
+            t = g.detach().clone() if isinstance(g, torch.Tensor) else torch.tensor(g, device=self.device)
+            t = t.to(self.device)
+            if t.dim() == 1:
+                t = t.unsqueeze(0).expand(self.num_envs, -1).contiguous()
+            return t
+
+        def _expand_scalar(g) -> torch.Tensor:
+            if isinstance(g, torch.Tensor):
+                t = g.detach().clone().to(self.device)
+            else:
+                t = torch.tensor(g, dtype=torch.float32, device=self.device)
+            if t.dim() == 0:
+                t = t.expand(self.num_envs).contiguous()
+            return t
+
+        return {
+            "Kp_vel": _expand_vec(self._velocity._Kp_vel),
+            "Ki_vel": _expand_vec(self._velocity._Ki_vel),
+            "Kp_att": _expand_vec(self._attitude._Kp_att),
+            "Kp_rate": _expand_vec(self._rate._Kp_rate),
+            "Ki_rate": _expand_vec(self._rate._Ki_rate),
+            "Kd_rate": _expand_vec(self._rate._Kd_rate),
+            "tau_motor": _expand_scalar(self._motor._tau_motor),
+            "tau_zoom": _expand_scalar(self._zoom._tau_zoom),
+            "max_zoom_rate": _expand_scalar(self._zoom._max_zoom_rate),
+        }
+
     @property
     def motor_dynamics(self) -> MotorDynamics:
         """Get motor dynamics component."""
@@ -382,13 +442,17 @@ class DroneController:
         env_ids: torch.Tensor,
         progress: float,
         cfg: GainRandomizationCfg,
-        tau_zoom_nominal: float | None = None,
     ):
         """Randomize controller gains for specified environments.
 
         Applies per-env uniform scaling to nominal gains. The scaling range
         is curriculum-ramped: at progress=0 all gains are nominal, at
         progress=1 gains are sampled from cfg.scale_range.
+
+        ``self._nominal_gains`` is captured at controller construction time
+        and never mutated, so this call always references the configured
+        values regardless of what env-side curriculum logic has written into
+        the per-env gain tensors.
 
         Args:
             env_ids: (M,) environment indices to randomize.
@@ -397,63 +461,6 @@ class DroneController:
         """
         if not cfg.enabled or progress <= 0.0:
             return
-
-        # Store nominal gains on first call
-        if not hasattr(self, "_nominal_gains"):
-            self._nominal_gains = {
-                "Kp_vel": self._velocity._Kp_vel.clone(),
-                "Ki_vel": self._velocity._Ki_vel.clone(),
-                "Kp_att": self._attitude._Kp_att.clone(),
-                "Kp_rate": self._rate._Kp_rate.clone(),
-                "Ki_rate": self._rate._Ki_rate.clone(),
-                "Kd_rate": self._rate._Kd_rate.clone(),
-                "tau_motor": (
-                    self._motor._tau_motor.clone()
-                    if isinstance(self._motor._tau_motor, torch.Tensor)
-                    else torch.tensor(self._motor._tau_motor, device=self.device)
-                ),
-                "tau_zoom": (
-                    self._zoom._tau_zoom.clone()
-                    if isinstance(self._zoom._tau_zoom, torch.Tensor)
-                    else torch.tensor(self._zoom._tau_zoom, device=self.device)
-                ),
-                "max_zoom_rate": (
-                    self._zoom._max_zoom_rate.clone()
-                    if isinstance(self._zoom._max_zoom_rate, torch.Tensor)
-                    else torch.tensor(self._zoom._max_zoom_rate, device=self.device)
-                ),
-            }
-            # Expand all gains to (N, 3) for per-env storage
-            for key in ["Kp_vel", "Ki_vel", "Kp_att", "Kp_rate", "Ki_rate", "Kd_rate"]:
-                g = self._nominal_gains[key]
-                if g.dim() == 1:
-                    self._nominal_gains[key] = g.unsqueeze(0).expand(self.num_envs, -1).clone()
-                    # Also set the controller to use (N, 3)
-            # Expand scalar gains to (N,)
-            tau = self._nominal_gains["tau_motor"]
-            if tau.dim() == 0:
-                self._nominal_gains["tau_motor"] = tau.expand(self.num_envs).clone()
-            tau_z = self._nominal_gains["tau_zoom"]
-            if tau_z.dim() == 0:
-                self._nominal_gains["tau_zoom"] = tau_z.expand(self.num_envs).clone()
-            mzr = self._nominal_gains["max_zoom_rate"]
-            if mzr.dim() == 0:
-                self._nominal_gains["max_zoom_rate"] = mzr.expand(self.num_envs).clone()
-
-            # Initialize per-env gains from nominal
-            self._velocity.set_gains(
-                Kp_vel=self._nominal_gains["Kp_vel"],
-                Ki_vel=self._nominal_gains["Ki_vel"],
-            )
-            self._attitude.set_gains(Kp_att=self._nominal_gains["Kp_att"])
-            self._rate.set_gains(
-                Kp_rate=self._nominal_gains["Kp_rate"],
-                Ki_rate=self._nominal_gains["Ki_rate"],
-                Kd_rate=self._nominal_gains["Kd_rate"],
-            )
-            self._motor.set_tau_motor(self._nominal_gains["tau_motor"])
-            self._zoom.set_tau_zoom(self._nominal_gains["tau_zoom"])
-            self._zoom.set_max_zoom_rate(self._nominal_gains["max_zoom_rate"])
 
         # Curriculum-ramped range: at progress=0 -> (1,1), at progress=1 -> scale_range
         low = 1.0 - progress * (1.0 - cfg.scale_range[0])
@@ -483,11 +490,9 @@ class DroneController:
             self._motor._tau_motor[env_ids] = self._nominal_gains["tau_motor"][env_ids] * scale
 
         if cfg.randomize_zoom:
-            # Update nominal if curriculum override provided
-            if tau_zoom_nominal is not None:
-                self._nominal_gains["tau_zoom"][env_ids] = tau_zoom_nominal
-
-            # Zoom uses its own wider scale range to prevent catastrophic forgetting
+            # Zoom uses its own scale range. With tau_zoom no longer curriculum-
+            # gated at the env, the nominal here equals cfg.zoom.tau_zoom and the
+            # range should be tight (e.g. (0.5, 2.0)) — symmetric around nominal.
             z_low = 1.0 - progress * (1.0 - cfg.zoom_scale_range[0])
             z_high = 1.0 + progress * (cfg.zoom_scale_range[1] - 1.0)
 

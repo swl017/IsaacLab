@@ -428,6 +428,13 @@ Each (experiment, seed) pair launches as a separate subprocess calling `run_expe
     --record-trajectory --trajectory-envs 8 \
     --target-trajectory-mode linear \
     --output traj.json
+
+# Action diagnostics: aggregate stats always emitted; per-step trace gated
+./isaaclab.sh -p .../iris_ma6/experiments/evaluate.py \
+    --experiment a3_delay_only \
+    --checkpoint /path/to/best_agent.pt \
+    --no-record-action-trace \
+    --output diag.json
 ```
 
 ### 8.2 Runtime Overrides
@@ -441,6 +448,7 @@ Each (experiment, seed) pair launches as a separate subprocess calling `run_expe
 | `--accel-override` | float | Target max acceleration (m/s^2) |
 | `--detection-dropout-override` | float | Detection failure rate (0-1) |
 | `--comm-dropout-override` | float | Communication dropout rate (0-1) |
+| `--record-action-trace` / `--no-record-action-trace` | bool | Include per-step action trace arrays in `action_diagnostics` block (default on; aggregate stats always emitted) |
 
 ### 8.3 Evaluation Workflow
 
@@ -511,7 +519,67 @@ def _collect_step_metrics(env, tracker, agent_ids):
     )
 ```
 
-### 8.5 Checkpoint Format Auto-Detection
+### 8.5 Action Diagnostics Output Schema
+
+`evaluate.py` always emits `results["action_diagnostics"]` summarizing the per-axis policy command signal, recorded for the same `--trajectory-envs` envs sampled by the trajectory recorder. The implementation lives in [`experiments/metrics/action_trace_recorder.py`](../experiments/metrics/action_trace_recorder.py).
+
+**Source signal**: `unwrapped.cmd_vel` of shape `(num_envs, num_agents, 7)`, read after `env.step()` returns.
+
+**Axis layout** (v0 `iris_ma_env6_test.py` — body-frame `vx/vy/vz`):
+
+| Index | Name | Stored in env as | Reported here in |
+|------:|------|------------------|------------------|
+| 0 | `vx_body` | m/s (post body-frame scaling) | m/s |
+| 1 | `vy_body` | m/s | m/s |
+| 2 | `vz_body` | m/s | m/s |
+| 3 | `yaw_rate` | rad/s | rad/s |
+| 4 | `gimbal_yaw_rate` | normalized [-1, 1] | rad/s (× `max_gimbal_rate`) |
+| 5 | `gimbal_pitch_rate` | normalized [-1, 1] | rad/s (× `max_gimbal_rate`) |
+| 6 | `zoom_rate` | normalized [-1, 1] | 1/s (× per-env `_max_zoom_rate`) |
+
+**Important**: dims 4–6 are stored normalized in `cmd_vel`; the controller scales them downstream. The recorder applies the same scaling at record time so all reported stats are in physical units. Per-env zoom scale is captured at recorder construction (DR-perturbed). v1 (`iris_ma_env6_v1.py`) instead stores `vx/vy/vz` rotated to world frame; if used with v1, axis names should be relabeled (currently hard-coded for v0).
+
+**JSON shape** (under `results["action_diagnostics"]`):
+
+```json
+{
+  "step_dt_seconds": 0.04,
+  "policy_rate_hz": 25.0,
+  "axis_names": ["vx_body", "vy_body", "vz_body", "yaw_rate",
+                 "gimbal_yaw_rate", "gimbal_pitch_rate", "zoom_rate"],
+  "axis_units": ["m/s", "m/s", "m/s", "rad/s", "rad/s", "rad/s", "1/s"],
+  "sample_env_ids": [...],
+  "agents": {
+    "drone_0": {
+      "action_rms":              {axis_name: float, ...},
+      "action_delta_rms":        {axis_name: float, ...},
+      "dominant_freq_hz":        {axis_name: float, ...},
+      "dominant_freq_delta_hz":  {axis_name: float, ...},
+      "trace": [[[...7 floats...], ...T_active steps...], ...one list per recorded env...]
+    },
+    "drone_1": {...}
+  }
+}
+```
+
+`trace` is omitted when `--no-record-action-trace` is passed.
+
+**Stat definitions** (computed per (env, agent), then aggregated by `nanmean` across envs):
+
+- `action_rms[axis] = sqrt(mean(a²))` over the active episode prefix.
+- `action_delta_rms[axis] = sqrt(mean((a_t − a_{t−1})²)) × policy_rate_hz` — rate of change in physical units per second.
+- `dominant_freq_hz[axis]`: peak bin of `torch.fft.rfft(a)` magnitude, DC zeroed, converted via `k / T × policy_rate_hz`.
+- `dominant_freq_delta_hz[axis]`: same on the `Δa` signal.
+- Constant signals (stddev < 1e-6 × max-abs) yield `NaN` for the freq fields to avoid reporting argmax over FP round-off noise.
+- Episodes with fewer than 16 active steps yield `NaN` for the freq fields (insufficient resolution).
+
+**Diagnostic interpretation**:
+
+- `dominant_freq_delta_hz` near Nyquist (`policy_rate_hz / 2 = 12.5 Hz`) indicates step-by-step bang-bang oscillation on that axis.
+- A large gap between `action_delta_rms` on the gimbal axes vs. drone-translation axes points to the gimbal weights (`action_weight[4:6]`, `action_delta_weight[4:6]`) being the right knob to tune, rather than the global `action_sum_penalty_scale` / `action_delta_penalty_scale`.
+- Per-env `trace` enables post-hoc plotting (e.g. matplotlib step plot of `a_t` per axis) without re-running the eval.
+
+### 8.6 Checkpoint Format Auto-Detection
 
 Two formats supported:
 

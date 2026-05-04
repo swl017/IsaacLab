@@ -46,21 +46,22 @@ class GainRandomizationCfg:
     randomize_zoom: bool = True
     """Randomize zoom dynamics (tau_zoom, max_zoom_rate)."""
 
-    zoom_scale_range: tuple[float, float] = (0.01, 1.0)
+    zoom_scale_range: tuple[float, float] = (0.5, 2.0)
     """Multiplicative scale range for tau_zoom at full curriculum progress.
 
-    Wide range (0.01–1.0) prevents catastrophic forgetting: even at full
-    dynamics curriculum, some envs get near-instant zoom (like early training)
-    while others get realistic lag. At progress=0 the range collapses to (1,1).
+    Symmetric around the configured nominal (e.g. cfg.zoom.tau_zoom = 0.1
+    -> sampled tau_zoom in [0.05, 0.2] s). Tight range matches measured
+    sensor variation; nominal applies from step 0 (no env-side curriculum
+    gating of tau_zoom). At progress=0 the range collapses to (1, 1).
     """
 
     randomize_max_lin_vel: bool = True
     """Randomize max linear velocity (action scaling)."""
 
-    max_lin_vel_scale_range: tuple[float, float] = (0.5, 1.2)
+    max_lin_vel_scale_range: tuple[float, float] = (0.8, 1.2)
     """Multiplicative scale range for max_lin_vel at full curriculum progress.
 
-    Wide range (0.5–1.2) prevents catastrophic forgetting: at full dynamics
-    curriculum, max_lin_vel is sampled from [5, 12] m/s (assuming nominal 10),
-    preserving the easy 5 m/s regime from early training.
+    +-20% around the agent-velocity-curriculum value (10 m/s at full
+    progress_agent_velocity). At progress_dynamics=0 the range collapses
+    to (1, 1).
     """

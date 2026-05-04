@@ -230,11 +230,21 @@ class CurriculumCfg:
     # Phase 3+: Robot/Camera Dynamics Randomization (last)
     # ==========================================================================
 
-    dynamics_start_step: int = 220000
-    """Step to start dynamics randomization (mass, inertia)."""
+    dynamics_start_step: int = 60000
+    """Step to start dynamics randomization.
 
-    dynamics_end_step: int = 240000
-    """Step when dynamics randomization reaches full range."""
+    Placed during the coordination ramp (60k-100k) and BEFORE noise
+    (100k-120k). LR is still high here so the policy can actually adapt
+    to the new dynamics distribution. By the noise/delay phases the policy
+    has already robustified against gain/τ/mass variation.
+    """
+
+    dynamics_end_step: int = 100000
+    """Step when dynamics randomization reaches full range.
+
+    Aligned with noise_start_step so dynamics randomization is at full
+    distribution before observation-corruption phases begin (clean handoff).
+    """
 
     # ==========================================================================
     # Phase 3+: Gimbal command-to-first-move dead time (mas/036)

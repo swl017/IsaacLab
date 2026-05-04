@@ -48,11 +48,11 @@ sys.path.insert(0, os.path.dirname(__file__))
 from experiment_registry import get_experiment
 
 parser = argparse.ArgumentParser(description="Evaluate trained policy with paper metrics (iris_ma6).")
-parser.add_argument("--experiment", type=str, required=True, help="Experiment name from registry")
+parser.add_argument("--experiment", type=str, default="a1_with_aoi", help="Experiment name from registry")
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to trained checkpoint (.pt)")
 parser.add_argument("--num_episodes", type=int, default=1, help="Episodes per env")
-parser.add_argument("--num_envs", type=int, default=4096, help="Number of parallel eval envs")
-parser.add_argument("--task", type=str, default=None,
+parser.add_argument("--num_envs", type=int, default=1024, help="Number of parallel eval envs")
+parser.add_argument("--task", type=str, default="Isaac-Iris-MA6-Direct-Test-v0",
                     help="Task name (overrides experiment task)")
 parser.add_argument("--output", type=str, default=None, help="Output JSON path")
 parser.add_argument("--headless", action="store_true", default=False)
@@ -72,6 +72,11 @@ parser.add_argument("--no-timeseries", action="store_true", default=False,
                     help="Disable per-timestep timeseries collection")
 parser.add_argument("--verbose", action="store_true", default=False)
 parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+parser.add_argument("--step", type=int, default=None,
+                    help="Training step to pin curriculum to via debug_initial_step. "
+                         "When set, all curriculum-driven parameters evaluate as if at this "
+                         "training step. When unset (default), all curriculum start/end steps "
+                         "are forced to 0 (full difficulty everywhere).")
 parser.add_argument("--target-trajectory-mode", type=str, default=None,
                     choices=["linear", "circular"],
                     help="Force target trajectory mode (overrides linear_weight)")
@@ -81,6 +86,9 @@ parser.add_argument("--policy-combo", type=str, default="default",
 # Trajectory recording
 parser.add_argument("--record-trajectory", action=argparse.BooleanOptionalAction, default=True)
 parser.add_argument("--trajectory-envs", type=int, default=8)
+# Action diagnostics (per-axis RMS / FFT; trace serialization gated)
+parser.add_argument("--record-action-trace", action=argparse.BooleanOptionalAction, default=True,
+                    help="Include per-step action trace arrays in action_diagnostics output")
 # Video recording
 parser.add_argument("--record-video", type=str, default=None,
                     help="Output path for video (e.g., demo.mp4)")
@@ -145,7 +153,11 @@ from isaaclab_tasks.direct.iris_ma6.experiments import (
     apply_env_overrides,
     apply_agent_overrides,
 )
-from isaaclab_tasks.direct.iris_ma6.experiments.metrics import MetricTracker, TimeseriesTracker
+from isaaclab_tasks.direct.iris_ma6.experiments.metrics import (
+    ActionTraceRecorder,
+    MetricTracker,
+    TimeseriesTracker,
+)
 
 if args_cli.record_video is not None:
     from isaaclab_tasks.direct.iris_ma5.video_recording import (
@@ -541,27 +553,36 @@ def main(env_cfg, agent_cfg: dict):
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.episode_length_s = 20.0
 
-    # Force all curriculum to full difficulty
-    env_cfg.curriculum.tracking_start_step = 0
-    env_cfg.curriculum.tracking_end_step = 0
-    env_cfg.curriculum.safety_start_step = 0
-    env_cfg.curriculum.safety_end_step = 0
-    env_cfg.curriculum.moving_target_start_step = 0
-    env_cfg.curriculum.moving_target_end_step = 0
-    env_cfg.curriculum.coordination_start_step = 0
-    env_cfg.curriculum.coordination_end_step = 0
-    env_cfg.curriculum.noise_start_step = 0
-    env_cfg.curriculum.noise_end_step = 0
-    env_cfg.curriculum.fixed_delay_start_step = 0
-    env_cfg.curriculum.fixed_delay_end_step = 0
-    env_cfg.curriculum.random_delay_start_step = 0
-    env_cfg.curriculum.random_delay_end_step = 0
-    env_cfg.curriculum.dropout_start_step = 0
-    env_cfg.curriculum.dropout_end_step = 0
-    env_cfg.curriculum.dynamics_start_step = 0
-    env_cfg.curriculum.dynamics_end_step = 0
-    env_cfg.curriculum.agent_velocity_start_step = 0
-    env_cfg.curriculum.agent_velocity_end_step = 0
+    if args_cli.step is not None:
+        # Pin curriculum to a specific training step (more intuitive than zeroing
+        # start/end steps). The env reads debug_initial_step in place of
+        # common_step_counter for all curriculum lookups when use_debug_initial_step
+        # is True.
+        env_cfg.use_debug_initial_step = True
+        env_cfg.debug_initial_step = int(args_cli.step)
+        print(f"[EVAL] Curriculum pinned to step {args_cli.step} via debug_initial_step")
+    else:
+        # Force all curriculum to full difficulty (legacy behavior when --step is unset)
+        env_cfg.curriculum.tracking_start_step = 0
+        env_cfg.curriculum.tracking_end_step = 0
+        env_cfg.curriculum.safety_start_step = 0
+        env_cfg.curriculum.safety_end_step = 0
+        env_cfg.curriculum.moving_target_start_step = 0
+        env_cfg.curriculum.moving_target_end_step = 0
+        env_cfg.curriculum.coordination_start_step = 0
+        env_cfg.curriculum.coordination_end_step = 0
+        env_cfg.curriculum.noise_start_step = 0
+        env_cfg.curriculum.noise_end_step = 0
+        env_cfg.curriculum.fixed_delay_start_step = 0
+        env_cfg.curriculum.fixed_delay_end_step = 0
+        env_cfg.curriculum.random_delay_start_step = 0
+        env_cfg.curriculum.random_delay_end_step = 0
+        env_cfg.curriculum.dropout_start_step = 0
+        env_cfg.curriculum.dropout_end_step = 0
+        env_cfg.curriculum.dynamics_start_step = 0
+        env_cfg.curriculum.dynamics_end_step = 0
+        env_cfg.curriculum.agent_velocity_start_step = 0
+        env_cfg.curriculum.agent_velocity_end_step = 0
 
     # Create environment
     env = gym.make(args_cli.task, cfg=env_cfg)
@@ -597,6 +618,19 @@ def main(env_cfg, agent_cfg: dict):
         )
     else:
         traj_recorder = None
+
+    # Action diagnostics recorder (per-axis RMS, ΔRMS, peak FFT freq; cmd_vel
+    # dims 4-6 are normalized in env, scaled to physical units here).
+    action_trace_recorder = ActionTraceRecorder(
+        num_sample_envs=args_cli.trajectory_envs,
+        num_total_envs=args_cli.num_envs,
+        agent_ids=list(possible_agents),
+        max_steps=unwrapped.max_episode_length,
+        policy_rate_hz=1.0 / float(unwrapped.step_dt),
+        gimbal_rate_scale=unwrapped._controller.cfg.gimbal.max_gimbal_rate,
+        zoom_rate_scale=unwrapped._controller._zoom._max_zoom_rate.clone(),
+        record_trace=args_cli.record_action_trace,
+    )
 
     # Video recorder
     if args_cli.record_video is not None:
@@ -677,6 +711,9 @@ def main(env_cfg, agent_cfg: dict):
         step_count += 1
 
         obs, rewards, terminated, truncated, info = env_wrapped.step(actions)
+
+        # Record per-step action commands (physical units; dims 4-6 scaled inside recorder)
+        action_trace_recorder.step(unwrapped.cmd_vel)
 
         # Record video frame
         if video_recorder is not None:
@@ -782,6 +819,7 @@ def main(env_cfg, agent_cfg: dict):
                 ts_tracker.record_episode_end(done_envs)
             if traj_recorder is not None:
                 traj_recorder.record_episode_end(done_envs)
+            action_trace_recorder.record_episode_end(done_envs)
 
     # Compute final results
     results = tracker.compute_final_metrics()
@@ -793,6 +831,7 @@ def main(env_cfg, agent_cfg: dict):
         traj_data = traj_recorder.to_dict()
         traj_data["step_dt_seconds"] = float(unwrapped.step_dt)
         results["trajectories"] = traj_data
+    results["action_diagnostics"] = action_trace_recorder.to_dict()
     results["experiment"] = exp_cfg.name
     results["checkpoint"] = args_cli.checkpoint or "greedy"
     results["eval_params"] = {

@@ -2247,14 +2247,10 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     result.zoom_levels[:, idx], batch_ids
                 )
 
-                # Curriculum-scaled tau_zoom: near-instant at progress=0,
-                # ramp to configured value at full dynamics progress.
-                # When progress > 0, randomize_gains() will overwrite with
-                # per-env randomized values centered on this nominal.
-                tau_zoom_curriculum = max(
-                    self.cfg.drone_controller.zoom.tau_zoom * self.progress_dynamics, 1e-4
-                )
-                self._controller._zoom._tau_zoom[batch_ids] = tau_zoom_curriculum
+                # tau_zoom is held at the configured nominal at all times;
+                # randomize_gains() draws per-env values around it during the
+                # dynamics phase (progress > 0). No curriculum-gating of the
+                # nominal here — see iris_ma6 dynamics-curriculum bug 4.
 
             # Apply target states
             target_pos = result.target_positions + self._terrain.env_origins[env_ids]
@@ -2295,14 +2291,10 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         # Randomize controller gains (curriculum-gated to dynamics phase)
         if self.progress_dynamics > 0.0:
-            tau_zoom_curriculum = max(
-                self.cfg.drone_controller.zoom.tau_zoom * self.progress_dynamics, 1e-4
-            )
             for idx in range(len(self.cfg.possible_agents)):
                 batch_ids = self._batch_idx(env_ids, idx)
                 self._controller.randomize_gains(
                     batch_ids, self.progress_dynamics, self.cfg.gain_randomization,
-                    tau_zoom_nominal=tau_zoom_curriculum,
                 )
 
             # Randomize max linear velocity (same dynamics curriculum gate)

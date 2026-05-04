@@ -5,6 +5,7 @@
 
 """Evaluation metrics for iris_ma6 experiments."""
 
+from .action_trace_recorder import ActionTraceRecorder
 from .metric_tracker import MetricTracker
 from .timeseries_tracker import TimeseriesTracker
 from .trajectory_recorder import TrajectoryRecorder

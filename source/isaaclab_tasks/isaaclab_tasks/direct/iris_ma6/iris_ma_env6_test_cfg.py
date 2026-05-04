@@ -109,7 +109,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     """Episode length in seconds."""
 
     decimation: int = 4
-    """Physics steps per control step (25 Hz policy at 100 Hz sim)."""
+    """Physics steps per control step (e.g. 25 Hz policy at 100 Hz sim)."""
 
     # These are populated dynamically in __post_init__ based on num_agents.
     possible_agents: list[str] = ["drone_0", "drone_1", "drone_2"]
