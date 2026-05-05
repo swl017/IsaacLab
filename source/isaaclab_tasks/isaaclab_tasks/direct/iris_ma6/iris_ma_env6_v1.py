@@ -461,13 +461,14 @@ class IrisMA6V1Env(DirectMARLEnv):
             self.cfg.tracking_lost_timeout_s / (self.cfg.sim.dt * self.cfg.decimation)
         )
 
-        # Curriculum progress factors (updated each step in _get_rewards).
-        # progress_coord is a per-env (N,) tensor: triangulation reward is
-        # gated as a step-at-episode-boundary, computed in _reset_idx and
-        # held constant for the episode (avoids mid-episode reward changes
-        # that bias GAE bootstrapped value targets).
+        # Curriculum progress factors. Reward-gating progress signals are
+        # per-env (N,) tensors written in _reset_idx and held constant for
+        # the episode — avoids mid-episode reward-function changes that bias
+        # GAE bootstrapped value targets. progress_coord is a step-at-
+        # episode-boundary (0 → 1 once); progress_safety is a per-env
+        # ramp value sampled at episode start.
         self.progress_coord = torch.zeros(self.num_envs, device=self.device)
-        self.progress_safety = 0.0
+        self.progress_safety = torch.zeros(self.num_envs, device=self.device)
 
         # Triangulation module initialization
         # Dual pipeline: GT for rewards, triangulated for observations
@@ -1296,22 +1297,13 @@ class IrisMA6V1Env(DirectMARLEnv):
         current_step = self.cfg.debug_initial_step if self.cfg.use_debug_initial_step else self.common_step_counter
         # current_step = self.common_step_counter
         curr = self.cfg.curriculum
-        # progress_coord is a step-at-episode-boundary signal (per-env, set in
-        # _reset_idx). It's not recomputed per step here because mid-episode
-        # reward-function changes bias GAE bootstrapped value targets.
-        self.progress_safety = self._linear_progress(
-            curr.safety_start_step, curr.safety_end_step, current_step
-        )
-
-        # Update curriculum progress for initial states randomization
-        self.progress_tracking = curr.get_progress(
-            current_step, curr.tracking_start_step, curr.tracking_end_step
-        )
-
-        self.progress_moving_target = curr.get_progress(
-            current_step, curr.moving_target_start_step, curr.moving_target_end_step
-        )
-        self.progress_agent_velocity = curr.get_agent_velocity_progress(current_step)
+        # Reward-gating curriculum signals (progress_coord, progress_safety) and
+        # reset-only scalars (progress_tracking / progress_moving_target /
+        # progress_agent_velocity) are computed in _reset_idx — see Phase A+D
+        # of the dynamics-curriculum follow-up. Recomputing them per step here
+        # is unnecessary: the per-env reward-gating values are held for the
+        # episode (avoids GAE bootstrap bias), and the scalar reset-only
+        # values are read by _reset_idx itself.
 
         # Update delay system curriculum (none → fixed → random, noise/dropout ramp)
         if self._delay_system is not None:
@@ -2205,6 +2197,28 @@ class IrisMA6V1Env(DirectMARLEnv):
         # _linear_progress here instead.
         coord_active = float(current_step >= self.cfg.curriculum.coordination_start_step)
         self.progress_coord[env_ids] = coord_active
+
+        # Phase A — per-env reward-gating ramp (safety → cbf_penalty +
+        # target_proximity). Same rationale as progress_coord: hold the
+        # value constant within an episode so GAE bootstrap targets are
+        # unbiased.
+        self.progress_safety[env_ids] = self._linear_progress(
+            self.cfg.curriculum.safety_start_step,
+            self.cfg.curriculum.safety_end_step,
+            current_step,
+        )
+
+        # Phase D — reset-only scalar curricula (only consumed in _reset_idx).
+        # Computed here instead of _get_rewards because the consumers are
+        # right below.
+        curr = self.cfg.curriculum
+        self.progress_tracking = curr.get_progress(
+            current_step, curr.tracking_start_step, curr.tracking_end_step
+        )
+        self.progress_moving_target = curr.get_progress(
+            current_step, curr.moving_target_start_step, curr.moving_target_end_step
+        )
+        self.progress_agent_velocity = curr.get_agent_velocity_progress(current_step)
 
         if self._initial_states is not None:
             # Generate randomized initial states via InitialStates module

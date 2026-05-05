@@ -66,7 +66,7 @@ zoom_rate_cmd ∈ [-1, 1]
 3. **Dead-time buffer is per-env, sampled at reset, constant within an episode.** Same Gaussian-sample-then-clip mechanism as [GimbalRateLoop._sample_dead_time](../../../../controller/gimbal_rate_loop.py#L278-L313). Curriculum scale ∈ [0, 1]: 0 = no delay (preserves pre-mas/037 behavior), 1 = full measured Gaussian. Per mas/037 scope-boundary "reuse the gimbal-axis dead-time curriculum scale unless the fit forces otherwise" — the fit gives zoom 100 ms vs gimbal 66 ms (mean), distinguishably different, so we add a **separate** zoom curriculum knob. The implementation pattern is shared; the curriculum knob is not.
 
 4. **Curriculum staging.** Two new knobs in [CurriculumCfg](../../../../curriculum/curriculum_cfg.py), aligned with the existing dynamics / gimbal-dead-time cadence:
-   - `zoom_tau_start_step / zoom_tau_end_step` — gates the τ₁ ramp on the zoom rate-loop. Default = align with `dynamics_start_step / dynamics_end_step` (60k / 100k) so the τ₁ ramp parallels the existing tau_zoom curriculum (which it replaces architecturally — same τ field, same ramp). The env's existing `max(cfg.zoom.tau_zoom * progress_dynamics, 1e-4)` write at reset ([iris_ma_env6_test.py:2272-2275](../../../../iris_ma_env6_test.py#L2272-L2275)) already handles this; this knob just renames the source-of-truth for clarity (no behavior change at the default value of `dynamics_*`).
+   - `zoom_tau_start_step / zoom_tau_end_step` (NEW knob, distinct from `dynamics_*`) — gates the τ₁ ramp on the zoom rate-loop. Default = `(20000, 200000)`. Rationale: bootstrap (< 20k) keeps τ₁ near-instant (`progress=0` → `tau_zoom_eff = max(cfg.tau_zoom * 0, 1e-4) = 1e-4`) so the policy can learn bbox / zoom alignment with infinite-bandwidth zoom; after 20k it ramps **slowly** over a ~180k window so the policy gradually adapts to the measured τ₁ = 0.091 s without a step change. This **decouples** the zoom τ ramp from the gimbal-rate-loop τ ramp (`dynamics_*` 60k / 100k) — zoom and gimbal have different timescales, mas/037 fits zoom independently of mas/035, and the policy benefits from a slower zoom-τ ramp in particular because zoom misalignment cascades into bbox-size and triangulation noise. The env's existing reset-time write becomes `_tau_zoom = max(cfg.zoom.tau_zoom * progress_zoom_tau, 1e-4)` at [iris_ma_env6_test.py:2272-2275](../../../../iris_ma_env6_test.py#L2272-L2275), reading `curr.get_zoom_tau_progress(current_step)` instead of `progress_dynamics`.
    - `zoom_dead_time_start_step / zoom_dead_time_end_step` — gates the dead-time buffer ramp (mas/036 pattern). Default = `(180000, 220000)`, mirroring `gimbal_dead_time_*`. Independent of the τ₁ ramp.
 
 5. **First-order lag stays.** mas/037's fit has `first_order_tau_s = 0.091 s` (non-zero). The fit's acceptance test (compare_zoom.py median |err| ≤ 0.10 on 3/4 linear-regime runs) requires it. Default `cfg.zoom.tau_zoom = 0.091` (down from 0.1, within DR range so no behavior shock).
@@ -83,20 +83,29 @@ zoom_rate_cmd ∈ [-1, 1]
 
 9. **`compute_z_eff` is unchanged.** mas/028's calibration curve maps the operator zoom level to the focal-length multiplier; mas/037 fits the operator zoom level's transient. Composable. The env continues to read `self.zoom_level[:, idx]` (= controller's published level) and feed it through `compute_z_eff` for the intrinsics path.
 
+10. **Backward-compatible model selector.** Add `cfg.zoom.model: str = "first_order"` to `ZoomControllerCfg`. Two values:
+    - `"first_order"` (default — preserves bit-exact pre-mas/037 behavior on existing checkpoints, training runs, and tests): only stages 1 + 4 + 5 run (action denorm → integrator → first-order lag). Stages 2 (v_max clip), 3 (dead-time), and the output quantization (design 2) are bypassed. The `zoom` and `zoom_internal` properties return the same continuous post-lag state. Curriculum hook `set_dead_time_curriculum_scale` becomes a no-op. v_max / quantum / dead_time cfg fields are present but unread. This makes flipping `model` a pure-additive change with no risk to in-flight runs or trained policies.
+    - `"siyi_a8"`: all four stages active, output quantized at 0.1, dead-time buffer engaged when curriculum scale > 0. The full mas/037 model.
+    Implementation: a single `if self.cfg.model == "siyi_a8"` branch inside `compute_control` selects the pipeline. Both modes share the integrator + lag stages — only the surrounding pre-clip / dead-time / post-quantization wrapping differs. Selection is per-controller-construction (cfg-time), not per-step. Env's `_init_<task>_v0` (or equivalent) chooses the mode; YAML configs override via `agent_cfg.cfg_overrides` if present.
+
+    Default = `"first_order"` so this ticket's landing does not change behavior for any current task / yaml / training run. New runs that want the deployment-faithful model set `model: siyi_a8` (or wire it from a yaml). The bit-exact regression gate (`test_zoom_response_model_stages.py::test_first_order_mode_unchanged`) compares `model="first_order"` outputs against a reference trace captured before this ticket lands — locking in zero behavior drift for the default mode.
+
 ### Workflow
 
 1. **Write [zoom_response_spec.md](../../../zoom_response_spec.md)** — per [iris_ma6/CLAUDE.md](../../../../CLAUDE.md) "Specs live in doc/*_spec.md". Document the four-stage model, the calling contract (per the §Stateful Component Rules in [/home/usrg/IsaacPX4/IsaacLab/CLAUDE.md](../../../../../../../../CLAUDE.md)), the DR/curriculum hooks, and the published-vs-internal split. Reference mas/037 truth values.
 
 2. **Edit [controller/zoom_controller_cfg.py](../../../../controller/zoom_controller_cfg.py)** — add the new fields:
    ```python
-   tau_zoom: float = 0.091      # was 0.1; mas/037 first_order_tau_s
-   v_max_levels_per_s: float = 3.16    # NEW; lens slew clip
-   quantum_levels: float = 0.1         # NEW; output quantum
-   dead_time_mean_s: float = 0.100     # NEW; mas/037 deadtime_s
-   dead_time_std_s: float = 0.018      # NEW; mas/037 deadtime_std_s
-   dead_time_max_s: float = 0.150      # NEW; per-env clip cap (≈ mean + 3σ)
-   dead_time_curriculum_scale: float = 0.0   # NEW; 0 → no delay (preserves pre-mas/037)
-   randomize_v_max: bool = False       # NEW; reserved (DO NOT enable per design 6)
+   model: str = "first_order"          # NEW (design 10); "first_order" | "siyi_a8". Default preserves pre-mas/037.
+   tau_zoom: float = 0.1               # UNCHANGED default to preserve "first_order" mode bit-exactness.
+                                       # When model="siyi_a8", the env / yaml should override to 0.091 (mas/037 fit).
+   v_max_levels_per_s: float = 3.16    # NEW; lens slew clip; only consumed when model="siyi_a8".
+   quantum_levels: float = 0.1         # NEW; output quantum; only consumed when model="siyi_a8".
+   dead_time_mean_s: float = 0.100     # NEW; mas/037 deadtime_s; only consumed when model="siyi_a8".
+   dead_time_std_s: float = 0.018      # NEW; mas/037 deadtime_std_s; only consumed when model="siyi_a8".
+   dead_time_max_s: float = 0.150      # NEW; per-env clip cap (≈ mean + 3σ); only consumed when model="siyi_a8".
+   dead_time_curriculum_scale: float = 0.0   # NEW; 0 → no delay (preserves pre-mas/037); only consumed when model="siyi_a8".
+   randomize_v_max: bool = False       # NEW; reserved (DO NOT enable per design 6).
    ```
    `max_zoom_rate` stays as is (it's now explicitly the policy action scale; clarify in docstring).
 
@@ -137,7 +146,11 @@ zoom_rate_cmd ∈ [-1, 1]
    - In `_nominal_gains` ([drone_controller.py:203-204](../../../../controller/drone_controller.py#L203-L204)), `tau_zoom` continues to track `_zoom._tau_zoom` (now τ₁); `max_zoom_rate` continues to track action scale.
    - Add `_zoom._v_max` to `_nominal_gains` for symmetry / DR forward compatibility (write `cfg.zoom.v_max_levels_per_s` at construction; never read by the active randomize path while design 6 holds).
 
-5. **Edit [curriculum/curriculum_cfg.py](../../../../curriculum/curriculum_cfg.py)** — add `zoom_dead_time_start_step / zoom_dead_time_end_step` (default 180000 / 220000) and `get_zoom_dead_time_progress(current_step)`. Mirror the gimbal-dead-time block at [curriculum_cfg.py:266-285](../../../../curriculum/curriculum_cfg.py#L266-L285). The τ₁ ramp continues to use `get_dynamics_progress` (no separate zoom_tau curriculum; preserves the existing reset-time write at [iris_ma_env6_test.py:2272-2275](../../../../iris_ma_env6_test.py#L2272-L2275)).
+5. **Edit [curriculum/curriculum_cfg.py](../../../../curriculum/curriculum_cfg.py)** — add four new fields and two getters:
+   - `zoom_tau_start_step: int = 20000` and `zoom_tau_end_step: int = 200000`. Bootstrap (< 20k) keeps τ₁ near-instant; slow ramp through 200k.
+   - `zoom_dead_time_start_step: int = 180000` and `zoom_dead_time_end_step: int = 220000`. Mirrors `gimbal_dead_time_*`.
+   - `get_zoom_tau_progress(current_step) -> float` — used by the env's reset-time write of `_tau_zoom`. Replaces `progress_dynamics` for the zoom path only.
+   - `get_zoom_dead_time_progress(current_step) -> float` — used by the env's per-step `set_dead_time_curriculum_scale` hook. Mirror the gimbal-dead-time block at [curriculum_cfg.py:266-285](../../../../curriculum/curriculum_cfg.py#L266-L285).
 
 6. **Edit [iris_ma_env6_test.py](../../../../iris_ma_env6_test.py)** — three small additions:
    - **Curriculum hook for zoom dead-time scale**: at the same site as the gimbal-dead-time hook ([iris_ma_env6_test.py:1429-1434](../../../../iris_ma_env6_test.py#L1429-L1434)), add:
@@ -146,14 +159,15 @@ zoom_rate_cmd ∈ [-1, 1]
          curr.get_zoom_dead_time_progress(current_step)
      )
      ```
-   - **No change to `self.zoom_level[:, idx] = zoom_batch[s:s + N]`** at [iris_ma_env6_test.py:807](../../../../iris_ma_env6_test.py#L807) — `zoom_batch` now arrives quantized (controller's `zoom` property returns `_zoom_published`). Verify by running the test_published_quantum test.
-   - **Reset path**: existing `_zoom.set_zoom(...)` at [iris_ma_env6_test.py:2259-2261](../../../../iris_ma_env6_test.py#L2259-L2261) carries over (writes the continuous internal state; published quantization is computed on read). Existing `_zoom._tau_zoom[batch_ids] = tau_zoom_curriculum` at [iris_ma_env6_test.py:2275](../../../../iris_ma_env6_test.py#L2275) carries over verbatim.
+   - **`self.zoom_level[:, idx] = zoom_batch[s:s + N]`** at [iris_ma_env6_test.py:807](../../../../iris_ma_env6_test.py#L807): when `model="siyi_a8"`, `zoom_batch` arrives quantized (controller's `zoom` property returns `_zoom_published`). When `model="first_order"`, `zoom_batch` is the continuous post-lag state — bit-exact pre-mas/037. No code change at the env site; the controller's property handles the mode switch.
+   - **Reset path — τ₁ curriculum source**: change `tau_zoom_curriculum = max(self.cfg.drone_controller.zoom.tau_zoom * self.progress_dynamics, 1e-4)` at [iris_ma_env6_test.py:2272-2274](../../../../iris_ma_env6_test.py#L2272-L2274) to read `self.curriculum_progress.get_zoom_tau_progress(current_step)` (or use a cached `self.progress_zoom_tau` mirror written next to `self.progress_dynamics`). The existing `_zoom._tau_zoom[batch_ids] = tau_zoom_curriculum` write itself is unchanged. With the default `zoom_tau_*=(20000, 200000)`, this keeps `tau_zoom ≈ 1e-4` for steps < 20k (bootstrap-instant zoom) and slowly ramps to `cfg.zoom.tau_zoom` thereafter.
+   - **Reset path — `set_zoom`**: existing `_zoom.set_zoom(...)` at [iris_ma_env6_test.py:2259-2261](../../../../iris_ma_env6_test.py#L2259-L2261) carries over (writes the continuous internal state; published quantization is computed on read).
 
 7. **No agents/yaml changes required.** The action / observation interfaces are unchanged: action[6] still ∈ [-1, 1], obs zoom field still emits a single float. The float is now quantized to 0.1, but the obs dim stays 1. Policies trained on the old continuous-zoom env will see slightly chunkier zoom obs after this change — that is intentional (mas/037 Tip 2). No reward/scaling change.
 
 8. **Tests** at [controller/tests/](../../../../controller/tests/) — add the following, runnable via the existing [run_tests.py](../../../../controller/tests/run_tests.py) AppLauncher harness:
 
-   - **`test_zoom_response_model_stages.py`** — pure-PyTorch unit test of the four stages on a small (num_envs=8) `ZoomController`:
+   - **`test_zoom_response_model_stages.py`** — pure-PyTorch unit test of the four stages on a small (num_envs=8) `ZoomController` with `model="siyi_a8"`. Adds an explicit **mode-selection** test (`test_first_order_mode_unchanged`) that compares `model="first_order"` outputs across a 200-step random-rate rollout against the pre-mas/037 controller's analytic formula (`alpha = 1 - exp(-dt/τ); state += alpha * (state + cmd*max_rate*dt - state)`) — must match within FP noise (atol=1e-6). This is the hard bit-exact backward-compatibility gate. Tests in this file:
      - **Stage 2 — slew clip**: feed sustained `zoom_rate_cmd = 1.0` at `max_zoom_rate = 4.0` (= 4 levels/s commanded). With `v_max = 3.16`, post-clip rate is 3.16. Integrate 1 s with τ₁ = 0 (set via `set_tau_zoom(0)`), τ_d = 0 (curriculum scale = 0). Assert `_zoom_target` advanced by **3.16 ± 0.05**, not 4.0.
      - **Stage 3 — dead-time**: with `dead_time_curriculum_scale = 1.0`, set per-env `_dead_time_seconds = 0.1`, `dt = 0.04` (env step). Feed `zoom_rate_cmd = 1.0` for 5 steps. The first 2 steps (≥ 100 / 40 = 2.5 → 3 steps cold) emit zero rate; integrator stays at 1.0. Step 3+ emits 1.0 · max_zoom_rate. Assert cold-start zero output, then non-zero after the dead-time depth.
      - **Stage 4 — integrator clamp**: zoom_target stays in [zoom_min, zoom_max] under sustained max-rate command (existing test, carry over).
@@ -188,7 +202,8 @@ zoom_rate_cmd ∈ [-1, 1]
 
 ### Scope boundary
 
-- DO: implement all four stages (rate clip, dead-time, integrator, lag), output quantization on the published path, per-env DR / curriculum hooks for τ_d and τ₁.
+- DO: implement all four stages (rate clip, dead-time, integrator, lag), output quantization on the published path, per-env DR / curriculum hooks for τ_d and τ₁, behind the `cfg.zoom.model` selector.
+- DO: default `cfg.zoom.model = "first_order"` so this ticket's landing is a no-op for every existing yaml / training run / checkpoint resume. Opt-in to `"siyi_a8"` by cfg or yaml override.
 - DO: keep `tau_zoom` as the field name for the first-order lag's time constant (preserves DR / curriculum compatibility with the existing `randomize_zoom` path and the `_tau_zoom` per-env tensor name).
 - DO: preserve bit-exact behavior at curriculum-bootstrap (`dead_time_curriculum_scale = 0`, `tau_zoom ≈ 1e-4`, `max_zoom_rate * scale ≤ v_max`) vs the pre-mas/037 first-order-only model. Locked in by `test_zoom_response_model_stages.py`.
 - DO: place the dead-time buffer at the **input to the integrator** (matches mas/036 architecture for the gimbal axes; matches the on-vehicle integrator's input).

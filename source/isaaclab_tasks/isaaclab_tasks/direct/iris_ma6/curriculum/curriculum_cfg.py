@@ -285,6 +285,49 @@ class CurriculumCfg:
     """
 
     # ==========================================================================
+    # Phase 3+: Zoom dynamics (mas/037)
+    #
+    # Two independent ramps:
+    #   - tau ramp: τ₁ (post-integrator first-order lag) ramps from near-instant
+    #     at bootstrap (< zoom_tau_start_step) to the configured tau_zoom over a
+    #     long window. Decoupled from gimbal `dynamics_*` because zoom and gimbal
+    #     have different timescales (mas/037 vs mas/035).
+    #   - dead-time ramp: input-side dead-time scale ramps from 0 (no delay) to
+    #     1 (full measured Gaussian). Mirrors `gimbal_dead_time_*` cadence.
+    # ==========================================================================
+
+    zoom_tau_start_step: int = 20000
+    """Step to start ramping the zoom-controller τ₁ (mas/037).
+
+    Bootstrap (< zoom_tau_start_step) keeps τ₁ near-instant (the env writes
+    ``max(cfg.zoom.tau_zoom * progress_zoom_tau, 1e-4)`` at every reset, so
+    progress=0 → tau ≈ 1e-4 → effectively pass-through). After this step, τ₁
+    ramps slowly to its configured value.
+    """
+
+    zoom_tau_end_step: int = 200000
+    """Step when the zoom-controller τ₁ ramp reaches 1.0 (full configured τ).
+
+    Long ramp (default ~180k window) lets the policy gradually adapt to the
+    measured τ₁ = 0.091 s without a step change. Zoom misalignment cascades
+    into bbox-size and triangulation noise, so a slower ramp than the gimbal
+    `dynamics_*` cadence is preferred.
+    """
+
+    zoom_dead_time_start_step: int = 180000
+    """Step to start ramping the zoom dead-time curriculum scale (mas/037).
+
+    Mirrors ``gimbal_dead_time_start_step`` so the policy first masters the
+    rate-loop lag (τ₁ via ``zoom_tau_*``) before the input-side dead-time is
+    layered on top.
+    """
+
+    zoom_dead_time_end_step: int = 220000
+    """Step when the zoom dead-time curriculum scale reaches 1.0 (full measured
+    Gaussian τ_d ~ N(0.100, 0.018) clipped to [0, 0.150]).
+    """
+
+    # ==========================================================================
     # Task Reward Level Curriculum (FIM → GT-anchored → Composite)
     # ==========================================================================
 
@@ -419,6 +462,36 @@ class CurriculumCfg:
             current_step,
             self.gimbal_dead_time_start_step,
             self.gimbal_dead_time_end_step,
+        )
+
+    def get_zoom_tau_progress(self, current_step: int) -> float:
+        """Get progress within the zoom τ₁ ramp phase [0, 1] (mas/037).
+
+        Multiplies the configured ``cfg.zoom.tau_zoom`` at episode reset:
+        ``tau_eff = max(tau_zoom * progress, 1e-4)``. Bootstrap (progress=0)
+        gives near-instant zoom; full progress gives the measured τ₁ =
+        0.091 s. Decoupled from the gimbal rate-loop τ ramp
+        (``dynamics_*``) — zoom and gimbal have different timescales.
+        """
+        return self.get_progress(
+            current_step,
+            self.zoom_tau_start_step,
+            self.zoom_tau_end_step,
+        )
+
+    def get_zoom_dead_time_progress(self, current_step: int) -> float:
+        """Get progress within the zoom dead-time phase [0, 1] (mas/037).
+
+        Drives ``ZoomController.set_dead_time_curriculum_scale`` so the
+        per-env dead-time samples ramp from 0 (no delay) at
+        ``zoom_dead_time_start_step`` to the full measured Gaussian at
+        ``zoom_dead_time_end_step``. Independent of the τ₁ ramp
+        (``zoom_tau_*``) so the two effects can be staged separately.
+        """
+        return self.get_progress(
+            current_step,
+            self.zoom_dead_time_start_step,
+            self.zoom_dead_time_end_step,
         )
 
     def get_task_level_progress(self, current_step: int) -> tuple:

@@ -202,6 +202,10 @@ class DroneController:
             "tau_motor": _expand_scalar(self._motor._tau_motor),
             "tau_zoom": _expand_scalar(self._zoom._tau_zoom),
             "max_zoom_rate": _expand_scalar(self._zoom._max_zoom_rate),
+            # mas/037: lens slew clip nominal (siyi_a8 mode). Snapshotted for
+            # forward-compat; v_max DR is intentionally disabled (design 6,
+            # Tip 6) — see ZoomControllerCfg.randomize_v_max docstring.
+            "v_max_levels_per_s": _expand_scalar(self._zoom._v_max),
         }
 
     @property
