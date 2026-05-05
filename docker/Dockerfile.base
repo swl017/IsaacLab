@@ -43,7 +43,11 @@ RUN --mount=type=cache,target=/var/cache/apt \
     cmake \
     git \
     libglib2.0-0 \
-    ncurses-term && \
+    ncurses-term \
+    tmux \
+    vim \
+    openssh-server && \
+    mkdir -p /run/sshd && \
     apt -y autoremove && apt clean autoclean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -82,10 +86,25 @@ RUN touch /bin/nvidia-smi && \
     mkdir -p /var/run/nvidia-persistenced && \
     touch /var/run/nvidia-persistenced/socket
 
+# Pre-install flatdict without build isolation (its legacy setup.py needs pkg_resources
+# which is unavailable in pip's isolated build env, causing core isaaclab package to fail)
+RUN ${ISAACLAB_PATH}/_isaac_sim/kit/python/bin/python3 -m pip install --no-build-isolation flatdict==4.0.1
+
 # installing Isaac Lab dependencies
 # use pip caching to avoid reinstalling large packages
 RUN --mount=type=cache,target=${DOCKER_USER_HOME}/.cache/pip \
     ${ISAACLAB_PATH}/isaaclab.sh --install
+
+# Pin skrl to 1.4.3 — Isaac Lab is incompatible with skrl 2.x
+RUN ${ISAACLAB_PATH}/isaaclab.sh -p -m pip install --force-reinstall --no-deps "skrl==1.4.3"
+
+# Remove standalone torch/nvidia packages if pulled during install
+# (restores Isaac Sim's bundled torch==2.5.1+cu118)
+RUN ${ISAACLAB_PATH}/_isaac_sim/kit/python/bin/python3 -m pip uninstall -y \
+    torch nvidia-cublas-cu12 nvidia-cuda-cupti-cu12 nvidia-cuda-nvrtc-cu12 \
+    nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12 nvidia-cufft-cu12 \
+    nvidia-curand-cu12 nvidia-cusolver-cu12 nvidia-cusparse-cu12 \
+    nvidia-nccl-cu12 nvidia-nvjitlink-cu12 nvidia-nvtx-cu12 2>/dev/null; exit 0
 
 # HACK: Remove install of quadprog dependency
 RUN ${ISAACLAB_PATH}/isaaclab.sh -p -m pip uninstall -y quadprog
@@ -100,6 +119,25 @@ RUN echo "export ISAACLAB_PATH=${ISAACLAB_PATH}" >> ${HOME}/.bashrc && \
     echo "alias tensorboard='${ISAACLAB_PATH}/_isaac_sim/python.sh ${ISAACLAB_PATH}/_isaac_sim/tensorboard'" >> ${HOME}/.bashrc && \
     echo "export TZ=$(date +%Z)" >> ${HOME}/.bashrc
 
+# Install Claude Code CLI and add to PATH
+RUN curl -fsSL https://claude.ai/install.sh | bash && \
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> ${HOME}/.bashrc
+
+# Clone PegasusSimulator beside isaaclab
+RUN git clone https://github.com/swl017/PegasusSimulator.git -b devel ${ISAACLAB_PATH}/../PegasusSimulator
+
+# Accept NVIDIA Omniverse EULA and privacy consent
+ENV ACCEPT_EULA=Y
+ENV PRIVACY_CONSENT=Y
+
 # make working directory as the Isaac Lab directory
 # this is the default directory when the container is run
 WORKDIR ${ISAACLAB_PATH}
+
+# Override Isaac Sim entrypoint so the container doesn't launch the simulator.                           
+# Our entrypoint brings up sshd (idempotent, key-only) before running CMD so                             
+# RunPod-style deployments are reachable on first boot without manual setup. 
+RUN chmod +x ${ISAACLAB_PATH}/docker/entrypoint.sh && \                                                  
+    ln -sf ${ISAACLAB_PATH}/docker/entrypoint.sh /usr/local/bin/isaaclab-entrypoint                      
+ENTRYPOINT ["/usr/local/bin/isaaclab-entrypoint"]     
+CMD ["sleep", "infinity"]
