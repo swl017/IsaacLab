@@ -419,17 +419,17 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # Reward Scales (migrated from iris_ma5)
     # ==========================================================================
 
-    action_sum_penalty_scale: float = -2.0
+    action_sum_penalty_scale: float = -8.0
     """Penalty scale for total action magnitude."""
 
     # [0 vx, 1 vy, 2 vz, 3 yaw_rate, 4 gimbal_yaw_rate, 5 gimbal_pitch_rate, 6 zoom_rate]
-    action_weight: list = [1, 1, 5, 1, 0.5, 0.5, 0.5]
+    action_weight: list = [1, 1, 5, 1, 1, 1, 1]
     """Weights for each action dimension in penalty computation."""
 
-    action_delta_weight: list = [1, 1, 1, 1, 0.5, 0.5, 0.5]
+    action_delta_weight: list = [1, 1, 1, 1, 1, 1, 1]
     """Weights for action delta (smoothness) penalty."""
 
-    action_delta_penalty_scale: float = -2.0
+    action_delta_penalty_scale: float = -8.0
     """Penalty scale for action changes (smoothness)."""
 
     bbox_center_reward_scale: float = 60.0

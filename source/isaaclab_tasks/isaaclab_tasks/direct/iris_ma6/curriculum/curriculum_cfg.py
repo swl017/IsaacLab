@@ -193,11 +193,27 @@ class CurriculumCfg:
     # Phase 0: Multi-Agent Coupling (triangulation geometry)
     # ==========================================================================
 
-    coordination_start_step: int = 60000
-    """Step to start rewarding coordination (triangulation)."""
+    coordination_start_step: int = 20000
+    """Step at which the triangulation reward switches on, as a step-at-
+    episode-boundary signal (per-env, computed in _reset_idx).
 
-    coordination_end_step: int = 100000
-    """Step when coordination rewards reach full scale."""
+    The default 30k is just past the bootstrap window (pair_valid plateaus
+    around 0.85 by 14k–24k in the SIYI stack) — the policy already has a
+    solid tracking baseline when triangulation is added, so the new gradient
+    is informative rather than noisy.
+
+    The step-vs-ramp choice is deliberate: triangulation is a *task signal*
+    (do it / don't), not a *difficulty knob* (do harder triangulation), so a
+    smooth ramp creates a 40k window where the gradient is some random
+    fraction of the real one and the policy can't disambiguate
+    "I'm bad at triangulation" from "the reward isn't fully on yet."
+    """
+
+    coordination_end_step: int = 20000
+    """[Legacy] Retained for backward compatibility but ignored under the
+    step-at-episode-boundary semantics. Held equal to coordination_start_step
+    so that any code reading _linear_progress(start, end) also sees a step.
+    """
 
     # ==========================================================================
     # Phase 2: Safety (CBF collision avoidance — after basic tracking is learned)

@@ -490,14 +490,19 @@ class DroneController:
             self._motor._tau_motor[env_ids] = self._nominal_gains["tau_motor"][env_ids] * scale
 
         if cfg.randomize_zoom:
-            # Zoom uses its own scale range. With tau_zoom no longer curriculum-
-            # gated at the env, the nominal here equals cfg.zoom.tau_zoom and the
-            # range should be tight (e.g. (0.5, 2.0)) — symmetric around nominal.
+            # Zoom uses its own scale range. The base is the *live* per-env
+            # ``_zoom._tau_zoom`` which the env writes at every reset as
+            #     max(cfg.zoom.tau_zoom * progress_dynamics, 1e-4)
+            # so bootstrap retains near-instant zoom and the random scaling
+            # composes on top of the curriculum value (in-place).
+            # ``_nominal_gains["tau_zoom"]`` is intentionally NOT used here:
+            # it equals cfg.zoom.tau_zoom from construction (Bug 4 fix) and
+            # ignoring it for zoom is what lets bootstrap stay instant.
             z_low = 1.0 - progress * (1.0 - cfg.zoom_scale_range[0])
             z_high = 1.0 + progress * (cfg.zoom_scale_range[1] - 1.0)
 
             scale = torch.empty(M, device=self.device).uniform_(z_low, z_high)
-            self._zoom._tau_zoom[env_ids] = self._nominal_gains["tau_zoom"][env_ids] * scale
+            self._zoom._tau_zoom[env_ids] = self._zoom._tau_zoom[env_ids] * scale
 
             scale2 = torch.empty(M, device=self.device).uniform_(low, high)
             self._zoom._max_zoom_rate[env_ids] = self._nominal_gains["max_zoom_rate"][env_ids] * scale2

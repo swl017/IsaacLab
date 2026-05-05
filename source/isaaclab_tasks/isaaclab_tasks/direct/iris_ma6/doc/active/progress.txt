@@ -1514,3 +1514,98 @@ Followups not done in this patch:
   doing if the 6.75× rendering cost becomes a measured bottleneck.
 - Wire camera_processor.py / domain_randomization process_images() into
   the test/v1 hot path if imitation-learning crops are added later.
+
+----------------------------------------
+2026-05-05 — Dynamics curriculum fix + coord step + tau_zoom restoration
+----------------------------------------
+Done:
+- Diagnosed dynamics-randomization curriculum bugs after experiments
+  58a3c3ee84 + 0b8278f00c showed late-phase collapse aligned with
+  dynamics_end_step. Filed five issues; fixed three in code (Bug 1/2 marked
+  invalid by user; Bug 5 deferred until DR is re-enabled).
+- Bug 4 (HIGH) — `_nominal_gains` snapshot moved from lazy first-call
+  inside `randomize_gains` to construction-time in `DroneController.__init__`
+  via a new `_snapshot_nominal_gains()` helper. The lazy capture had been
+  grabbing the curriculum-modified `_zoom._tau_zoom` (≈1e-4) as the
+  "nominal", corrupting subsequent randomization. The snapshot now matches
+  cfg values for all envs, never mutated. Live tensors are clones on
+  hand-off so in-place randomization can't alias the snapshot.
+- Range tightening — `zoom_scale_range` (0.01, 1.0) → (0.5, 2.0) initially,
+  then reverted to (0.01, 1.0) after the 4d2bb48dc8 review showed the wide
+  range covered near-instant samples that early training depends on.
+  `max_lin_vel_scale_range` (0.5, 1.2) → (0.8, 1.2).
+- Curriculum repositioning — `dynamics_start_step` 220k→60k,
+  `dynamics_end_step` 240k→100k (40k window, ends at noise_start_step so
+  the policy adapts to randomized dynamics under clean obs before
+  observability corruption layers in).
+- Restored bootstrap-time instant tau_zoom: env-side
+  `_zoom._tau_zoom[batch_ids] = max(cfg.tau_zoom * progress_dynamics, 1e-4)`
+  re-added in `_reset_idx`. `randomize_gains` zoom block now scales the
+  *live* `_tau_zoom` in-place rather than reading from `_nominal_gains`,
+  composing curriculum gating with random scaling without re-introducing
+  Bug 4 (other gains still use the construction-time nominal).
+- Coordination curriculum converted from 40k linear ramp (60k–100k) to
+  step-at-episode-boundary at 30k. `progress_coord` is now a per-env
+  (N,) tensor written in `_reset_idx` and held constant for the episode,
+  so GAE bootstrapped value targets see a stationary reward function
+  within each rollout. Triangulation reward turns on once for an env when
+  it starts an episode at common_step >= 30k.
+- Reviewed experiment 4d2bb48dc8 (first run with the new curriculum,
+  -2/-2 penalties). Late-phase collapse eliminated (rew 3.64 / pv 0.49 at
+  254k vs 0b8278f00c's 2.61 / 0.33), but bootstrap regressed (-30% rew
+  through 0–150k) because the prior `_tau_zoom = 1e-4` cushion had been
+  removed. Restoration of bootstrap instant zoom + the 30k coord step
+  should recover both regimes.
+
+Tests:
+- curriculum/test/test_curriculum_cfg.py (19/19 pass): phase-ordering
+  invariants (agent_velocity_end <= dynamics_start <= noise_start),
+  well-formedness of every (start, end) pair, coord step (start==end at
+  30k), dynamics_progress monotonicity. No AppLauncher needed —
+  importlib.spec_from_file_location loads cfg without triggering the
+  isaaclab_tasks/__init__ chain into isaacsim.
+- controller/tests/test_dynamics_curriculum_fix.py (9/9 pass): nominal
+  capture at __init__, nominal == cfg.tau_zoom for all envs, progress=0
+  is no-op, full-progress tau_zoom range around the live base
+  ([1e-3, 0.1] with cfg.tau_zoom=0.1 and zoom_scale_range=(0.01, 1.0)),
+  bootstrap tau_zoom stays at 1e-4, mid-progress (0.5) scales live base,
+  partial-env randomization confines mutation, default cfg ranges,
+  legacy tau_zoom_nominal kwarg rejected.
+- The 4 failures in the wider controller/tests/run_tests.py
+  (Reset functionality asserting omega_min instead of hover, two gimbal
+  controller tests, a sub-process path issue) are pre-existing in code
+  not touched by this fix.
+
+Affected files:
+- EDIT: controller/drone_controller.py — _snapshot_nominal_gains() in
+  __init__, randomize_gains drops tau_zoom_nominal arg, zoom block scales
+  live _tau_zoom (Bug 4 + bootstrap restoration).
+- EDIT: controller/gain_randomization_cfg.py — zoom_scale_range and
+  max_lin_vel_scale_range defaults.
+- EDIT: curriculum/curriculum_cfg.py — dynamics 60k–100k,
+  coordination_start/end_step both 30k (step semantics).
+- EDIT: iris_ma_env6_test.py / iris_ma_env6_v1.py — env-side tau_zoom
+  curriculum gating restored, randomize_gains call drops
+  tau_zoom_nominal kwarg, progress_coord became per-env tensor written
+  in _reset_idx, removed per-step _linear_progress for coord.
+- NEW: controller/tests/test_dynamics_curriculum_fix.py
+- NEW: curriculum/test/test_curriculum_cfg.py
+
+Open items / not done:
+- Inertia-recompute approximation in apply_mass_randomization is rough
+  for added payload (Bug 5). Deferred until DR is re-enabled.
+- Late-phase 300k+ FP/FN curriculum was never learning successfully even
+  in prior runs; intentionally deferred per user.
+- Same step-at-episode-boundary treatment could apply to task_level_2_*
+  / task_level_3_* (also reward-form switches, not difficulty knobs);
+  deferred unless the user requests it.
+- Action-penalty sweep (sum8_d8 + per-axis weight rebalance) is the
+  parallel track that finally collapsed sigma. Combining it with this
+  fix is the next training run.
+
+Next:
+- Train with the combined config: dynamics 60k–100k, coord step at 30k,
+  bootstrap instant tau_zoom restored, sum8_d8 penalties, per-axis
+  weight rebalance. Expected: bootstrap matches 0b8278f00c quality
+  (pair_valid 0.85+ at 24k), no regression through dynamics phase, no
+  late collapse through 200k+.

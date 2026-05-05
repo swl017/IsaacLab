@@ -135,6 +135,40 @@ def test_well_formed_phase_windows(results: TestResults):
             results.add_fail(f"phase {name} well-formed", str(ex))
 
 
+def test_coordination_is_step_at_boundary(results: TestResults):
+    """coordination_start_step must equal coordination_end_step under
+    step-at-episode-boundary semantics. The env code reads
+    coordination_start_step only; coordination_end_step is retained for
+    backward-compat but must not introduce a ramp window."""
+    cfg = CurriculumCfg()
+    try:
+        assert cfg.coordination_start_step == cfg.coordination_end_step, (
+            f"coord must be a step: start={cfg.coordination_start_step}, "
+            f"end={cfg.coordination_end_step}"
+        )
+        results.add_pass("coordination is step (start == end)")
+    except AssertionError as ex:
+        results.add_fail("coordination is step (start == end)", str(ex))
+
+    # Step is post-bootstrap (after the first ~20k where pair_valid plateaus)
+    # and pre-noise so observability corruption doesn't onset before the
+    # triangulation gradient signal exists.
+    try:
+        assert cfg.coordination_start_step >= 20_000, (
+            f"coord step at {cfg.coordination_start_step} is mid-bootstrap"
+        )
+        assert cfg.coordination_start_step <= cfg.noise_start_step, (
+            f"coord step at {cfg.coordination_start_step} starts after noise "
+            f"({cfg.noise_start_step}) — triangulation should activate before "
+            f"observation corruption"
+        )
+        results.add_pass(
+            f"coord step {cfg.coordination_start_step} between bootstrap and noise"
+        )
+    except AssertionError as ex:
+        results.add_fail("coord step between bootstrap and noise", str(ex))
+
+
 def test_dynamics_progress_monotone(results: TestResults):
     """get_dynamics_progress must be 0 before start, 1 after end, and
     monotonically non-decreasing in between."""
@@ -177,6 +211,7 @@ def main() -> int:
     for fn in [
         test_phase_ordering,
         test_well_formed_phase_windows,
+        test_coordination_is_step_at_boundary,
         test_dynamics_progress_monotone,
     ]:
         try:

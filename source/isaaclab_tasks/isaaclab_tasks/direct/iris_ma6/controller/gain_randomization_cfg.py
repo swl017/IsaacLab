@@ -46,13 +46,17 @@ class GainRandomizationCfg:
     randomize_zoom: bool = True
     """Randomize zoom dynamics (tau_zoom, max_zoom_rate)."""
 
-    zoom_scale_range: tuple[float, float] = (0.5, 2.0)
+    zoom_scale_range: tuple[float, float] = (0.01, 1.0)
     """Multiplicative scale range for tau_zoom at full curriculum progress.
 
-    Symmetric around the configured nominal (e.g. cfg.zoom.tau_zoom = 0.1
-    -> sampled tau_zoom in [0.05, 0.2] s). Tight range matches measured
-    sensor variation; nominal applies from step 0 (no env-side curriculum
-    gating of tau_zoom). At progress=0 the range collapses to (1, 1).
+    Wide asymmetric range applied to the *live* curriculum-gated tau_zoom
+    base (which the env writes as ``max(cfg.tau_zoom * progress, 1e-4)`` at
+    every reset). At full progress this gives tau_zoom in
+    ``[cfg.tau_zoom * 0.01, cfg.tau_zoom * 1.0] = [1e-3, 0.1] s``,
+    preserving near-instant samples in the post-curriculum distribution.
+    At progress=0 randomization is skipped entirely (env-side base of 1e-4
+    is used as-is — bootstrap-time instant zoom). See iris_ma6
+    dynamics-curriculum review (2026-05-05).
     """
 
     randomize_max_lin_vel: bool = True

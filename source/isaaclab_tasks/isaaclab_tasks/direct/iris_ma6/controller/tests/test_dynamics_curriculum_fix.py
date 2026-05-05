@@ -142,16 +142,20 @@ def test_progress_zero_is_identity(results: TestResults, device):
         )
 
 
-def test_full_progress_zoom_range_around_nominal(results: TestResults, device):
-    """At progress=1 with zoom_scale_range=(0.5, 2.0), per-env tau_zoom must
-    fall in [cfg.tau_zoom * 0.5, cfg.tau_zoom * 2.0]."""
+def test_full_progress_zoom_range_around_live_base(results: TestResults, device):
+    """At progress=1 with zoom_scale_range=(0.01, 1.0), per-env tau_zoom must
+    fall in [live_base * 0.01, live_base * 1.0] where live_base is whatever
+    the env wrote into _zoom._tau_zoom (curriculum-gated)."""
     try:
         torch.manual_seed(0)
         N = 1024
         ctrl = _make_controller(num_envs=N, device=device)
         cfg_tau = ctrl.cfg.zoom.tau_zoom
+        # Simulate env-side curriculum write at full progress: live base
+        # equals cfg.zoom.tau_zoom.
+        ctrl._zoom._tau_zoom[:] = cfg_tau
         gain_cfg = GainRandomizationCfg(
-            enabled=True, zoom_scale_range=(0.5, 2.0)
+            enabled=True, zoom_scale_range=(0.01, 1.0)
         )
         ctrl.randomize_gains(
             env_ids=torch.arange(N, device=device),
@@ -159,27 +163,99 @@ def test_full_progress_zoom_range_around_nominal(results: TestResults, device):
             cfg=gain_cfg,
         )
         tau = ctrl._zoom._tau_zoom
-        lo = cfg_tau * 0.5
-        hi = cfg_tau * 2.0
+        lo = cfg_tau * 0.01
+        hi = cfg_tau * 1.0
         assert tau.min().item() >= lo - 1e-7, (
             f"min tau_zoom {tau.min().item()} < {lo}"
         )
         assert tau.max().item() <= hi + 1e-7, (
             f"max tau_zoom {tau.max().item()} > {hi}"
         )
-        # Sanity: range is actually exercised (not stuck at nominal)
         assert tau.std().item() > 0.0, "tau_zoom did not vary across envs"
-        # And the nominal snapshot is still untouched
+        # _nominal_gains stays at cfg.tau_zoom (Bug 4 fix), unused for zoom.
         assert torch.allclose(
             ctrl._nominal_gains["tau_zoom"],
             torch.full_like(ctrl._nominal_gains["tau_zoom"], cfg_tau),
-        ), "_nominal_gains['tau_zoom'] mutated after randomize_gains"
+        ), "_nominal_gains['tau_zoom'] mutated"
         results.add_pass(
-            f"Full-progress tau_zoom in [{lo:.3f}, {hi:.3f}], nominal unchanged"
+            f"Full-progress tau_zoom in [{lo:.4f}, {hi:.4f}] around live base"
         )
     except Exception:
         results.add_fail(
             "Full-progress tau_zoom range", traceback.format_exc()
+        )
+
+
+def test_bootstrap_tau_zoom_stays_instant(results: TestResults, device):
+    """At progress=0 the env writes _tau_zoom = 1e-4 ('instant zoom') and
+    randomize_gains is skipped — verify the 1e-4 sticks. This is the
+    bootstrap-quality cushion that the dynamics-curriculum review
+    (2026-05-05) identified as load-bearing during the first ~60k steps."""
+    try:
+        N = 32
+        ctrl = _make_controller(num_envs=N, device=device)
+        # Simulate the env's curriculum write at progress_dynamics=0:
+        # tau_zoom_curriculum = max(cfg.tau_zoom * 0, 1e-4) = 1e-4.
+        ctrl._zoom._tau_zoom[:] = 1e-4
+        gain_cfg = GainRandomizationCfg(enabled=True)
+        ctrl.randomize_gains(
+            env_ids=torch.arange(N, device=device),
+            progress=0.0,
+            cfg=gain_cfg,
+        )
+        assert torch.allclose(
+            ctrl._zoom._tau_zoom,
+            torch.full_like(ctrl._zoom._tau_zoom, 1e-4),
+        ), "tau_zoom drifted from 1e-4 at progress=0"
+        results.add_pass("Bootstrap tau_zoom stays at 1e-4 (instant)")
+    except Exception:
+        results.add_fail(
+            "Bootstrap tau_zoom stays at 1e-4 (instant)",
+            traceback.format_exc(),
+        )
+
+
+def test_mid_progress_zoom_scales_live_base(results: TestResults, device):
+    """At mid-progress (0.5) with live base = max(cfg.tau_zoom * 0.5, 1e-4),
+    randomize_gains scales the *live* base, not the cfg nominal. This is the
+    composability of env-side curriculum gating with controller-side
+    randomization."""
+    try:
+        torch.manual_seed(2)
+        N = 512
+        ctrl = _make_controller(num_envs=N, device=device)
+        cfg_tau = ctrl.cfg.zoom.tau_zoom
+        # Simulate env-side write at progress_dynamics=0.5
+        live_base = max(cfg_tau * 0.5, 1e-4)
+        ctrl._zoom._tau_zoom[:] = live_base
+        gain_cfg = GainRandomizationCfg(
+            enabled=True, zoom_scale_range=(0.01, 1.0)
+        )
+        ctrl.randomize_gains(
+            env_ids=torch.arange(N, device=device),
+            progress=0.5,
+            cfg=gain_cfg,
+        )
+        tau = ctrl._zoom._tau_zoom
+        # ramped scale at progress=0.5 with range (0.01, 1.0):
+        # low = 1.0 - 0.5 * (1 - 0.01) = 0.505
+        # high = 1.0 + 0.5 * (1 - 1) = 1.0
+        ramped_low, ramped_high = 0.505, 1.0
+        lo = live_base * ramped_low
+        hi = live_base * ramped_high
+        assert tau.min().item() >= lo - 1e-7, (
+            f"min tau_zoom {tau.min().item()} < {lo}"
+        )
+        assert tau.max().item() <= hi + 1e-7, (
+            f"max tau_zoom {tau.max().item()} > {hi}"
+        )
+        results.add_pass(
+            f"Mid-progress tau_zoom scales live base ({live_base:.4f}) -> "
+            f"[{lo:.4f}, {hi:.4f}]"
+        )
+    except Exception:
+        results.add_fail(
+            "Mid-progress tau_zoom scales live base", traceback.format_exc()
         )
 
 
@@ -216,17 +292,20 @@ def test_partial_progress_only_targets_env_ids(results: TestResults, device):
 
 
 def test_default_gain_cfg_ranges(results: TestResults, _device):
-    """The new defaults (per the curriculum fix plan) are tighter than the
-    pre-fix wide ranges intended to compensate for the broken curriculum."""
+    """Defaults reflect the post-2026-05-05 review:
+    - max_lin_vel_scale_range = (0.8, 1.2) — tight ±20% around curriculum
+    - zoom_scale_range = (0.01, 1.0) — wide asymmetric around the *live*
+      curriculum-gated tau_zoom base, preserving near-instant samples
+    """
     try:
         cfg = GainRandomizationCfg()
         assert cfg.max_lin_vel_scale_range == (0.8, 1.2), (
             f"max_lin_vel_scale_range default is {cfg.max_lin_vel_scale_range}, "
             f"expected (0.8, 1.2)"
         )
-        assert cfg.zoom_scale_range == (0.5, 2.0), (
+        assert cfg.zoom_scale_range == (0.01, 1.0), (
             f"zoom_scale_range default is {cfg.zoom_scale_range}, "
-            f"expected (0.5, 2.0)"
+            f"expected (0.01, 1.0)"
         )
         results.add_pass("GainRandomizationCfg defaults match the fix plan")
     except Exception:
@@ -273,7 +352,9 @@ def main() -> int:
         test_nominal_gains_captured_at_construction,
         test_nominal_tau_zoom_matches_cfg,
         test_progress_zero_is_identity,
-        test_full_progress_zoom_range_around_nominal,
+        test_full_progress_zoom_range_around_live_base,
+        test_bootstrap_tau_zoom_stays_instant,
+        test_mid_progress_zoom_scales_live_base,
         test_partial_progress_only_targets_env_ids,
         test_default_gain_cfg_ranges,
         test_randomize_gains_signature_no_tau_zoom_nominal,

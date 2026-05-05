@@ -84,7 +84,7 @@ agent:
   # Experiment tracking
   experiment:
     directory: iris_ma6
-    experiment_name: "58a3c3ee84_siyi_a8_mini_action_penalty_tuning" 
+    experiment_name: "4d2bb48dc8_siyi_a8_mini_dynamics_randomization_curriculum" 
     write_interval: auto
     checkpoint_interval: auto
     store_separately: false

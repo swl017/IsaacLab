@@ -461,8 +461,12 @@ class IrisMA6V1Env(DirectMARLEnv):
             self.cfg.tracking_lost_timeout_s / (self.cfg.sim.dt * self.cfg.decimation)
         )
 
-        # Curriculum progress factors (updated each step in _get_rewards)
-        self.progress_coord = 0.0
+        # Curriculum progress factors (updated each step in _get_rewards).
+        # progress_coord is a per-env (N,) tensor: triangulation reward is
+        # gated as a step-at-episode-boundary, computed in _reset_idx and
+        # held constant for the episode (avoids mid-episode reward changes
+        # that bias GAE bootstrapped value targets).
+        self.progress_coord = torch.zeros(self.num_envs, device=self.device)
         self.progress_safety = 0.0
 
         # Triangulation module initialization
@@ -1292,9 +1296,9 @@ class IrisMA6V1Env(DirectMARLEnv):
         current_step = self.cfg.debug_initial_step if self.cfg.use_debug_initial_step else self.common_step_counter
         # current_step = self.common_step_counter
         curr = self.cfg.curriculum
-        self.progress_coord = self._linear_progress(
-            curr.coordination_start_step, curr.coordination_end_step, current_step
-        )
+        # progress_coord is a step-at-episode-boundary signal (per-env, set in
+        # _reset_idx). It's not recomputed per step here because mid-episode
+        # reward-function changes bias GAE bootstrapped value targets.
         self.progress_safety = self._linear_progress(
             curr.safety_start_step, curr.safety_end_step, current_step
         )
@@ -2193,6 +2197,15 @@ class IrisMA6V1Env(DirectMARLEnv):
             current_step,
         )
 
+        # Step-at-episode-boundary: triangulation reward turns on when the env
+        # starts an episode at or after coordination_start_step. Held constant
+        # for the episode (no mid-episode reward-function change). The legacy
+        # coordination_end_step is intentionally ignored — set start==end if
+        # you want a strict step semantic, or revert to ramping by reading
+        # _linear_progress here instead.
+        coord_active = float(current_step >= self.cfg.curriculum.coordination_start_step)
+        self.progress_coord[env_ids] = coord_active
+
         if self._initial_states is not None:
             # Generate randomized initial states via InitialStates module
             result = self._initial_states.generate(
@@ -2273,10 +2286,19 @@ class IrisMA6V1Env(DirectMARLEnv):
                     result.zoom_levels[:, idx], batch_ids
                 )
 
-                # tau_zoom is held at the configured nominal at all times;
-                # randomize_gains() draws per-env values around it during the
-                # dynamics phase (progress > 0). No curriculum-gating of the
-                # nominal here — see iris_ma6 dynamics-curriculum bug 4.
+                # Curriculum-scaled tau_zoom: near-instant (1e-4) at progress=0
+                # gives the policy fast bbox/zoom learning during bootstrap,
+                # ramping to the configured nominal at full dynamics progress.
+                # During the dynamics phase, randomize_gains() multiplies this
+                # live curriculum-gated value by a random scale (in-place), so
+                # the per-env distribution remains centered on the curriculum
+                # value. _nominal_gains["tau_zoom"] (Bug 4 fix) stays at
+                # cfg.zoom.tau_zoom and is intentionally NOT used as the base
+                # for zoom randomization — see drone_controller.randomize_gains.
+                tau_zoom_curriculum = max(
+                    self.cfg.drone_controller.zoom.tau_zoom * self.progress_dynamics, 1e-4
+                )
+                self._controller._zoom._tau_zoom[batch_ids] = tau_zoom_curriculum
 
             # Apply target states
             target_pos = result.target_positions + self._terrain.env_origins[env_ids]
