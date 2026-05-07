@@ -122,7 +122,32 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     """Observation space dimensions per agent. 31D ego + 16D*(num_agents-1) inter-agent [+6D triangulation]."""
 
     state_space: int = -1
-    """State space dimension. -1 means concatenate all observations."""
+    """State space dimension. -1 means concatenate all observations.
+
+    When ``enable_critic_continuous_zoom`` is True, the env auto-replaces this
+    with a positive int matching the actor-obs concat plus the privileged
+    zoom-state tail (2 scalars per agent), and exposes
+    ``shared_observation_spaces`` so the centralized MAPPO critic picks up
+    the new size.
+    """
+
+    enable_critic_continuous_zoom: bool = True
+    """Asymmetric actor-critic: feed the centralized MAPPO critic privileged
+    zoom-state info (continuous ``zoom_internal`` and integrator
+    ``zoom_target``) appended after the standard concat-of-actor-obs. The
+    actor's observation is unchanged (still sees the quantized published
+    zoom that hardware will expose at deployment).
+
+    Rationale (siyi_a8 mode): with quantum=0.1 and max Δzoom/policy_step≈0.08,
+    the actor's zoom obs is staircased and the per-step gradient signal on the
+    zoom dim drops to zero between quanta. A symmetric critic (sees same
+    quantized obs as the actor) is forced to predict the *average* return
+    across all internal states sharing one quantum bin, blurring V predictions
+    and inflating advantage variance. An asymmetric critic seeing the
+    continuous internal state can resolve those internal states, producing
+    sharper V estimates and crisper temporal credit assignment for the
+    integrator chain that ultimately produces a quantum crossing several
+    steps later. No deployment-side change — the critic is training-only."""
 
     # ==========================================================================
     # Simulation
@@ -429,7 +454,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     action_delta_weight: list = [1, 1, 1, 1, 1, 1, 1]
     """Weights for action delta (smoothness) penalty."""
 
-    action_delta_penalty_scale: float = -8.0
+    action_delta_penalty_scale: float = -12.0
     """Penalty scale for action changes (smoothness)."""
 
     bbox_center_reward_scale: float = 60.0
@@ -674,3 +699,17 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
         if self.enable_triangulation:
             obs_dim += 6  # triangulated position (3) + std_dev (3)
         self.observation_spaces = {a: obs_dim for a in self.possible_agents}
+
+        # ------------------------------------------------------------------
+        # Asymmetric actor-critic: when enabled, set state_space to a positive
+        # int matching the critic-side state size: concat-of-actor-obs plus a
+        # per-agent privileged tail (zoom_internal + zoom_target = 2 dims).
+        # The env's _get_states() materializes this state; DirectMARLEnv.state()
+        # routes to it; skrl's MAPPO trainer reads it via env.state() and
+        # injects into infos before record_transition. Untouched when the
+        # toggle is False (state_space stays -1, auto-concat-of-obs path).
+        # ------------------------------------------------------------------
+        if getattr(self, "enable_critic_continuous_zoom", False):
+            actor_concat_dim = obs_dim * self.num_agents
+            critic_extra_per_agent = 2  # zoom_internal + zoom_target
+            self.state_space = actor_concat_dim + critic_extra_per_agent * self.num_agents

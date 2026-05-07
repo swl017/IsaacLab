@@ -1,14 +1,14 @@
 {
   "project": "iris_ma6",
-  "last_updated": "2026-04-15",
-  "last_session_ticket": "030-v1-observation-integration",
+  "last_updated": "2026-05-07",
+  "last_session_ticket": "siyi_a8_zoom_collapse_diagnosis_and_fixes",
   "features": [
     {
       "id": "controller",
       "name": "PX4-style cascaded drone controller",
       "status": "done",
       "spec": "doc/controller_spec.md",
-      "notes": "Velocity→attitude→rate→motor cascade with gimbal and zoom control"
+      "notes": "Velocity→attitude→rate→motor cascade with gimbal and zoom control. mas/037: SIYI A8 zoom model (slew clip + dead-time buffer + integrator + first-order lag + 0.1-level publish quantization). 2026-05-07: zoom-controller bug fixes — ring buffer depth ceil(...)+1 with clamp [0, depth-1] (prevents d=depth wrap-around to 0 delay); per-call CUDA sync removed via _dead_time_all_zero Python bool cache refreshed in _refresh_dead_time_steps; env-side reset now mirrors controller._zoom.zoom (quantized published) into self.zoom_level so the first observation post-reset is consistent with subsequent steps."
     },
     {
       "id": "delay-system-v3",
@@ -85,7 +85,7 @@
       "name": "Full environment integration and training",
       "status": "in_progress",
       "spec": "doc/iris_ma6_env_spec.md",
-      "notes": "Obs: 31D ego (pos, vel, rpy, ang_vel_b, lin_acc_b, gimbal joints, ray_dir_w, combined_ang_vel_w, bbox_aoi, zoom, effective_hfov, bbox) + 16D*(N-1) inter-agent [+6D tri]. Ticket-012: added effective HFOV (1D, radians) to ego obs — physical quantity, deployment-ready from camera calibration (2026-04-09). Ticket-030: registered heading-frame v1 env as separate gym task (`Isaac-Iris-MA6-Direct-V1-v0`) and wired experiment/eval task selection so short A/B validation can target baseline vs v1 without code edits. (2026-04-15)"
+      "notes": "Obs: 31D ego (pos, vel, rpy, ang_vel_b, lin_acc_b, gimbal joints, ray_dir_w, combined_ang_vel_w, bbox_aoi, zoom, effective_hfov, bbox) + 16D*(N-1) inter-agent [+6D tri]. Ticket-012: added effective HFOV (1D, radians) to ego obs — physical quantity, deployment-ready from camera calibration (2026-04-09). Ticket-030: registered heading-frame v1 env as separate gym task (`Isaac-Iris-MA6-Direct-V1-v0`) and wired experiment/eval task selection so short A/B validation can target baseline vs v1 without code edits. (2026-04-15). 2026-05-07: asymmetric actor-critic — `cfg.enable_critic_continuous_zoom` (default False) auto-sets `state_space = obs_dim*N + 2*N` and the env's `_get_states()` returns concat(actor_obs) ++ [zoom_internal, zoom_target] per agent. Actor's per-agent obs unchanged (still sees quantized published zoom that hardware exposes); centralized MAPPO critic gets the privileged continuous zoom state via skrl's existing `env.state()` → infos plumbing in `multi_agent_train`. Motivation: with quantum=0.1 and max Δzoom_per_step≈0.08, the symmetric critic blurs V predictions across all internal states sharing a quantum bin; the asymmetric critic resolves them, sharpening V and temporal credit assignment for the integrator chain that produces a quantum crossing several steps after the action. Toggle is the next training experiment to run against the failing siyi_a8 + sum8/delta12 config that earlier collapsed."
     },
     {
       "id": "experiments",

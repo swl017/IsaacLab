@@ -16,8 +16,9 @@ Control Architecture:
 from __future__ import annotations
 
 import copy
+import numpy as np
 import torch
-from typing import Dict
+from typing import Dict, List
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
@@ -231,6 +232,29 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         # Call parent constructor
         super().__init__(cfg, render_mode, **kwargs)
+
+        # ------------------------------------------------------------------
+        # Asymmetric actor-critic plumbing: when
+        # ``cfg.enable_critic_continuous_zoom`` is True, ``cfg.state_space``
+        # has been set to a positive int (in cfg.__post_init__), and
+        # ``DirectMARLEnv._configure_env_spaces`` has wrapped it in a gym
+        # Box at ``self.state_space``. The skrl trainer's MAPPO setup
+        # (train_mappo_rnn_hydra.py) reads ``env.shared_observation_spaces``
+        # (a dict, not the singular ``state_space``) to size the centralized
+        # critic network and its running-stats preprocessor; mirror the
+        # state_space Box into per-agent entries here so that path picks up
+        # the privileged-tail dimension instead of falling back to the
+        # auto-concat of actor obs (which is 4 dims smaller and triggers a
+        # tensor-size mismatch in the preprocessor at first
+        # record_transition).
+        # ------------------------------------------------------------------
+        if (
+            getattr(self.cfg, "enable_critic_continuous_zoom", False)
+            and self.state_space is not None
+        ):
+            self.shared_observation_spaces = {
+                a: self.state_space for a in self.cfg.possible_agents
+            }
 
         # Store references to robots (populated after scene setup)
         self._robots: Dict[str, Articulation] = {}
@@ -2065,6 +2089,56 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         return obs
 
+    def _get_states(self) -> torch.Tensor:
+        """Build the centralized critic state for the asymmetric MAPPO critic.
+
+        Called by the parent ``DirectMARLEnv.state()`` whenever
+        ``cfg.state_space > 0`` (set in cfg.__post_init__ when
+        ``enable_critic_continuous_zoom`` is True). The skrl MAPPO trainer
+        invokes ``self.env.state()`` once before each step and once after,
+        and injects the result into ``infos["shared_states"]`` /
+        ``infos["shared_next_states"]`` before ``record_transition`` — so
+        time-alignment is automatic.
+
+        State layout (sized to match cfg.state_space):
+            concat( actor_obs[a] for a in agents )                      # actor concat
+                 ++  concat( [zoom_internal[a], zoom_target[a]]         # privileged tail
+                              for a in agents )
+
+        The actor's per-agent obs is unchanged (still sees quantized
+        published zoom that the deployed hardware will expose). The critic
+        sees concat-of-actor-obs + the continuous internal zoom state per
+        agent. With quantum=0.1 and max Δzoom_per_step≈0.08, this lets the
+        critic resolve internal states that look identical from the actor's
+        quantized view, sharpening V estimates and temporal credit
+        assignment for the multi-step integrator chain that produces a
+        quantum crossing.
+        """
+        if not getattr(self.cfg, "enable_critic_continuous_zoom", False):
+            # Fallback: same as DirectMARLEnv's auto-concat path.
+            return torch.cat(
+                [self.obs_dict[a].reshape(self.num_envs, -1) for a in self.cfg.possible_agents],
+                dim=-1,
+            )
+
+        actor_concat = torch.cat(
+            [self.obs_dict[a] for a in self.cfg.possible_agents], dim=-1
+        )
+        # Per-agent batched controller layout is agent-major:
+        # ``zoom_internal[a*N : (a+1)*N]`` is agent ``a``'s slice. Same
+        # convention as the scatter at iris_ma_env6_test.py L809:
+        # ``self.zoom_level[:, idx] = zoom_batch[idx*N : (idx+1)*N]``.
+        z_int = self._controller._zoom.zoom_internal       # (N*A,)
+        z_tgt = self._controller._zoom._zoom_target        # (N*A,)
+        N = self.num_envs
+        priv_parts: List[torch.Tensor] = []
+        for a_idx in range(len(self.cfg.possible_agents)):
+            s, e = a_idx * N, (a_idx + 1) * N
+            priv_parts.append(z_int[s:e].unsqueeze(-1))    # (N, 1)
+            priv_parts.append(z_tgt[s:e].unsqueeze(-1))    # (N, 1)
+        priv_tail = torch.cat(priv_parts, dim=-1)          # (N, 2*A)
+        return torch.cat([actor_concat, priv_tail], dim=-1)
+
     def _get_dones(self) -> tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         """Get termination and truncation flags for all agents.
 
@@ -2286,10 +2360,19 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 # sync the random initial zoom into the controller's internal
                 # _zoom and _zoom_target to prevent the first _apply_action from
                 # overwriting it back to 1.0.
-                self.zoom_level[env_ids, idx] = result.zoom_levels[:, idx]
+                #
+                # The env-side tracking tensor mirrors the controller's
+                # *published* zoom (the .zoom property): in first_order mode
+                # this is identical to internal state; in siyi_a8 mode it
+                # applies the publish-path quantization. Reading from the
+                # property here keeps the first observation post-reset
+                # consistent with what compute_control() will return on the
+                # next step (otherwise the policy/RNN sees a one-step
+                # discontinuity at every episode start).
                 self._controller._zoom.set_zoom(
                     result.zoom_levels[:, idx], batch_ids
                 )
+                self.zoom_level[env_ids, idx] = self._controller._zoom.zoom[batch_ids]
 
                 # Curriculum-scaled tau_zoom: near-instant (1e-4) at progress=0
                 # gives the policy fast bbox/zoom learning during bootstrap,

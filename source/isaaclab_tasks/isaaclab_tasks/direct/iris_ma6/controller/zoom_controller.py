@@ -127,6 +127,12 @@ class ZoomController:
         self._dead_time_buffer: torch.Tensor | None = None
         self._dead_time_buffer_idx: int = 0
         self._dead_time_dt: float | None = None
+        # Bug-3: Python-side mirror of "are all envs at d=0?". Updated
+        # whenever _dead_time_steps is rewritten (only in
+        # _refresh_dead_time_steps). _dead_time_steps starts at zeros so the
+        # cache starts True and the per-call early-exit in _apply_dead_time
+        # can avoid a CUDA->CPU sync on every controller call.
+        self._dead_time_all_zero: bool = True
 
     # ------------------------------------------------------------------ properties
 
@@ -378,29 +384,47 @@ class ZoomController:
             self._refresh_dead_time_steps(env_ids)
 
     def _refresh_dead_time_steps(self, env_ids: torch.Tensor | None) -> None:
-        """Convert dead_time_seconds to integer step counts."""
+        """Convert dead_time_seconds to integer step counts.
+
+        Clamps to ``[0, depth - 1]`` because the apply-path writes the new rate
+        first and then reads ``(write_idx - d) mod depth``: at ``d == depth``
+        the read wraps back onto the just-written slot. With the buffer
+        allocated at ``ceil(dead_time_max_s / dt) + 1``, the ``-1`` here
+        leaves the natural physical max (``ceil(dead_time_max_s / dt)`` steps)
+        as the largest valid delay.
+        """
         assert self._dead_time_dt is not None
-        max_buf_steps = (
-            self._dead_time_buffer.shape[0]
+        max_d = (
+            self._dead_time_buffer.shape[0] - 1
             if self._dead_time_buffer is not None
             else 0
         )
         if env_ids is None:
             steps = torch.round(self._dead_time_seconds / self._dead_time_dt).long()
-            steps.clamp_(min=0, max=max_buf_steps)
+            steps.clamp_(min=0, max=max_d)
             self._dead_time_steps.copy_(steps)
         else:
             steps = torch.round(
                 self._dead_time_seconds[env_ids] / self._dead_time_dt
             ).long()
-            steps.clamp_(min=0, max=max_buf_steps)
+            steps.clamp_(min=0, max=max_d)
             self._dead_time_steps[env_ids] = steps
+        # Bug-3: cache the all-zeros predicate so the per-call early-exit in
+        # _apply_dead_time can read a Python bool instead of forcing a CUDA
+        # sync on every controller call. _dead_time_steps is only written
+        # here, so refreshing the cache after each write is sufficient.
+        self._dead_time_all_zero = bool((self._dead_time_steps == 0).all().item())
 
     def _ensure_dead_time_buffer(self, dt: float) -> None:
         """Lazy-allocate (or re-allocate on dt change) the 1-D dead-time ring.
 
-        Depth = ``ceil(dead_time_max_s / dt)``. Skipped when
-        ``dead_time_max_s <= 0`` — the buffer path becomes a no-op.
+        Depth = ``ceil(dead_time_max_s / dt) + 1``. The +1 is required because
+        the apply-path writes the new rate at ``_dead_time_buffer_idx`` *before*
+        reading the popped value at ``(_dead_time_buffer_idx - d) mod depth``.
+        Without the +1, ``d == ceil(dead_time_max_s / dt)`` wraps back onto the
+        just-written slot and silently produces 0 delay instead of the maximum.
+
+        Skipped when ``dead_time_max_s <= 0`` — the buffer path becomes a no-op.
         """
         if self.cfg.dead_time_max_s <= 0.0:
             self._dead_time_buffer = None
@@ -408,7 +432,7 @@ class ZoomController:
             self._dead_time_steps.zero_()
             return
 
-        max_steps = max(1, int(math.ceil(self.cfg.dead_time_max_s / max(dt, 1e-9))))
+        max_steps = max(1, int(math.ceil(self.cfg.dead_time_max_s / max(dt, 1e-9)))) + 1
         if (
             self._dead_time_buffer is None
             or self._dead_time_dt != dt
@@ -429,9 +453,11 @@ class ZoomController:
         """
         if self.cfg.dead_time_max_s <= 0.0:
             return rate
-        if self._dead_time_curr_scale <= 0.0 and bool(
-            (self._dead_time_steps == 0).all().item()
-        ):
+        # Bug-3: read the cached all-zeros bool instead of doing a per-call
+        # GPU->CPU sync on (steps == 0).all(). The cache is refreshed inside
+        # _refresh_dead_time_steps, which is the only writer of
+        # _dead_time_steps.
+        if self._dead_time_curr_scale <= 0.0 and self._dead_time_all_zero:
             return rate
 
         self._ensure_dead_time_buffer(dt)

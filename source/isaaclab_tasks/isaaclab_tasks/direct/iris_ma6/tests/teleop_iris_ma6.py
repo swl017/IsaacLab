@@ -69,6 +69,7 @@ parser.add_argument("--yolo_model", type=str,
                     help="Path to YOLO model weights for live detection overlay. Set '' to disable.")
 parser.add_argument("--yolo_conf", type=float, default=0.25,
                     help="YOLO confidence threshold.")
+parser.add_argument("--step", type=int, default=0, help="Step at which to load checkpoint for overlay. Set 0 to disable.")
 
 # Append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -521,7 +522,7 @@ def main():
         env_cfg.debug_lock_gimbal_to_target = True
         print("[INFO] Gimbal locked to target (debug_lock_gimbal_to_target=True)")
     env_cfg.use_debug_initial_step = True
-    env_cfg.debug_initial_step = 300_000
+    env_cfg.debug_initial_step = args_cli.step if args_cli.step > 0 else 0
 
     # Detector replicator uses hardcoded defaults from NoiseModelParams dataclass
     # (calibrated from experiments/calibrate_detector.py, no JSON loading needed)

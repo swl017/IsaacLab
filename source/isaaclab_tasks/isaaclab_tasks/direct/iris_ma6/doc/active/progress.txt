@@ -1609,3 +1609,146 @@ Next:
   weight rebalance. Expected: bootstrap matches 0b8278f00c quality
   (pair_valid 0.85+ at 24k), no regression through dynamics phase, no
   late collapse through 200k+.
+
+----------------------------------------
+2026-05-07 — siyi_a8 zoom-model collapse: diagnosis + zoom-controller
+              bug fixes + asymmetric actor-critic (privileged zoom state)
+----------------------------------------
+Done:
+- Diagnosed why the siyi_a8 zoom model killed training in
+  iris_ma6_action_penalty_20260506_132151 (sum8_delta12_seed84) versus
+  the matching first_order baseline (iris_ma6_action_penalty_20260505_150632
+  / sum8_delta12). Same commit, same seed, same penalties; the *only*
+  env diff was zoom.model. Failing run: ep_len 282→129 (dropping over
+  training), bbox_size 15→3.8, entropy → 0 by ~32k. Baseline: ep_len
+  347→493, bbox_size 21→46, growing reward. Collapse window was
+  8k–16k — *before* tau_zoom curriculum (20k) and far before dead-time
+  curriculum (180k). So the trigger was the always-on parts of siyi_a8:
+  v_max clip (irrelevant — never fires below max_zoom_rate=2.0), the
+  dead-time path (gated to no-op at scale=0), or output quantization.
+- Root cause confirmed by experiment
+  2026-05-07_13-39-28_mappo_rnn_torch_49059fee10_siyi_a8_mini_siyi_zoom_weight0
+  (siyi_a8 + action_weight=[1,1,5,1,1,1,0] + action_delta_weight=
+  [1,1,1,1,1,1,0] — i.e., zoom-dim mask): ep_len 497, bbox_size 46,
+  total reward +4138 by 32k. Recovers fully to baseline numbers.
+  Mechanism: max Δzoom_per_policy_step = max_zoom_rate × policy_dt =
+  2.0 × 0.04 = 0.08 levels < quantum = 0.1 — even at saturated action,
+  the published zoom mostly stays flat for 1–2 steps. Result: the
+  policy gradient on the zoom dim is dominated by the dense penalty
+  (drag toward 0) with no compensating dense observable signal between
+  quanta. σ_z collapses → exploration on zoom dies → bbox-tracking loop
+  (which depends on zoom commands) collapses → entropy → 0.
+
+- Fixed three real bugs in the zoom controller while diagnosing:
+  - Bug 1 (env, not controller): at reset, env wrote the unquantized
+    random initial zoom into self.zoom_level directly, while
+    controller.set_zoom() also stored the unquantized value internally
+    (correct — design says internal stays continuous). The first
+    observation post-reset showed unquantized; the next step's
+    compute_control returned quantized; the policy/RNN saw a
+    one-step discontinuity at every episode start. Fixed by mirroring
+    controller._zoom.zoom (the published property — quantized in
+    siyi_a8, identity in first_order) into self.zoom_level after
+    set_zoom. iris_ma_env6_test.py:2284–2299.
+  - Bug 2 (controller): ring-buffer apply path writes new rate at
+    write_idx then reads (write_idx − d) mod depth. With depth =
+    ceil(dead_time_max_s / dt), d == depth wrapped onto the
+    just-written slot → 0 delay instead of max. Fixed by allocating
+    depth = ceil(...) + 1 and clamping _dead_time_steps to
+    [0, depth − 1]. zoom_controller.py:386–446.
+  - Bug 3 (controller, perf): early-exit predicate did
+    bool((self._dead_time_steps == 0).all().item()) every controller
+    call → 1 GPU→CPU sync per call × ~100/s. Replaced by a Python-bool
+    cache _dead_time_all_zero refreshed inside _refresh_dead_time_steps
+    (the only writer of _dead_time_steps). Sync rate drops to ~once
+    per reset. zoom_controller.py:130–135, 412–416, 456–461.
+  - Bug 5 (cfg, doc only): tau_zoom default 0.1 vs mas/037 fit 0.091.
+    Reviewed; default is intentional for first_order bit-exactness;
+    docstring already directs siyi_a8 sim2real users to override via
+    yaml. No code change.
+
+- Implemented asymmetric actor-critic (privileged-info critic) for
+  sim2real-faithful training with quantized zoom obs.
+  - Discovery: skrl's multi_agent_train calls env.state() before AND
+    after each step and injects the result into infos["shared_states"]
+    / infos["shared_next_states"] before record_transition (skrl
+    base.py:319, 333–336). So the integration point is the standard
+    Isaac Lab pattern — set cfg.state_space > 0 and implement
+    _get_states(); time-alignment is automatic. (First implementation
+    attempt wrote to env.extras directly; the trainer overwrote it
+    one layer up. Reverted.)
+  - State layout: concat(actor_obs[a] for a in agents) ++
+    concat([zoom_internal[a], zoom_target[a]] for a in agents). For
+    2 agents with obs_dim=47: shared state dim 98 (vs 94 baseline).
+    Actor's obs unchanged (still sees the quantized published zoom
+    that hardware will expose at deployment). Critic sees concat-
+    of-actor-obs + the continuous internal zoom state per agent —
+    can resolve internal states that the symmetric critic would
+    blur into one bin. Mechanism: variance reduction in V estimates
+    + sharper temporal credit assignment for the integrator chain
+    that produces a quantum crossing several steps after the
+    causing action.
+  - Toggle: cfg.enable_critic_continuous_zoom (default False — no
+    behavior change for existing runs). When True, cfg.__post_init__
+    auto-sets state_space = obs_dim × num_agents + 2 × num_agents.
+  - Smoke-tested both paths (toggle on / default off) at
+    --num_envs 16 --headless agent.trainer.timesteps=20.
+
+Tests:
+- controller/tests/test_zoom_response_model_stages.py: 8/9 pass
+  (the 1 failure is the pre-existing model-default-is-first_order
+  assertion; user has temporarily set siyi_a8 as the cfg default
+  for this experiment cycle and asked not to fix Bug 4 / model
+  default).
+- controller/tests/test_zoom_curriculum_hooks.py: 5/5 pass
+  (cold-start + curriculum_scale=0/1 + partial-reset + first_order
+  no-op + bit-exact-vs-no-buffer all green with the +1 buffer).
+- controller/tests/test_zoom_published_vs_internal.py: 3/3 pass
+  (continuous internal vs staircase published, set_zoom semantics,
+  first_order zoom == zoom_internal).
+
+Affected files:
+- EDIT: controller/zoom_controller.py — buffer depth ceil(...)+1 and
+  step clamp [0, depth-1] (Bug 2); _dead_time_all_zero cache and
+  early-exit refactor (Bug 3); docstrings on _ensure_dead_time_buffer
+  and _refresh_dead_time_steps explaining the wrap-around invariant.
+- EDIT: iris_ma_env6_test.py — Bug 1 fix at reset (mirror
+  controller._zoom.zoom into self.zoom_level after set_zoom);
+  asymmetric-critic implementation (_get_states method); imports
+  (numpy, List); removed an extras-based first attempt that was
+  superseded.
+- EDIT: iris_ma_env6_test_cfg.py — enable_critic_continuous_zoom
+  flag with motivation in the docstring; __post_init__ block
+  auto-setting state_space when toggle is True; expanded
+  state_space docstring referencing the toggle.
+
+Open items / not done:
+- Asymmetric-critic full training run (200k+) NOT yet executed —
+  smoke test only. The hypothesis to validate is: with the toggle
+  on and the *full* failing-run penalties (sum=-8, delta=-12, no
+  zoom-dim mask), does training survive? Optimistic: matches
+  zoom-mask run + retains smoothness shaping. Pessimistic: critic
+  reduces basin width but doesn't cross the penalty threshold; need
+  partial mask (e.g. action_weight[6]=0.2) on top.
+- Bug 4 (cfg model default = "siyi_a8" vs docstring claim of
+  "first_order") intentionally left — user's temp setting for testing.
+- Suggested follow-up exploration NOT yet considered: stochastic
+  publishing (Bernoulli rounding) as a training-time-only injector
+  to recover dense gradient signal; quantization curriculum
+  (quantum_eff = q · progress, ramp 0 → quantum) as a third option
+  beyond mask and asymmetric critic.
+
+Next:
+- Run asymmetric-critic full training:
+  env.enable_critic_continuous_zoom=true
+  env.action_sum_penalty_scale=-8
+  env.action_delta_penalty_scale=-12
+  agent.seed=84
+  zoom.model=siyi_a8 (current default)
+  num_envs=1024, ~200–250k steps.
+  Watch: ep_len mean staying near 490 through 32k (vs failing run's
+  drop to 160), entropy NOT collapsing to 0 by 32k, bbox_size growing
+  past 30 by 16k. If those three hold, the asymmetric-critic-alone
+  thesis is confirmed. If ep_len holds but entropy still decays
+  toward 0, layer in partial zoom-dim mask (action_weight[6]=0.2) as
+  the smallest hybrid fix.

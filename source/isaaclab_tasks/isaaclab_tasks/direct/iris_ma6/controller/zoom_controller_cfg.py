@@ -35,7 +35,7 @@ class ZoomControllerCfg:
     SIYI A8 model by setting ``model="siyi_a8"`` (or via yaml override).
     """
 
-    model: str = "first_order"
+    model: str = "siyi_a8"
     """Zoom dynamics model selector. ``"first_order"`` (default) or ``"siyi_a8"``.
 
     - ``"first_order"``: legacy continuous first-order lag — only ``tau_zoom``,
