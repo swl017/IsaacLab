@@ -1,0 +1,1 @@
+python3 play_iris_mappo_rnn.py --task Isaac-Iris-MA6-Direct-Test-v0 --checkpoint /home/usrg/IsaacPX4/IsaacLab/logs/skrl/iris_ma6/2026-05-08_01-25-46_mappo_rnn_torch_2f8907ebed_siyi_a8_mini_siyi_zoom_continuous_critic_on/checkpoints/agent_400000.pt --step 400000 --enable_cameras --num_envs 2

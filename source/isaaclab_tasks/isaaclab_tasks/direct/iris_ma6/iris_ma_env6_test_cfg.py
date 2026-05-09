@@ -124,9 +124,10 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     state_space: int = -1
     """State space dimension. -1 means concatenate all observations.
 
-    When ``enable_critic_continuous_zoom`` is True, the env auto-replaces this
-    with a positive int matching the actor-obs concat plus the privileged
-    zoom-state tail (2 scalars per agent), and exposes
+    When any ``enable_critic_*`` toggle below is True, the env auto-replaces
+    this with a positive int matching the actor-obs concat plus the
+    privileged tails enabled (zoom: 2 scalars per agent; GT target position:
+    3 globals; GT target velocity: 3 globals). The env also exposes
     ``shared_observation_spaces`` so the centralized MAPPO critic picks up
     the new size.
     """
@@ -148,6 +149,38 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     sharper V estimates and crisper temporal credit assignment for the
     integrator chain that ultimately produces a quantum crossing several
     steps later. No deployment-side change — the critic is training-only."""
+
+    enable_critic_gt_target: bool = False
+    """Asymmetric actor-critic: feed the centralized MAPPO critic the
+    GT target world position (3 dims) appended after the actor-obs concat
+    (and after the zoom tail, if enabled). The actor's observation is
+    unchanged — actor sees only delayed/noisy bbox-derived target signals,
+    matching deployment.
+
+    Rationale: every reward term in this env is a function of the drone's
+    geometric relationship to the target (bbox_center, bbox_size,
+    triangulation FIM, target_proximity, tracking_lost). Giving the critic
+    the GT target lets V regress against the causal observable directly
+    instead of inferring it through delayed/noisy bbox observations,
+    cutting advantage variance and stabilizing the curriculum-stress
+    regime. Indirectly stabilizes the policy tri head's training
+    distribution by keeping ``effective_sample_fraction`` high (the head
+    relies on per-agent bbox+scene-valid masks that collapse when policy
+    training thrashes).
+
+    Source: ``self._target_pos_w`` (snapshot of ``self.target.data.root_pos_w``,
+    updated each step in ``_update_state_cache``). Same source as the aux-head
+    supervision target, so the critic and the head are aligned.
+
+    No deployment-side change — the critic is training-only."""
+
+    enable_critic_gt_target_velocity: bool = False
+    """Asymmetric actor-critic: also append the GT target world-frame linear
+    velocity (3 dims) to the critic state. Off by default — pure-position
+    privileged info usually captures the dominant signal. Turn on if you
+    want to test whether velocity helps the critic anticipate next-step
+    rewards (closing speed, occlusion onset). Requires
+    ``enable_critic_gt_target=True``."""
 
     # ==========================================================================
     # Simulation
@@ -701,15 +734,34 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
         self.observation_spaces = {a: obs_dim for a in self.possible_agents}
 
         # ------------------------------------------------------------------
-        # Asymmetric actor-critic: when enabled, set state_space to a positive
-        # int matching the critic-side state size: concat-of-actor-obs plus a
-        # per-agent privileged tail (zoom_internal + zoom_target = 2 dims).
+        # Asymmetric actor-critic: when any enable_critic_* toggle is True,
+        # set state_space to a positive int matching the critic-side state
+        # size: concat-of-actor-obs plus the enabled privileged tails.
         # The env's _get_states() materializes this state; DirectMARLEnv.state()
         # routes to it; skrl's MAPPO trainer reads it via env.state() and
-        # injects into infos before record_transition. Untouched when the
-        # toggle is False (state_space stays -1, auto-concat-of-obs path).
+        # injects into infos before record_transition. Untouched when all
+        # toggles are False (state_space stays -1, auto-concat-of-obs path).
+        #
+        # Tails:
+        #   - zoom (2 dims/agent)        if enable_critic_continuous_zoom
+        #   - GT target position (3)     if enable_critic_gt_target
+        #   - GT target velocity (3)     if enable_critic_gt_target_velocity
+        #     (requires enable_critic_gt_target)
         # ------------------------------------------------------------------
+        critic_extra_per_agent = 0
         if getattr(self, "enable_critic_continuous_zoom", False):
+            critic_extra_per_agent += 2  # zoom_internal + zoom_target
+
+        critic_extra_global = 0  # single-target globals (one target in v0)
+        if getattr(self, "enable_critic_gt_target", False):
+            critic_extra_global += 3  # GT target world position
+            if getattr(self, "enable_critic_gt_target_velocity", False):
+                critic_extra_global += 3  # GT target world linear velocity
+
+        if critic_extra_per_agent > 0 or critic_extra_global > 0:
             actor_concat_dim = obs_dim * self.num_agents
-            critic_extra_per_agent = 2  # zoom_internal + zoom_target
-            self.state_space = actor_concat_dim + critic_extra_per_agent * self.num_agents
+            self.state_space = (
+                actor_concat_dim
+                + critic_extra_per_agent * self.num_agents
+                + critic_extra_global
+            )

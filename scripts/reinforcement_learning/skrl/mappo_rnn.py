@@ -15,6 +15,13 @@ from skrl.multi_agents.torch import MultiAgent
 from skrl.resources.schedulers.torch import KLAdaptiveLR
 from skrl.agents.torch.ppo import PPO_DEFAULT_CONFIG
 
+from mappo_rnn_groups import (
+    OwnershipGroup,
+    assert_groups_partition_params,
+    build_ownership_groups,
+    homogeneous_config_check,
+)
+
 
 # MAPPO_RNN Configuration
 MAPPO_RNN_DEFAULT_CONFIG = copy.deepcopy(PPO_DEFAULT_CONFIG)
@@ -120,37 +127,76 @@ class MAPPO_RNN(MultiAgent):
         else:
             self.scaler = torch.cuda.amp.GradScaler(enabled=self._mixed_precision)
         
-        # set up optimizers
-        self.optimizers = {}
-        self.schedulers = {}
-        
-        for uid in self.possible_agents:
-            policy = self.policies[uid]
-            value = self.values[uid]
-            if policy is not None and value is not None:
-                if policy is value:
-                    optimizer = torch.optim.Adam(policy.parameters(), lr=self._learning_rate[uid])
-                else:
-                    optimizer = torch.optim.Adam(
-                        itertools.chain(policy.parameters(), value.parameters()), lr=self._learning_rate[uid]
-                    )
+        # set up optimizers and schedulers, keyed by parameter-ownership group
+        # rather than by agent uid. When two uids share the same Python model
+        # object (homogeneous shared-policy/value setup), they fall into the
+        # same group and back exactly one Adam optimizer + one KL scheduler;
+        # when uids own disjoint parameter sets, the grouping degenerates to
+        # one singleton group per uid, matching the stock skrl per-uid layout.
+        self._opt_groups: list[OwnershipGroup] = build_ownership_groups(
+            self.possible_agents, self.policies, self.values
+        )
+        assert_groups_partition_params(self._opt_groups)
+        self._uid_to_group: dict[str, OwnershipGroup] = {}
+        for group in self._opt_groups:
+            for uid in group.uids:
+                self._uid_to_group[uid] = group
+
+        # Per-uid optimizer/scheduler maps preserved for backward compatibility
+        # with the rest of this class and with skrl's checkpoint_modules layout.
+        # For uids in the same group, all entries alias the same Python object,
+        # so optimizer.step() / scheduler.step() called once per group steps the
+        # shared parameters exactly once.
+        self.optimizers: dict[str, torch.optim.Optimizer] = {}
+        self.schedulers: dict = {}
+        # Group-level state used by _update():
+        self._group_optimizers: dict[str, torch.optim.Optimizer] = {}
+        self._group_schedulers: dict = {}
+
+        for group in self._opt_groups:
+            if not group.params:
+                # Degenerate group whose uids have neither trainable policy nor
+                # value parameters. Skip optimizer construction (matches stock
+                # skrl behavior of "no optimizer for empty agent").
+                continue
+
+            # Shared per-uid hyperparameters must agree across the group, since
+            # one optimizer step drives all contributors at once. Singleton
+            # groups (heterogeneous case) just pass the lone value through.
+            group_lr = homogeneous_config_check(group, self._learning_rate, "learning_rate")
+            group_scheduler_cls = homogeneous_config_check(
+                group, self._learning_rate_scheduler, "learning_rate_scheduler"
+            )
+            group_scheduler_kwargs = homogeneous_config_check(
+                group, self._learning_rate_scheduler_kwargs, "learning_rate_scheduler_kwargs"
+            )
+
+            optimizer = torch.optim.Adam(group.params, lr=group_lr)
+            self._group_optimizers[group.name] = optimizer
+
+            scheduler = None
+            if group_scheduler_cls is not None:
+                scheduler = group_scheduler_cls(optimizer, **group_scheduler_kwargs)
+                self._group_schedulers[group.name] = scheduler
+
+            for uid in group.uids:
                 self.optimizers[uid] = optimizer
-                if self._learning_rate_scheduler[uid] is not None:
-                    self.schedulers[uid] = self._learning_rate_scheduler[uid](
-                        optimizer, **self._learning_rate_scheduler_kwargs[uid]
-                    )
-            
-            self.checkpoint_modules[uid]["optimizer"] = self.optimizers[uid]
+                if scheduler is not None:
+                    self.schedulers[uid] = scheduler
+
+        for uid in self.possible_agents:
+            if uid in self.optimizers:
+                self.checkpoint_modules[uid]["optimizer"] = self.optimizers[uid]
             self.checkpoint_modules[uid]["policy"] = self.policies[uid]
             self.checkpoint_modules[uid]["value"] = self.values[uid]
-            
+
             # set up preprocessors
             if self._state_preprocessor[uid] is not None:
                 self._state_preprocessor[uid] = self._state_preprocessor[uid](**self._state_preprocessor_kwargs[uid])
                 self.checkpoint_modules[uid]["state_preprocessor"] = self._state_preprocessor[uid]
             else:
                 self._state_preprocessor[uid] = self._empty_preprocessor
-            
+
             if self._shared_state_preprocessor[uid] is not None:
                 self._shared_state_preprocessor[uid] = self._shared_state_preprocessor[uid](
                     **self._shared_state_preprocessor_kwargs[uid]
@@ -158,12 +204,21 @@ class MAPPO_RNN(MultiAgent):
                 self.checkpoint_modules[uid]["shared_state_preprocessor"] = self._shared_state_preprocessor[uid]
             else:
                 self._shared_state_preprocessor[uid] = self._empty_preprocessor
-            
+
             if self._value_preprocessor[uid] is not None:
                 self._value_preprocessor[uid] = self._value_preprocessor[uid](**self._value_preprocessor_kwargs[uid])
                 self.checkpoint_modules[uid]["value_preprocessor"] = self._value_preprocessor[uid]
             else:
                 self._value_preprocessor[uid] = self._empty_preprocessor
+
+        # Log the resolved ownership layout once, so a future reader can tell
+        # at a glance whether the optimizer is shared or per-uid.
+        for group in self._opt_groups:
+            n_params = sum(p.numel() for p in group.params)
+            logger.info(
+                f"MAPPO_RNN ownership group '{group.name}': uids={group.uids}, "
+                f"unique tensors={len(group.params)}, total scalar params={n_params}"
+            )
     
     def init(self, trainer_cfg: Optional[Mapping[str, Any]] = None) -> None:
         """Initialize the agent"""
@@ -414,6 +469,191 @@ class MAPPO_RNN(MultiAgent):
         # write tracking data and checkpoints
         super().post_interaction(timestep, timesteps)
     
+    def _per_uid_minibatch_components(
+        self,
+        uid: str,
+        state: Mapping[str, Any],
+        mb_i: int,
+        epoch: int,
+    ) -> Mapping[str, torch.Tensor]:
+        """Compute one uid's PPO loss components for a single minibatch.
+
+        Pulled out of `_update` so the per-group loop can call this once per
+        contributing uid and sum the losses before backward+step. The returned
+        `policy_loss`, `value_loss`, and `entropy_loss` carry autograd
+        history; `kl_divergence` is detached and used only for diagnostics
+        and KL-adaptive scheduling.
+        """
+        policy = state["policy"]
+        value = state["value"]
+        sampled_batches = state["sampled_batches"]
+        sampled_rnn_batches = state["sampled_rnn_batches"]
+
+        (
+            sampled_states,
+            sampled_shared_states,
+            sampled_actions,
+            sampled_terminated,
+            sampled_truncated,
+            sampled_log_prob,
+            sampled_values,
+            sampled_returns,
+            sampled_advantages,
+            sampled_episode_step,
+        ) = sampled_batches[mb_i]
+
+        rnn_policy: dict = {}
+        rnn_value: dict = {}
+        if sampled_rnn_batches:
+            combined_terminated = sampled_terminated | sampled_truncated
+            if combined_terminated.dim() == 3 and combined_terminated.shape[-1] == 1:
+                combined_terminated = combined_terminated.squeeze(-1)
+
+            if policy is value:
+                rnn_policy = {
+                    "rnn": [s.transpose(0, 1) for s in sampled_rnn_batches[mb_i]],
+                    "terminated": combined_terminated,
+                }
+                rnn_value = rnn_policy
+            else:
+                rnn_policy = {
+                    "rnn": [
+                        s.transpose(0, 1)
+                        for s, n in zip(sampled_rnn_batches[mb_i], self._rnn_tensors_names[uid])
+                        if "policy" in n
+                    ],
+                    "terminated": combined_terminated,
+                }
+                rnn_value = {
+                    "rnn": [
+                        s.transpose(0, 1)
+                        for s, n in zip(sampled_rnn_batches[mb_i], self._rnn_tensors_names[uid])
+                        if "value" in n
+                    ],
+                    "terminated": combined_terminated,
+                }
+
+        with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
+            is_sequence = sampled_states.dim() == 3
+            if is_sequence:
+                batch_size, seq_length = sampled_states.shape[0], sampled_states.shape[1]
+            else:
+                batch_size, seq_length = sampled_states.shape[0], 1
+            episode_mask = None
+            effective_seq_length = seq_length
+
+            def masked_mean(x: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
+                x_flat = x.flatten()
+                x_reshaped = x_flat.view(batch_size, effective_seq_length)
+                m_f = m.float()
+                denom = m_f.sum().clamp_min(1.0)
+                return (x_reshaped * m_f).sum() / denom
+
+            if is_sequence:
+                flat_actions = sampled_actions.flatten(0, 1)
+            else:
+                flat_actions = sampled_actions
+
+            proc_states = self._state_preprocessor[uid](sampled_states, train=not epoch)
+            proc_shared_states = self._shared_state_preprocessor[uid](sampled_shared_states, train=not epoch)
+
+            _, next_log_prob, _ = policy.act(
+                {"states": proc_states, "taken_actions": flat_actions, **rnn_policy}, role="policy"
+            )
+            predicted_values, _, _ = value.act(
+                {"states": proc_shared_states, **rnn_value}, role="value"
+            )
+
+            if is_sequence and self._burn_in_steps > 0:
+                burn_in = self._burn_in_steps
+                burn_in = min(burn_in, seq_length - 1)
+                if burn_in < 0:
+                    burn_in = 0
+
+                next_log_prob = next_log_prob.view(batch_size, seq_length, -1)
+                predicted_values = predicted_values.view(batch_size, seq_length, -1)
+
+                next_log_prob = next_log_prob[:, burn_in:]
+                predicted_values = predicted_values[:, burn_in:]
+                sampled_log_prob = sampled_log_prob[:, burn_in:]
+                sampled_values = sampled_values[:, burn_in:]
+                sampled_returns = sampled_returns[:, burn_in:]
+                sampled_advantages = sampled_advantages[:, burn_in:]
+                sampled_episode_step = sampled_episode_step[:, burn_in:]
+
+                effective_seq_length = seq_length - burn_in
+
+                if self._episode_start_mask_steps > 0:
+                    D = self._episode_start_mask_steps
+                    episode_mask = (sampled_episode_step.squeeze(-1) >= D)
+
+                next_log_prob = next_log_prob.flatten()
+                predicted_values = predicted_values.flatten()
+                sampled_log_prob = sampled_log_prob.flatten()
+                sampled_values = sampled_values.flatten()
+                sampled_returns = sampled_returns.flatten()
+                sampled_advantages = sampled_advantages.flatten()
+            elif is_sequence:
+                next_log_prob = next_log_prob.flatten()
+                predicted_values = predicted_values.flatten()
+                sampled_log_prob = sampled_log_prob.flatten()
+                sampled_values = sampled_values.flatten()
+                sampled_returns = sampled_returns.flatten()
+                sampled_advantages = sampled_advantages.flatten()
+
+                if self._episode_start_mask_steps > 0:
+                    D = self._episode_start_mask_steps
+                    episode_mask = (sampled_episode_step.squeeze(-1) >= D)
+
+            with torch.no_grad():
+                ratio_kl = next_log_prob - sampled_log_prob
+                kl_terms = (torch.exp(ratio_kl) - 1) - ratio_kl
+                if episode_mask is not None:
+                    kl_divergence = masked_mean(kl_terms, episode_mask)
+                else:
+                    kl_divergence = kl_terms.mean()
+
+            if self._entropy_loss_scale[uid]:
+                entropy = policy.get_entropy(role="policy")
+                if entropy.dim() > 1:
+                    entropy = entropy.sum(dim=-1)
+                if episode_mask is not None:
+                    entropy_loss = -self._entropy_loss_scale[uid] * masked_mean(entropy, episode_mask)
+                else:
+                    entropy_loss = -self._entropy_loss_scale[uid] * entropy.mean()
+            else:
+                entropy_loss = torch.zeros((), device=self.device)
+
+            ratio = torch.exp(next_log_prob - sampled_log_prob)
+            surrogate = sampled_advantages * ratio
+            surrogate_clipped = sampled_advantages * torch.clip(
+                ratio, 1.0 - self._ratio_clip[uid], 1.0 + self._ratio_clip[uid]
+            )
+            policy_terms = torch.min(surrogate, surrogate_clipped)
+            if episode_mask is not None:
+                policy_loss = -masked_mean(policy_terms, episode_mask)
+            else:
+                policy_loss = -policy_terms.mean()
+
+            if self._clip_predicted_values[uid]:
+                predicted_values = sampled_values + torch.clip(
+                    predicted_values - sampled_values,
+                    min=-self._value_clip[uid],
+                    max=self._value_clip[uid],
+                )
+            mse = (sampled_returns - predicted_values).pow(2)
+            if episode_mask is not None:
+                value_loss = self._value_loss_scale[uid] * masked_mean(mse.flatten(), episode_mask)
+            else:
+                value_loss = self._value_loss_scale[uid] * mse.mean()
+
+        return {
+            "policy_loss": policy_loss,
+            "value_loss": value_loss,
+            "entropy_loss": entropy_loss,
+            "kl_divergence": kl_divergence,
+        }
+
     def _update(self, timestep: int, timesteps: int) -> None:
         """Algorithm's main update step"""
         
@@ -447,24 +687,32 @@ class MAPPO_RNN(MultiAgent):
             
             return returns, advantages
         
+        # ============================================================
+        # PHASE A — per-uid rollout preparation
+        # Compute returns/advantages, build sequence mini-batches, stash the
+        # results into per_uid_state. This phase does NOT touch optimizers;
+        # all parameter updates happen in Phase B, where contributing uids
+        # within a single ownership group are aggregated into one step.
+        # ============================================================
+        per_uid_state: dict = {}
         for uid in self.possible_agents:
             policy = self.policies[uid]
             value = self.values[uid]
             memory = self.memories[uid]
-            
+
             # compute returns and advantages
             with torch.no_grad(), torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
                 # Prepare RNN states for last value computation
                 rnn_input = {}
                 if self._rnn_states[uid]["value"]:
                     rnn_input = {"rnn": self._rnn_states[uid]["value"]}
-                
+
                 # Get shared state for last value computation
                 if isinstance(self._current_shared_next_states, dict):
                     last_shared_state = self._current_shared_next_states[uid]
                 else:
                     last_shared_state = self._current_shared_next_states
-                
+
                 value.train(False)
                 last_values, _, _ = value.act(
                     {"states": self._shared_state_preprocessor[uid](last_shared_state.float()), **rnn_input},
@@ -472,7 +720,7 @@ class MAPPO_RNN(MultiAgent):
                 )
                 value.train(True)
             last_values = self._value_preprocessor[uid](last_values, inverse=True)
-            
+
             values = memory.get_tensor_by_name("values")
             returns, advantages = compute_gae(
                 rewards=memory.get_tensor_by_name("rewards"),
@@ -482,7 +730,7 @@ class MAPPO_RNN(MultiAgent):
                 discount_factor=self._discount_factor[uid],
                 lambda_coefficient=self._lambda[uid],
             )
-            
+
             memory.set_tensor_by_name("values", self._value_preprocessor[uid](values, train=True))
             memory.set_tensor_by_name("returns", self._value_preprocessor[uid](returns, train=True))
             memory.set_tensor_by_name("advantages", advantages)
@@ -682,280 +930,157 @@ class MAPPO_RNN(MultiAgent):
                 logger.info(f"VERDICT: {'SEQUENCE TRAINING ACTIVE - BPTT enabled!' if is_seq else 'NOT doing BPTT'}")
                 logger.info(f"{'='*60}\n")
 
-            cumulative_policy_loss = 0
-            cumulative_entropy_loss = 0
-            cumulative_value_loss = 0
-            
-            # learning epochs
-            for epoch in range(self._learning_epochs[uid]):
-                kl_divergences = []
-                
-                # mini-batches loop
-                for i, (
-                    sampled_states,
-                    sampled_shared_states,
-                    sampled_actions,
-                    sampled_terminated,
-                    sampled_truncated,
-                    sampled_log_prob,
-                    sampled_values,
-                    sampled_returns,
-                    sampled_advantages,
-                    sampled_episode_step,
-                ) in enumerate(sampled_batches):
-                    
-                    # Prepare RNN inputs if available
-                    rnn_policy = {}
-                    rnn_value = {}
-                    if sampled_rnn_batches:
-                        # Fix terminated shape: squeeze trailing dim if (B, S, 1) -> (B, S)
-                        combined_terminated = sampled_terminated | sampled_truncated
-                        if combined_terminated.dim() == 3 and combined_terminated.shape[-1] == 1:
-                            combined_terminated = combined_terminated.squeeze(-1)
+            # ----------------------------------------------------------------
+            # Stash this uid's prepared rollout state for Phase B.
+            # Sequence/RNN batching has produced sampled_batches and
+            # sampled_rnn_batches above; everything Phase B needs to compute
+            # one minibatch's losses for this uid lives in this dict.
+            # ----------------------------------------------------------------
+            per_uid_state[uid] = {
+                "policy": policy,
+                "value": value,
+                "sampled_batches": sampled_batches,
+                "sampled_rnn_batches": sampled_rnn_batches,
+                "cumulative_policy_loss": 0.0,
+                "cumulative_value_loss": 0.0,
+                "cumulative_entropy_loss": 0.0,
+                "n_loss_samples": 0,
+                "kl_history": [],
+            }
 
-                        if policy is value:
-                            rnn_policy = {
-                                "rnn": [s.transpose(0, 1) for s in sampled_rnn_batches[i]],
-                                "terminated": combined_terminated,
-                            }
-                            rnn_value = rnn_policy
-                        else:
-                            rnn_policy = {
-                                "rnn": [
-                                    s.transpose(0, 1)
-                                    for s, n in zip(sampled_rnn_batches[i], self._rnn_tensors_names[uid])
-                                    if "policy" in n
-                                ],
-                                "terminated": combined_terminated,
-                            }
-                            rnn_value = {
-                                "rnn": [
-                                    s.transpose(0, 1)
-                                    for s, n in zip(sampled_rnn_batches[i], self._rnn_tensors_names[uid])
-                                    if "value" in n
-                                ],
-                                "terminated": combined_terminated,
-                            }
-                    
-                    with torch.autocast(device_type=self._device_type, enabled=self._mixed_precision):
+        # ============================================================
+        # PHASE B — per-ownership-group optimization
+        # For every group of uids that share parameter tensors we sum the
+        # per-uid losses at each minibatch and call backward + optimizer.step
+        # exactly once. For singleton (heterogeneous) groups this collapses
+        # to the original per-uid behavior; for shared-model groups (the
+        # iris_ma6 case) it removes the double-stepping that previously made
+        # two independent Adam optimizers and two KLAdaptiveLR controllers
+        # fight over the same weights.
+        # ============================================================
+        for group in self._opt_groups:
+            if not group.params:
+                continue
+            optimizer = self._group_optimizers[group.name]
+            scheduler = self._group_schedulers.get(group.name)
 
-                        # Check if we have sequence data (3D tensors)
-                        is_sequence = sampled_states.dim() == 3
-                        batch_size, seq_length = (sampled_states.shape[0], sampled_states.shape[1]) if is_sequence else (sampled_states.shape[0], 1)
+            # Per-uid hyperparameters that drive the optimization loop must
+            # agree across the group (asserted, since one optimizer step
+            # serves all contributors). Singleton groups pass through.
+            n_epochs = homogeneous_config_check(group, self._learning_epochs, "learning_epochs")
+            n_minibatches = homogeneous_config_check(group, self._mini_batches, "mini_batches")
+            kl_threshold = homogeneous_config_check(group, self._kl_threshold, "kl_threshold")
+            grad_norm_clip = homogeneous_config_check(group, self._grad_norm_clip, "grad_norm_clip")
 
-                        # Episode-start mask helper function
-                        # mask: (B, S) bool tensor where True = include in loss
-                        episode_mask = None
-                        effective_seq_length = seq_length  # May change after burn-in slicing
+            for epoch in range(n_epochs):
+                aggregate_kl_per_minibatch = []
 
-                        def masked_mean(x: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
-                            """Compute masked mean over a tensor.
+                for mb_i in range(n_minibatches):
+                    optimizer.zero_grad()
 
-                            Args:
-                                x: (B*S,) or (B*S, 1) or (B, S) or (B, S, 1) tensor
-                                m: (B, S) boolean mask where True = include in mean
-                            Returns:
-                                Scalar mean over masked elements
-                            """
-                            # First flatten to 1D if needed, then reshape to (B, S)
-                            x_flat = x.flatten()
-                            x_reshaped = x_flat.view(batch_size, effective_seq_length)
-                            # Apply mask
-                            m_f = m.float()
-                            denom = m_f.sum().clamp_min(1.0)
-                            return (x_reshaped * m_f).sum() / denom
-
-                        # For sequence training:
-                        # - States stay 3D (B, S, obs) -> model processes sequences with GRU, outputs (B*S, hidden)
-                        # - Actions must be flattened to (B*S, action_dim) to match model output
-                        # - Model's compute_base handles the sequence->flattened transformation internally
-
-                        if is_sequence:
-                            # Flatten actions to match model's flattened output
-                            flat_actions = sampled_actions.flatten(0, 1)  # (B*S, action_dim)
-                        else:
-                            flat_actions = sampled_actions
-
-                        # Preprocess states (handles 3D correctly - normalizes per feature)
-                        proc_states = self._state_preprocessor[uid](sampled_states, train=not epoch)
-                        proc_shared_states = self._shared_state_preprocessor[uid](sampled_shared_states, train=not epoch)
-
-                        # Policy forward pass - model internally processes 3D states through GRU
-                        # and outputs flattened (B*S, action_dim) mean + log_prob
-                        _, next_log_prob, _ = policy.act(
-                            {"states": proc_states, "taken_actions": flat_actions, **rnn_policy}, role="policy"
+                    # Compute each contributing uid's loss components on the
+                    # current (un-stepped) weights, accumulate them into a
+                    # combined loss, then backward+step once.
+                    components_per_uid: dict = {}
+                    for uid in group.uids:
+                        components_per_uid[uid] = self._per_uid_minibatch_components(
+                            uid, per_uid_state[uid], mb_i, epoch
                         )
 
-                        # Value forward pass
-                        predicted_values, _, _ = value.act({"states": proc_shared_states, **rnn_value}, role="value")
+                    # Aggregate KL across uids at this minibatch. KL is
+                    # detached so this does not enter the autograd graph.
+                    kl_terms = [c["kl_divergence"] for c in components_per_uid.values()]
+                    aggregate_kl = torch.stack(kl_terms).mean()
+                    aggregate_kl_per_minibatch.append(aggregate_kl)
 
-                        # Apply burn-in masking
-                        if is_sequence and self._burn_in_steps > 0:
-                            burn_in = self._burn_in_steps
-                            # Guard burn-in range: clamp to [0, seq_length-1]
-                            burn_in = min(burn_in, seq_length - 1)
-                            if burn_in < 0:
-                                burn_in = 0
+                    # KL early stopping: applied to the group-level signal so
+                    # the decision is shared across all contributing uids.
+                    if kl_threshold and aggregate_kl.item() > kl_threshold:
+                        break
 
-                            # Reshape model outputs back to (B, S, ...) for burn-in slicing
-                            next_log_prob = next_log_prob.view(batch_size, seq_length, -1)
-                            predicted_values = predicted_values.view(batch_size, seq_length, -1)
+                    total_loss = sum(
+                        c["policy_loss"] + c["value_loss"] + c["entropy_loss"]
+                        for c in components_per_uid.values()
+                    )
 
-                            # Slice out burn-in steps from model outputs
-                            # (guard above ensures burn_in < seq_length, so we always have >=1 timestep remaining)
-                            next_log_prob = next_log_prob[:, burn_in:]
-                            predicted_values = predicted_values[:, burn_in:]
-                            # Slice out burn-in steps from targets
-                            sampled_log_prob = sampled_log_prob[:, burn_in:]
-                            sampled_values = sampled_values[:, burn_in:]
-                            sampled_returns = sampled_returns[:, burn_in:]
-                            sampled_advantages = sampled_advantages[:, burn_in:]
-                            sampled_episode_step = sampled_episode_step[:, burn_in:]
+                    self.scaler.scale(total_loss).backward()
 
-                            # Update effective_seq_length for masked_mean
-                            effective_seq_length = seq_length - burn_in
-
-                            # Create episode-start mask AFTER burn-in slicing
-                            if self._episode_start_mask_steps > 0:
-                                D = self._episode_start_mask_steps
-                                # sampled_episode_step: (B, S', 1) int32 -> (B, S') bool
-                                episode_mask = (sampled_episode_step.squeeze(-1) >= D)
-
-                            # Flatten everything for loss computation
-                            next_log_prob = next_log_prob.flatten()
-                            predicted_values = predicted_values.flatten()
-                            sampled_log_prob = sampled_log_prob.flatten()
-                            sampled_values = sampled_values.flatten()
-                            sampled_returns = sampled_returns.flatten()
-                            sampled_advantages = sampled_advantages.flatten()
-                        elif is_sequence:
-                            # No burn-in, but still need to flatten everything for loss computation
-                            # Model outputs may be (B*S, 1) - flatten to (B*S,) to match targets
-                            next_log_prob = next_log_prob.flatten()
-                            predicted_values = predicted_values.flatten()
-                            sampled_log_prob = sampled_log_prob.flatten()
-                            sampled_values = sampled_values.flatten()
-                            sampled_returns = sampled_returns.flatten()
-                            sampled_advantages = sampled_advantages.flatten()
-
-                            # Create episode-start mask (no burn-in case)
-                            if self._episode_start_mask_steps > 0:
-                                D = self._episode_start_mask_steps
-                                # sampled_episode_step: (B, S, 1) int32 -> (B, S) bool
-                                episode_mask = (sampled_episode_step.squeeze(-1) >= D)
-                        
-                        # compute approximate KL divergence
-                        with torch.no_grad():
-                            ratio = next_log_prob - sampled_log_prob
-                            kl_terms = (torch.exp(ratio) - 1) - ratio
-                            if episode_mask is not None:
-                                kl_divergence = masked_mean(kl_terms, episode_mask)
-                            else:
-                                kl_divergence = kl_terms.mean()
-                            kl_divergences.append(kl_divergence)
-                        
-                        # early stopping with KL divergence
-                        if self._kl_threshold[uid] and kl_divergence > self._kl_threshold[uid]:
-                            break
-                        
-                        # compute entropy loss
-                        if self._entropy_loss_scale[uid]:
-                            entropy = policy.get_entropy(role="policy")  # (B*S,) or (B*S, action_dim)
-                            # Sum across action dimensions if multi-dimensional to get per-timestep entropy
-                            if entropy.dim() > 1:
-                                entropy = entropy.sum(dim=-1)  # (B*S,)
-                            if episode_mask is not None:
-                                entropy_loss = -self._entropy_loss_scale[uid] * masked_mean(entropy, episode_mask)
-                            else:
-                                entropy_loss = -self._entropy_loss_scale[uid] * entropy.mean()
-                        else:
-                            entropy_loss = 0
-                        
-                        # compute policy loss
-                        ratio = torch.exp(next_log_prob - sampled_log_prob)
-                        surrogate = sampled_advantages * ratio
-                        surrogate_clipped = sampled_advantages * torch.clip(
-                            ratio, 1.0 - self._ratio_clip[uid], 1.0 + self._ratio_clip[uid]
-                        )
-
-                        policy_terms = torch.min(surrogate, surrogate_clipped)  # (B*S,)
-                        if episode_mask is not None:
-                            policy_loss = -masked_mean(policy_terms, episode_mask)
-                        else:
-                            policy_loss = -policy_terms.mean()
-                        
-                        if self._clip_predicted_values[uid]:
-                            predicted_values = sampled_values + torch.clip(
-                                predicted_values - sampled_values, min=-self._value_clip[uid], max=self._value_clip[uid]
-                            )
-
-                        # Compute value loss with optional masking
-                        mse = (sampled_returns - predicted_values).pow(2)  # (B*S,) or (B*S, 1)
-                        if episode_mask is not None:
-                            value_loss = self._value_loss_scale[uid] * masked_mean(mse.flatten(), episode_mask)
-                        else:
-                            value_loss = self._value_loss_scale[uid] * mse.mean()
-                    
-                    # optimization step
-                    self.optimizers[uid].zero_grad()
-                    self.scaler.scale(policy_loss + entropy_loss + value_loss).backward()
-                    
                     if config.torch.is_distributed:
-                        policy.reduce_parameters()
-                        if policy is not value:
-                            value.reduce_parameters()
-                    
-                    if self._grad_norm_clip[uid] > 0:
-                        self.scaler.unscale_(self.optimizers[uid])
-                        if policy is value:
-                            nn.utils.clip_grad_norm_(policy.parameters(), self._grad_norm_clip[uid])
-                        else:
-                            nn.utils.clip_grad_norm_(
-                                itertools.chain(policy.parameters(), value.parameters()), self._grad_norm_clip[uid]
-                            )
-                    
-                    self.scaler.step(self.optimizers[uid])
+                        for uid in group.uids:
+                            policy_u = self.policies[uid]
+                            value_u = self.values[uid]
+                            if policy_u is not None:
+                                policy_u.reduce_parameters()
+                            if value_u is not None and value_u is not policy_u:
+                                value_u.reduce_parameters()
+
+                    if grad_norm_clip > 0:
+                        self.scaler.unscale_(optimizer)
+                        nn.utils.clip_grad_norm_(group.params, grad_norm_clip)
+
+                    self.scaler.step(optimizer)
                     self.scaler.update()
-                    
-                    # update cumulative losses
-                    cumulative_policy_loss += policy_loss.item()
-                    cumulative_value_loss += value_loss.item()
-                    if self._entropy_loss_scale[uid]:
-                        cumulative_entropy_loss += entropy_loss.item()
-                
-                # update learning rate
-                if self._learning_rate_scheduler[uid]:
-                    if isinstance(self.schedulers[uid], KLAdaptiveLR):
-                        kl = torch.tensor(kl_divergences, device=self.device).mean()
-                        # reduce (collect from all workers/processes) KL in distributed runs
+
+                    # Per-uid diagnostics: cumulative losses for the
+                    # interpretable per-agent loss curves.
+                    for uid, c in components_per_uid.items():
+                        per_uid_state[uid]["cumulative_policy_loss"] += c["policy_loss"].item()
+                        per_uid_state[uid]["cumulative_value_loss"] += c["value_loss"].item()
+                        if self._entropy_loss_scale[uid]:
+                            per_uid_state[uid]["cumulative_entropy_loss"] += c["entropy_loss"].item()
+                        per_uid_state[uid]["n_loss_samples"] += 1
+                        per_uid_state[uid]["kl_history"].append(c["kl_divergence"].item())
+
+                # Scheduler step at the end of each epoch using the aggregate
+                # KL across the group's contributors and minibatches.
+                if scheduler is not None:
+                    if isinstance(scheduler, KLAdaptiveLR):
+                        kl = torch.stack(aggregate_kl_per_minibatch).mean()
                         if config.torch.is_distributed:
                             torch.distributed.all_reduce(kl, op=torch.distributed.ReduceOp.SUM)
                             kl /= config.torch.world_size
-                        self.schedulers[uid].step(kl.item())
+                        scheduler.step(kl.item())
                     else:
-                        self.schedulers[uid].step()
-            
-            # record data
+                        scheduler.step()
+
+            # Per-group diagnostics: one LR per ownership group, since per-uid
+            # LR is now meaningless for shared groups (they all share one
+            # optimizer/scheduler).
             self.track_data(
-                f"Loss / Policy loss ({uid})",
-                cumulative_policy_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
+                f"Learning / Learning rate (group: {group.name})",
+                optimizer.param_groups[0]["lr"],
             )
-            self.track_data(
-                f"Loss / Value loss ({uid})",
-                cumulative_value_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
-            )
-            if self._entropy_loss_scale:
+            if group.uids:
+                # Group-level KL diagnostic, averaged across the most recent
+                # epoch's minibatches.
+                if aggregate_kl_per_minibatch:
+                    self.track_data(
+                        f"Learning / KL (group: {group.name})",
+                        torch.stack(aggregate_kl_per_minibatch).mean().item(),
+                    )
+
+        # ============================================================
+        # PHASE C — per-uid diagnostics
+        # Per-agent loss/std curves remain available so each agent's local
+        # contribution is still interpretable, even though they now share an
+        # optimizer for shared groups.
+        # ============================================================
+        for uid in self.possible_agents:
+            state = per_uid_state[uid]
+            n = max(state["n_loss_samples"], 1)
+            self.track_data(f"Loss / Policy loss ({uid})", state["cumulative_policy_loss"] / n)
+            self.track_data(f"Loss / Value loss ({uid})", state["cumulative_value_loss"] / n)
+            if self._entropy_loss_scale[uid]:
                 self.track_data(
-                    f"Loss / Entropy loss ({uid})",
-                    cumulative_entropy_loss / (self._learning_epochs[uid] * self._mini_batches[uid]),
+                    f"Loss / Entropy loss ({uid})", state["cumulative_entropy_loss"] / n
                 )
-            
-            self.track_data(
-                f"Policy / Standard deviation ({uid})", policy.distribution(role="policy").stddev.mean().item()
-            )
-            
-            if self._learning_rate_scheduler[uid]:
-                self.track_data(f"Learning / Learning rate ({uid})", self.schedulers[uid].get_last_lr()[0])
+
+            policy_u = state["policy"]
+            if policy_u is not None:
+                self.track_data(
+                    f"Policy / Standard deviation ({uid})",
+                    policy_u.distribution(role="policy").stddev.mean().item(),
+                )
 
 
 class MAPPORNNBaseModel(Model):

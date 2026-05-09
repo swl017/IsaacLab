@@ -1,7 +1,7 @@
 {
   "project": "iris_ma6",
-  "last_updated": "2026-05-07",
-  "last_session_ticket": "siyi_a8_zoom_collapse_diagnosis_and_fixes",
+  "last_updated": "2026-05-09",
+  "last_session_ticket": "033-mappo-shared-optimizer-ownership",
   "features": [
     {
       "id": "controller",
@@ -92,7 +92,7 @@
       "name": "Experiment registry, training runners, and evaluation pipeline",
       "status": "done",
       "spec": "doc/experiments_spec.md",
-      "notes": "42 experiments (A1/A3/A4/A5/A6/A7/baselines/sweeps), 4 suites, metric tracker with CBF metrics, greedy baseline with gimbal tracking. Ported from iris_ma5, dropped MLP path. Ticket-030: ExperimentCfg now carries a `task` field; run/eval resolve task precedence as CLI `--task` > experiment task > default baseline task. Added `validation_obs_v1_short` for short heading-frame A/B validation. (2026-04-15)"
+      "notes": "42 experiments (A1/A3/A4/A5/A6/A7/baselines/sweeps), 4 suites, metric tracker with CBF metrics, greedy baseline with gimbal tracking. Ported from iris_ma5, dropped MLP path. Ticket-030: ExperimentCfg now carries a `task` field; run/eval resolve task precedence as CLI `--task` > experiment task > default baseline task. Added `validation_obs_v1_short` for short heading-frame A/B validation. (2026-04-15). Ticket-033 (2026-05-09): MAPPO-RNN trainer fix — optimizer/scheduler ownership keyed by parameter-tensor identity (`mappo_rnn_groups.py` + `mappo_rnn.py` _update refactor). Homogeneous shared models (current iris_ma6) collapse to one Adam + one KLAdaptiveLR with aggregated losses; heterogeneous setups fall through to per-uid layout unchanged. Effective LR is now ~halved per shared group (one step per minibatch instead of two sequential per-uid steps); existing learning_rate values may need ~2x bump or longer training to match early-phase progress of pre-fix runs. 20 tests in scripts/reinforcement_learning/skrl/tests/ (groups/init/update). Pending real-run validation."
     },
     {
       "id": "controller-tuning",

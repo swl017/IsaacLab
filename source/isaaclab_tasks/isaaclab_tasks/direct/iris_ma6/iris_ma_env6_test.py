@@ -234,24 +234,24 @@ class IrisMA6TestEnv(DirectMARLEnv):
         super().__init__(cfg, render_mode, **kwargs)
 
         # ------------------------------------------------------------------
-        # Asymmetric actor-critic plumbing: when
-        # ``cfg.enable_critic_continuous_zoom`` is True, ``cfg.state_space``
-        # has been set to a positive int (in cfg.__post_init__), and
-        # ``DirectMARLEnv._configure_env_spaces`` has wrapped it in a gym
-        # Box at ``self.state_space``. The skrl trainer's MAPPO setup
-        # (train_mappo_rnn_hydra.py) reads ``env.shared_observation_spaces``
-        # (a dict, not the singular ``state_space``) to size the centralized
-        # critic network and its running-stats preprocessor; mirror the
-        # state_space Box into per-agent entries here so that path picks up
-        # the privileged-tail dimension instead of falling back to the
-        # auto-concat of actor obs (which is 4 dims smaller and triggers a
-        # tensor-size mismatch in the preprocessor at first
-        # record_transition).
+        # Asymmetric actor-critic plumbing: when any ``enable_critic_*`` flag
+        # is True, ``cfg.state_space`` has been set to a positive int (in
+        # cfg.__post_init__), and ``DirectMARLEnv._configure_env_spaces`` has
+        # wrapped it in a gym Box at ``self.state_space``. The skrl trainer's
+        # MAPPO setup (train_mappo_rnn_hydra.py) reads
+        # ``env.shared_observation_spaces`` (a dict, not the singular
+        # ``state_space``) to size the centralized critic network and its
+        # running-stats preprocessor; mirror the state_space Box into
+        # per-agent entries here so that path picks up the privileged-tail
+        # dimension instead of falling back to the auto-concat of actor obs
+        # (which is smaller and triggers a tensor-size mismatch in the
+        # preprocessor at first record_transition).
         # ------------------------------------------------------------------
-        if (
+        _asymmetric_critic_enabled = (
             getattr(self.cfg, "enable_critic_continuous_zoom", False)
-            and self.state_space is not None
-        ):
+            or getattr(self.cfg, "enable_critic_gt_target", False)
+        )
+        if _asymmetric_critic_enabled and self.state_space is not None:
             self.shared_observation_spaces = {
                 a: self.state_space for a in self.cfg.possible_agents
             }
@@ -2093,51 +2093,69 @@ class IrisMA6TestEnv(DirectMARLEnv):
         """Build the centralized critic state for the asymmetric MAPPO critic.
 
         Called by the parent ``DirectMARLEnv.state()`` whenever
-        ``cfg.state_space > 0`` (set in cfg.__post_init__ when
-        ``enable_critic_continuous_zoom`` is True). The skrl MAPPO trainer
-        invokes ``self.env.state()`` once before each step and once after,
-        and injects the result into ``infos["shared_states"]`` /
+        ``cfg.state_space > 0`` (set in cfg.__post_init__ when any
+        ``enable_critic_*`` flag is True). The skrl MAPPO trainer invokes
+        ``self.env.state()`` once before each step and once after, and
+        injects the result into ``infos["shared_states"]`` /
         ``infos["shared_next_states"]`` before ``record_transition`` — so
         time-alignment is automatic.
 
         State layout (sized to match cfg.state_space):
-            concat( actor_obs[a] for a in agents )                      # actor concat
-                 ++  concat( [zoom_internal[a], zoom_target[a]]         # privileged tail
-                              for a in agents )
+            concat( actor_obs[a] for a in agents )                              # actor concat
+              ++  concat( [zoom_internal[a], zoom_target[a]]                    # zoom tail (per-agent)
+                           for a in agents )                                    # if enable_critic_continuous_zoom
+              ++  target_pos_w (3)                                              # GT target position (global)
+                                                                                # if enable_critic_gt_target
+              ++  target_lin_vel_w (3)                                          # GT target velocity (global)
+                                                                                # if enable_critic_gt_target_velocity
 
         The actor's per-agent obs is unchanged (still sees quantized
-        published zoom that the deployed hardware will expose). The critic
-        sees concat-of-actor-obs + the continuous internal zoom state per
-        agent. With quantum=0.1 and max Δzoom_per_step≈0.08, this lets the
-        critic resolve internal states that look identical from the actor's
-        quantized view, sharpening V estimates and temporal credit
-        assignment for the multi-step integrator chain that produces a
-        quantum crossing.
+        published zoom that the deployed hardware will expose, and only
+        delayed/noisy bbox-derived target signals). The critic sees the
+        concat-of-actor-obs plus the privileged tails enabled — sharpening
+        V estimates and temporal credit assignment without affecting what
+        the actor (and therefore the deployed policy) can use.
         """
-        if not getattr(self.cfg, "enable_critic_continuous_zoom", False):
+        cfg_zoom = getattr(self.cfg, "enable_critic_continuous_zoom", False)
+        cfg_target = getattr(self.cfg, "enable_critic_gt_target", False)
+        cfg_target_vel = getattr(self.cfg, "enable_critic_gt_target_velocity", False)
+
+        if not (cfg_zoom or cfg_target):
             # Fallback: same as DirectMARLEnv's auto-concat path.
             return torch.cat(
                 [self.obs_dict[a].reshape(self.num_envs, -1) for a in self.cfg.possible_agents],
                 dim=-1,
             )
 
-        actor_concat = torch.cat(
-            [self.obs_dict[a] for a in self.cfg.possible_agents], dim=-1
-        )
-        # Per-agent batched controller layout is agent-major:
-        # ``zoom_internal[a*N : (a+1)*N]`` is agent ``a``'s slice. Same
-        # convention as the scatter at iris_ma_env6_test.py L809:
-        # ``self.zoom_level[:, idx] = zoom_batch[idx*N : (idx+1)*N]``.
-        z_int = self._controller._zoom.zoom_internal       # (N*A,)
-        z_tgt = self._controller._zoom._zoom_target        # (N*A,)
         N = self.num_envs
-        priv_parts: List[torch.Tensor] = []
-        for a_idx in range(len(self.cfg.possible_agents)):
-            s, e = a_idx * N, (a_idx + 1) * N
-            priv_parts.append(z_int[s:e].unsqueeze(-1))    # (N, 1)
-            priv_parts.append(z_tgt[s:e].unsqueeze(-1))    # (N, 1)
-        priv_tail = torch.cat(priv_parts, dim=-1)          # (N, 2*A)
-        return torch.cat([actor_concat, priv_tail], dim=-1)
+        parts: List[torch.Tensor] = [
+            torch.cat([self.obs_dict[a] for a in self.cfg.possible_agents], dim=-1),
+        ]
+
+        # Privileged zoom tail (per-agent: zoom_internal + zoom_target)
+        if cfg_zoom:
+            # Per-agent batched controller layout is agent-major:
+            # ``zoom_internal[a*N : (a+1)*N]`` is agent ``a``'s slice. Same
+            # convention as the scatter at iris_ma_env6_test.py L809:
+            # ``self.zoom_level[:, idx] = zoom_batch[idx*N : (idx+1)*N]``.
+            z_int = self._controller._zoom.zoom_internal       # (N*A,)
+            z_tgt = self._controller._zoom._zoom_target        # (N*A,)
+            zoom_parts: List[torch.Tensor] = []
+            for a_idx in range(len(self.cfg.possible_agents)):
+                s, e = a_idx * N, (a_idx + 1) * N
+                zoom_parts.append(z_int[s:e].unsqueeze(-1))    # (N, 1)
+                zoom_parts.append(z_tgt[s:e].unsqueeze(-1))    # (N, 1)
+            parts.append(torch.cat(zoom_parts, dim=-1))        # (N, 2*A)
+
+        # Privileged GT target tail (global; one target in v0)
+        if cfg_target:
+            # Same source the aux-head supervision uses (snapshot of
+            # self.target.data.root_pos_w in _update_state_cache).
+            parts.append(self._target_pos_w.float())            # (N, 3)
+            if cfg_target_vel:
+                parts.append(self.target.data.root_lin_vel_w.float())  # (N, 3)
+
+        return torch.cat(parts, dim=-1)
 
     def _get_dones(self) -> tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         """Get termination and truncation flags for all agents.

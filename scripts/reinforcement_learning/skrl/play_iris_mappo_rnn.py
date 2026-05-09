@@ -46,6 +46,18 @@ parser.add_argument(
     default=None,
     help="The environment step at which to evaluate the agent. If not specified, evaluates from step 0",
 )
+parser.add_argument(
+    "--show_plots",
+    action="store_true",
+    default=True,
+    help="Show per-agent camera + reward + gimbal plots for env 0.",
+)
+parser.add_argument(
+    "--no_show_plots",
+    dest="show_plots",
+    action="store_false",
+    help="Disable per-agent visualization plots.",
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -64,11 +76,15 @@ simulation_app = app_launcher.app
 import torch
 import os
 import time
+import math
 import pickle
 import gymnasium as gym
 import numpy as np
 import yaml
 from typing import Optional, Sequence
+
+import cv2
+import matplotlib.pyplot as plt
 
 # Import MAPPO_RNN components
 from mappo_rnn import MAPPO_RNN, MAPPO_RNN_DEFAULT_CONFIG, MAPPORNNPolicy, MAPPORNNValue
@@ -84,6 +100,134 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
 from isaaclab.envs import DirectMARLEnv
 from isaaclab.utils.dict import print_dict
+from isaaclab.utils.math import quat_apply, quat_inv, quat_mul
+
+
+# =============================================================================
+# Visualization helpers (mirrored from teleop_iris_ma6.py)
+# =============================================================================
+
+def project_point_to_image(
+    point_w: torch.Tensor,
+    camera_pos_w: torch.Tensor,
+    camera_quat_w_ros: torch.Tensor,
+    intrinsic: torch.Tensor,
+) -> tuple[int, int, bool]:
+    """Project a 3D world point to 2D image pixel using pinhole model."""
+    point_rel = point_w - camera_pos_w
+    point_cam = quat_apply(quat_inv(camera_quat_w_ros.unsqueeze(0)), point_rel.unsqueeze(0)).squeeze(0)
+
+    x, y, z = point_cam[0].item(), point_cam[1].item(), point_cam[2].item()
+    if z <= 0.01:
+        return 0, 0, False
+
+    fx = intrinsic[0, 0].item()
+    fy = intrinsic[1, 1].item()
+    cx = intrinsic[0, 2].item()
+    cy = intrinsic[1, 2].item()
+
+    return int(fx * x / z + cx), int(fy * y / z + cy), True
+
+
+def _draw_dashed_line(img, pt1, pt2, color, thickness=1, dash_len=10):
+    x1, y1 = pt1
+    x2, y2 = pt2
+    dx, dy = x2 - x1, y2 - y1
+    length = max(1, int((dx * dx + dy * dy) ** 0.5))
+    num_dashes = max(1, length // dash_len)
+    for i in range(0, num_dashes, 2):
+        t0 = i / num_dashes
+        t1 = min((i + 1) / num_dashes, 1.0)
+        sx, sy = int(x1 + dx * t0), int(y1 + dy * t0)
+        ex, ey = int(x1 + dx * t1), int(y1 + dy * t1)
+        cv2.line(img, (sx, sy), (ex, ey), color, thickness)
+
+
+def draw_bbox_overlay(
+    image: np.ndarray,
+    bbox_xyxy,
+    bbox_empty: bool,
+    agent_id: str,
+    zoom_level: float = 1.0,
+    target_pixel=None,
+    distance_m: float | None = None,
+    obs_bbox_xyxy=None,
+    obs_bbox_empty: bool = True,
+    bbox_aoi: float | None = None,
+    replicated_bbox_xyxy=None,
+    replicated_bbox_empty: bool = True,
+    bg_is_ground: bool | None = None,
+) -> np.ndarray:
+    """Draw bbox overlay on a single agent camera image (env 0)."""
+    vis = image.copy()
+    h_img, w_img = vis.shape[:2]
+    x_min, y_min, x_max, y_max = bbox_xyxy
+
+    if not bbox_empty:
+        color = (0, 255, 0)
+        label = "Target DETECTED"
+        cv2.rectangle(vis, (x_min, y_min), (x_max, y_max), color, 2)
+        w = x_max - x_min
+        h = y_max - y_min
+        cv2.putText(vis, f"{w}x{h}px", (x_min, max(y_min - 5, 15)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+    else:
+        color = (255, 0, 0)
+        label = "Target NOT detected"
+
+    if obs_bbox_xyxy is not None and not obs_bbox_empty:
+        ox_min, oy_min, ox_max, oy_max = obs_bbox_xyxy
+        obs_color = (255, 255, 0)
+        for start, end in [
+            ((ox_min, oy_min), (ox_max, oy_min)),
+            ((ox_max, oy_min), (ox_max, oy_max)),
+            ((ox_max, oy_max), (ox_min, oy_max)),
+            ((ox_min, oy_max), (ox_min, oy_min)),
+        ]:
+            _draw_dashed_line(vis, start, end, obs_color, thickness=2, dash_len=8)
+
+    if target_pixel is not None:
+        tu, tv, tvalid = target_pixel
+        if tvalid and 0 <= tu < w_img and 0 <= tv < h_img:
+            cross_color = (0, 120, 255)
+            size = 12
+            cv2.line(vis, (tu - size, tv), (tu + size, tv), cross_color, 2)
+            cv2.line(vis, (tu, tv - size), (tu, tv + size), cross_color, 2)
+
+    cv2.putText(vis, label, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+    cv2.putText(vis, f"{agent_id} | Zoom: {zoom_level:.2f}x", (10, 50),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+    if distance_m is not None:
+        dist_str = f"{distance_m:.1f} m"
+        if bg_is_ground is not None:
+            bg_label = "GND" if bg_is_ground else "SKY"
+            bg_color = (139, 90, 43) if bg_is_ground else (135, 206, 250)
+            dist_str += f"  [{bg_label}]"
+            cv2.putText(vis, dist_str, (10, 75),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, bg_color, 1)
+        else:
+            cv2.putText(vis, dist_str, (10, 75),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+    if bbox_aoi is not None:
+        aoi_ms = bbox_aoi * 1000.0
+        aoi_steps = bbox_aoi / 0.04 if bbox_aoi > 0 else 0.0
+        cv2.putText(vis, f"BBox AoI: {aoi_ms:.0f}ms ({aoi_steps:.1f} steps)",
+                    (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+
+    if replicated_bbox_xyxy is not None and not replicated_bbox_empty:
+        rx1, ry1, rx2, ry2 = replicated_bbox_xyxy
+        rep_color = (255, 0, 255)
+        for start, end in [
+            ((rx1, ry1), (rx2, ry1)),
+            ((rx2, ry1), (rx2, ry2)),
+            ((rx2, ry2), (rx1, ry2)),
+            ((rx1, ry2), (rx1, ry1)),
+        ]:
+            _draw_dashed_line(vis, start, end, rep_color, thickness=2, dash_len=5)
+
+    return vis
 
 
 def get_run_dir_from_checkpoint(checkpoint_path: str) -> str:
@@ -254,6 +398,11 @@ def main():
         print("[INFO] Recording videos during play.")
         print_dict(video_kwargs, nesting=4)
         env = gym.wrappers.RecordVideo(env, **video_kwargs)
+
+    # Keep a reference to the unwrapped Isaac Lab env so we can read internal
+    # state (cameras, bbox raycaster, step rewards, gimbal joints, ...) for
+    # the per-agent visualization plots.
+    raw_env = env.unwrapped
 
     # Wrap environment for SKRL
     env = SkrlVecEnvWrapper(env, ml_framework=args_cli.ml_framework)
@@ -451,7 +600,180 @@ def main():
     # Reset environment
     print("Resetting the environment...")
     states, infos = env.reset()
-    
+
+    # ------------------------------------------------------------------
+    # Visualization plots for env 0
+    # Layout: (num_agents + 1) rows x 4 cols
+    #   per-agent rows : camera | rewards | gimbal joints | actions
+    #   global row    : distance | delay (AoI) | parallax | tri RMSE
+    # X-axis is wall-sim time in seconds (env._sim_time).
+    # ------------------------------------------------------------------
+    show_plots = args_cli.show_plots and hasattr(raw_env, "_cameras") and len(getattr(raw_env, "_cameras", {})) > 0
+
+    reward_plot_keys = ["action_sum", "action_delta", "bbox_center", "bbox_size",
+                        "triangulation", "cbf_penalty"]
+    reward_colors = {
+        "action_sum": "#e74c3c",
+        "action_delta": "#e67e22",
+        "bbox_center": "#2ecc71",
+        "bbox_size": "#27ae60",
+        "triangulation": "#3498db",
+        "cbf_penalty": "#9b59b6",
+    }
+    action_dim_labels = ["vx", "vy", "vz", "yaw_rate", "gim_yaw", "gim_pitch", "zoom"]
+    action_colors = ["#e74c3c", "#e67e22", "#f1c40f", "#2ecc71",
+                     "#3498db", "#9b59b6", "#1abc9c"]
+    history_len = 200          # samples
+    history_window_s = 8.0     # default visible time window (s)
+
+    # Shared time history (one entry per env step) for all rolling plots.
+    time_history: list[float] = []
+
+    # Per-agent plot/line state
+    plot_state: dict = {}
+    # Global metrics (dict keyed by agent_id where per-agent; scalar list otherwise)
+    global_state: dict = {
+        "distance": {a: [] for a in possible_agents},
+        "aoi": {a: [] for a in possible_agents},
+        "parallax_deg": {a: [] for a in possible_agents},
+        "tri_err_m": [],
+    }
+    fig = None
+    if show_plots:
+        plt.ion()
+        fig, axes = plt.subplots(
+            num_agents + 1, 4,
+            figsize=(22, 4.0 * (num_agents + 1)),
+            gridspec_kw={"width_ratios": [1.2, 1, 1, 1]},
+            squeeze=False,
+        )
+        for agent_idx, agent_id in enumerate(possible_agents):
+            ax_cam = axes[agent_idx, 0]
+            ax_rew = axes[agent_idx, 1]
+            ax_gim = axes[agent_idx, 2]
+            ax_act = axes[agent_idx, 3]
+
+            ax_cam.set_title(f"Camera - {agent_id} (env 0)")
+            ax_cam.axis("off")
+
+            ax_rew.set_title(f"Reward Components - {agent_id}")
+            ax_rew.set_xlabel("Time (s)")
+            ax_rew.set_ylabel("Reward")
+            ax_rew.set_xlim(0, history_window_s)
+            ax_rew.grid(True, alpha=0.3)
+            rew_lines = {}
+            for k in reward_plot_keys:
+                line, = ax_rew.plot([], [], label=k, color=reward_colors[k],
+                                    linewidth=1.0, alpha=0.8)
+                rew_lines[k] = line
+            total_line, = ax_rew.plot([], [], label="total", color="black", linewidth=1.5)
+            ax_rew.legend(fontsize=6, loc="upper left")
+
+            ax_gim.set_title(f"Gimbal Joints - {agent_id}")
+            ax_gim.set_xlabel("Time (s)")
+            ax_gim.set_ylabel("Angle (deg)")
+            ax_gim.set_xlim(0, history_window_s)
+            ax_gim.grid(True, alpha=0.3)
+            gim_lines = {
+                "yaw_joint_deg": ax_gim.plot([], [], color="#2ecc71", lw=1.2,
+                                             alpha=0.9, label="Yaw joint")[0],
+                "pitch_joint_deg": ax_gim.plot([], [], color="#e67e22", lw=1.2,
+                                               alpha=0.9, label="Pitch joint")[0],
+            }
+            ax_gim.legend(fontsize=6, loc="upper left")
+
+            ax_act.set_title(f"Actions - {agent_id}")
+            ax_act.set_xlabel("Time (s)")
+            ax_act.set_ylabel("Action (normalized)")
+            ax_act.set_xlim(0, history_window_s)
+            ax_act.set_ylim(-1.1, 1.1)
+            ax_act.axhline(0.0, color="grey", lw=0.5, alpha=0.5)
+            ax_act.grid(True, alpha=0.3)
+            act_lines = {}
+            for d, label in enumerate(action_dim_labels):
+                line, = ax_act.plot([], [], label=label, color=action_colors[d],
+                                    linewidth=1.0, alpha=0.85)
+                act_lines[label] = line
+            ax_act.legend(fontsize=6, loc="upper left", ncol=2)
+
+            plot_state[agent_id] = {
+                "ax_cam": ax_cam,
+                "ax_rew": ax_rew,
+                "ax_gim": ax_gim,
+                "ax_act": ax_act,
+                "image_display": None,
+                "reward_history": {k: [] for k in reward_plot_keys},
+                "total_reward_history": [],
+                "reward_lines": rew_lines,
+                "total_reward_line": total_line,
+                "gimbal_history": {"yaw_joint_deg": [], "pitch_joint_deg": []},
+                "gimbal_lines": gim_lines,
+                "action_history": {label: [] for label in action_dim_labels},
+                "action_lines": act_lines,
+            }
+
+        # Global bottom row
+        ax_dist = axes[num_agents, 0]
+        ax_aoi = axes[num_agents, 1]
+        ax_par = axes[num_agents, 2]
+        ax_tri = axes[num_agents, 3]
+
+        agent_palette = ["#2980b9", "#c0392b", "#27ae60", "#8e44ad", "#d35400", "#16a085"]
+
+        global_axes = {"distance": ax_dist, "aoi": ax_aoi, "parallax_deg": ax_par, "tri_err_m": ax_tri}
+        global_lines: dict = {"distance": {}, "aoi": {}, "parallax_deg": {}, "tri_err_m": None}
+
+        ax_dist.set_title("Distance to Target (env 0)")
+        ax_dist.set_xlabel("Time (s)")
+        ax_dist.set_ylabel("Distance (m)")
+        ax_dist.set_xlim(0, history_window_s)
+        ax_dist.grid(True, alpha=0.3)
+        for i, a in enumerate(possible_agents):
+            line, = ax_dist.plot([], [], color=agent_palette[i % len(agent_palette)],
+                                  lw=1.2, label=a)
+            global_lines["distance"][a] = line
+        ax_dist.legend(fontsize=6, loc="upper left")
+
+        ax_aoi.set_title("BBox AoI (delay) — env 0")
+        ax_aoi.set_xlabel("Time (s)")
+        ax_aoi.set_ylabel("AoI (s)")
+        ax_aoi.set_xlim(0, history_window_s)
+        ax_aoi.grid(True, alpha=0.3)
+        for i, a in enumerate(possible_agents):
+            line, = ax_aoi.plot([], [], color=agent_palette[i % len(agent_palette)],
+                                 lw=1.2, label=a)
+            global_lines["aoi"][a] = line
+        ax_aoi.legend(fontsize=6, loc="upper left")
+
+        ax_par.set_title("Parallax (max LOS angle vs other agents)")
+        ax_par.set_xlabel("Time (s)")
+        ax_par.set_ylabel("Angle (deg)")
+        ax_par.set_xlim(0, history_window_s)
+        ax_par.grid(True, alpha=0.3)
+        for i, a in enumerate(possible_agents):
+            line, = ax_par.plot([], [], color=agent_palette[i % len(agent_palette)],
+                                 lw=1.2, label=a)
+            global_lines["parallax_deg"][a] = line
+        ax_par.legend(fontsize=6, loc="upper left")
+
+        ax_tri.set_title("Triangulation Error |X̂ - X*| (env 0)")
+        ax_tri.set_xlabel("Time (s)")
+        ax_tri.set_ylabel("Error (m)")
+        ax_tri.set_xlim(0, history_window_s)
+        ax_tri.grid(True, alpha=0.3)
+        line_tri, = ax_tri.plot([], [], color="#34495e", lw=1.4, label="|err|")
+        global_lines["tri_err_m"] = line_tri
+        ax_tri.legend(fontsize=6, loc="upper left")
+
+        fig.tight_layout()
+        plt.show(block=False)
+        print(f"[INFO] Plots enabled for {num_agents} agents (env 0)")
+    else:
+        global_axes = {}
+        global_lines = {}
+        if args_cli.show_plots:
+            print("[INFO] Plots disabled — env has no tiled cameras available")
+
     # Initialize variables for the play loop
     timestep = 0
     episode_rewards = {agent_id: 0.0 for agent_id in possible_agents}
@@ -484,7 +806,317 @@ def main():
 
             # Step the environment
             next_states, rewards, terminated, truncated, infos = env.step(actions)
-            
+
+            # ----------------------------------------------------------
+            # Update visualization plots for env 0
+            # ----------------------------------------------------------
+            if show_plots:
+                # Time axis (sim seconds)
+                t_now = float(raw_env._sim_time[0].item()) if hasattr(raw_env, "_sim_time") else float(timestep) * dt
+
+                # Detect episode reset on env 0: sim_time goes backwards (or to 0).
+                # When that happens, clear every rolling history so the new
+                # episode draws from scratch rather than appending non-monotonic
+                # samples that would make the line jump backwards in time.
+                if time_history and t_now < time_history[-1] - 1e-6:
+                    time_history.clear()
+                    for s in plot_state.values():
+                        for k in s["reward_history"]:
+                            s["reward_history"][k].clear()
+                        s["total_reward_history"].clear()
+                        for k in s["gimbal_history"]:
+                            s["gimbal_history"][k].clear()
+                        for k in s["action_history"]:
+                            s["action_history"][k].clear()
+                    for a in possible_agents:
+                        global_state["distance"][a].clear()
+                        global_state["aoi"][a].clear()
+                        global_state["parallax_deg"][a].clear()
+                    global_state["tri_err_m"].clear()
+
+                time_history.append(t_now)
+                if len(time_history) > history_len:
+                    time_history.pop(0)
+                t_min, t_max = time_history[0], time_history[-1]
+                # Pre-compute LOS vectors (env 0) for parallax
+                los_vecs = None
+                if hasattr(raw_env, "_robots") and hasattr(raw_env, "target"):
+                    target_pos_w = raw_env.target.data.root_pos_w[0]  # (3,)
+                    los = torch.stack(
+                        [raw_env._robots[a].data.root_pos_w[0] - target_pos_w
+                         for a in possible_agents],
+                        dim=0,
+                    )  # (N, 3)
+                    los_norm = los / (los.norm(dim=-1, keepdim=True).clamp_min(1e-6))
+                    los_vecs = los_norm
+
+                for agent_id in possible_agents:
+                    state = plot_state[agent_id]
+                    camera = raw_env._cameras.get(agent_id) if hasattr(raw_env, "_cameras") else None
+                    if camera is None:
+                        continue
+
+                    # --- Camera image with bbox overlay ---
+                    cam_rgb = camera.data.output["rgb"][0].cpu().numpy()
+                    if cam_rgb.ndim == 3 and cam_rgb.shape[2] == 4:
+                        cam_rgb = cam_rgb[:, :, :3]
+                    if cam_rgb.dtype != np.uint8:
+                        cam_rgb = (cam_rgb * 255).clip(0, 255).astype(np.uint8)
+
+                    a_idx = possible_agents.index(agent_id)
+
+                    # GT bbox from raycaster
+                    bbox_xyxy = (0, 0, 0, 0)
+                    bbox_empty_val = True
+                    if hasattr(raw_env, "bbox_raycaster_v2"):
+                        bxyxy_t = raw_env.bbox_raycaster_v2.data.bboxes_xyxy[0, a_idx, 0, :]
+                        bbox_empty_val = bool(raw_env.bbox_raycaster_v2.data.bbox_empty[0, a_idx, 0].item())
+                        bbox_xyxy = (
+                            int(bxyxy_t[0].item()), int(bxyxy_t[1].item()),
+                            int(bxyxy_t[2].item()), int(bxyxy_t[3].item()),
+                        )
+
+                    zoom_val = 1.0
+                    if hasattr(raw_env, "zoom_level"):
+                        zoom_val = raw_env.zoom_level[0, a_idx].item()
+
+                    # Re-project target into image (blue crosshair)
+                    target_pixel = None
+                    distance_m = None
+                    if (
+                        hasattr(raw_env, "_robots")
+                        and hasattr(raw_env, "_frame_link_ids")
+                        and hasattr(raw_env, "target")
+                    ):
+                        robot = raw_env._robots[agent_id]
+                        pitch_link_idx = raw_env._frame_link_ids[agent_id]["pitch_link"]
+                        cam_pos = robot.data.body_pos_w[0, pitch_link_idx]
+                        pitch_link_quat = robot.data.body_quat_w[0, pitch_link_idx]
+
+                        cam_offset_quat = torch.tensor(
+                            [0.5, -0.5, 0.5, -0.5], dtype=torch.float32, device=raw_env.device
+                        )
+                        cam_quat_world = quat_mul(
+                            pitch_link_quat.unsqueeze(0), cam_offset_quat.unsqueeze(0)
+                        ).squeeze(0)
+                        cam_intrinsic = camera.data.intrinsic_matrices[0]
+                        target_pos = raw_env.target.data.root_pos_w[0]
+
+                        tu, tv, tvalid = project_point_to_image(
+                            target_pos, cam_pos, cam_quat_world, cam_intrinsic
+                        )
+                        target_pixel = (tu, tv, tvalid)
+                        distance_m = (target_pos - robot.data.root_pos_w[0]).norm().item()
+
+                    # Delayed/observed bbox + AoI
+                    obs_bbox_xyxy_val = None
+                    obs_bbox_empty_val = True
+                    bbox_aoi_val = None
+                    if getattr(raw_env, "_delay_system", None) is not None:
+                        delayed_states = raw_env._delay_system.get_all_states_for_observations(
+                            ego_agent_id=agent_id
+                        )
+                        obs_data = delayed_states[agent_id].data
+                        obs_bbox_xywh = obs_data.bboxes_2d[0, 0, :]
+                        obs_bbox_empty_val = obs_bbox_xywh.abs().sum().item() < 1e-6
+                        bbox_aoi_val = (
+                            raw_env._sim_time[0].item() - obs_data.timestamp_detection[0].item()
+                        )
+                        if not obs_bbox_empty_val:
+                            cx = obs_bbox_xywh[0].item()
+                            cy = obs_bbox_xywh[1].item()
+                            bw = obs_bbox_xywh[2].item()
+                            bh = obs_bbox_xywh[3].item()
+                            obs_bbox_xyxy_val = (
+                                int(cx - bw / 2), int(cy - bh / 2),
+                                int(cx + bw / 2), int(cy + bh / 2),
+                            )
+
+                    # Replicated (calibrated noise) bbox + ground/sky flag
+                    rep_bbox_xyxy_val = None
+                    rep_bbox_empty_val = True
+                    bg_is_ground_val = None
+                    if (
+                        hasattr(raw_env, "cfg")
+                        and getattr(raw_env.cfg, "calibrated_bbox_noise", None) is not None
+                        and raw_env.cfg.calibrated_bbox_noise.enabled
+                        and getattr(raw_env.bbox_raycaster_v2.data, "bboxes_xyxy_replicated", None) is not None
+                    ):
+                        rep_xyxy_t = raw_env.bbox_raycaster_v2.data.bboxes_xyxy_replicated[0, a_idx, 0, :]
+                        rep_empty = raw_env.bbox_raycaster_v2.data.bbox_empty_replicated[0, a_idx, 0].item()
+                        rep_bbox_empty_val = bool(rep_empty)
+                        if not rep_bbox_empty_val:
+                            rep_bbox_xyxy_val = (
+                                int(rep_xyxy_t[0].item()), int(rep_xyxy_t[1].item()),
+                                int(rep_xyxy_t[2].item()), int(rep_xyxy_t[3].item()),
+                            )
+                        if raw_env.bbox_raycaster_v2.data.bg_is_ground is not None:
+                            bg_is_ground_val = bool(
+                                raw_env.bbox_raycaster_v2.data.bg_is_ground[0, a_idx, 0].item()
+                            )
+
+                    vis_image = draw_bbox_overlay(
+                        cam_rgb, bbox_xyxy, bbox_empty_val, agent_id, zoom_val,
+                        target_pixel=target_pixel,
+                        distance_m=distance_m,
+                        obs_bbox_xyxy=obs_bbox_xyxy_val,
+                        obs_bbox_empty=obs_bbox_empty_val,
+                        bbox_aoi=bbox_aoi_val,
+                        replicated_bbox_xyxy=rep_bbox_xyxy_val,
+                        replicated_bbox_empty=rep_bbox_empty_val,
+                        bg_is_ground=bg_is_ground_val,
+                    )
+
+                    if state["image_display"] is None:
+                        state["image_display"] = state["ax_cam"].imshow(vis_image)
+                    else:
+                        state["image_display"].set_data(vis_image)
+
+                    # --- Reward components ---
+                    if hasattr(raw_env, "_step_rewards") and agent_id in raw_env._step_rewards:
+                        step_rewards = raw_env._step_rewards[agent_id]
+                        step_total = 0.0
+                        for k in reward_plot_keys:
+                            val = step_rewards[k][0].item() if k in step_rewards else 0.0
+                            state["reward_history"][k].append(val)
+                            if len(state["reward_history"][k]) > history_len:
+                                state["reward_history"][k].pop(0)
+                            step_total += val
+                        state["total_reward_history"].append(step_total)
+                        if len(state["total_reward_history"]) > history_len:
+                            state["total_reward_history"].pop(0)
+
+                        n = len(state["total_reward_history"])
+                        x_t = time_history[-n:]
+                        for k in reward_plot_keys:
+                            state["reward_lines"][k].set_data(x_t, state["reward_history"][k])
+                        state["total_reward_line"].set_data(x_t, state["total_reward_history"])
+
+                        state["ax_rew"].set_xlim(t_min, max(t_min + history_window_s, t_max))
+                        all_vals = state["total_reward_history"][:]
+                        for k in reward_plot_keys:
+                            all_vals.extend(state["reward_history"][k])
+                        if all_vals:
+                            ymin, ymax = min(all_vals), max(all_vals)
+                            margin = max(0.01, (ymax - ymin) * 0.1)
+                            state["ax_rew"].set_ylim(ymin - margin, ymax + margin)
+
+                    # --- Gimbal joint angles ---
+                    if hasattr(raw_env, "gimbal_joint_idx") and agent_id in raw_env.gimbal_joint_idx:
+                        robot = raw_env._robots[agent_id]
+                        to_deg = 180.0 / math.pi
+                        yaw_j = robot.data.joint_pos[0, raw_env.gimbal_joint_idx[agent_id]["yaw"]].item()
+                        pitch_j = robot.data.joint_pos[0, raw_env.gimbal_joint_idx[agent_id]["pitch"]].item()
+                        state["gimbal_history"]["yaw_joint_deg"].append(yaw_j * to_deg)
+                        state["gimbal_history"]["pitch_joint_deg"].append(pitch_j * to_deg)
+                        for key in state["gimbal_history"]:
+                            if len(state["gimbal_history"][key]) > history_len:
+                                state["gimbal_history"][key].pop(0)
+
+                        n = len(state["gimbal_history"]["yaw_joint_deg"])
+                        x_t = time_history[-n:]
+                        for k, line in state["gimbal_lines"].items():
+                            line.set_data(x_t, state["gimbal_history"][k])
+                        state["ax_gim"].set_xlim(t_min, max(t_min + history_window_s, t_max))
+                        all_angles = (state["gimbal_history"]["yaw_joint_deg"]
+                                      + state["gimbal_history"]["pitch_joint_deg"])
+                        if all_angles:
+                            ymin, ymax = min(all_angles), max(all_angles)
+                            margin = max(1.0, (ymax - ymin) * 0.1)
+                            state["ax_gim"].set_ylim(ymin - margin, ymax + margin)
+
+                    # --- Action (each dim) ---
+                    if agent_id in actions:
+                        act_vec = actions[agent_id][0].detach().cpu().numpy()  # (act_dim,)
+                        for d, label in enumerate(action_dim_labels):
+                            v = float(act_vec[d]) if d < len(act_vec) else 0.0
+                            state["action_history"][label].append(v)
+                            if len(state["action_history"][label]) > history_len:
+                                state["action_history"][label].pop(0)
+                        n = len(state["action_history"][action_dim_labels[0]])
+                        x_t = time_history[-n:]
+                        for label, line in state["action_lines"].items():
+                            line.set_data(x_t, state["action_history"][label])
+                        state["ax_act"].set_xlim(t_min, max(t_min + history_window_s, t_max))
+
+                    # --- Global metrics: distance, AoI, parallax ---
+                    a_idx_g = possible_agents.index(agent_id)
+                    # distance
+                    if distance_m is not None:
+                        global_state["distance"][agent_id].append(distance_m)
+                    else:
+                        global_state["distance"][agent_id].append(float("nan"))
+                    if len(global_state["distance"][agent_id]) > history_len:
+                        global_state["distance"][agent_id].pop(0)
+                    # AoI
+                    aoi_v = bbox_aoi_val if bbox_aoi_val is not None else float("nan")
+                    global_state["aoi"][agent_id].append(aoi_v)
+                    if len(global_state["aoi"][agent_id]) > history_len:
+                        global_state["aoi"][agent_id].pop(0)
+                    # parallax (max LOS angle vs other agents, deg)
+                    if los_vecs is not None and num_agents > 1:
+                        cos_ij = (los_vecs[a_idx_g:a_idx_g+1] * los_vecs).sum(dim=-1)
+                        cos_ij = cos_ij.clamp(-1.0 + 1e-6, 1.0 - 1e-6)
+                        ang = torch.arccos(cos_ij)  # (N,)
+                        ang[a_idx_g] = 0.0
+                        max_par_deg = float(ang.max().item() * 180.0 / math.pi)
+                    else:
+                        max_par_deg = 0.0
+                    global_state["parallax_deg"][agent_id].append(max_par_deg)
+                    if len(global_state["parallax_deg"][agent_id]) > history_len:
+                        global_state["parallax_deg"][agent_id].pop(0)
+
+                # --- Triangulation error (env 0, scalar) ---
+                tri_err = float("nan")
+                tri_res = getattr(raw_env, "_triangulation_result_obs", None)
+                if tri_res is None:
+                    tri_res = getattr(raw_env, "_triangulation_result_gt", None)
+                if (
+                    tri_res is not None
+                    and hasattr(raw_env, "_target_pos_w")
+                    and bool(tri_res.is_valid[0, 0].item())
+                ):
+                    est = tri_res.position[0, 0]  # (3,)
+                    truth = raw_env._target_pos_w[0]
+                    tri_err = float((est - truth).norm().item())
+                global_state["tri_err_m"].append(tri_err)
+                if len(global_state["tri_err_m"]) > history_len:
+                    global_state["tri_err_m"].pop(0)
+
+                # --- Update global-row line plots ---
+                def _autoscale(ax, all_vals, default_pad=0.5):
+                    valid = [v for v in all_vals if not (isinstance(v, float) and math.isnan(v))]
+                    if valid:
+                        ymin, ymax = min(valid), max(valid)
+                        margin = max(default_pad, (ymax - ymin) * 0.1)
+                        ax.set_ylim(ymin - margin, ymax + margin)
+
+                if global_axes:
+                    n = len(time_history)
+                    x_t = time_history
+                    for metric in ("distance", "aoi", "parallax_deg"):
+                        all_vals = []
+                        for a in possible_agents:
+                            line = global_lines[metric][a]
+                            data = global_state[metric][a]
+                            line.set_data(x_t[-len(data):], data)
+                            all_vals.extend(data)
+                        ax = global_axes[metric]
+                        ax.set_xlim(t_min, max(t_min + history_window_s, t_max))
+                        _autoscale(ax, all_vals,
+                                   default_pad=0.05 if metric == "aoi" else 0.5)
+
+                    # tri error
+                    data = global_state["tri_err_m"]
+                    global_lines["tri_err_m"].set_data(x_t[-len(data):], data)
+                    ax_tri_err = global_axes["tri_err_m"]
+                    ax_tri_err.set_xlim(t_min, max(t_min + history_window_s, t_max))
+                    _autoscale(ax_tri_err, data, default_pad=0.1)
+
+                if fig is not None:
+                    fig.canvas.draw()
+                    fig.canvas.flush_events()
+
             # Accumulate rewards
             for agent_id in possible_agents:
                 episode_rewards[agent_id] += rewards[agent_id].mean().item()

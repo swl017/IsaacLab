@@ -1752,3 +1752,75 @@ Next:
   thesis is confirmed. If ep_len holds but entropy still decays
   toward 0, layer in partial zoom-dim mask (action_weight[6]=0.2) as
   the smallest hybrid fix.
+
+----------------------------------------
+2026-05-09 — Ticket 033: MAPPO-RNN parameter-ownership fix
+----------------------------------------
+Done:
+- Diagnosed and fixed the MAPPO-RNN shared-optimizer-ownership bug. Root
+  cause: scripts/reinforcement_learning/skrl/mappo_rnn.py builds one Adam
+  + one KLAdaptiveLR per agent_id; train_mappo_rnn_hydra.py assigns the
+  same shared_policy/shared_value Python objects under both drone uids,
+  so two independent optimizers and schedulers were owning and double-
+  stepping the same parameter tensors per MAPPO update. Verified the same
+  pattern persists in skrl v2.0.0 (released 2026-04-08) — upstream did
+  not fix it and v2 still ships no recurrent MAPPO, so the patch lives
+  in our local trainer.
+- Added scripts/reinforcement_learning/skrl/mappo_rnn_groups.py: pure-
+  PyTorch parameter-ownership grouping (union-find over id(parameter)).
+  Two uids fuse if their (policy ∪ value) parameter id sets overlap;
+  disjoint uids stay in singleton groups. Includes assert_groups_partition
+  _params and homogeneous_config_check helpers.
+- Refactored mappo_rnn.py __init__ to build one optimizer/scheduler per
+  ownership group (self._opt_groups, self._group_optimizers,
+  self._group_schedulers). Per-uid self.optimizers[uid]/schedulers[uid]
+  preserved as aliases so checkpoint_modules plumbing is unchanged.
+- Refactored mappo_rnn.py _update into three explicit phases:
+  Phase A: per-uid GAE + sequence batching (existing logic, stashed into
+           per_uid_state).
+  Phase B: per-group iteration. For each (epoch, minibatch), sums per-
+           uid losses on un-stepped weights, runs one backward, one
+           grad-clip on group.params, one optimizer.step, one scheduler
+           step per epoch using aggregate KL across contributors. Group-
+           level KL early stopping replaces per-uid early stopping.
+  Phase C: per-uid loss/std diagnostics preserved.
+  Added per-group LR/KL diagnostics
+  ("Learning / Learning rate (group: ...)").
+  Extracted _per_uid_minibatch_components helper for the inner forward+
+  loss math.
+- Added scripts/reinforcement_learning/skrl/tests/ with three suites:
+  * test_mappo_rnn_groups.py (13 tests, pure-PyTorch): singleton,
+    homogeneous-shared, heterogeneous-disjoint, hybrid-shared-encoder,
+    partial-value-sharing, transitive fusion (A↔B, B↔C → all fused),
+    no-models, homogeneous_config_check enforcement, iteration order,
+    and an Adam-state divergence reproduction of the original bug.
+  * test_mappo_rnn_init.py (4 tests): MAPPO_RNN init with tiny torch
+    models, optimizer aliasing, Adam state dedup.
+  * test_mappo_rnn_update.py (3 tests): drives MAPPO_RNN through one
+    rollout of synthetic transitions and triggers _update; verifies
+    shared optimizer step counter equals exactly learning_epochs *
+    mini_batches (not double), heterogeneous keeps per-uid step
+    counters, shared params actually move.
+  All 20 tests green on CUDA (torch 2.5.1+cu118).
+- Updated ticket with implementation summary, file inventory, acceptance-
+  criteria checklist, skrl v2.0.0 status note, and pending validation
+  list. Status changed from Open to "Implemented (pending end-to-end
+  validation in a real iris_ma6 training run)".
+
+Next:
+- Run a real iris_ma6 MAPPO-RNN training and confirm:
+  * Single LR curve under "Learning / Learning rate (group: drone_0+
+    drone_1)" (no longer two divergent per-uid curves).
+  * "Policy / Standard deviation (drone_0)" and "(drone_1)" identical
+    (same shared policy → same stddev), where they previously diverged.
+  * Late-training std drift on lateral velocity/yaw/gimbal/zoom
+    behaves more cleanly than the 2026-05-08 run.
+- Once validated end-to-end, move ticket 033 to closed and consider the
+  follow-up "batch along agent dim" optimization as a separate ticket
+  (real GPU throughput win, distinct from the correctness fix here).
+- Be aware: effective LR is now ~halved (single step per minibatch
+  instead of two sequential steps). Existing learning_rate values may
+  need to be roughly doubled to match early-phase progress of prior
+  runs, OR plan to train longer; do not interpret slower early-phase
+  reward as a regression without retuning LR.
+
