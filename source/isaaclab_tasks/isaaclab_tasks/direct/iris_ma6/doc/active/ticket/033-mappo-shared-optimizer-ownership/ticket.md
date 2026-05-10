@@ -394,6 +394,100 @@ Pending validation:
     behaves more cleanly than the 2026-05-08 run — direction expected,
     magnitude TBD pending the run.
 
+### Post-mortem of 2026-05-09 first-validation run + SUM→MEAN follow-up
+
+The first validation run with the initial fix
+(`logs/skrl/iris_ma6/2026-05-09_22-12-18_mappo_rnn_torch_1abe3cf54b_mappo_rnn_shared_model_fix`)
+confirmed the structural fix worked — `drone_0` and `drone_1` policy std
+became bit-identical, and only one LR/KL curve was logged per group — but
+training collapsed:
+
+- Reward peaked at 4362 at 24k (better bootstrap than the 2026-05-08 buggy
+  run's 3957), then degraded: 3288 at 44k → 1997 at 64k → 1001 at 104k →
+  28 at 124k → -200 plateau through 264k.
+- Episode length followed: 498 (24k) → 251 (124k) → 141 (264k).
+- `Termination/tracking_lost_fraction` rose from 0.005 (24k) to 0.78 (124k)
+  to 0.98 (264k); `Detection/pair_valid_rate` collapsed 0.91 → 0.13 → 0.07.
+- KLAdaptive pinned LR at `min_lr=1e-4` from 124k onward; aggregate KL
+  (group) hovered at 0.025–0.04 against `kl_threshold=0.02`.
+- Per-uid logged losses were 5–25× larger than the pre-fix run's at
+  comparable steps (mostly during the curriculum-window failure).
+
+Root cause: the initial fix aggregated per-uid losses by **SUM** in Phase B
+of `_update`. For a homogeneous shared group with N=2 uids this silently
+multiplied the optimizer-visible scaling of `value_loss_scale` and
+`entropy_loss_scale` by N, and shifted the per-MB KL that KLAdaptiveLR
+consumes into a regime the threshold was not tuned for. Concretely:
+
+```
+SUM:  total_loss = Σ_uid (policy_loss_uid + value_loss_scale * value_loss_uid
+                         + entropy_loss_scale * entropy_loss_uid)
+                 = Σ policy_loss + (N * value_loss_scale) * mean_value_loss
+                                 + (N * entropy_loss_scale) * mean_entropy_loss
+```
+
+So with `value_loss_scale=1.0`, `entropy_loss_scale=0.01`, and N=2, the
+optimizer was effectively running with 2.0 / 0.02 — the value head over-
+weighted the policy head's gradient share, and the entropy bonus was
+doubled (consistent with the observed late-training std drift back up to
+0.297 once policy gradients went to zero).
+
+Fix follow-up (2026-05-09, same session):
+
+- Phase B in `mappo_rnn.py::_update` now aggregates per-uid losses by
+  **MEAN** instead of SUM:
+
+  ```python
+  total_loss = sum(
+      c["policy_loss"] + c["value_loss"] + c["entropy_loss"]
+      for c in components_per_uid.values()
+  ) / len(group.uids)
+  ```
+
+- For singleton (heterogeneous) groups, `len(group.uids) == 1` and MEAN
+  reduces to identity — zero behavior change for disjoint agents. For
+  shared groups (N ≥ 2), every loss-scaled hyperparameter recovers its
+  configured magnitude, KL-per-MB recovers the pre-fix per-uid magnitude,
+  and KLAdaptiveLR sees the signal it was tuned against.
+- This matches the canonical MAPPO formulation
+  L_MAPPO = (1/N) Σ_i L_PPO_i.
+- All 20 tests still green after the change: groups 13/13, init 4/4,
+  update 3/3.
+
+Why this is the principled choice over the alternatives:
+
+| Option | Behavior | Verdict |
+|--------|----------|---------|
+| Retune LR / scales / threshold | per-N maintenance debt; LR knob means different things in shared vs hetero setups | rejected |
+| Keep SUM, halve scales for shared groups | same maintenance debt, surprising semantics | rejected |
+| Disable KL early-stop for groups | symptom-suppression, not root-cause | rejected |
+| Revert to per-uid optimizers | that is the bug | rejected |
+| **SUM → MEAN** | hyperparameter-invariant under N, matches MAPPO literature, single-line change | **accepted** |
+
+Pending second-validation run: same agent.yaml, same seed, with the MEAN
+fix in place. Expected:
+
+- Per-uid `Loss / Policy loss`, `Loss / Value loss`, `Loss / Entropy loss`
+  drop back to the pre-fix per-uid magnitudes (5–25× smaller than the
+  first-validation run).
+- KL-per-MB drops back to the pre-fix per-uid range (~0.005–0.015 instead
+  of 0.025–0.040 aggregate); KLAdaptive raises rather than pins LR.
+- Bootstrap stays as good as the SUM run (cleaner gradients are still
+  cleaner — that benefit comes from the optimizer/scheduler unification,
+  not from sum-vs-mean).
+- Curriculum window 40k–120k: policy adapts at roughly the pre-fix rate;
+  `Termination/tracking_lost_fraction` does not exceed 0.1, episode
+  length stays >450, reward stays >2000 through 200k.
+
+Open thought (separate from this ticket): bootstrap-phase std collapses
+from 0.348 → 0.169 by 24k in both pre-fix and post-fix runs; this rapid
+commitment is a generic feature of the current `entropy_loss_scale=0.01`
++ `min_log_std=-5.0` (σ_floor ≈ 0.007) combination, not caused by the
+fix. If late-curriculum re-exploration ever proves brittle, raising
+`min_log_std` to about -2.0 (σ_floor ≈ 0.135) would prevent over-
+commitment without distorting the policy mean. Tracked separately, not
+in scope for this ticket.
+
 ### skrl v2 RNN support for multi-agent algorithms (checked 2026-05-09)
 
 skrl v2 still does **not** ship a recurrent variant of MAPPO (or IPPO). The

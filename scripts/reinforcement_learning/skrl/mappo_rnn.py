@@ -998,10 +998,17 @@ class MAPPO_RNN(MultiAgent):
                     if kl_threshold and aggregate_kl.item() > kl_threshold:
                         break
 
+                    # Aggregate per-uid losses by MEAN (not SUM) so that the
+                    # effective magnitude of `policy_loss`, `value_loss`, and
+                    # `entropy_loss` — and hence the effective values of
+                    # `value_loss_scale`, `entropy_loss_scale`, and the per-MB
+                    # KL that KLAdaptiveLR observes — are independent of how
+                    # many uids share the group. This matches the
+                    # canonical MAPPO formulation L = (1/N) Σ_i L_PPO_i.
                     total_loss = sum(
                         c["policy_loss"] + c["value_loss"] + c["entropy_loss"]
                         for c in components_per_uid.values()
-                    )
+                    ) / len(group.uids)
 
                     self.scaler.scale(total_loss).backward()
 

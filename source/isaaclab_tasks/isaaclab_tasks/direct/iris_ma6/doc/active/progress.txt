@@ -1824,3 +1824,48 @@ Next:
   runs, OR plan to train longer; do not interpret slower early-phase
   reward as a regression without retuning LR.
 
+
+----------------------------------------
+2026-05-09 — Ticket 033 follow-up: SUM → MEAN loss aggregation
+----------------------------------------
+Done:
+- First validation run (logs/skrl/iris_ma6/2026-05-09_22-12-18_mappo_rnn
+  _torch_1abe3cf54b_mappo_rnn_shared_model_fix) confirmed the structural
+  fix works (drone_0/_1 std bit-identical, single LR/KL curve per group)
+  but training collapsed: reward peaked at 4362 at 24k then degraded to
+  -200 by 264k; tracking_lost_fraction reached 0.98 by 264k; KLAdaptive
+  pinned LR at min_lr=1e-4 from 124k.
+- Diagnosed root cause: Phase B was aggregating per-uid losses by SUM,
+  which silently multiplies effective value_loss_scale and entropy_loss_
+  scale by N (number of uids in shared group). For iris_ma6 N=2 this
+  doubled both, breaking the hyperparameter tune (over-weighted value
+  head, doubled entropy bonus → late-training std drift back up to
+  0.297) and pushed KL-per-MB into a regime KLAdaptive's threshold was
+  not tuned for.
+- Switched aggregation to MEAN in mappo_rnn.py::_update Phase B:
+    total_loss = sum(...) / len(group.uids)
+  Singleton (heterogeneous) groups: identity, no behavior change.
+  Shared groups (N>=2): every loss-scaled hyperparameter recovers its
+  configured magnitude; KL-per-MB recovers pre-fix per-uid magnitude;
+  KLAdaptive sees the signal it was tuned against. Matches canonical
+  MAPPO formulation L = (1/N) Σ_i L_PPO_i.
+- All 20 tests still green: groups 13/13, init 4/4, update 3/3.
+- Updated ticket 033 with post-mortem of first-validation run, root-
+  cause analysis, options table comparing alternatives, and pending
+  second-validation expectations.
+
+Next:
+- Re-run iris_ma6 MAPPO-RNN training with the MEAN fix, same agent.yaml,
+  same seed. Expected:
+  * Per-uid policy/value/entropy losses drop to pre-fix per-uid magnitudes
+    (5-25x smaller than the first-validation run).
+  * KL-per-MB drops to ~0.005-0.015 (was 0.025-0.040 aggregate).
+  * KLAdaptive raises rather than pins LR.
+  * Curriculum window 40k-120k: tracking_lost_fraction stays <0.1,
+    episode length >450, reward >2000 through 200k.
+- Open follow-up (out of ticket 033 scope): bootstrap-phase std drop
+  from 0.348 to 0.169 by 24k is generic to the current entropy_loss_
+  scale=0.01 + min_log_std=-5.0 combo, not caused by the fix. If late-
+  curriculum re-exploration proves brittle in future runs, consider
+  raising min_log_std to ~-2.0 (sigma_floor ~0.135) as a separate
+  exploration-tuning ticket.
