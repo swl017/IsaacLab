@@ -488,6 +488,119 @@ fix. If late-curriculum re-exploration ever proves brittle, raising
 commitment without distorting the policy mean. Tracked separately, not
 in scope for this ticket.
 
+### Post-mortem of 2026-05-10 MEAN-validation run + cfg-side band alignment
+
+Second validation run with the SUM→MEAN follow-up
+(`logs/skrl/iris_ma6/2026-05-10_19-44-37_mappo_rnn_torch_962be96b48_mappo_rnn_shared_model_fix`)
+no longer collapses (unlike the first SUM-validation run), but degrades:
+
+| step | reward | pair_valid | tracking_lost | LR (group) | KL (group) |
+|------|--------|------------|---------------|------------|------------|
+| 28k  | 3940   | 0.89       | 0.010         | 0.0026     | 0.025      |
+| 88k  | 2231   | 0.66       | 0.27          | 0.0056     | 0.023      |
+| 184k | 1611   | 0.58       | 0.30          | 0.0084     | 0.023      |
+| 208k | 1139   | 0.49       | 0.41          | 0.0032     | —          |
+
+vs pre-fix at 208k: reward 2142, tracking_lost 0.097.
+
+So MEAN run is functional but reaches ~half the late-phase reward of
+pre-fix. Per-uid `Loss / Policy loss (drone_0)` is 5–30× larger at
+comparable steps, `Loss / Value loss` is 4–13× larger; group LR
+oscillates 0.002–0.009.
+
+Root cause (Codex flagged it, confirmed): a structural mismatch between
+the PPO early-stop threshold and the KLAdaptiveLR scheduler's hysteresis
+band. Stock SKRL uses the same numeric `kl_threshold` value for both
+purposes, but with default `kl_factor=2` they trigger at different KLs:
+
+```
+SKRL stock layout (kl_threshold = 0.02 used for both):
+0 ─── 0.010 ─── 0.020 ─── 0.040 ─── ∞
+      ↑raise   ↑PPO       ↑LR
+       LR      stop       lower
+              <-- inert -->
+```
+
+When KL sits in [0.020, 0.040] (which it did continuously at ~0.023):
+PPO frequently early-stops the inner loop (updates skipped), but
+KLAdaptive thinks LR is fine and lets it climb. Result: per-step moves
+get larger, intermittent updates, eventual reward degradation.
+
+This is NOT specific to our fix — stock SKRL has the same mismatch.
+The bug fix exposed it because the post-fix code's per-MB KL signal is
+"cleaner" (un-stepped average across uids vs pre-fix's order-inflated
+drone_1 KL), so KLAdaptive raises LR more aggressively than it ever did
+in pre-fix runs.
+
+Principled answer: the standard PPO convention (Schulman et al. 2017,
+SpinningUp, Stable-Baselines3) places PPO early-stop at
+`1.5 × target_kl`, just inside KLAdaptive's high band of `2 × target_kl`.
+This gives a layered response: early-stop fires first, LR cut only if
+that is not enough.
+
+Cfg-side fix applied 2026-05-11 in `agents/skrl_mappo_rnn_cfg.yaml`,
+without touching the trainer:
+
+```yaml
+agent:
+  kl_threshold: 0.02         # PPO early-stop (unchanged)
+  learning_rate_scheduler_kwargs:
+    kl_threshold: 0.01       # NEW: scheduler target = early-stop / 2
+    kl_factor: 2.0           # NEW: pinned explicit so alignment doesn't drift
+    min_lr: 1.0e-4           # unchanged
+    max_lr: 1.0e-3           # NEW: cap to prevent runaway LR climb
+```
+
+This produces the band layout:
+
+```
+0 ─── 0.005 ────────── 0.020 ─── ∞
+      ↑raise            ↑PPO stop AND LR lower (both fire together)
+       LR               (aligned via target × kl_factor = 0.01 × 2 = 0.02)
+              dead zone
+              [0.005, 0.020]
+```
+
+When KL exceeds 0.020, BOTH PPO early-stops the current inner loop
+AND KLAdaptive halves LR for the next update — synchronized response,
+no inert region. `max_lr=1e-3` is a safety net in case KLAdaptive ever
+wants to climb above the pre-fix `lr_drone_0` operating range.
+
+Validation parse confirms the alignment:
+```
+agent.kl_threshold (PPO early-stop): 0.02
+scheduler.kl_threshold (target):     0.01
+scheduler.kl_factor:                 2.0
+derived scheduler-low  = 0.0050
+derived scheduler-high = 0.0200
+PPO early-stop         = 0.0200
+OK  scheduler-high band matches PPO early-stop
+```
+
+Trade-off note: this is the operator-side fix. An equivalent trainer-
+side fix would be to apply the SpinningUp 1.5× multiplier directly in
+`_per_uid_minibatch_components` / Phase B's early-stop check. Both
+reach the same goal of band-alignment; the cfg-side approach was chosen
+because it required zero code changes after two structural fixes in two
+days, and because the threshold relationship is now visible in the YAML
+where operators can audit it.
+
+Pending third-validation run with the cfg fix:
+
+- Bootstrap (0–40k): expect peak 3000–3800 reward by ~30–40k (slightly
+  slower than the 962be96b48 run's 3940 at 28k, since LR is capped at
+  1e-3 instead of climbing to 8e-3).
+- Mid (40k–120k): expect plateau 2500–3500, no degradation slope.
+- Late (120k+): expect to match or beat pre-fix's late plateau of
+  ~2000–2500 reward.
+- KL (group) curve: expect to sit in [0.008, 0.018] most of the time.
+  If it parks above 0.020 with LR repeatedly halving → max_lr too high.
+  If it parks below 0.005 with LR pinned at max_lr → max_lr too low.
+- LR (group): expect to oscillate in [3e-4, 1e-3] under the cap.
+- Per-uid logged losses: expect to drop closer to pre-fix magnitudes,
+  partly because n_loss_samples will return to ~48 (no more aggressive
+  early-stop), partly because per-step parameter movement is now bounded.
+
 ### skrl v2 RNN support for multi-agent algorithms (checked 2026-05-09)
 
 skrl v2 still does **not** ship a recurrent variant of MAPPO (or IPPO). The

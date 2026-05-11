@@ -55,14 +55,26 @@ agent:
   entropy_loss_scale: 0.01   # Entropy loss scaling
   value_loss_scale: 1.0      # Value loss scaling
 
-  # KL divergence
+  # KL divergence — PPO early-stop threshold
+  # Aligned with KLAdaptiveLR's high band so PPO early-stop and LR reduction
+  # trigger together at the same KL value (see scheduler block below).
   kl_threshold: 0.02         # KL divergence threshold for early stopping
 
   # Learning rate scheduler
+  # Threshold layout (assumes scheduler kl_factor = 2):
+  #   kl < 0.005  → KLAdaptiveLR raises LR (×2, capped by max_lr)
+  #   0.005-0.020 → dead zone, LR unchanged, no early-stop
+  #   kl > 0.020  → PPO early-stop AND KLAdaptiveLR halves LR (both fire together)
+  # The scheduler target (0.01) is half of the PPO early-stop threshold (0.02)
+  # so that scheduler_high = target × kl_factor = 0.01 × 2 = 0.02 = early-stop.
+  # Do NOT change kl_threshold here without updating agent.kl_threshold above
+  # (or kl_factor below) — the alignment depends on the 2:1 ratio.
   learning_rate_scheduler: KLAdaptiveLR
   learning_rate_scheduler_kwargs:
-    kl_threshold: 0.02       # Wider dead zone (0.02–0.08) absorbs curriculum transitions
-    min_lr: 1.0e-4           # Prevent LR collapse after curriculum shifts (default 1e-6 froze policy)
+    kl_threshold: 0.01       # Scheduler target; high-band = 0.01 × kl_factor = 0.02
+    kl_factor: 2.0           # Pinned explicitly so threshold alignment doesn't drift
+    min_lr: 1.0e-4           # Prevent LR collapse after curriculum shifts
+    max_lr: 1.0e-3           # Cap to prevent runaway LR climb (post-fix observed up to 8e-3)
 
   # Preprocessors
   state_preprocessor: RunningStandardScaler
@@ -84,7 +96,7 @@ agent:
   # Experiment tracking
   experiment:
     directory: iris_ma6
-    experiment_name: "2f8907ebed_siyi_a8_mini_siyi_zoom_continuous_critic_on" 
+    experiment_name: "962be96b48_mappo_rnn_shared_model_fix" 
     write_interval: auto
     checkpoint_interval: auto
     store_separately: false

@@ -1869,3 +1869,60 @@ Next:
   curriculum re-exploration proves brittle in future runs, consider
   raising min_log_std to ~-2.0 (sigma_floor ~0.135) as a separate
   exploration-tuning ticket.
+
+----------------------------------------
+2026-05-11 — Ticket 033 follow-up: cfg-side PPO/KLAdaptive band alignment
+----------------------------------------
+Done:
+- Diagnosed second-validation run (962be96b48 MEAN-fix). It does not
+  collapse like the SUM run did, but degrades to ~half pre-fix's late-
+  phase reward (1139 at 208k vs pre-fix 2142 at 208k). LR oscillates
+  0.002-0.009; KL sits at 0.022-0.025 continuously.
+- Codex flagged the structural mismatch: stock SKRL uses the same
+  numeric `kl_threshold` value for both PPO early-stop and KLAdaptive's
+  target. With default kl_factor=2 the bands are: PPO-stop at 0.02,
+  KLAdaptive-lower at 0.04. KL ~0.023 sits in [0.02, 0.04] where PPO
+  early-stops but KLAdaptive is inert — LR keeps climbing while updates
+  are intermittent. Confirmed by reading SKRL source: the conflation of
+  the two thresholds is structural in stock SKRL, not a bug introduced
+  by my fix.
+- Principled answer: PPO literature (Schulman 2017, SpinningUp, SB3)
+  uses `1.5 × target_kl` for early-stop, just inside KLAdaptive's high
+  band of `2 × target_kl`. SKRL's convention of `1.0 × target_kl` is
+  non-standard and creates the inert region.
+- Applied cfg-side band alignment in agents/skrl_mappo_rnn_cfg.yaml
+  (no trainer code changes):
+    agent.kl_threshold: 0.02         (PPO early-stop, unchanged)
+    scheduler.kl_threshold: 0.01     (NEW: target = early-stop / 2)
+    scheduler.kl_factor: 2.0         (NEW: pinned explicit)
+    scheduler.min_lr: 1.0e-4         (unchanged)
+    scheduler.max_lr: 1.0e-3         (NEW: cap to prevent runaway)
+  This makes scheduler_high = target × kl_factor = 0.02 = PPO-stop, so
+  early-stop and LR-decrease fire together at KL=0.02 instead of having
+  an inert region between them. max_lr=1e-3 caps LR at the level that
+  pre-fix's drone_0 averaged (was reaching 0.005-0.008 in the broken
+  post-fix run). YAML carries an explicit comment block describing the
+  band layout and warning operators not to break the 2:1 ratio between
+  the two thresholds.
+- Added validation step: parsed the cfg, confirmed
+  `target × factor == early_stop` (0.02 = 0.02). OK.
+- Updated ticket 033 with post-mortem of MEAN-validation run, root-cause
+  analysis of the band-misalignment pathology, the cfg-side fix as
+  applied, and pending third-validation expectations.
+
+Next:
+- Re-run iris_ma6 MAPPO-RNN training with this cfg. Expected:
+  * KL (group) sits in [0.008, 0.018] most of the time.
+  * LR (group) oscillates in [3e-4, 1e-3] under the cap.
+  * Reward bootstrap slightly slower than 962be96b48 run (3000-3800 by
+    30-40k vs that run's 3940 at 28k), but mid/late phase plateau at
+    2500-3500 (instead of degrading to 1100).
+  * Per-uid logged losses drop closer to pre-fix magnitudes (n_loss_
+    samples returns to ~48; per-step parameter movement bounded).
+- If validation succeeds, this closes ticket 033. Move it from
+  doc/active/ticket/ to doc/closed/ (or wherever convention puts it).
+- Open follow-up: consider upstreaming the principled 1.5× early-stop
+  convention as an actual trainer-side change (with kl_early_stop_factor
+  cfg, default 1.5), so future operators don't have to manually maintain
+  the 2:1 ratio between the two yaml fields. Tracked separately, not
+  blocking ticket 033 closure.
