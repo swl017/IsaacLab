@@ -55,26 +55,28 @@ agent:
   entropy_loss_scale: 0.01   # Entropy loss scaling
   value_loss_scale: 1.0      # Value loss scaling
 
-  # KL divergence — PPO early-stop threshold
-  # Aligned with KLAdaptiveLR's high band so PPO early-stop and LR reduction
-  # trigger together at the same KL value (see scheduler block below).
-  kl_threshold: 0.02         # KL divergence threshold for early stopping
+  # KL divergence — PPO early-stop threshold.
+  # Keep this aligned with KLAdaptiveLR's high band so PPO early-stop and
+  # LR reduction trigger together, but leave enough room for curriculum
+  # transitions such as fixed/random delay to adapt instead of starving updates.
+  kl_threshold: 0.04         # KL divergence threshold for early stopping
 
   # Learning rate scheduler
   # Threshold layout (assumes scheduler kl_factor = 2):
-  #   kl < 0.005  → KLAdaptiveLR raises LR (×2, capped by max_lr)
-  #   0.005-0.020 → dead zone, LR unchanged, no early-stop
-  #   kl > 0.020  → PPO early-stop AND KLAdaptiveLR halves LR (both fire together)
-  # The scheduler target (0.01) is half of the PPO early-stop threshold (0.02)
-  # so that scheduler_high = target × kl_factor = 0.01 × 2 = 0.02 = early-stop.
+  #   kl < 0.010  → KLAdaptiveLR raises LR (×1.25, capped by max_lr)
+  #   0.010-0.040 → dead zone, LR unchanged, no early-stop
+  #   kl > 0.040  → PPO early-stop AND KLAdaptiveLR lowers LR (both fire together)
+  # The scheduler target (0.02) is half of the PPO early-stop threshold (0.04)
+  # so that scheduler_high = target × kl_factor = 0.02 × 2 = 0.04 = early-stop.
   # Do NOT change kl_threshold here without updating agent.kl_threshold above
   # (or kl_factor below) — the alignment depends on the 2:1 ratio.
   learning_rate_scheduler: KLAdaptiveLR
   learning_rate_scheduler_kwargs:
-    kl_threshold: 0.01       # Scheduler target; high-band = 0.01 × kl_factor = 0.02
+    kl_threshold: 0.02       # Scheduler target; high-band = 0.02 × kl_factor = 0.04
     kl_factor: 2.0           # Pinned explicitly so threshold alignment doesn't drift
-    min_lr: 1.0e-4           # Prevent LR collapse after curriculum shifts
-    max_lr: 1.0e-3           # Cap to prevent runaway LR climb (post-fix observed up to 8e-3)
+    lr_factor: 1.25          # Smaller LR adjustments avoid one-way ratcheting to min_lr
+    min_lr: 3.0e-4           # Preserve adaptation capacity after curriculum shifts
+    max_lr: 1.5e-3           # Cap to prevent runaway LR climb while allowing adaptation
 
   # Preprocessors
   state_preprocessor: RunningStandardScaler
@@ -96,7 +98,7 @@ agent:
   # Experiment tracking
   experiment:
     directory: iris_ma6
-    experiment_name: "962be96b48_mappo_rnn_shared_model_fix" 
+    experiment_name: "0e4daf9ca4_mappo_rnn_shared_model_scheduler_param_fix" 
     write_interval: auto
     checkpoint_interval: auto
     store_separately: false

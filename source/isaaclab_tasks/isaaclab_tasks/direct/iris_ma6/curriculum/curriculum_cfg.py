@@ -68,10 +68,10 @@ class CurriculumCfg:
     # Phase 0: Agent Velocity Ramp (learn tilt dynamics on slow target)
     # ==========================================================================
 
-    agent_velocity_start_step: int = 20000
+    agent_velocity_start_step: int = 0
     """Step to start ramping agent max linear velocity."""
 
-    agent_velocity_end_step: int = 40000
+    agent_velocity_end_step: int = 0
     """Step when agent velocity reaches its configured maximum.
 
     Decoupled from target motion so the agent learns tilt compensation
