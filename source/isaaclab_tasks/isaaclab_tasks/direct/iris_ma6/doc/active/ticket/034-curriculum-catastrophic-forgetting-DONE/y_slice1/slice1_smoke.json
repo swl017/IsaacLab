@@ -1,0 +1,15 @@
+{
+  "num_envs": 256,
+  "step": 399000,
+  "max_lin_vel_min_cfg": 3.0,
+  "max_lin_vel_max_cfg": 10.0,
+  "max_lin_vel_observed_min": 2.8311145305633545,
+  "max_lin_vel_observed_max": 11.405608177185059,
+  "max_lin_vel_observed_mean": 6.576849460601807,
+  "max_lin_vel_observed_std": 1.6493186950683594,
+  "max_lin_vel_below_5": 42,
+  "max_lin_vel_above_9": 19,
+  "eff_progress_agent_velocity_min": 0.0012416952522471547,
+  "eff_progress_agent_velocity_max": 0.9993729591369629,
+  "eff_progress_agent_velocity_mean": 0.517051100730896
+}

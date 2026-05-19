@@ -1,0 +1,23 @@
+{
+  "step": 399000,
+  "num_envs": 256,
+  "tau_progress_per_env_min": 0.00246987771242857,
+  "tau_progress_per_env_max": 0.9975543022155762,
+  "tau_progress_per_env_mean": 0.5076432228088379,
+  "tau_progress_per_env_below_005": 26,
+  "tau_progress_per_env_above_095": 27,
+  "dead_time_seconds_min": 4.7649147745687515e-05,
+  "dead_time_seconds_max": 0.09293358027935028,
+  "dead_time_seconds_mean": 0.03208664804697037,
+  "dead_time_seconds_below_001": 5,
+  "dead_time_seconds_above_005": 114,
+  "dead_time_curr_scale_per_env_min": 0.0006396750686690211,
+  "dead_time_curr_scale_per_env_max": 0.9994935989379883,
+  "dead_time_curr_scale_per_env_mean": 0.4822981655597687,
+  "eff_progress_dynamics_min": 0.00246987771242857,
+  "eff_progress_dynamics_max": 0.9975543022155762,
+  "eff_progress_dynamics_mean": 0.5076432228088379,
+  "eff_progress_gimbal_dead_time_min": 0.0006396750686690211,
+  "eff_progress_gimbal_dead_time_max": 0.9994935989379883,
+  "eff_progress_gimbal_dead_time_mean": 0.4822981655597687
+}

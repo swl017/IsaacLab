@@ -1926,3 +1926,127 @@ Next:
   cfg, default 1.5), so future operators don't have to manually maintain
   the 2:1 ratio between the two yaml fields. Tracked separately, not
   blocking ticket 033 closure.
+
+----------------------------------------
+2026-05-15 — Ticket 033 closed: fix2 validation run is strictly better than pre-fix
+----------------------------------------
+Done:
+- Third validation run completed: 2026-05-13_03-05-08_..._scheduler_param_fix
+  (400k, fix1 = band-aligned cfg + learning_epochs=6 unchanged from
+  pre-fix). Result: peak 5141 at 28k (great), but late-phase collapsed
+  to last-10-avg 839 (worse than pre-fix's 1963). Diagnosis: KL escalated
+  from 0.024 to 0.052 over training, LR pinned at min_lr=3e-4 for 58% of
+  the run, std drifted 0.18 → 0.33 as entropy bonus dominated weak
+  gradients. Root cause: learning_epochs=6 was inherited from pre-fix
+  tuning where the bug's implicit damping made it tolerable; without
+  those dampers it caused 2x per-rollout drift the controllers were
+  tuned for.
+- Fourth validation run completed: 2026-05-15_12-00-44_..._scheduler_param
+  _fix2 (400k, fix2 = same cfg as fix1 except learning_epochs: 6 → 3).
+  Result: peak 5406 at 28k (new best), last-10-avg 2714 (vs pre-fix's
+  1963, +38%). STRICTLY BETTER than pre-fix at EVERY checkpoint:
+    step    pre    fix1    fix2    fix2-vs-pre
+    4k      42     965     1641    +1598 (39x)
+    28k     4081   5141    5406    +1325 (+32%)
+    100k    2674   3417    3834    +1159 (+43%)
+    200k    2429   1258    2473    +44
+    320k    1948   896     2723    +775 (+40%)
+    400k    1778   990     2639    +861 (+48%)
+  Controllers in healthy regime throughout: LR at max_lr=1.5e-3 the
+  entire run (0% pinned at min), KL parks in [0.012, 0.028] (within or
+  just above dead zone, never escalates to early-stop), std stays in
+  [0.17, 0.27] (no late drift). Episode length flat at ~490.
+- Per-component reward at 380k: bbox_center +24%, triangulation +40%,
+  collision penalty 5.6x lower (-0.40 → -0.07), cbf penalty 2x lower.
+  Fix2 wins both cooperative-observation metrics AND safety.
+- Updated live cfg agents/skrl_mappo_rnn_cfg.yaml to learning_epochs: 3
+  (confirmed by user — already in place).
+- Updated ticket 033:
+  * Status: Implemented → "Validated and closed"
+  * Added "Post-mortem of 2026-05-13 third-validation run (fix1)" section
+    documenting the KL-escalation / LR-pinning / std-drift failure mode
+    of leaving learning_epochs=6 in place.
+  * Added "Final validation: 2026-05-15 fix2 run — strictly better than
+    pre-fix" section with full trajectory table, controller diagnostics,
+    per-component reward comparison, and the four-piece fix stack summary.
+  * Added "Closure notes" section listing live cfg/trainer state,
+    recommended baseline checkpoint (fix2's final), and follow-up tickets
+    to open as separate work (seed reproducibility, entropy tuning,
+    EMA value target, upstream the 1.5x convention).
+
+Next:
+- Use fix2's agent_drone_X_final.pt as the iris_ma6 baseline checkpoint
+  going forward. Better than any pre-fix checkpoint by every measure.
+- Open follow-up tickets (don't bundle into 033):
+  * 034: seed-reproducibility regression — second-seed run with fix2 cfg,
+    confirm +38% win is robust within +/- 10% across seeds.
+  * 035 (optional): entropy_loss_scale reduction experiment (0.01 → 0.005)
+    to test whether the residual gap (fix2's bbox_center is +24% over
+    pre-fix, but could potentially close further) shrinks.
+  * 036 (optional): EMA value target for GAE bootstrap — orthogonal
+    improvement axis, well-supported in literature.
+  * 037 (optional): upstream the 1.5x PPO early-stop convention into the
+    trainer as a kl_early_stop_factor cfg (default 1.5) so future
+    operators don't have to maintain the 2:1 ratio between two cfg
+    fields manually.
+- Move ticket 033 from doc/active/ticket/ to wherever closed tickets
+  live in this project (doc/closed/? doc/archive/? — confirm location).
+- Consider updating doc/experiments/ with a per-run analysis writeup
+  for the fix2 run (if that's the convention for "what was learned"
+  per-run analysis as the folder name suggests).
+
+================================================================================
+Session: 2026-05-17 → 2026-05-19  (ticket 034: curriculum catastrophic forgetting)
+================================================================================
+Done:
+- Drafted, executed, and closed ticket 034 (curriculum-driven catastrophic
+  forgetting on dynamics + observability axes). Full QRISPY flow.
+- Stage R0 measurement: confirmed regression on fix2's 400k ckpt — visibility
+  ratios at 39k/99k/199k/399k env settings: 0.616 / 0.577 / 0.988 / 1.000.
+  First two cells FAIL the 0.80 bar; failure pattern monotonic vs distance
+  from training mass (220k-400k). See r_research/regression_eval.md.
+- Stage R: codebase audit (r_research.md) catalogued 16 curriculum axes;
+  14 collapse onto hardest setting at progress=1. progress_tracking
+  (initial_states) is already anti-forgetting under default cfg. Floor:
+  min_latency_steps=2 (= 80ms at 25Hz) already enforced via LatencyCfg.
+- Stages I, S, P (i_design.md, s_structure.md, p_plan.md): designed
+  per-(env, agent) Uniform(0, global_p) anti-forgetting sampler.
+- Stage Y: 4 implementation slices + 1 validation slice. All slice-smokes
+  pass (slow envs restored on _max_lin_vel; per-env divergence on gimbal-τ,
+  gimbal+zoom dead-time, noise scale, dropout rate, delay mode, burst
+  dropout; 0 latency-floor violations).
+- Slice 5 validation: 400k training run 034_2026-05-18_11-45-45 completes
+  cleanly. Controllers healthy throughout (KL in [0.022, 0.028], LR mostly
+  at max with one transient ~33% dip at 120k that recovers by 160k, std
+  stable). Mean reward parity with fix2 (-2.7% last-10 avg). Task-quality
+  metrics improved (collisions -53%, bbox_center +17.5%, pair_valid +2.7pp,
+  track_lost -20%); action-smoothness penalties +35-40% (acceptable cost).
+- Regression eval against new 400k ckpt: visibility ratios
+  0.898 / 0.827 / 1.034 / 1.000 — ALL PASS the 0.80 bar. Pre-fix
+  regression fully eliminated.
+- Two side-bugfixes en route:
+  * `train_mappo_rnn_hydra.py`: propagate agent_cfg["seed"] to env_cfg.seed
+    (required by the new strict-seed assertion in IrisMA6TestEnv).
+  * `train_mappo_rnn_hydra.py`: uncommented --experiment_name CLI flag
+    (avoids run-dir collision when iterating on the same yaml; hydra
+    struct-mode rejected dotted-path overrides).
+- One non-bug closed: ticket 035 (evaluate.py triangulation metrics zero).
+  enable_triangulation=False is intentional deploy-time setting; downstream
+  use visibility_mean as task-quality witness. Marked -NOTABUG.
+
+New baseline checkpoint:
+  logs/skrl/iris_ma6/2026-05-18_11-45-51_..._ticket034_per_env_jitter/
+    checkpoints/agent_400000.pt
+  Use this for all forward work. Strictly better than fix2 on every task
+  metric; comparable on mean reward.
+
+Next:
+- Move ticket 034 from doc/active/ticket/...-DONE to closed location
+  (same as ticket 033 disposition once that convention is settled).
+- Optional follow-up tickets to open separately:
+  * FP/FN curriculum redesign (per Q6).
+  * Delay-system runtime efficiency (Q13 observation — ringbuffer queries).
+  * Critic-only privileged obs (Q10, optional).
+  * Investigate the action-smoothness regression (+35-40% on action_sum/
+    action_delta) — is it a real deployment concern, or just a side-effect
+    of wider env support that washes out at eval time?

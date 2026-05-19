@@ -213,21 +213,52 @@ class BurstDropoutSampler:
         """
         return self._dropout_mask[:, i, j]
 
-    def set_burst_params(self, p_onset: float, p_recovery: float) -> None:
+    def set_burst_params(
+        self,
+        p_onset: "float | torch.Tensor",
+        p_recovery: "float | torch.Tensor",
+    ) -> None:
         """Set burst parameters for curriculum control.
 
-        Args:
-            p_onset: Good->Bad transition probability. 0 disables bursts.
-            p_recovery: Bad->Good transition probability.
-        """
-        self._base_p_onset = max(0.0, min(1.0, p_onset))
-        self._base_p_recovery = max(0.0, min(1.0, p_recovery))
+        Ticket 034: both args accept scalar (uniform) or ``Tensor[num_envs]``
+        (per-env). The scalar mirrors ``_base_p_onset`` / ``_base_p_recovery``
+        are kept in sync (mean) for logging.
 
-        # Update per-env values (unless overridden by distribution sampler)
-        if self._p_onset_sampler is None:
-            self._p_onset.fill_(self._base_p_onset)
-        if self._p_recovery_sampler is None:
-            self._p_recovery.fill_(self._base_p_recovery)
+        Args:
+            p_onset: Good->Bad transition probability — scalar or
+                ``Tensor[num_envs]``. 0 disables bursts.
+            p_recovery: Bad->Good transition probability — scalar or
+                ``Tensor[num_envs]``.
+        """
+        if isinstance(p_onset, torch.Tensor):
+            if p_onset.shape != (self._num_envs,):
+                raise ValueError(
+                    f"set_burst_params p_onset per-env tensor must be Tensor"
+                    f"[{self._num_envs}], got Tensor{tuple(p_onset.shape)}"
+                )
+            p_onset_t = p_onset.to(self._p_onset.device).clamp(min=0.0, max=1.0)
+            self._base_p_onset = float(p_onset_t.mean().item())
+            if self._p_onset_sampler is None:
+                self._p_onset.copy_(p_onset_t)
+        else:
+            self._base_p_onset = max(0.0, min(1.0, float(p_onset)))
+            if self._p_onset_sampler is None:
+                self._p_onset.fill_(self._base_p_onset)
+
+        if isinstance(p_recovery, torch.Tensor):
+            if p_recovery.shape != (self._num_envs,):
+                raise ValueError(
+                    f"set_burst_params p_recovery per-env tensor must be Tensor"
+                    f"[{self._num_envs}], got Tensor{tuple(p_recovery.shape)}"
+                )
+            p_rec_t = p_recovery.to(self._p_recovery.device).clamp(min=0.0, max=1.0)
+            self._base_p_recovery = float(p_rec_t.mean().item())
+            if self._p_recovery_sampler is None:
+                self._p_recovery.copy_(p_rec_t)
+        else:
+            self._base_p_recovery = max(0.0, min(1.0, float(p_recovery)))
+            if self._p_recovery_sampler is None:
+                self._p_recovery.fill_(self._base_p_recovery)
 
     def reset(self, env_ids: Optional[torch.Tensor] = None) -> None:
         """Reset Markov state to Good for specified environments.

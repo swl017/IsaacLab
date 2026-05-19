@@ -33,6 +33,7 @@ from .domain_randomization import DomainRandomizer
 from .controller import DroneController
 from .controller.gimbal_controller import YAW_JOINT_OFFSET
 from .controller.zoom_controller import compute_z_eff
+from .curriculum.progress_helper import sample_per_env_progress
 from .delay_system_v3 import MultiAgentDelaySystemV3, AgentStates
 from .initial_states import InitialStates
 from .delay_system_v3.derived_field_computers import compute_combined_angular_velocity, compute_ray_directions_from_bbox
@@ -574,6 +575,51 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self.progress_zoom_tau = 0.0  # mas/037: decoupled from progress_dynamics
         self._curriculum_noise_scale = 0.0
         self._curriculum_fp_fn_scale = 0.0
+
+        # Ticket 034: env-owned RNG for per-(env, agent) curriculum effective-progress
+        # sampling. Seeded from cfg.seed so two training runs with the same seed
+        # produce identical curriculum-jitter samples. Stays on the env's device.
+        # An explicit cfg.seed is required — silently defaulting causes
+        # non-reproducible runs that look reproducible in their logs.
+        if self.cfg.seed is None:
+            raise ValueError(
+                "IrisMA6TestEnvCfg.seed must be set explicitly for ticket-034 "
+                "per-(env, agent) curriculum sampling to be reproducible. "
+                "Pass --seed <int> at the trainer / set seed in your hydra cfg."
+            )
+        self._curriculum_generator = torch.Generator(device=self.device)
+        self._curriculum_generator.manual_seed(int(self.cfg.seed))
+
+        # Ticket 034: per-(env, agent) effective-progress tensors. Written in
+        # _reset_idx via curriculum.progress_helper.sample_per_env_progress;
+        # held constant for an episode; read by step-time hooks in _get_rewards
+        # and by reset-time consumers below.
+        # Slice 1: agent_velocity. Slice 2: dynamics, gimbal_dead_time.
+        # Slice 3: zoom_dead_time. Slice 4: noise, dropout, delay, burst_dropout.
+        self._eff_progress_agent_velocity = torch.zeros(
+            self.num_envs, len(cfg.possible_agents), device=self.device
+        )
+        self._eff_progress_dynamics = torch.zeros(
+            self.num_envs, len(cfg.possible_agents), device=self.device
+        )
+        self._eff_progress_gimbal_dead_time = torch.zeros(
+            self.num_envs, len(cfg.possible_agents), device=self.device
+        )
+        self._eff_progress_zoom_dead_time = torch.zeros(
+            self.num_envs, len(cfg.possible_agents), device=self.device
+        )
+        self._eff_progress_noise = torch.zeros(
+            self.num_envs, len(cfg.possible_agents), device=self.device
+        )
+        self._eff_progress_dropout = torch.zeros(
+            self.num_envs, len(cfg.possible_agents), device=self.device
+        )
+        self._eff_progress_delay = torch.zeros(
+            self.num_envs, len(cfg.possible_agents), device=self.device
+        )
+        self._eff_progress_burst_dropout = torch.zeros(
+            self.num_envs, len(cfg.possible_agents), device=self.device
+        )
 
         # Initialize target controller for physics-based target movement
         if self.cfg.enable_target_controller:
@@ -1403,58 +1449,82 @@ class IrisMA6TestEnv(DirectMARLEnv):
         # episode (avoids GAE bootstrap bias), and the scalar reset-only
         # values are read by _reset_idx itself.
 
-        # Update delay system curriculum (none → fixed → random, noise/dropout ramp)
+        # Update delay system curriculum (none → fixed → random, noise/dropout ramp).
+        # Ticket 034 — Slice 4: pass per-(env, agent) effective-progress tensors
+        # to the wrapper. The scalar mirrors (self.progress_delay,
+        # self._curriculum_noise_scale, self._curriculum_fp_fn_scale) are kept
+        # for logging back-compat — they reflect the mean across (env, agent).
         if self._delay_system is not None:
             delay_mode = curr.get_delay_mode(current_step)
             if delay_mode == "none":
                 self.progress_delay = 0.0
-                self._delay_system.set_delay_mode("none", progress=0.0)
+                # Pass zero tensor so the wrapper's per-(env, agent) state
+                # is cleared too (otherwise stale "fixed/random" values persist).
+                self._delay_system.set_delay_mode(
+                    "none", progress=torch.zeros_like(self._eff_progress_delay)
+                )
             elif delay_mode == "fixed":
-                self.progress_delay = curr.get_fixed_delay_progress(current_step)
-                self._delay_system.set_delay_mode("fixed", progress=self.progress_delay)
+                self.progress_delay = float(self._eff_progress_delay.mean().item())
+                self._delay_system.set_delay_mode(
+                    "fixed", progress=self._eff_progress_delay
+                )
             else:  # "random"
-                self.progress_delay = curr.get_random_delay_progress(current_step)
-                self._delay_system.set_delay_mode("random", progress=self.progress_delay)
+                self.progress_delay = float(self._eff_progress_delay.mean().item())
+                self._delay_system.set_delay_mode(
+                    "random", progress=self._eff_progress_delay
+                )
 
             # Ramp noise (phase 2: 80k-100k)
-            self._curriculum_noise_scale = curr.get_noise_progress(current_step)
-            self._delay_system.set_noise_scale(self._curriculum_noise_scale)
+            self._curriculum_noise_scale = float(self._eff_progress_noise.mean().item())
+            self._delay_system.set_noise_scale(self._eff_progress_noise)
 
-            # Ramp FP/FN (co-located with noise by default)
+            # Ramp FP/FN (co-located with noise by default).
+            # FP/FN axis is consumed downstream by the replicator (out of
+            # ticket-034 scope); keep the scalar curriculum value here.
             self._curriculum_fp_fn_scale = curr.get_fp_fn_progress(current_step)
 
             # Ramp dropout (phase 5: 160k-180k)
-            dropout_progress = curr.get_dropout_progress(current_step)
-            self._delay_system.set_dropout_rate(
-                dropout_progress * self.cfg.delay_system_params.dropout_prob
+            dropout_rate_per_env_agent = (
+                self._eff_progress_dropout * self.cfg.delay_system_params.dropout_prob
             )
+            self._delay_system.set_dropout_rate(dropout_rate_per_env_agent)
 
             # Ramp burst dropout (phase 6: 200k-220k)
             if self.cfg.delay_system_params.burst_dropout_enabled:
-                burst_progress = curr.get_burst_dropout_progress(current_step)
+                p_onset_per_env_agent = (
+                    self._eff_progress_burst_dropout
+                    * self.cfg.delay_system_params.burst_p_onset
+                )
                 self._delay_system.set_burst_params(
-                    p_onset=burst_progress * self.cfg.delay_system_params.burst_p_onset,
+                    p_onset=p_onset_per_env_agent,
                     p_recovery=self.cfg.delay_system_params.burst_p_recovery,
                 )
 
         # mas/035: ramp gimbal rate-loop τ during the dynamics phase (180k-220k).
         # progress=0 → pass-through (instant gimbal); progress=1 → measured τ.
+        # Ticket 034 — Slice 2: pass per-(env, agent) effective progress
+        # flattened to the batched-controller layout
+        # (agent_a → rows [a*N, (a+1)*N); see _batch_idx). `.t().reshape(-1)`
+        # produces [agent_0_env_0, ..., agent_0_env_N-1, agent_1_env_0, ...].
         self._controller.gimbal_rate_loop.set_progress(
-            curr.get_dynamics_progress(current_step)
+            self._eff_progress_dynamics.t().reshape(-1)
         )
 
         # mas/036: ramp gimbal command-to-first-move dead-time scale.
         # 0 → no delay at the rate-loop input; 1 → full measured Gaussian
         # sampled per env at episode reset. Independent of τ ramp above.
+        # Ticket 034 — Slice 2: per-(env, agent) effective progress (same
+        # flatten as above).
         self._controller.gimbal_rate_loop.set_dead_time_curriculum_scale(
-            curr.get_gimbal_dead_time_progress(current_step)
+            self._eff_progress_gimbal_dead_time.t().reshape(-1)
         )
 
         # mas/037: ramp zoom command-to-first-move dead-time scale (siyi_a8
         # mode only — no-op when cfg.zoom.model == "first_order"). Mirrors
         # mas/036 hook above; per-env τ_d sample takes effect on next reset.
+        # Ticket 034 — Slice 3: pass per-(env, agent) effective progress.
         self._controller.zoom_controller.set_dead_time_curriculum_scale(
-            curr.get_zoom_dead_time_progress(current_step)
+            self._eff_progress_zoom_dead_time.t().reshape(-1)
         )
 
         # Get states for reward computation
@@ -2296,6 +2366,118 @@ class IrisMA6TestEnv(DirectMARLEnv):
         )
         self.progress_agent_velocity = curr.get_agent_velocity_progress(current_step)
 
+        # Ticket 034 — Slice 1: per-(env, agent) effective agent_velocity progress.
+        # Each (env, agent) draws eff_p ~ Uniform(0, progress_agent_velocity) so the
+        # env distribution always retains positive mass on the slow regime, even at
+        # progress_agent_velocity = 1.
+        self._eff_progress_agent_velocity[env_ids] = sample_per_env_progress(
+            global_progress=self.progress_agent_velocity,
+            num_envs=self.num_envs,
+            num_agents=len(self.cfg.possible_agents),
+            device=self.device,
+            env_ids=env_ids,
+            generator=self._curriculum_generator,
+        )
+
+        # Ticket 034 — Slice 2: gimbal rate-loop τ (progress_dynamics) and
+        # gimbal dead-time scale. Same anti-forgetting sampler — at full
+        # progress_dynamics the env distribution still contains near-zero
+        # gimbal-τ (pass-through) and near-zero dead-time envs.
+        self._eff_progress_dynamics[env_ids] = sample_per_env_progress(
+            global_progress=self.progress_dynamics,
+            num_envs=self.num_envs,
+            num_agents=len(self.cfg.possible_agents),
+            device=self.device,
+            env_ids=env_ids,
+            generator=self._curriculum_generator,
+        )
+        self._eff_progress_gimbal_dead_time[env_ids] = sample_per_env_progress(
+            global_progress=self.cfg.curriculum.get_gimbal_dead_time_progress(current_step),
+            num_envs=self.num_envs,
+            num_agents=len(self.cfg.possible_agents),
+            device=self.device,
+            env_ids=env_ids,
+            generator=self._curriculum_generator,
+        )
+
+        # Slice 3: zoom dead-time per-(env, agent) effective progress.
+        self._eff_progress_zoom_dead_time[env_ids] = sample_per_env_progress(
+            global_progress=self.cfg.curriculum.get_zoom_dead_time_progress(current_step),
+            num_envs=self.num_envs,
+            num_agents=len(self.cfg.possible_agents),
+            device=self.device,
+            env_ids=env_ids,
+            generator=self._curriculum_generator,
+        )
+
+        # Slice 4: observability axes (noise, dropout, delay mode, burst).
+        # Each draws eff_p ~ Uniform(0, axis_progress) per-(env, agent) so
+        # the env distribution always contains clean-obs envs alongside
+        # high-corruption envs.
+        self._eff_progress_noise[env_ids] = sample_per_env_progress(
+            global_progress=curr.get_noise_progress(current_step),
+            num_envs=self.num_envs,
+            num_agents=len(self.cfg.possible_agents),
+            device=self.device,
+            env_ids=env_ids,
+            generator=self._curriculum_generator,
+        )
+        self._eff_progress_dropout[env_ids] = sample_per_env_progress(
+            global_progress=curr.get_dropout_progress(current_step),
+            num_envs=self.num_envs,
+            num_agents=len(self.cfg.possible_agents),
+            device=self.device,
+            env_ids=env_ids,
+            generator=self._curriculum_generator,
+        )
+        # Delay-mode progress depends on which mode the curriculum is in;
+        # _get_rewards reads `curr.get_delay_mode(current_step)` and picks
+        # the corresponding progress getter. For the reset-time per-(env, agent)
+        # sample we use the same axis: fixed-delay progress drives the
+        # `fixed` phase, random-delay progress drives the `random` phase,
+        # and `none` produces zeros.
+        delay_mode = curr.get_delay_mode(current_step)
+        if delay_mode == "none":
+            global_progress_delay = 0.0
+        elif delay_mode == "fixed":
+            global_progress_delay = curr.get_fixed_delay_progress(current_step)
+        else:
+            global_progress_delay = curr.get_random_delay_progress(current_step)
+        self._eff_progress_delay[env_ids] = sample_per_env_progress(
+            global_progress=global_progress_delay,
+            num_envs=self.num_envs,
+            num_agents=len(self.cfg.possible_agents),
+            device=self.device,
+            env_ids=env_ids,
+            generator=self._curriculum_generator,
+        )
+        self._eff_progress_burst_dropout[env_ids] = sample_per_env_progress(
+            global_progress=curr.get_burst_dropout_progress(current_step),
+            num_envs=self.num_envs,
+            num_agents=len(self.cfg.possible_agents),
+            device=self.device,
+            env_ids=env_ids,
+            generator=self._curriculum_generator,
+        )
+
+        # Push the freshly-sampled per-(env, agent) scales to the batched
+        # controller BEFORE the per-agent reset loop below, otherwise
+        # `_controller.reset()` → `_sample_dead_time()` uses the stale scalar
+        # value (initial cfg value at first reset; previous step's value on
+        # subsequent resets) and writes 0 dead times. The same step-time
+        # hooks in _get_rewards will re-push these values every step, but
+        # the reset path needs them up front. Flatten (N, A) → (N*A,) into
+        # the batched-controller layout.
+        self._controller.gimbal_rate_loop.set_progress(
+            self._eff_progress_dynamics.t().reshape(-1)
+        )
+        self._controller.gimbal_rate_loop.set_dead_time_curriculum_scale(
+            self._eff_progress_gimbal_dead_time.t().reshape(-1)
+        )
+        self._controller.zoom_controller.set_dead_time_curriculum_scale(
+            self._eff_progress_zoom_dead_time.t().reshape(-1)
+        )
+
         if self._initial_states is not None:
             # Generate randomized initial states via InitialStates module
             result = self._initial_states.generate(
@@ -2441,9 +2623,14 @@ class IrisMA6TestEnv(DirectMARLEnv):
             self._delay_system.reset(env_ids)
             self._delay_system.randomize_per_agent_params(env_ids)
 
-        # Scale max_lin_vel with agent velocity curriculum (decoupled from target motion):
-        # 3 m/s at progress=0, full (10 m/s) at progress=1
-        self._max_lin_vel[env_ids] = self.cfg.max_lin_vel_min + self.progress_agent_velocity * (
+        # Scale max_lin_vel with agent velocity curriculum (decoupled from target motion).
+        # Ticket 034: replaces the deterministic `progress_agent_velocity * (...)` mapping
+        # with the per-(env, agent) effective progress from progress_helper. The axis is
+        # per-env (one max_lin_vel per env, shared across agents), so the agent-axis is
+        # collapsed via mean. At any progress, the distribution of _max_lin_vel over envs
+        # always retains slow-regime envs (down to max_lin_vel_min) — anti-forgetting.
+        eff_p_av = self._eff_progress_agent_velocity[env_ids].mean(dim=-1)  # (len(env_ids),)
+        self._max_lin_vel[env_ids] = self.cfg.max_lin_vel_min + eff_p_av * (
             self.cfg.max_lin_vel - self.cfg.max_lin_vel_min
         )
 
@@ -2455,14 +2642,20 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     batch_ids, self.progress_dynamics, self.cfg.gain_randomization,
                 )
 
-            # Randomize max linear velocity (same dynamics curriculum gate)
+            # Randomize max linear velocity (same dynamics curriculum gate).
+            # Ticket 034: composes multiplicatively with the curriculum value set
+            # above, instead of replacing it. Previously this branch overwrote the
+            # curriculum's `_max_lin_vel` with `cfg.max_lin_vel * Uniform(0.8, 1.2)`,
+            # which collapsed all envs into the fast band [8, 12] m/s. Multiplying
+            # on top preserves the per-env curriculum distribution while still
+            # adding the ±20 % gain-randomization spread.
             gain_cfg = self.cfg.gain_randomization
             if gain_cfg.randomize_max_lin_vel:
                 low = 1.0 - self.progress_dynamics * (1.0 - gain_cfg.max_lin_vel_scale_range[0])
                 high = 1.0 + self.progress_dynamics * (gain_cfg.max_lin_vel_scale_range[1] - 1.0)
                 M = len(env_ids)
                 scale = torch.empty(M, device=self.device).uniform_(low, high)
-                self._max_lin_vel[env_ids] = self.cfg.max_lin_vel * scale
+                self._max_lin_vel[env_ids] = self._max_lin_vel[env_ids] * scale
 
         # ---- Domain Randomization (curriculum-gated to dynamics phase) ----
         if self._domain_randomizer is not None:

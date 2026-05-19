@@ -1,0 +1,16 @@
+{
+  "step": 399000,
+  "num_envs": 256,
+  "zoom_model_is_siyi_a8": true,
+  "dead_time_seconds_min": 3.614726665546186e-05,
+  "dead_time_seconds_max": 0.13413254916667938,
+  "dead_time_seconds_mean": 0.04828339442610741,
+  "dead_time_seconds_below_001": 8,
+  "dead_time_seconds_above_005": 226,
+  "dead_time_curr_scale_per_env_min": 0.0004549989243969321,
+  "dead_time_curr_scale_per_env_max": 0.9992140531539917,
+  "dead_time_curr_scale_per_env_mean": 0.4761647582054138,
+  "eff_progress_zoom_dead_time_min": 0.0004549989243969321,
+  "eff_progress_zoom_dead_time_max": 0.9992140531539917,
+  "eff_progress_zoom_dead_time_mean": 0.47616472840309143
+}

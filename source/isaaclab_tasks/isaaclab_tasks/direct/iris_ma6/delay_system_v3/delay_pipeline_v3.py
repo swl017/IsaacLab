@@ -215,27 +215,42 @@ class DelayPipelineV3:
         """Current dropout rates for each environment."""
         return self._dropout_sampler.rates
 
-    def set_mode(self, mode: Literal["none", "fixed", "random"], progress: float = 1.0):
+    def set_mode(
+        self,
+        mode: Literal["none", "fixed", "random"],
+        progress: "float | torch.Tensor" = 1.0,
+    ):
         """Set delay mode for curriculum learning.
+
+        Ticket 034: ``progress`` may be a scalar (uniform across envs) or
+        a ``Tensor[num_envs]`` of per-env progress values. The scalar
+        ``self._progress`` attribute is kept in sync (mean for logging).
 
         Args:
             mode: Delay mode:
                 - 'none': No delay applied (pass-through)
                 - 'fixed': Fixed deterministic delay
                 - 'random': Random delay with staleness
-            progress: Curriculum progress [0, 1].
+            progress: Curriculum progress in ``[0, 1]`` — scalar or
+                ``Tensor[num_envs]``.
         """
         if mode not in ("none", "fixed", "random"):
             raise ValueError(f"Unknown delay mode: {mode}")
 
         self._mode = mode
-        self._progress = max(0.0, min(1.0, progress))
+        if isinstance(progress, torch.Tensor):
+            progress_t = progress.to(self._device).clamp(min=0.0, max=1.0)
+            self._progress = float(progress_t.mean().item())
+            progress_eff = progress_t
+        else:
+            self._progress = max(0.0, min(1.0, float(progress)))
+            progress_eff = self._progress
 
         # Update sampler scales based on mode and progress
         if mode == "none":
             self._latency_sampler.set_scale(0.0)
         else:
-            self._latency_sampler.set_scale(self._progress)
+            self._latency_sampler.set_scale(progress_eff)
 
         # Staleness only in random mode
         # (In fixed mode, we still apply latency but no staleness)
@@ -243,11 +258,12 @@ class DelayPipelineV3:
         # Resample with new settings
         self._latency_sampler.initialize()
 
-    def set_dropout_rate(self, rate: float):
+    def set_dropout_rate(self, rate: "float | torch.Tensor"):
         """Set dropout probability for curriculum control.
 
         Args:
-            rate: Dropout probability [0, 1].
+            rate: Dropout probability in ``[0, 1]`` — scalar or
+                ``Tensor[num_envs]`` (ticket 034).
         """
         self._dropout_sampler.set_rate(rate)
 

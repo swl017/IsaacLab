@@ -79,34 +79,57 @@ class DistributionSampler:
         return values
 
     def sample_scaled(
-        self, scale: float, env_ids: torch.Tensor | None = None
+        self, scale: "float | torch.Tensor", env_ids: torch.Tensor | None = None
     ) -> torch.Tensor:
         """Sample values scaled by a curriculum progress factor.
 
+        Ticket 034: ``scale`` may be a scalar (uniform across envs) or a
+        ``Tensor[n]`` of per-env scales. When tensor, the result is per-env
+        with each env's mean/range scaled independently.
+
         Args:
-            scale: Scale factor [0, 1] to multiply mean/value by.
-            env_ids: Optional environment indices.
+            scale: Scale factor in ``[0, 1]`` — scalar or ``Tensor[n]``.
+            env_ids: Optional environment indices (only ``len(env_ids)``
+                consulted for output size).
 
         Returns:
-            Scaled sampled values.
+            Scaled sampled values, shape ``(n,)``.
         """
         if env_ids is None:
             n = self._num_envs
         else:
             n = len(env_ids)
 
+        if isinstance(scale, torch.Tensor):
+            if scale.shape != (n,):
+                raise ValueError(
+                    f"sample_scaled per-env scale must be Tensor[{n}], "
+                    f"got Tensor{tuple(scale.shape)}"
+                )
+            scale_t = scale.to(self._device)
+        else:
+            scale_t = float(scale)
+
         if self._cfg.type == "constant":
-            values = torch.full((n,), self._cfg.value * scale, device=self._device)
+            values = self._cfg.value * scale_t
+            if isinstance(values, torch.Tensor):
+                # Already (n,); ensure dtype/device.
+                values = values.to(device=self._device, dtype=torch.float32)
+            else:
+                values = torch.full((n,), values, device=self._device)
         elif self._cfg.type == "normal":
-            values = torch.normal(
-                mean=self._cfg.mean * scale,
-                std=self._cfg.std * scale,
-                size=(n,),
-                device=self._device,
-            )
+            mean_t = self._cfg.mean * scale_t
+            std_t = self._cfg.std * scale_t
+            if isinstance(scale_t, torch.Tensor):
+                # Per-env mean/std into `torch.normal(mean, std)` which infers shape.
+                values = torch.normal(mean=mean_t, std=std_t)
+            else:
+                values = torch.normal(
+                    mean=mean_t, std=std_t, size=(n,), device=self._device
+                )
         elif self._cfg.type == "uniform":
-            scaled_mean = self._cfg.mean * scale
-            scaled_range = self._cfg.half_range * scale
+            scaled_mean = self._cfg.mean * scale_t
+            scaled_range = self._cfg.half_range * scale_t
             low = scaled_mean - scaled_range
             high = scaled_mean + scaled_range
             values = torch.rand(n, device=self._device) * (high - low) + low
@@ -170,13 +193,27 @@ class ParameterSampler:
         """Sampling frequency."""
         return self._frequency
 
-    def set_scale(self, scale: float):
+    def set_scale(self, scale: "float | torch.Tensor"):
         """Set curriculum scale factor.
 
+        Ticket 034: accepts a scalar (uniform across envs) or a
+        ``Tensor[num_envs]`` of per-env scales. The scalar form is
+        clamped to ``[0, 1]``; the tensor form is also clamped and is
+        used as-is by ``initialize`` / ``maybe_resample`` when those
+        regenerate ``_values``.
+
         Args:
-            scale: Scale factor [0, 1] for curriculum learning.
+            scale: Scale factor — scalar or ``Tensor[num_envs]``.
         """
-        self._scale = max(0.0, min(1.0, scale))
+        if isinstance(scale, torch.Tensor):
+            if scale.shape != (self._num_envs,):
+                raise ValueError(
+                    f"set_scale per-env tensor must be Tensor[{self._num_envs}], "
+                    f"got Tensor{tuple(scale.shape)}"
+                )
+            self._scale = scale.to(self._device).clamp_(min=0.0, max=1.0).clone()
+        else:
+            self._scale = max(0.0, min(1.0, float(scale)))
 
     def initialize(self):
         """Initialize values for all environments."""
@@ -208,8 +245,14 @@ class ParameterSampler:
         elif self._frequency == "per_env_reset":
             # Resample only the reset environments
             if reset_env_ids is not None and len(reset_env_ids) > 0:
+                # Ticket 034: when _scale is a per-env tensor, slice it to
+                # match the reset subset before passing to sample_scaled.
+                if isinstance(self._scale, torch.Tensor):
+                    scale_subset = self._scale[reset_env_ids]
+                else:
+                    scale_subset = self._scale
                 new_values = self._distribution.sample_scaled(
-                    self._scale, env_ids=reset_env_ids
+                    scale_subset, env_ids=reset_env_ids
                 )
                 self._values[reset_env_ids] = new_values
 
@@ -387,15 +430,31 @@ class DropoutSampler:
         """Current dropout mask (True = dropped)."""
         return self._mask
 
-    def set_rate(self, rate: float):
+    def set_rate(self, rate: "float | torch.Tensor"):
         """Set dropout rate for curriculum control.
 
+        Ticket 034: accepts scalar (uniform) or ``Tensor[num_envs]`` (per-env).
+        When the dropout sampler has no inner rate-sampler (the common case),
+        per-env rates are written directly into ``self._rates``. The scalar
+        ``_base_probability`` is kept in sync (mean for logging).
+
         Args:
-            rate: Dropout probability [0, 1].
+            rate: Dropout probability — scalar or ``Tensor[num_envs]``.
         """
-        self._base_probability = max(0.0, min(1.0, rate))
-        if self._rate_sampler is None:
-            self._rates.fill_(self._base_probability)
+        if isinstance(rate, torch.Tensor):
+            if rate.shape != (self._num_envs,):
+                raise ValueError(
+                    f"set_rate per-env tensor must be Tensor[{self._num_envs}], "
+                    f"got Tensor{tuple(rate.shape)}"
+                )
+            r = rate.to(self._device).clamp(min=0.0, max=1.0)
+            self._base_probability = float(r.mean().item())
+            if self._rate_sampler is None:
+                self._rates.copy_(r)
+        else:
+            self._base_probability = max(0.0, min(1.0, float(rate)))
+            if self._rate_sampler is None:
+                self._rates.fill_(self._base_probability)
 
     def initialize(self):
         """Initialize dropout sampler."""

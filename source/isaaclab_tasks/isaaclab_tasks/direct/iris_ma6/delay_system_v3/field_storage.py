@@ -110,8 +110,20 @@ class FieldStorage:
         # Store noisy version only when caller provides noise (explicit payload
         # or positive std). Clean-only fields leave _noisy unpopulated so the
         # pipeline can skip the noisy cache path entirely.
+        # Ticket 034: noise_std may be a scalar (legacy) or a Tensor[N]
+        # (per-env, from MultiAgentDelaySystemWrapper). Tensor std is
+        # broadcast over data's trailing dims at noise application.
         if noisy_data is not None:
             self._noisy[field_name] = noisy_data.to(self._device).clone()
+        elif isinstance(noise_std, torch.Tensor):
+            if (noise_std > 0).any():
+                # Reshape (N,) to (N, 1, 1, ...) for broadcast.
+                broadcast_shape = (data.shape[0],) + (1,) * (data.dim() - 1)
+                std_b = noise_std.to(self._device).view(broadcast_shape)
+                noise = torch.randn_like(data) * std_b
+                self._noisy[field_name] = data + noise
+            else:
+                self._noisy.pop(field_name, None)
         elif noise_std > 0:
             noise = torch.randn_like(data) * noise_std
             self._noisy[field_name] = data + noise

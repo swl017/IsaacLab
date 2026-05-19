@@ -589,6 +589,18 @@ class DelaySystemKeyParams:
     reward_use_noise: bool = False
     """If True, reward computation uses noisy states."""
 
+    # === Latency floor (ticket 034) ===
+    min_latency_steps: int = 2
+    """Minimum delay floor in policy-rate steps applied to every LatencyCfg.
+
+    The underlying CircularBuffer needs at least 2 steps to return meaningful
+    delayed data; setting this lower triggers a latency cliff at curriculum
+    start. Surfaced here so per-(env, agent) curriculum jitter samples that
+    drive latency toward zero are always clamped to a physically realizable
+    floor (80 ms at 25 Hz policy rate). Propagated to every per-perspective
+    ``LatencyCfg.min_steps`` by :func:`create_delay_cfg_from_params`.
+    """
+
 
 def create_delay_cfg_from_params(params: DelaySystemKeyParams) -> MultiAgentDelayCfgV3:
     """Create delay system configuration from key parameters.
@@ -617,6 +629,7 @@ def create_delay_cfg_from_params(params: DelaySystemKeyParams) -> MultiAgentDela
                 std=params.ego_motion_latency_std,
                 min_value=0.0,
             ),
+            min_steps=params.min_latency_steps,
         ),
         staleness=StalenessCfg(enabled=False),  # No staleness for motion
         dropout=DropoutCfg(enabled=False),  # No dropout for motion
@@ -643,6 +656,7 @@ def create_delay_cfg_from_params(params: DelaySystemKeyParams) -> MultiAgentDela
                 std=params.ego_detection_latency_std,
                 min_value=0.0,
             ),
+            min_steps=params.min_latency_steps,
         ),
         staleness=StalenessCfg(enabled=True, fps_distribution=fps_dist),
         dropout=DropoutCfg(enabled=True, probability=params.dropout_prob),
@@ -659,6 +673,7 @@ def create_delay_cfg_from_params(params: DelaySystemKeyParams) -> MultiAgentDela
                 std=params.other_latency_std,
                 min_value=0.0,
             ),
+            min_steps=params.min_latency_steps,
         ),
         staleness=StalenessCfg(enabled=True, fps_distribution=fps_dist),
         dropout=DropoutCfg(enabled=True, probability=params.dropout_prob),

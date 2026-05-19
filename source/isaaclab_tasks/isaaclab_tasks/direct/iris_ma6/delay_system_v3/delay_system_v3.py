@@ -302,38 +302,54 @@ class UnifiedDelaySystem:
             yield p
 
     def set_delay_mode(
-        self, mode: Literal["none", "fixed", "random"], progress: float = 1.0
+        self,
+        mode: Literal["none", "fixed", "random"],
+        progress: "float | torch.Tensor" = 1.0,
     ):
         """Set delay mode for curriculum learning.
 
+        Ticket 034: ``progress`` may be a scalar or ``Tensor[num_envs]``;
+        forwarded as-is to every pipeline.
+
         Args:
             mode: Delay mode ('none', 'fixed', 'random').
-            progress: Curriculum progress [0, 1].
+            progress: Curriculum progress in ``[0, 1]`` — scalar or
+                ``Tensor[num_envs]``.
         """
         self._mode = mode
-        self._progress = max(0.0, min(1.0, progress))
+        if isinstance(progress, torch.Tensor):
+            self._progress = float(progress.clamp(min=0.0, max=1.0).mean().item())
+        else:
+            self._progress = max(0.0, min(1.0, float(progress)))
 
         for pipeline in self._all_pipelines():
             pipeline.set_mode(mode, progress)
 
-    def set_dropout_rate(self, rate: float):
+    def set_dropout_rate(self, rate: "float | torch.Tensor"):
         """Set dropout rate for curriculum control.
 
         Args:
-            rate: Dropout probability [0, 1].
+            rate: Dropout probability in ``[0, 1]`` — scalar or
+                ``Tensor[num_envs]`` (ticket 034).
         """
         for pipeline in self._all_pipelines():
             pipeline.set_dropout_rate(rate)
 
-    def set_dropout_rate_by_perspective(self, ego_rate: float, other_rate: float):
+    def set_dropout_rate_by_perspective(
+        self,
+        ego_rate: "float | torch.Tensor",
+        other_rate: "float | torch.Tensor",
+    ):
         """Set dropout rates separately for ego and other perspectives.
 
         Used when burst dropout replaces i.i.d. dropout on "other" channels
         but ego channels should keep independent dropout.
 
         Args:
-            ego_rate: Dropout probability for ego pipelines [0, 1].
-            other_rate: Dropout probability for other pipelines [0, 1].
+            ego_rate: Dropout probability for ego pipelines — scalar or
+                ``Tensor[num_envs]``.
+            other_rate: Dropout probability for other pipelines — scalar
+                or ``Tensor[num_envs]``.
         """
         for pipeline in self._ego_pipelines.values():
             pipeline.set_dropout_rate(ego_rate)
@@ -344,28 +360,33 @@ class UnifiedDelaySystem:
         self,
         field_prefix: str,
         mode: Literal["none", "fixed", "random"],
-        progress: float = 1.0,
+        progress: "float | torch.Tensor" = 1.0,
     ):
         """Set delay mode for pipelines whose key starts with field_prefix.
 
         Args:
             field_prefix: Prefix to match (e.g., 'drone_0' for all drone_0 fields).
             mode: Delay mode ('none', 'fixed', 'random').
-            progress: Curriculum progress [0, 1].
+            progress: Curriculum progress in ``[0, 1]`` — scalar or
+                ``Tensor[num_envs]`` (ticket 034).
         """
-        progress = max(0.0, min(1.0, progress))
+        if not isinstance(progress, torch.Tensor):
+            progress = max(0.0, min(1.0, float(progress)))
         dot_prefix = field_prefix + "."
         for pipe_dict in (self._ego_pipelines, self._other_pipelines):
             for key, pipeline in pipe_dict.items():
                 if key.startswith(dot_prefix):
                     pipeline.set_mode(mode, progress)
 
-    def set_field_dropout_rate(self, field_prefix: str, rate: float):
+    def set_field_dropout_rate(
+        self, field_prefix: str, rate: "float | torch.Tensor"
+    ):
         """Set dropout rate for pipelines whose key starts with field_prefix.
 
         Args:
             field_prefix: Prefix to match (e.g., 'drone_0').
-            rate: Dropout probability [0, 1].
+            rate: Dropout probability in ``[0, 1]`` — scalar or
+                ``Tensor[num_envs]`` (ticket 034).
         """
         dot_prefix = field_prefix + "."
         for pipe_dict in (self._ego_pipelines, self._other_pipelines):

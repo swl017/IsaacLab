@@ -1,7 +1,7 @@
 {
   "project": "iris_ma6",
-  "last_updated": "2026-05-09",
-  "last_session_ticket": "033-mappo-shared-optimizer-ownership",
+  "last_updated": "2026-05-15",
+  "last_session_ticket": "033-mappo-shared-optimizer-ownership (validated and closed)",
   "features": [
     {
       "id": "controller",
@@ -76,9 +76,9 @@
     {
       "id": "curriculum",
       "name": "Curriculum learning system",
-      "status": "in_progress",
+      "status": "done",
       "spec": "doc/curriculum_spec.md",
-      "notes": "Redesigned: decoupled agent velocity ramp (0-40k, 3→10m/s) from target motion (40k-120k). Observability phases pushed after target mastery (noise 120k, delay 140k+). Added FP/FN phase (fp_fn_start/end_step, default co-located with noise 100k-120k). Anti-forgetting: tau_zoom/max_lin_vel wide-range randomization. Backlog: per-agent noise/dropout/max_lin_vel (2026-04-08)"
+      "notes": "Redesigned: decoupled agent velocity ramp (0-40k, 3→10m/s) from target motion (40k-120k). Observability phases pushed after target mastery (noise 120k, delay 140k+). Anti-forgetting: tau_zoom/max_lin_vel wide-range randomization. Ticket 034 VALIDATED+CLOSED (2026-05-19): per-(env, agent) effective-progress sampler `curriculum/progress_helper.py` drives anti-forgetting Uniform(0, global_p) sampling on max_lin_vel, gimbal-τ, gimbal+zoom dead-time, noise scale, dropout rate, delay mode, burst dropout. min_latency_steps=2 floor enforced via LatencyCfg.min_steps (now surfaced on DelaySystemKeyParams). _max_lin_vel curriculum + randomization compose multiplicatively (was: replace). 400k validation run 034_2026-05-18_11-45-45_ticket034_per_env_jitter completes cleanly with controllers healthy (KL in [0.022, 0.028], LR mostly at max, one transient dip to 0.001 at step 120k that recovers by 160k, std stable 0.28). Mean reward parity with fix2 (last-10 avg 2642 vs 2714, -2.7%); task-quality metrics improved (bbox_center +17.5%, collisions -53%, cbf_penalty -29%, pair_valid +2.7pp, track_lost -20%); action-smoothness penalties +35-40% (acceptable cost for wider env variance). Regression eval visibility ratios at 39k/99k/199k/399k env settings: 0.898/0.827/1.034/1.000 (all PASS ≥0.80 bar; pre-fix was 0.616/0.577/0.988/1.000). agent_400000.pt is the new iris_ma6 baseline. Use this checkpoint going forward. Backlog: FP/FN curriculum (Q6, separate ticket), delay-system runtime efficiency (Q13, separate), critic-only privileged obs (Q10, optional)."
     },
     {
       "id": "env-integration",
@@ -92,7 +92,7 @@
       "name": "Experiment registry, training runners, and evaluation pipeline",
       "status": "done",
       "spec": "doc/experiments_spec.md",
-      "notes": "42 experiments (A1/A3/A4/A5/A6/A7/baselines/sweeps), 4 suites, metric tracker with CBF metrics, greedy baseline with gimbal tracking. Ported from iris_ma5, dropped MLP path. Ticket-030: ExperimentCfg now carries a `task` field; run/eval resolve task precedence as CLI `--task` > experiment task > default baseline task. Added `validation_obs_v1_short` for short heading-frame A/B validation. (2026-04-15). Ticket-033 (2026-05-09): MAPPO-RNN trainer fix — optimizer/scheduler ownership keyed by parameter-tensor identity (`mappo_rnn_groups.py` + `mappo_rnn.py` _update refactor). Homogeneous shared models (current iris_ma6) collapse to one Adam + one KLAdaptiveLR with aggregated losses; heterogeneous setups fall through to per-uid layout unchanged. Effective LR is now ~halved per shared group (one step per minibatch instead of two sequential per-uid steps); existing learning_rate values may need ~2x bump or longer training to match early-phase progress of pre-fix runs. 20 tests in scripts/reinforcement_learning/skrl/tests/ (groups/init/update). Pending real-run validation."
+      "notes": "42 experiments (A1/A3/A4/A5/A6/A7/baselines/sweeps), 4 suites, metric tracker with CBF metrics, greedy baseline with gimbal tracking. Ported from iris_ma5, dropped MLP path. Ticket-030: ExperimentCfg now carries a `task` field; run/eval resolve task precedence as CLI `--task` > experiment task > default baseline task. Added `validation_obs_v1_short` for short heading-frame A/B validation. (2026-04-15). Ticket-033 (2026-05-09→2026-05-15, VALIDATED+CLOSED): MAPPO-RNN trainer fix — optimizer/scheduler ownership keyed by parameter-tensor identity (`mappo_rnn_groups.py` + `mappo_rnn.py` _update refactor with MEAN aggregation). Homogeneous shared models (current iris_ma6) collapse to one Adam + one KLAdaptiveLR; heterogeneous setups fall through to per-uid layout unchanged. Final solution required four pieces: (1) ownership grouping, (2) MEAN aggregation, (3) cfg-side band alignment (`agent.kl_threshold=0.04`, `scheduler.kl_threshold=0.02`, `kl_factor=2.0`, `lr_factor=1.25`, `min_lr=3e-4`, `max_lr=1.5e-3`), (4) `learning_epochs: 6 → 3` (the missing piece — pre-fix's 6 was tolerable only because of the bug's implicit damping). 2026-05-15 fix2 run validates: peak 5406 (pre-fix 4081, +32%), last-10-avg 2714 (pre-fix 1963, +38%), strictly better at every checkpoint, controllers in healthy regime throughout 400k (LR at max_lr=1.5e-3 all run, KL parks in [0.012, 0.028]), per-component wins: triangulation +40%, collision penalty 5.6x lower. Use fix2's agent_drone_X_final.pt as new baseline. 20 tests pass in scripts/reinforcement_learning/skrl/tests/."
     },
     {
       "id": "controller-tuning",

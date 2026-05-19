@@ -115,6 +115,14 @@ class ZoomController:
         self._dead_time_curr_scale: float = float(
             max(0.0, min(1.0, cfg.dead_time_curriculum_scale))
         )
+        # Ticket 034: per-env tensor mirrors the scalar above; consumed by
+        # _sample_dead_time so each env's mean / std scales independently.
+        self._dead_time_curr_scale_per_env = torch.full(
+            (num_envs,),
+            self._dead_time_curr_scale,
+            dtype=torch.float32,
+            device=self.device,
+        )
         self._dead_time_seconds = torch.zeros(
             num_envs, dtype=torch.float32, device=self.device
         )
@@ -336,7 +344,7 @@ class ZoomController:
             self._zoom[env_ids] = zoom_clamped
             self._zoom_target[env_ids] = zoom_clamped
 
-    def set_dead_time_curriculum_scale(self, scale: float) -> None:
+    def set_dead_time_curriculum_scale(self, scale: float | torch.Tensor) -> None:
         """Curriculum hook: scale the per-env dead-time samples by
         ``scale ∈ [0, 1]``.
 
@@ -346,39 +354,55 @@ class ZoomController:
         constant within an episode by design — the dead time is a structural
         firmware/motor property, not a per-step variable).
 
+        Accepts a scalar (uniform) or a ``Tensor[N]`` (per-env, ticket 034).
+        The scalar ``self._dead_time_curr_scale`` is kept in sync (mean of
+        tensor) for logging back-compat.
+
         No-op when ``cfg.model != "siyi_a8"``.
         """
         if self.cfg.model != "siyi_a8":
             return
-        self._dead_time_curr_scale = float(max(0.0, min(1.0, scale)))
+        if isinstance(scale, torch.Tensor):
+            if scale.shape != (self.num_envs,):
+                raise ValueError(
+                    f"set_dead_time_curriculum_scale expected scalar or "
+                    f"Tensor[{self.num_envs}], got Tensor{tuple(scale.shape)}"
+                )
+            self._dead_time_curr_scale_per_env.copy_(
+                scale.to(self.device).clamp_(min=0.0, max=1.0)
+            )
+            self._dead_time_curr_scale = float(self._dead_time_curr_scale_per_env.mean().item())
+        else:
+            self._dead_time_curr_scale = float(max(0.0, min(1.0, scale)))
+            self._dead_time_curr_scale_per_env.fill_(self._dead_time_curr_scale)
 
     # ------------------------------------------------------------------ internals (siyi_a8 only)
 
     def _sample_dead_time(self, env_ids: torch.Tensor | None) -> None:
         """Draw new per-env dead-time samples from
-        ``N(mean, std) * curriculum_scale``, clipped to [0, dead_time_max_s].
-        """
-        scale = self._dead_time_curr_scale
-        mean_s = self.cfg.dead_time_mean_s * scale
-        std_s = self.cfg.dead_time_std_s * scale
-        max_s = self.cfg.dead_time_max_s
+        ``N(mean * scale[env], std * scale[env])``, clipped to
+        ``[0, dead_time_max_s]``.
 
+        Ticket 034: per-env scale via ``_dead_time_curr_scale_per_env``.
+        Envs with ``scale[env]=0`` deterministically produce 0 (randn * 0 + 0).
+        """
+        max_s = self.cfg.dead_time_max_s
         if env_ids is None:
             n = self.num_envs
-            if scale <= 0.0:
-                self._dead_time_seconds.zero_()
-            else:
-                samples = torch.randn(n, device=self.device) * std_s + mean_s
-                samples.clamp_(min=0.0, max=max_s)
-                self._dead_time_seconds.copy_(samples)
+            scale_per = self._dead_time_curr_scale_per_env
+            mean_per = self.cfg.dead_time_mean_s * scale_per
+            std_per = self.cfg.dead_time_std_s * scale_per
+            samples = torch.randn(n, device=self.device) * std_per + mean_per
+            samples.clamp_(min=0.0, max=max_s)
+            self._dead_time_seconds.copy_(samples)
         else:
             n = int(env_ids.numel()) if isinstance(env_ids, torch.Tensor) else len(env_ids)
-            if scale <= 0.0:
-                self._dead_time_seconds[env_ids] = 0.0
-            else:
-                samples = torch.randn(n, device=self.device) * std_s + mean_s
-                samples.clamp_(min=0.0, max=max_s)
-                self._dead_time_seconds[env_ids] = samples
+            scale_per = self._dead_time_curr_scale_per_env[env_ids]
+            mean_per = self.cfg.dead_time_mean_s * scale_per
+            std_per = self.cfg.dead_time_std_s * scale_per
+            samples = torch.randn(n, device=self.device) * std_per + mean_per
+            samples.clamp_(min=0.0, max=max_s)
+            self._dead_time_seconds[env_ids] = samples
 
         if self._dead_time_dt is not None:
             self._refresh_dead_time_steps(env_ids)

@@ -133,7 +133,15 @@ class MultiAgentDelaySystemV3:
 
         # Noise configuration
         self._noise_cfg = cfg.noise
-        self._noise_scale = 0.0  # Start with no noise; curriculum ramps via set_noise_scale()
+        # Ticket 034: per-(env, agent) curriculum scale tensor. Filled by
+        # `set_noise_scale` from a scalar or a Tensor[N, A]. Initially 0
+        # (no noise) — curriculum hook ramps it up.
+        self._num_agents_cached: int = len(possible_agents)
+        self._noise_scale_per_env_agent = torch.zeros(
+            num_envs, self._num_agents_cached, device=device, dtype=torch.float32
+        )
+        # Scalar mirror for logging back-compat.
+        self._noise_scale: float = 0.0
 
         # Current time
         self._t_current = torch.zeros(num_envs, device=device)
@@ -141,8 +149,15 @@ class MultiAgentDelaySystemV3:
         # Curriculum state
         self._mode: Literal["none", "fixed", "random"] = "none"
         self._progress: float = 1.0
+        # Ticket 034: per-(env, agent) latency-progress tensor mirror.
+        self._progress_per_env_agent = torch.ones(
+            num_envs, self._num_agents_cached, device=device, dtype=torch.float32
+        )
 
-        # Per-agent heterogeneity scales (sampled at episode reset)
+        # Per-agent heterogeneity scales (sampled at episode reset).
+        # Kept as Python dicts: with Option B, the wrapper's per-env tensors
+        # carry the env-level diversity, and these per-agent multipliers
+        # layer existing intra-env diversity on top.
         self._per_agent_latency_scale: Dict[AgentID, float] = {
             a: 1.0 for a in possible_agents
         }
@@ -152,8 +167,12 @@ class MultiAgentDelaySystemV3:
         self._per_agent_dropout_offset: Dict[AgentID, float] = {
             a: 0.0 for a in possible_agents
         }
-        # Base dropout rate from curriculum (before per-agent offsets)
+        # Base dropout rate from curriculum (before per-agent offsets).
+        # Ticket 034: per-(env, agent) dropout-rate tensor mirror.
         self._base_dropout_rate: float = 0.0
+        self._base_dropout_rate_per_env_agent = torch.zeros(
+            num_envs, self._num_agents_cached, device=device, dtype=torch.float32
+        )
 
         # Burst dropout sampler (Gilbert-Elliott model)
         self._burst_sampler: Optional[BurstDropoutSampler] = None
@@ -412,15 +431,22 @@ class MultiAgentDelaySystemV3:
 
     def _get_noise_std(
         self, noise_type: str, agent_id: Optional[AgentID] = None
-    ) -> float:
+    ) -> "float | torch.Tensor":
         """Get noise standard deviation for a field type.
 
+        Ticket 034: returns a ``Tensor[num_envs]`` per-env std when noise is
+        enabled, derived from the per-(env, agent) scale tensor sliced for
+        ``agent_id``. Returns scalar ``0.0`` when noise is disabled (legacy
+        contract). Downstream :meth:`FieldStorage.store` accepts both.
+
         Args:
-            noise_type: Type of noise ("position", "velocity", "orientation", "angular_velocity", "acceleration", "bbox").
-            agent_id: Optional agent ID for per-agent noise scaling.
+            noise_type: Type of noise ("position", "velocity", "orientation",
+                "angular_velocity", "acceleration", "bbox").
+            agent_id: Optional agent ID for per-(env, agent) scaling.
 
         Returns:
-            Noise standard deviation scaled by curriculum and per-agent factor.
+            Noise standard deviation — scalar 0.0 when disabled, otherwise
+            ``Tensor[num_envs]`` scaled by curriculum and per-agent factor.
         """
         if not self._noise_cfg.enabled:
             return 0.0
@@ -440,11 +466,22 @@ class MultiAgentDelaySystemV3:
         else:
             base_std = 0.0
 
+        if base_std == 0.0:
+            return 0.0
+
         per_agent_scale = 1.0
         if agent_id is not None and self._cfg.per_agent_randomization:
             per_agent_scale = self._per_agent_noise_scale.get(agent_id, 1.0)
 
-        return base_std * self._noise_scale * per_agent_scale
+        # Per-env scale for this agent
+        if agent_id is not None and agent_id in self._possible_agents:
+            agent_idx = self._possible_agents.index(agent_id)
+            per_env_scale = self._noise_scale_per_env_agent[:, agent_idx]
+        else:
+            # Fallback to the mean across agents (no agent context)
+            per_env_scale = self._noise_scale_per_env_agent.mean(dim=-1)
+
+        return base_std * per_env_scale * per_agent_scale
 
     def get_all_states_for_rewards(
         self, ego_agent_id: AgentID
@@ -916,32 +953,57 @@ class MultiAgentDelaySystemV3:
         )
 
     def set_delay_mode(
-        self, mode: Literal["none", "fixed", "random"], progress: float = 1.0
+        self,
+        mode: Literal["none", "fixed", "random"],
+        progress: "float | torch.Tensor" = 1.0,
     ):
         """Set delay mode for curriculum learning with per-agent scaling.
 
         When per_agent_randomization is enabled, each agent's latency progress
         is scaled by its independently sampled latency_scale factor.
 
+        Ticket 034: ``progress`` may be a scalar (uniform across envs) or
+        ``Tensor[N, A]`` of per-(env, agent) progress values. Per-agent
+        column dispatched to the field pipeline so each agent gets its own
+        per-env scale.
+
         Args:
             mode: Delay mode ('none', 'fixed', 'random').
-            progress: Curriculum progress [0, 1].
+            progress: Curriculum progress in ``[0, 1]`` — scalar or
+                ``Tensor[N, A]``.
         """
         self._mode = mode
-        self._progress = max(0.0, min(1.0, progress))
+        if isinstance(progress, torch.Tensor):
+            expected = (self.num_envs, self._num_agents_cached)
+            if progress.shape != expected:
+                raise ValueError(
+                    f"set_delay_mode per-(env, agent) tensor must be Tensor{expected}, "
+                    f"got Tensor{tuple(progress.shape)}"
+                )
+            progress_t = progress.to(self._progress_per_env_agent.device).clamp(min=0.0, max=1.0)
+            self._progress_per_env_agent.copy_(progress_t)
+            self._progress = float(progress_t.mean().item())
+        else:
+            self._progress = max(0.0, min(1.0, float(progress)))
+            self._progress_per_env_agent.fill_(self._progress)
 
-        if self._cfg.per_agent_randomization:
-            # Apply per-agent latency scaling
-            for agent_id in self._possible_agents:
-                scale = self._per_agent_latency_scale[agent_id]
-                effective_progress = min(progress * scale, 1.0)
+        # Dispatch per-agent: each agent's column is the per-env scale for
+        # its pipeline. per_agent_randomization still layers a scalar
+        # multiplier on top for intra-env diversity.
+        for agent_idx, agent_id in enumerate(self._possible_agents):
+            per_env_progress = self._progress_per_env_agent[:, agent_idx]
+            if self._cfg.per_agent_randomization:
+                scalar_scale = float(self._per_agent_latency_scale[agent_id])
+                effective_progress = (per_env_progress * scalar_scale).clamp(max=1.0)
                 self._delay_system.set_field_delay_mode(
                     str(agent_id), mode, effective_progress
                 )
-        else:
-            self._delay_system.set_delay_mode(mode, progress)
+            else:
+                self._delay_system.set_field_delay_mode(
+                    str(agent_id), mode, per_env_progress
+                )
 
-    def set_dropout_rate(self, rate: float):
+    def set_dropout_rate(self, rate: "float | torch.Tensor"):
         """Set dropout rate for curriculum control with per-agent offsets.
 
         When burst dropout is active, i.i.d. dropout is disabled only on
@@ -949,45 +1011,110 @@ class MultiAgentDelaySystemV3:
         perspective pipelines keep i.i.d. dropout so ego detection still
         experiences independent packet loss.
 
+        Ticket 034: ``rate`` may be a scalar or ``Tensor[N, A]``.
+
         Args:
-            rate: Base dropout probability [0, 1].
+            rate: Base dropout probability in ``[0, 1]`` — scalar or
+                ``Tensor[N, A]``.
         """
-        self._base_dropout_rate = rate
+        if isinstance(rate, torch.Tensor):
+            expected = (self.num_envs, self._num_agents_cached)
+            if rate.shape != expected:
+                raise ValueError(
+                    f"set_dropout_rate per-(env, agent) tensor must be Tensor{expected}, "
+                    f"got Tensor{tuple(rate.shape)}"
+                )
+            rate_t = rate.to(self._base_dropout_rate_per_env_agent.device).clamp(min=0.0, max=1.0)
+            self._base_dropout_rate_per_env_agent.copy_(rate_t)
+            self._base_dropout_rate = float(rate_t.mean().item())
+        else:
+            self._base_dropout_rate = max(0.0, min(1.0, float(rate)))
+            self._base_dropout_rate_per_env_agent.fill_(self._base_dropout_rate)
 
         if self._burst_sampler is not None:
-            # Burst active: zero "other" pipelines, keep ego at requested rate
+            # Burst active: per-agent mean → per-env ego rate; "other" zeroed.
+            ego_rate_per_env = self._base_dropout_rate_per_env_agent.mean(dim=-1)
             self._delay_system.set_dropout_rate_by_perspective(
-                ego_rate=rate, other_rate=0.0
+                ego_rate=ego_rate_per_env,
+                other_rate=torch.zeros_like(ego_rate_per_env),
             )
             return
 
-        if self._cfg.per_agent_randomization:
-            for agent_id in self._possible_agents:
-                offset = self._per_agent_dropout_offset[agent_id]
-                effective_rate = min(rate + offset, 1.0)
-                self._delay_system.set_field_dropout_rate(str(agent_id), effective_rate)
-        else:
-            self._delay_system.set_dropout_rate(rate)
+        for agent_idx, agent_id in enumerate(self._possible_agents):
+            per_env_rate = self._base_dropout_rate_per_env_agent[:, agent_idx]
+            if self._cfg.per_agent_randomization:
+                offset = float(self._per_agent_dropout_offset[agent_id])
+                effective_rate = (per_env_rate + offset).clamp(max=1.0)
+                self._delay_system.set_field_dropout_rate(
+                    str(agent_id), effective_rate
+                )
+            else:
+                self._delay_system.set_field_dropout_rate(
+                    str(agent_id), per_env_rate
+                )
 
-    def set_burst_params(self, p_onset: float, p_recovery: float):
+    def set_burst_params(
+        self,
+        p_onset: "float | torch.Tensor",
+        p_recovery: "float | torch.Tensor",
+    ):
         """Set burst dropout parameters for curriculum control.
 
-        Args:
-            p_onset: Good->Bad transition probability. 0 disables bursts.
-            p_recovery: Bad->Good transition probability.
-        """
-        if self._burst_sampler is not None:
-            self._burst_sampler.set_burst_params(p_onset, p_recovery)
+        Ticket 034: both args accept scalar or ``Tensor[N, A]``. The
+        underlying :class:`BurstDropoutSampler` works at per-env granularity,
+        so per-agent columns are collapsed to per-env via mean before
+        forwarding. Scalars are passed through unchanged.
 
-    def set_noise_scale(self, scale: float):
+        Args:
+            p_onset: Good->Bad transition probability — scalar or
+                ``Tensor[N, A]``. 0 disables bursts.
+            p_recovery: Bad->Good transition probability — scalar or
+                ``Tensor[N, A]``.
+        """
+        if self._burst_sampler is None:
+            return
+
+        def _to_per_env(x):
+            if isinstance(x, torch.Tensor):
+                expected = (self.num_envs, self._num_agents_cached)
+                if x.shape != expected:
+                    raise ValueError(
+                        f"set_burst_params per-(env, agent) tensor must be "
+                        f"Tensor{expected}, got Tensor{tuple(x.shape)}"
+                    )
+                return x.to(self._noise_scale_per_env_agent.device).mean(dim=-1)
+            return x
+
+        self._burst_sampler.set_burst_params(
+            _to_per_env(p_onset), _to_per_env(p_recovery)
+        )
+
+    def set_noise_scale(self, scale: "float | torch.Tensor"):
         """Set noise scale for curriculum control.
 
         Per-agent noise scaling is applied in _get_noise_std() at query time.
 
+        Ticket 034: accepts a scalar (uniform) or a ``Tensor[N, A]`` of
+        per-(env, agent) scales. The scalar mirror ``_noise_scale`` is kept
+        in sync (mean) for logging.
+
         Args:
-            scale: Noise scale [0, 1].
+            scale: Noise scale in ``[0, 1]`` — scalar or ``Tensor[N, A]``.
         """
-        self._noise_scale = max(0.0, min(1.0, scale))
+        if isinstance(scale, torch.Tensor):
+            expected = (self.num_envs, self._num_agents_cached)
+            if scale.shape != expected:
+                raise ValueError(
+                    f"set_noise_scale per-(env, agent) tensor must be Tensor{expected}, "
+                    f"got Tensor{tuple(scale.shape)}"
+                )
+            self._noise_scale_per_env_agent.copy_(
+                scale.to(self._noise_scale_per_env_agent.device).clamp(min=0.0, max=1.0)
+            )
+            self._noise_scale = float(self._noise_scale_per_env_agent.mean().item())
+        else:
+            self._noise_scale = max(0.0, min(1.0, float(scale)))
+            self._noise_scale_per_env_agent.fill_(self._noise_scale)
 
     def randomize_per_agent_params(self, env_ids: Optional[torch.Tensor] = None):
         """Sample independent delay parameters per agent at episode reset.

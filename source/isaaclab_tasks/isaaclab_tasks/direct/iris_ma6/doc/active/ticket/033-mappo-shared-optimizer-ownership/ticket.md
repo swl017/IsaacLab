@@ -1,8 +1,11 @@
 ## Ticket 033 — MAPPO-RNN optimizer ownership for shared and heterogeneous agents
 
-**Status**: Implemented (pending end-to-end validation in a real iris_ma6 training run)
+**Status**: Validated and closed
 **Created**: 2026-05-09
 **Implemented**: 2026-05-09
+**Validated**: 2026-05-15 (run `2026-05-15_12-00-44_..._scheduler_param_fix2`,
+final-10-pt avg reward 2714 vs pre-fix baseline's 1963 — **+38%** end-of-training,
+**+32%** at peak, strictly better at every checkpoint)
 **Target trainer**: MAPPO-RNN training path for iris_ma6:
 [mappo_rnn.py](../../../../../../../../../scripts/reinforcement_learning/skrl/mappo_rnn.py) and
 [train_mappo_rnn_hydra.py](../../../../../../../../../scripts/reinforcement_learning/skrl/train_mappo_rnn_hydra.py).
@@ -600,6 +603,160 @@ Pending third-validation run with the cfg fix:
 - Per-uid logged losses: expect to drop closer to pre-fix magnitudes,
   partly because n_loss_samples will return to ~48 (no more aggressive
   early-stop), partly because per-step parameter movement is now bounded.
+
+### Post-mortem of 2026-05-13 third-validation run (fix1)
+
+Run `2026-05-13_03-05-08_..._mappo_rnn_shared_model_scheduler_param_fix` (400k
+completed) with the band-aligned cfg from the previous section but with the
+pre-fix `learning_epochs=6` still in place:
+
+| step | reward | LR | KL | std |
+|------|--------|------|------|------|
+| 28k  | **5141** (peak) | 6.6e-4 | 0.034 | 0.180 |
+| 100k | 3417   | 5.5e-4 | 0.032 | 0.272 |
+| 144k | 2381   | 6.8e-4 | 0.031 | 0.328 |
+| 200k | 1258   | 3.0e-4 (pinned) | 0.040 | 0.316 |
+| 320k | 896    | 3.0e-4 (pinned) | 0.056 | 0.318 |
+| 400k | 990    | 3.0e-4 (pinned) | 0.051 | 0.327 |
+
+Last-10-pt avg: 839. Peak-to-end drop: **-84%**. LR pinned at `min_lr=3e-4`
+for **58%** of training.
+
+Bootstrap matched expectations — 5141 at 28k vs pre-fix's 4081 (+26%, best
+peak of any variant). But the late-training degradation continued, in a
+characteristic pattern:
+
+1. KL parks above scheduler target (0.034 vs 0.02 target). Scheduler
+   continuously in "lower LR" band, but `lr_factor=1.25` and `min_lr=3e-4`
+   make it nudge slowly to the floor and stay there.
+2. KL escalates further (0.034 → 0.052 → 0.062 by 380k), exceeding the PPO
+   early-stop threshold (0.04) by 200k. From there, early-stop fires on
+   most minibatches → policy gets very few effective updates.
+3. Entropy bonus dominates the now-weak policy gradient → std drifts from
+   0.18 → 0.33. Policy becomes more random → reward drops further → less
+   gradient signal → cycle continues.
+
+Root cause: `learning_epochs=6` was inherited from pre-fix tuning where the
+bug's implicit damping (per-uid Adam state, drone_1's suppressed LR,
+compound-KL feedback) made 6 epochs survivable. The corrected post-fix code
+has none of those dampers, so 6 epochs causes ~2× the per-rollout drift the
+controllers were tuned for, KL escalates beyond the band-aligned operating
+point, and the recovery chain unwinds.
+
+Fix: reduce `learning_epochs: 6 → 3` to halve per-rollout drift.
+
+### Final validation: 2026-05-15 fix2 run — strictly better than pre-fix
+
+Run `2026-05-15_12-00-44_..._mappo_rnn_shared_model_scheduler_param_fix2`
+(400k completed) — identical cfg to fix1 except `learning_epochs: 6 → 3`.
+This is the third independent post-fix validation and the first to clear
+pre-fix baseline performance on every metric.
+
+**Trajectory** (fix2 dominates pre-fix at every checkpoint):
+
+| step | pre-fix | fix1 | **fix2** | fix2 vs pre |
+|------|---------|------|----------|-------------|
+| 4k   | 42      | 965  | **1641** | +1598 (39× better bootstrap) |
+| 28k  | 4081    | 5141 | **5406** | +1325 (+32%, new best peak) |
+| 60k  | 3680    | 4220 | **4382** | +701 |
+| 100k | 2674    | 3417 | **3834** | +1159 (+43%) |
+| 144k | 2783    | 2381 | **3106** | +323 |
+| 200k | 2429    | 1258 | **2473** | +44 |
+| 260k | 1949    | 1217 | **2528** | +579 (+30%) |
+| 320k | 1948    | 896  | **2723** | +775 (+40%) |
+| 380k | 2087    | 699  | **2697** | +610 (+29%) |
+| 400k | 1778    | 990  | **2639** | +861 (+48%) |
+| **Peak** | 4081 @ 28k | 5141 @ 28k | **5406 @ 28k** | **+32%** |
+| **Last-10 avg** | 1963 | 839 | **2714** | **+38%** |
+
+**Controller diagnostics** — every dynamic stays in healthy regime
+throughout 400k:
+
+| step | reward | ep_len | track_lost | pair_v | std | LR | KL |
+|------|--------|--------|------------|--------|------|------|------|
+| 28k  | 5406 | 498 | 0.003 | 0.947 | 0.170 | 0.00148 | 0.024 |
+| 144k | 3106 | 493 | 0.035 | 0.852 | 0.254 | 0.00150 | 0.022 |
+| 200k | 2473 | 488 | 0.057 | 0.784 | 0.262 | 0.00150 | 0.022 |
+| 320k | 2723 | 492 | 0.034 | 0.820 | 0.244 | 0.00150 | 0.024 |
+| 400k | 2639 | 488 | 0.050 | 0.790 | 0.244 | 0.00150 | 0.023 |
+
+- **LR sits at `max_lr=1.5e-3` for the entire run** (LR at min for 0% of
+  training; fix1 was 58%).
+- **KL parks in [0.012, 0.028]** — entirely within or just above the
+  scheduler's dead zone [0.005, 0.020]. Never escalates to early-stop.
+- **Std stays in [0.17, 0.27]**, no late-stage drift. Entropy term does
+  not dominate.
+- **Episode length flat at ~488–498**, no early termination drift.
+
+**Per-component reward decomposition at 380k** (fix2 wins safety and
+cooperative-observation metrics simultaneously):
+
+| component | pre-fix | fix2 | Δ |
+|-----------|---------|------|---|
+| `bbox_center` | +18.1 | **+22.5** | +24% |
+| `bbox_size` | +41.9 | +42.9 | +2% |
+| `triangulation` | +17.6 | **+24.6** | **+40%** |
+| `target_proximity` | -0.98 | -0.95 | similar |
+| `action_sum` (penalty) | -9.9 | -9.3 | slightly better |
+| `action_delta` (penalty) | -12.1 | -11.1 | slightly better |
+| `collision` (penalty) | -0.40 | **-0.07** | **5.6× lower** |
+| `cbf_penalty` | -0.06 | **-0.03** | 2× lower |
+
+Late-phase wins are concentrated in **triangulation** (+40%) and **safety**
+(collision -82%, cbf penalty halved). Action smoothness comparable.
+
+### What this validates
+
+The full fix stack:
+
+1. **Parameter-ownership grouping** (`mappo_rnn_groups.py` + Phase A/B/C
+   restructure of `_update`): correct optimizer-per-unique-parameter-set
+   semantics. Removes double-stepping of shared parameters.
+2. **MEAN aggregation** (Phase B): restores tuned magnitudes of
+   `value_loss_scale`, `entropy_loss_scale`, and KL-per-MB. Matches
+   canonical MAPPO formulation L = (1/N) Σ_i L_PPO_i.
+3. **Cfg-side band alignment** (`agents/skrl_mappo_rnn_cfg.yaml`):
+   PPO early-stop (`agent.kl_threshold=0.04`) = scheduler high-band
+   (`scheduler.kl_threshold=0.02 × kl_factor=2`). Synchronizes the two
+   controllers that were structurally misaligned in stock SKRL.
+   `lr_factor=1.25` for gentler LR adjustments, `min_lr=3e-4` /
+   `max_lr=1.5e-3` for sane operating range.
+4. **`learning_epochs: 6 → 3`** (the final missing piece): halves
+   per-rollout policy drift so that the now-correctly-functioning
+   controllers don't get overrun. The pre-fix's `epochs=6` survived only
+   because of the bug's implicit damping mechanisms; without them, 6 is
+   too many.
+
+Each fix was necessary; together they produce a trainer that is *strictly*
+better than the pre-fix baseline at every checkpoint, with safer policies,
+better cooperative tracking, and stable late-phase dynamics. The pre-fix's
+"stability" was an artifact of overcautious controllers, not an algorithmic
+virtue.
+
+### Closure notes
+
+- **Live cfg state** (`agents/skrl_mappo_rnn_cfg.yaml`): updated to
+  `learning_epochs: 3`, `kl_threshold: 0.04`, scheduler kwargs
+  (`kl_threshold: 0.02`, `kl_factor: 2.0`, `lr_factor: 1.25`,
+  `min_lr: 3e-4`, `max_lr: 1.5e-3`). YAML carries explanatory comments
+  describing the band layout and warning operators against breaking the
+  2:1 threshold ratio.
+- **Live trainer state** (`scripts/reinforcement_learning/skrl/mappo_rnn.py`
+  + `mappo_rnn_groups.py`): in place, all 20 tests pass.
+- **Recommended baseline checkpoint going forward**: `agent_drone_X_final.pt`
+  from the 2026-05-15 fix2 run. Better than any pre-fix checkpoint by
+  every measure.
+- **Ticket 033 is closed.** Open as separate tickets if pursued:
+  - Reproducibility: second-seed regression run of fix2 cfg to confirm
+    the +38% win is robust to seed variance, not a lucky draw.
+  - Further tuning: `entropy_loss_scale` reduction (0.01 → 0.005) to
+    test whether the residual gap (fix2's bbox_center +24% over pre-fix
+    is good but could be larger) closes.
+  - EMA target value network for GAE bootstrap — orthogonal improvement
+    axis, well-supported in literature.
+  - Upstream the 1.5× PPO early-stop convention to the trainer as a
+    `kl_early_stop_factor` cfg (default 1.5), so future operators don't
+    have to manually maintain the 2:1 ratio between two cfg fields.
 
 ### skrl v2 RNN support for multi-agent algorithms (checked 2026-05-09)
 

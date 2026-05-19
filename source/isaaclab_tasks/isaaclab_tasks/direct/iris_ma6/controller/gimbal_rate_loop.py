@@ -71,16 +71,32 @@ class GimbalRateLoop:
             num_envs, 2, dtype=torch.float32, device=self.device
         )
 
-        # Curriculum scale on the lag (1.0 = full configured τ; 0.0 = pass-through)
+        # Curriculum scale on the lag (1.0 = full configured τ; 0.0 = pass-through).
+        # Ticket 034: `_tau_progress` is the scalar broadcast value, kept for
+        # logging / back-compat. `_tau_progress_per_env` is the per-env tensor
+        # the step() loop actually consumes; both are kept in sync inside
+        # set_progress(). Callers passing a float fill the tensor uniformly.
         self._tau_progress: float = 1.0
+        self._tau_progress_per_env = torch.full(
+            (num_envs,), 1.0, dtype=torch.float32, device=self.device
+        )
 
         # mas/036: per-env dead-time buffer at the rate-loop input.
         # The ring depth is bounded by `dead_time_max_s / dt` — but `dt`
         # is per-step, so we lazily allocate the ring on the first
         # `step()` call when we know `dt`. The Gaussian samples are
         # stored in seconds and converted to integer step counts at use.
+        # Ticket 034: scalar `_dead_time_curr_scale` is mirrored to a per-env
+        # tensor used by _sample_dead_time. Same dual-storage pattern as
+        # `_tau_progress` above.
         self._dead_time_curr_scale: float = float(
             max(0.0, min(1.0, cfg.dead_time_curriculum_scale))
+        )
+        self._dead_time_curr_scale_per_env = torch.full(
+            (num_envs,),
+            self._dead_time_curr_scale,
+            dtype=torch.float32,
+            device=self.device,
         )
         self._dead_time_seconds = torch.zeros(
             num_envs, dtype=torch.float32, device=self.device
@@ -180,9 +196,10 @@ class GimbalRateLoop:
         cmd = self._apply_dead_time(cmd, dt)
 
         # 4) First-order lag toward (saturated, deadbanded, delayed) command,
-        #    with per-axis τ scaled by the curriculum progress.
-        tau_yaw_eff = self._tau_yaw * self._tau_progress
-        tau_pitch_eff = self._tau_pitch * self._tau_progress
+        #    with per-axis τ scaled by the per-env curriculum progress
+        #    (ticket 034: per-env tensor instead of broadcast scalar).
+        tau_yaw_eff = self._tau_yaw * self._tau_progress_per_env
+        tau_pitch_eff = self._tau_pitch * self._tau_progress_per_env
 
         # Pass-through when curriculum progress is 0 (or τ is effectively 0).
         # alpha = 1 - exp(-dt / tau); guard against τ ≈ 0 → alpha → 1 (instant).
@@ -229,16 +246,31 @@ class GimbalRateLoop:
                 self._dead_time_buffer[:, env_ids, :] = 0.0
             self._sample_dead_time(env_ids=env_ids)
 
-    def set_progress(self, p: float) -> None:
+    def set_progress(self, p: float | torch.Tensor) -> None:
         """Curriculum hook: scale the lag τ by ``p ∈ [0, 1]``.
 
         At p=0 the loop is pass-through (no lag); at p=1 the loop uses the
         configured τ_yaw / τ_pitch. Saturation, deadband, and dead-time
         buffer are unaffected by this scale.
-        """
-        self._tau_progress = float(max(0.0, min(1.0, p)))
 
-    def set_dead_time_curriculum_scale(self, scale: float) -> None:
+        Accepts a scalar (applied uniformly to all envs) or a ``Tensor[N]``
+        of per-env values (ticket 034). The scalar ``self._tau_progress``
+        attribute is kept in sync (set to the tensor mean when called with
+        a tensor) for logging back-compat.
+        """
+        if isinstance(p, torch.Tensor):
+            if p.shape != (self.num_envs,):
+                raise ValueError(
+                    f"set_progress expected scalar or Tensor[{self.num_envs}], "
+                    f"got Tensor{tuple(p.shape)}"
+                )
+            self._tau_progress_per_env.copy_(p.to(self.device).clamp_(min=0.0, max=1.0))
+            self._tau_progress = float(self._tau_progress_per_env.mean().item())
+        else:
+            self._tau_progress = float(max(0.0, min(1.0, p)))
+            self._tau_progress_per_env.fill_(self._tau_progress)
+
+    def set_dead_time_curriculum_scale(self, scale: float | torch.Tensor) -> None:
         """Curriculum hook: scale the per-env dead-time samples by
         ``scale ∈ [0, 1]``.
 
@@ -247,8 +279,24 @@ class GimbalRateLoop:
         Takes effect at the *next* :meth:`reset` call (per-env dead times
         are constant within an episode by design — the dead time is a
         structural firmware/motor property, not a per-step variable).
+
+        Accepts a scalar (uniform) or a ``Tensor[N]`` of per-env values
+        (ticket 034). The scalar ``self._dead_time_curr_scale`` is kept
+        in sync (mean of the tensor when called with a tensor) for logging.
         """
-        self._dead_time_curr_scale = float(max(0.0, min(1.0, scale)))
+        if isinstance(scale, torch.Tensor):
+            if scale.shape != (self.num_envs,):
+                raise ValueError(
+                    f"set_dead_time_curriculum_scale expected scalar or "
+                    f"Tensor[{self.num_envs}], got Tensor{tuple(scale.shape)}"
+                )
+            self._dead_time_curr_scale_per_env.copy_(
+                scale.to(self.device).clamp_(min=0.0, max=1.0)
+            )
+            self._dead_time_curr_scale = float(self._dead_time_curr_scale_per_env.mean().item())
+        else:
+            self._dead_time_curr_scale = float(max(0.0, min(1.0, scale)))
+            self._dead_time_curr_scale_per_env.fill_(self._dead_time_curr_scale)
 
     def set_tau_per_env(
         self,
@@ -277,34 +325,32 @@ class GimbalRateLoop:
 
     def _sample_dead_time(self, env_ids: torch.Tensor | None) -> None:
         """Draw new per-env dead-time samples (in seconds) from
-        ``N(mean, std) * curriculum_scale``, clipped to
+        ``N(mean * scale[env], std * scale[env])``, clipped to
         ``[0, dead_time_max_s]``. Steps cache is refreshed lazily on the
         next :meth:`step` once ``dt`` is known.
-        """
-        scale = self._dead_time_curr_scale
-        mean_s = self.cfg.dead_time_mean_s * scale
-        std_s = self.cfg.dead_time_std_s * scale
-        max_s = self.cfg.dead_time_max_s
 
+        Ticket 034: ``scale`` is now per-env via ``_dead_time_curr_scale_per_env``.
+        Envs with ``scale[env]=0`` deterministically produce 0 because mean
+        and std both vanish (``randn * 0 + 0 = 0``); no special-case branch
+        needed.
+        """
+        max_s = self.cfg.dead_time_max_s
         if env_ids is None:
             n = self.num_envs
-            # If both effective parameters are zero, force exact zero
-            # rather than sampling — preserves the bit-exact pre-curriculum
-            # behavior at scale=0.
-            if scale <= 0.0:
-                self._dead_time_seconds.zero_()
-            else:
-                samples = torch.randn(n, device=self.device) * std_s + mean_s
-                samples.clamp_(min=0.0, max=max_s)
-                self._dead_time_seconds.copy_(samples)
+            scale_per = self._dead_time_curr_scale_per_env
+            mean_per = self.cfg.dead_time_mean_s * scale_per
+            std_per = self.cfg.dead_time_std_s * scale_per
+            samples = torch.randn(n, device=self.device) * std_per + mean_per
+            samples.clamp_(min=0.0, max=max_s)
+            self._dead_time_seconds.copy_(samples)
         else:
             n = int(env_ids.numel()) if isinstance(env_ids, torch.Tensor) else len(env_ids)
-            if scale <= 0.0:
-                self._dead_time_seconds[env_ids] = 0.0
-            else:
-                samples = torch.randn(n, device=self.device) * std_s + mean_s
-                samples.clamp_(min=0.0, max=max_s)
-                self._dead_time_seconds[env_ids] = samples
+            scale_per = self._dead_time_curr_scale_per_env[env_ids]
+            mean_per = self.cfg.dead_time_mean_s * scale_per
+            std_per = self.cfg.dead_time_std_s * scale_per
+            samples = torch.randn(n, device=self.device) * std_per + mean_per
+            samples.clamp_(min=0.0, max=max_s)
+            self._dead_time_seconds[env_ids] = samples
 
         # If the ring is already allocated, refresh the integer step count
         # for the affected envs immediately so the next `step()` uses the

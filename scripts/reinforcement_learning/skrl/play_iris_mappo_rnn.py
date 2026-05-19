@@ -46,6 +46,7 @@ parser.add_argument(
     default=None,
     help="The environment step at which to evaluate the agent. If not specified, evaluates from step 0",
 )
+parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
 parser.add_argument(
     "--show_plots",
     action="store_true",
@@ -61,7 +62,10 @@ parser.add_argument(
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
-args_cli = parser.parse_args()
+# Use parse_known_args so hydra-style env-cfg overrides (e.g.
+# `env.episode_length_s=5.0`) survive the argparse pass. They're applied
+# to env_cfg in main() after parse_env_cfg().
+args_cli, cfg_overrides = parser.parse_known_args()
 
 # always enable cameras to record video
 if args_cli.video:
@@ -337,22 +341,85 @@ def load_checkpoint_weights(checkpoint_path: str, possible_agents: Sequence[str]
         return result
 
 
+def _coerce_override_value(val: str):
+    """Best-effort string -> Python type coercion for CLI overrides."""
+    lo = val.lower()
+    if lo in ("true", "false"):
+        return lo == "true"
+    if lo == "none":
+        return None
+    try:
+        i = int(val)
+        if str(i) == val:
+            return i
+    except ValueError:
+        pass
+    try:
+        return float(val)
+    except ValueError:
+        return val
+
+
+def _apply_cfg_overrides(env_cfg, overrides):
+    """Apply hydra-style `key.path=value` overrides to env_cfg.
+
+    Accepts both `env.foo.bar=...` (hydra config-group convention) and bare
+    `foo.bar=...` paths. The leading `env.` is stripped so the target is the
+    env_cfg dataclass instance directly.
+
+    Unknown attribute paths produce a warning, not a hard error — matches
+    the training script's hydra struct-mode behavior where typos surface
+    clearly without aborting the run.
+    """
+    if not overrides:
+        return
+    print(f"[OVERRIDE] applying {len(overrides)} CLI override(s) to env_cfg:")
+    for ov in overrides:
+        if "=" not in ov:
+            print(f"  [WARN] '{ov}' has no '=', ignoring")
+            continue
+        key, _, val = ov.partition("=")
+        if key.startswith("env."):
+            key = key[len("env."):]
+        parts = key.split(".")
+        target = env_cfg
+        try:
+            for p in parts[:-1]:
+                target = getattr(target, p)
+            leaf = parts[-1]
+            if not hasattr(target, leaf):
+                print(f"  [WARN] env_cfg has no attribute '{key}', skipping")
+                continue
+            new_val = _coerce_override_value(val)
+            setattr(target, leaf, new_val)
+            print(f"  {key} = {new_val!r}")
+        except AttributeError as e:
+            print(f"  [WARN] failed to walk path '{key}': {e}")
+
+
 def main():
     """Play with trained MAPPO RNN agents."""
-    
+
     # Set seed for reproducibility
     set_seed(42)
-    
+
     # Create Isaac Lab environment
     env_cfg = parse_env_cfg(
-        args_cli.task, 
-        device=args_cli.device, 
-        num_envs=args_cli.num_envs, 
+        args_cli.task,
+        device=args_cli.device,
+        num_envs=args_cli.num_envs,
         use_fabric=not args_cli.disable_fabric
     )
     env_cfg.enable_tiled_cameras = True
     env_cfg.use_debug_initial_step = True
     env_cfg.debug_initial_step = int(args_cli.step)
+    # Apply seed
+    torch.manual_seed(args_cli.seed)
+    env_cfg.seed = args_cli.seed
+    print(f"[EVAL] Seed: {args_cli.seed}")
+    # Apply any `key.path=value` CLI overrides (e.g. `env.episode_length_s=5.0`).
+    # These are captured by parse_known_args at script top.
+    _apply_cfg_overrides(env_cfg, cfg_overrides)
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     
     # Verify this is a multi-agent environment

@@ -1,0 +1,169 @@
+{
+  "trace_sigma_mean": 0.0,
+  "trace_sigma_std": 0.0,
+  "triangulation_rmse_mean": 0.0,
+  "triangulation_rmse_std": 0.0,
+  "task_success_rate": 0.0,
+  "track_maintenance_rate": 0.0,
+  "accuracy_rate": 0.0,
+  "visibility_mean": 0.8358543711910366,
+  "visibility_std": 0.291280852192394,
+  "collision_rate_mean": 0.8406072106261859,
+  "collision_rate_std": 7.669478062354711,
+  "convergence_speed_mean": -1.0,
+  "convergence_speed_std": 0.0,
+  "time_to_first_lock_mean": -1.0,
+  "time_to_first_lock_std": 0.0,
+  "tri_valid_ratio_mean": 0.0,
+  "tri_valid_ratio_std": 0.0,
+  "track_loss_count_mean": 0.0,
+  "track_loss_count_std": 0.0,
+  "max_track_gap_mean": 424.0721062618596,
+  "max_track_gap_std": 113.93976453811852,
+  "cbf_violation_rate_mean": 0.008224650491673648,
+  "cbf_violation_rate_std": 0.03864073691230479,
+  "min_separation_mean": 9.4748423236371,
+  "min_separation_std": 4.5080198492957635,
+  "trace_sigma_median": 0.0,
+  "triangulation_rmse_median": 0.0,
+  "visibility_median": 0.8558740328715376,
+  "tri_valid_ratio_median": 0.0,
+  "trace_sigma_p5": 0.0,
+  "trace_sigma_p95": 0.0,
+  "triangulation_rmse_p5": 0.0,
+  "triangulation_rmse_p95": 0.0,
+  "visibility_p5": 0.386986301369863,
+  "visibility_p95": 0.9949899799599199,
+  "tri_valid_ratio_p5": 0.0,
+  "tri_valid_ratio_p95": 0.0,
+  "trace_sigma_clipped_mean": 0.0,
+  "trace_sigma_clipped_std": 0.0,
+  "triangulation_rmse_clipped_mean": 0.0,
+  "triangulation_rmse_clipped_std": 0.0,
+  "visibility_clipped_mean": 0.8104896403771488,
+  "visibility_clipped_std": 0.1661264181780684,
+  "tri_valid_ratio_clipped_mean": 0.0,
+  "tri_valid_ratio_clipped_std": 0.0,
+  "num_episodes": 1054,
+  "action_diagnostics": {
+    "step_dt_seconds": 0.04,
+    "policy_rate_hz": 25.0,
+    "axis_names": [
+      "vx_body",
+      "vy_body",
+      "vz_body",
+      "yaw_rate",
+      "gimbal_yaw_rate",
+      "gimbal_pitch_rate",
+      "zoom_rate"
+    ],
+    "axis_units": [
+      "m/s",
+      "m/s",
+      "m/s",
+      "rad/s",
+      "rad/s",
+      "rad/s",
+      "1/s"
+    ],
+    "sample_env_ids": [
+      0,
+      146,
+      292,
+      438,
+      584,
+      730,
+      876,
+      1023
+    ],
+    "agents": {
+      "drone_0": {
+        "action_rms": {
+          "vx_body": 1.8061041831970215,
+          "vy_body": 1.6730709075927734,
+          "vz_body": 0.4094707667827606,
+          "yaw_rate": 0.22259601950645447,
+          "gimbal_yaw_rate": 0.23660427331924438,
+          "gimbal_pitch_rate": 0.21754638850688934,
+          "zoom_rate": 0.9049311876296997
+        },
+        "action_delta_rms": {
+          "vx_body": 23.38089370727539,
+          "vy_body": 19.598365783691406,
+          "vz_body": 3.9024500846862793,
+          "yaw_rate": 1.8302065134048462,
+          "gimbal_yaw_rate": 3.5697550773620605,
+          "gimbal_pitch_rate": 2.722100019454956,
+          "zoom_rate": 11.102731704711914
+        },
+        "dominant_freq_hz": {
+          "vx_body": 0.1200326681137085,
+          "vy_body": 0.08872003853321075,
+          "vz_body": 0.1020367369055748,
+          "yaw_rate": 0.07619498670101166,
+          "gimbal_yaw_rate": 0.15811388194561005,
+          "gimbal_pitch_rate": 0.12028568983078003,
+          "zoom_rate": 0.12787848711013794
+        },
+        "dominant_freq_delta_hz": {
+          "vx_body": 9.532907485961914,
+          "vy_body": 11.212808609008789,
+          "vz_body": 9.742180824279785,
+          "yaw_rate": 10.0894136428833,
+          "gimbal_yaw_rate": 7.53023624420166,
+          "gimbal_pitch_rate": 9.06950569152832,
+          "zoom_rate": 9.975472450256348
+        }
+      },
+      "drone_1": {
+        "action_rms": {
+          "vx_body": 1.7580348253250122,
+          "vy_body": 1.4587082862854004,
+          "vz_body": 0.44362884759902954,
+          "yaw_rate": 0.26369941234588623,
+          "gimbal_yaw_rate": 0.27080273628234863,
+          "gimbal_pitch_rate": 0.17476390302181244,
+          "zoom_rate": 0.8992314338684082
+        },
+        "action_delta_rms": {
+          "vx_body": 17.464109420776367,
+          "vy_body": 16.988391876220703,
+          "vz_body": 3.1930675506591797,
+          "yaw_rate": 1.765782356262207,
+          "gimbal_yaw_rate": 2.9923722743988037,
+          "gimbal_pitch_rate": 2.2670817375183105,
+          "zoom_rate": 9.50851821899414
+        },
+        "dominant_freq_hz": {
+          "vx_body": 0.2343088686466217,
+          "vy_body": 0.4359422028064728,
+          "vz_body": 0.2343088686466217,
+          "yaw_rate": 0.0949825644493103,
+          "gimbal_yaw_rate": 0.14666606485843658,
+          "gimbal_pitch_rate": 0.2896268665790558,
+          "zoom_rate": 0.1075076162815094
+        },
+        "dominant_freq_delta_hz": {
+          "vx_body": 9.429499626159668,
+          "vy_body": 10.212327003479004,
+          "vz_body": 9.899971008300781,
+          "yaw_rate": 8.423660278320312,
+          "gimbal_yaw_rate": 9.5995454788208,
+          "gimbal_pitch_rate": 9.995004653930664,
+          "zoom_rate": 8.831851959228516
+        }
+      }
+    }
+  },
+  "experiment": "a1_with_aoi",
+  "checkpoint": "/home/usrg/IsaacPX4/IsaacLab/logs/skrl/iris_ma6/2026-05-18_11-45-51_mappo_rnn_torch_034_2026-05-18_11-45-45_ticket034_per_env_jitter/checkpoints/agent_400000.pt",
+  "eval_params": {
+    "num_episodes": 1,
+    "num_envs": 1024,
+    "delay_override": null,
+    "comm_delay_override": null,
+    "target_speed": null,
+    "noise_override": null,
+    "detection_dropout_override": null
+  }
+}

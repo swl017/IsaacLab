@@ -23,7 +23,7 @@ controller       _v2                            randomization
                                                  gimbal randomizers)
                    ▼              ▼
               visualization    curriculum
-              (debug only)     (config only)
+              (debug only)     (config + progress_helper)
 
                    ▼
               experiments/

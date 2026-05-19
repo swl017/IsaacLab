@@ -17,6 +17,11 @@ None (minimal module, orchestrated by the environment).
 
 ## Key Files
 - `curriculum_cfg.py` — Phase definitions, step boundaries, progress getters
+- `progress_helper.py` — Per-(env, agent) effective-progress sampler. Maps a
+  scalar global `p ∈ [0, 1]` to a `Tensor[E, A]` of values drawn i.i.d. from
+  `Uniform(0, p)`. Enforces the anti-forgetting invariant (ticket 034): the
+  per-env distribution always contains positive mass on the easy regime,
+  including at `p = 1`. Stateless; consumed by env `_reset_idx` once per axis.
 - `doc/curriculum_wiring.md` — Reference table mapping each phase to the env variable it controls and where it's applied
 
 ## Phases (13 total, in chronological order)
