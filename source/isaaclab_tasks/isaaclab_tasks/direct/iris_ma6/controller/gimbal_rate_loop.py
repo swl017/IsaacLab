@@ -151,6 +151,24 @@ class GimbalRateLoop:
         the first :meth:`step` call once ``dt`` is known)."""
         return self._dead_time_steps
 
+    # ------------------------------------------------------------------ Ticket 037
+    # Effective τ accessors. The values returned by `tau_yaw` / `tau_pitch`
+    # above are the *nominal* (post-randomization) τ. At step time the lag
+    # uses `τ_nominal × _tau_progress_per_env` (line ~201 below). For the
+    # critic-only privileged obs we want the value the rate loop actually
+    # consumes — exposed here as effective τ. Shape `(N,)` per batched row.
+    # See doc/critic_obs_design.md §3.4 fields 8a/8b.
+
+    @property
+    def tau_yaw_effective(self) -> torch.Tensor:
+        """Effective yaw τ = nominal × curriculum progress. Shape (N,)."""
+        return self._tau_yaw * self._tau_progress_per_env
+
+    @property
+    def tau_pitch_effective(self) -> torch.Tensor:
+        """Effective pitch τ = nominal × curriculum progress. Shape (N,)."""
+        return self._tau_pitch * self._tau_progress_per_env
+
     # ------------------------------------------------------------------ control
 
     def step(self, omega_cmd_per_axis: torch.Tensor, dt: float) -> torch.Tensor:

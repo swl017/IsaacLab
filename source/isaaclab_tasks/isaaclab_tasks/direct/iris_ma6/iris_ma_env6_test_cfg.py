@@ -87,6 +87,108 @@ IRIS_GIMBAL2_TEST_CFG = _create_robot_cfg()
 IRIS_TARGET_CFG = _create_target_cfg()
 
 
+# ============================================================================
+# Critic-only privileged env-param obs (ticket 037)
+# ============================================================================
+# Registry of fields the centralized MAPPO critic can receive as privileged
+# observation tails, beyond the actor obs and the existing zoom / GT-target
+# tails. Each field is one or more scalars derived from the env's current
+# (per-episode, per-(env, agent)) randomization state.
+#
+# - scope="per_agent": dim per agent; tail size = dim × num_agents.
+# - scope="shared":    single global value per env; broadcast / appended once.
+#
+# Field details (storage owner, shape, getter status, pre-norm range) are in
+# doc/critic_obs_design.md §3.4. Implementation:
+#   - Slice 2 (this file): cfg surface + dim accounting in __post_init__
+#   - Slice 3: getter methods on each owner module
+#   - Slice 4: privileged-obs assembly in _get_states()
+# Setting `critic_privileged_fields = []` (default) reproduces t034 behavior.
+# ============================================================================
+
+# Subset of registry fields whose accessor reads from `self._domain_randomizer`
+# (instantiated only when `cfg.domain_randomization.enabled = True`). Requesting
+# any of these via `critic_privileged_fields` while DR is disabled would crash
+# with AttributeError at obs-build time; `__post_init__` validates and raises
+# a clearer error at cfg-time instead.
+_CRITIC_PRIVILEGED_FIELDS_REQUIRING_DR: frozenset = frozenset({
+    "fov_scale",
+    "gimbal_yaw_offset",
+    "gimbal_pitch_offset",
+    "gimbal_roll_offset",
+    "gimbal_stiffness_scale",
+    "gimbal_damping_scale",
+    "body_mass_scale_or_add",
+})
+
+
+_CRITIC_PRIVILEGED_FIELD_REGISTRY: dict[str, dict] = {
+    # --- drone controller gain scales (derived: current / nominal) ---
+    "vel_gain_scale":            {"dim": 1, "scope": "per_agent"},
+    "att_gain_scale":            {"dim": 1, "scope": "per_agent"},
+    "rate_gain_scale":           {"dim": 1, "scope": "per_agent"},
+    "motor_gain_scale":          {"dim": 1, "scope": "per_agent"},
+    "zoom_tau_scale":            {"dim": 1, "scope": "per_agent"},
+    "zoom_max_rate_scale":       {"dim": 1, "scope": "per_agent"},
+    # --- drone dynamics (broadcast: stored per-env, applied per-agent) ---
+    "max_lin_vel_per_env":       {"dim": 1, "scope": "per_agent"},
+    # --- gimbal rate loop (effective τ = nominal × _tau_progress_per_env) ---
+    "gimbal_rate_tau_yaw_s":     {"dim": 1, "scope": "per_agent"},
+    "gimbal_rate_tau_pitch_s":   {"dim": 1, "scope": "per_agent"},
+    # --- dead times ---
+    "gimbal_dead_time_s":        {"dim": 1, "scope": "per_agent"},
+    "zoom_dead_time_s":          {"dim": 1, "scope": "per_agent"},
+    # --- camera intrinsics ---
+    "fov_scale":                 {"dim": 1, "scope": "per_agent"},
+    # --- gimbal mechanical offsets ---
+    "gimbal_yaw_offset":         {"dim": 1, "scope": "per_agent"},
+    "gimbal_pitch_offset":       {"dim": 1, "scope": "per_agent"},
+    "gimbal_roll_offset":        {"dim": 1, "scope": "per_agent"},
+    # --- gimbal joint dynamics ---
+    "gimbal_stiffness_scale":    {"dim": 1, "scope": "per_agent"},
+    "gimbal_damping_scale":      {"dim": 1, "scope": "per_agent"},
+    # --- robot physics (mass scale OR addition, mode-dependent) ---
+    "body_mass_scale_or_add":    {"dim": 1, "scope": "per_agent"},
+    # --- detection pipeline (env-derived: _eff_progress_* × cfg base) ---
+    # `detection_latency_s` is the curriculum-scaled expected latency
+    # (_eff_progress_delay × cfg.latency_distribution.mean); the
+    # per-episode actual sampled value lives in LatencySampler.step_values
+    # — exposing the expected approximates the actual under "fixed" mode
+    # and matches the latency distribution mean under "random" mode.
+    # `burst_p_onset` is the Gilbert-Elliott burst-onset probability,
+    # NOT a generic dropout prob; see _reset_idx ~L1493-1500.
+    "detection_latency_s":       {"dim": 1, "scope": "per_agent"},
+    "bbox_noise_std":            {"dim": 1, "scope": "per_agent"},
+    "detection_dropout_prob":    {"dim": 1, "scope": "per_agent"},
+    "burst_p_onset":             {"dim": 1, "scope": "per_agent"},
+    # --- target physics (shared per env) ---
+    "target_scale_xy":           {"dim": 1, "scope": "shared"},
+    "target_scale_z":            {"dim": 1, "scope": "shared"},
+}
+"""Field registry for ticket 037 critic-only privileged obs. 22 per-agent +
+2 shared = 44 dims for A=2. See doc/critic_obs_design.md §3.4 for storage
+owners, accessor status, and pre-norm ranges."""
+
+
+def _critic_privileged_dim_split(field_names: list[str]) -> tuple[int, int]:
+    """Sum per-agent and shared dim contributions for the given field list.
+
+    Returns:
+        (per_agent_dim, shared_dim) — used by __post_init__ to size state_space.
+    """
+    per_agent = 0
+    shared = 0
+    for fname in field_names:
+        spec = _CRITIC_PRIVILEGED_FIELD_REGISTRY[fname]
+        if spec["scope"] == "per_agent":
+            per_agent += spec["dim"]
+        elif spec["scope"] == "shared":
+            shared += spec["dim"]
+        else:
+            raise ValueError(f"unknown scope {spec['scope']!r} for field {fname!r}")
+    return per_agent, shared
+
+
 @configclass
 class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     """Configuration for the Iris MA6 Test environment.
@@ -124,12 +226,18 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     state_space: int = -1
     """State space dimension. -1 means concatenate all observations.
 
-    When any ``enable_critic_*`` toggle below is True, the env auto-replaces
-    this with a positive int matching the actor-obs concat plus the
-    privileged tails enabled (zoom: 2 scalars per agent; GT target position:
-    3 globals; GT target velocity: 3 globals). The env also exposes
-    ``shared_observation_spaces`` so the centralized MAPPO critic picks up
-    the new size.
+    When any of the following toggles is set, the env auto-replaces this with
+    a positive int matching the actor-obs concat plus the privileged tails
+    enabled:
+
+    - ``enable_critic_continuous_zoom``: 2 scalars per agent
+    - ``enable_critic_gt_target``: 3 globals (target world position)
+    - ``enable_critic_gt_target_velocity``: 3 globals (target world linear velocity)
+    - ``critic_privileged_fields`` (ticket 037): per-field dim from the registry
+      (22 per-agent + 2 shared = 44 dims for A=2 if all fields enabled)
+
+    The env also exposes ``shared_observation_spaces`` so the centralized
+    MAPPO critic picks up the new size.
     """
 
     enable_critic_continuous_zoom: bool = True
@@ -181,6 +289,67 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     want to test whether velocity helps the critic anticipate next-step
     rewards (closing speed, occlusion onset). Requires
     ``enable_critic_gt_target=True``."""
+
+    enable_axis_independence: bool = True
+    """Ticket 037 Slice 7 — when True, the 8 sub-axes of ``progress_dynamics``
+    are sampled independently per (env, agent) using their own curriculum
+    schedules from ``curriculum.{axis}_(start|end)_step``. When False
+    (default), all 8 axes share the ``dynamics_(start|end)_step`` schedule
+    — bit-exact t034 behavior.
+
+    The 8 axes (each per-(env, agent)):
+    - gimbal_rate_tau (replaces _eff_progress_dynamics for the gimbal rate-loop τ)
+    - drone_gains (controller gain randomization)
+    - max_lin_vel_scale (±20 % max_lin_vel multiplier)
+    - camera_fov (FOV scale)
+    - gimbal_mech_offsets (yaw/pitch/roll mechanical misalignment)
+    - mass_inertia (body mass + inertia)
+    - gimbal_stiff_damp (gimbal joint stiffness/damping)
+    - target_scale (target object xy/z scale)
+
+    Real hardware has no correlation between these axes; bundling masks
+    sim-to-real failure modes. See doc/critic_obs_design.md §2.3 and
+    ticket 037 for motivation."""
+
+    enable_full_critic_priv_obs: bool = True
+    """Convenience toggle for ticket 037 — when True and
+    ``critic_privileged_fields`` is empty, ``__post_init__`` populates the
+    list with all ~24 entries in ``_CRITIC_PRIVILEGED_FIELD_REGISTRY``.
+
+    Useful for CLI overrides (Hydra's struct mode treats an empty
+    ``list[str]`` default as length-locked, so ``critic_privileged_fields``
+    cannot be overridden from an empty default via ``++env.critic_priv...``).
+    For ablation, set ``critic_privileged_fields`` directly to a subset
+    (programmatically, in cfg constructor / experiment_registry)."""
+
+    critic_privileged_fields: list[str] = []
+    """Ticket 037 — asymmetric actor-critic env-param privileged tail.
+
+    List of field names from ``_CRITIC_PRIVILEGED_FIELD_REGISTRY`` (defined
+    at module scope above the cfg class) to append to the critic state.
+    Each field contributes its registered ``dim`` × ``scope``:
+
+    - ``scope="per_agent"``: 1 scalar per agent appended at this slot.
+    - ``scope="shared"``: 1 scalar per env appended once at this slot.
+
+    The actor observation is unchanged. Setting this list to ``[]``
+    (default) reproduces t034 behavior bit-exactly.
+
+    Typical "full Phase 1" configuration is all 24 fields in the registry
+    (22 per-agent + 2 shared = 44 dims for A=2). Smaller subsets can be
+    used for ablation: e.g. ``["max_lin_vel_per_env"]`` to isolate the
+    velocity-axis V-loss contribution.
+
+    Field details (storage owner, accessor, pre-norm range) are in
+    doc/critic_obs_design.md §3.4. Implementation slices:
+
+    - Slice 2 (this file): cfg surface + dim accounting in __post_init__.
+    - Slice 3: getter methods on each owner module.
+    - Slice 4: privileged-obs assembly in _get_states().
+
+    Validated against the registry in __post_init__; unknown field names
+    raise ValueError at cfg-time (before env init), so config errors
+    surface early."""
 
     # ==========================================================================
     # Simulation
@@ -651,7 +820,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     gain_randomization: GainRandomizationCfg = GainRandomizationCfg()
     """Configuration for per-env controller gain randomization.
 
-    Applies +-20% uniform scaling on controller gains (velocity PID,
+    Applies +-5% uniform scaling on controller gains (velocity PID,
     attitude P, rate PID, motor time constant). Curriculum-gated to
     dynamics phase (dynamics_start_step to dynamics_end_step).
     """
@@ -661,7 +830,9 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # ==========================================================================
 
     domain_randomization: DomainRandomizationCfg = DomainRandomizationCfg(
-        enabled=False,
+        enabled=True,  # ticket 037 Phase 1: enable DR so the 7 DR-dependent
+                      # priv-obs fields (fov_scale, gimbal offsets, mass etc.)
+                      # are populated. Was False through t034.
         mount_offset=MountOffsetRandomizationCfg(enabled=False),
     )
     """Domain randomization for sim-to-real transfer.
@@ -757,6 +928,49 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
             critic_extra_global += 3  # GT target world position
             if getattr(self, "enable_critic_gt_target_velocity", False):
                 critic_extra_global += 3  # GT target world linear velocity
+
+        # Ticket 037 — env-param privileged tail. The convenience bool
+        # `enable_full_critic_priv_obs` expands to the full registry
+        # when set and the explicit list is empty.
+        if self.enable_full_critic_priv_obs and not self.critic_privileged_fields:
+            self.critic_privileged_fields = list(
+                _CRITIC_PRIVILEGED_FIELD_REGISTRY.keys()
+            )
+        # cfg-driven by critic_privileged_fields list, validated against the registry.
+        if self.critic_privileged_fields:
+            unknown = (
+                set(self.critic_privileged_fields)
+                - set(_CRITIC_PRIVILEGED_FIELD_REGISTRY.keys())
+            )
+            if unknown:
+                raise ValueError(
+                    f"unknown critic_privileged_fields: {sorted(unknown)}. "
+                    f"valid keys: {sorted(_CRITIC_PRIVILEGED_FIELD_REGISTRY.keys())}"
+                )
+            duplicates = [
+                f for f in set(self.critic_privileged_fields)
+                if self.critic_privileged_fields.count(f) > 1
+            ]
+            if duplicates:
+                raise ValueError(
+                    f"duplicate critic_privileged_fields: {sorted(duplicates)}"
+                )
+            # DR-dependent fields require domain_randomization.enabled=True;
+            # accessor would crash with AttributeError on disabled DR.
+            if not self.domain_randomization.enabled:
+                needs_dr = (
+                    set(self.critic_privileged_fields)
+                    & _CRITIC_PRIVILEGED_FIELDS_REQUIRING_DR
+                )
+                if needs_dr:
+                    raise ValueError(
+                        f"critic_privileged_fields includes DR-dependent fields "
+                        f"{sorted(needs_dr)} but domain_randomization.enabled=False. "
+                        f"Enable DR or remove these fields."
+                    )
+            pa, sh = _critic_privileged_dim_split(self.critic_privileged_fields)
+            critic_extra_per_agent += pa
+            critic_extra_global += sh
 
         if critic_extra_per_agent > 0 or critic_extra_global > 0:
             actor_concat_dim = obs_dim * self.num_agents

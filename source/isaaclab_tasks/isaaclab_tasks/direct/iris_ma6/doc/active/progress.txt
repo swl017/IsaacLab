@@ -2050,3 +2050,550 @@ Next:
   * Investigate the action-smoothness regression (+35-40% on action_sum/
     action_delta) — is it a real deployment concern, or just a side-effect
     of wider env support that washes out at eval time?
+
+----------------------------------------
+2026-05-20 — Ticket 036 policy-adaptation probe — robust verdict
+----------------------------------------
+Done:
+- Built experiments/adaptation_probe.py (~620 LOC, 3 sub-probes).
+- Probe 1 (action energy vs episode step): ratio 1.50, naively "adaptive"
+  but explained by post-reset settling, not env-id (per design caveat).
+- Probe 2 (linear+MLP decoding from pre-GRU MLP and post-GRU GRU features,
+  1024 envs × 2 agents = 2048 samples, ridge + 32-hidden MLP, 80/20 split):
+  ALL 7 non-degenerate _eff_progress_* axes give negative R² on both
+  feature types at every T ∈ [8, 256]. burst_dropout degenerate at step
+  199k (no curriculum variance yet). Post-GRU R² consistently MORE negative
+  than pre-GRU — GRU is not concentrating env-identity info.
+- Probe 3 (hidden-state swap counterfactual, 512 paired envs, swap at T=100):
+  detrended signal = -0.21 nat (within ±0.5 robust threshold). Isaac Sim
+  non-determinism gives ~19 nat baseline noise floor between rollouts;
+  swap excess matches the no-swap-control excess.
+- Convergent verdict: ROBUST, not adaptive. The t034 +39% action_sum
+  regression is uniformly-overaggressive commands across the env
+  distribution, not env-conditional behavior. Validates the indirect
+  priors (sigma +0.04 above fix2; monotone sigma growth) from t034.
+- Outputs: experiments/outputs/2026-05-20/probe036/ (PNGs + JSON + CSV).
+- Writeup: doc/experiments/2026-05-20_036_policy_adaptation_probe.md
+- Bug fixes encountered:
+  * Preprocessor-cfg `setdefault({})` doesn't replace explicit None; use
+    explicit None check.
+  * Probe 2 MLP target must be standardized to avoid numerical explosion
+    on degenerate (near-zero-variance) latents.
+  * Probe 3 cross-rollout reproducibility: env.reset(seed=) didn't help —
+    Isaac Sim physics is not bit-reproducible across reset() calls. Probe
+    now reports DETRENDED signal (post-pre) instead of absolute KL.
+
+Bug fix during smoke: feedback memory added — must `conda activate
+env_isaaclab` before `./isaaclab.sh -p` (otherwise numpy 2.2.6 vs vendored
+1.26 ABI mismatch crashes evaluate.py and all isaaclab scripts on import).
+
+Next:
+- Open follow-up ticket: critic-only privileged obs (8 _eff_progress_*
+  scalars × A agents to centralized critic; no actor change). Per
+  ticket 036 §"Next step": ~1 day implementation, ~24h to train 400k for
+  A/B vs t034 baseline. Verdict justifies it as the highest-leverage
+  next investment.
+- Optionally: confirm Probe 2 result with stronger nonlinear decoders
+  (k-NN, RandomForest) before committing to retrain — current MLP gave
+  WORSE R² than ridge on every axis, suggesting overfitting; but ridge
+  R² also negative, so the signal is consistent.
+
+----------------------------------------
+2026-05-20 — Ticket 037 opened (critic-only privileged obs, Phase 1)
+----------------------------------------
+Done:
+- Opened ticket 037 at doc/active/ticket/037-critic-privileged-obs/
+- Scope: Phase 1 only (critic-only privileged obs, no actor change).
+- Identified the critical bundling concern: `progress_dynamics` co-ramps
+  at least 7 physically-INDEPENDENT quantities (gimbal τ, controller
+  gains, max_lin_vel scale, FOV scale, gimbal mech offsets, mass/inertia,
+  gimbal stiffness/damping, target scale). Real hardware has no such
+  correlation — bundled training risks the policy exploiting a
+  distributional artifact, and the critic learning V over a manifold
+  that doesn't exist at deployment.
+- Three options laid out:
+  A. `_eff_progress_*` (8 scalars × A) — cheapest, bundled.
+  B. Actual jittered physical params — independent, expensive plumbing.
+  C. `_eff_progress_*` BUT with `progress_dynamics` decoupled into the
+     7 sub-axes — cleanest sim-to-real story, env-side cost.
+- Ticket workflow GATES implementation on a written design doc:
+  §1 literature review (Pinto 2018, ETH 2020, RMA, MAPPO 2022, etc.),
+  §2 comparison matrix (info sufficiency, bundling, sim2real,
+  dimensionality, plumbing, probe-ability), §3 decision.
+- Phase 2 (actor-side aux sysid head) recorded as future-reference at
+  bottom of ticket — NOT in 037 scope. Opens as a separate ticket
+  post-Phase-1 evaluation, gated on whether Phase 1's metrics (σ,
+  action_sum) recover enough.
+- Acceptance criteria: V-loss drops ≥15% vs t034, σ collapses modestly,
+  visibility ratios stay ≥0.80, task-quality within ±2% of t034,
+  re-run ticket 036 probe expected to give comparable robust verdict
+  (Phase 1 doesn't add actor-side env-id encoding).
+
+Next:
+- Write doc/critic_obs_design.md §1-3 (literature review + decision matrix).
+  This is the load-bearing decision; ticket gates implementation on it.
+
+----------------------------------------
+2026-05-20 — Ticket 037 §1 literature review draft-complete
+----------------------------------------
+Done:
+- Wrote §1 of doc/critic_obs_design.md covering 4 lines of prior work:
+  asymmetric AC (Pinto 2018, OpenAI Hand 2019); privileged teacher-student
+  (Lee ETH 2020, Miki 2022); DR encoders (RMA 2021); centralized critic
+  in MARL (MADDPG, COMA, MAPPO 2022).
+- Verified load-bearing facts via WebFetch / ar5iv:
+  * RMA: z ∈ R^8, e_t ∈ R^17 = mass+COM(3) + motor_strength(12) +
+    friction(1) + terrain_ht(1). Encoder 3-layer MLP (256, 128).
+    Critic input NOT explicitly stated in paper text I could verify.
+  * OpenAI Hand (arXiv 1910.07113 §6.2): critic sees CLEAN sim state
+    (no obs noise), NOT randomization parameter values. The privilege
+    is "noiseless obs" not "raw env params." This contradicts my prior
+    claim — updated synthesis.
+  * Scaffolder (arXiv 2405.14853, 2024): critic-only privilege exists
+    as a paradigm, but the privileged content is extra sensors
+    (cameras, touch, object poses), not env randomization params.
+- KEY FINDING: ticket 037 Phase 1's exact pattern — critic-only +
+  env-randomization-params + no actor encoder — is NOT a directly
+  precedented architecture in the published literature. The mechanism
+  (asymmetric AC) and the content (raw env params) each have strong
+  precedents, but the conjunction doesn't. This is a sub-novel choice,
+  not foregone-conclusion. Updated ticket expected-outcome bounds:
+  V-loss drop may be smaller than Pinto 2018's clean-vs-pixels delta;
+  actor-side effects (sigma collapse, action_sum) are unanchored.
+- Tentative option ranking pre-§2 analysis:
+  B (raw params, critic-only) > C (decoupled progress) > D (encoder) > A
+  (bundled progress, no lit precedent).
+
+Open verification gaps (do not block §2 but worth confirming before
+treating doc as authoritative):
+- Lee 2020 exact privileged-obs list
+- Yu 2022 MAPPO AS-vs-CL claim (all tasks or just most?)
+- Margolis/Agrawal 2022 — is it cited correctly or should it be dropped?
+- Tan 2018, Peng 2018 exact titles/venues
+
+Next:
+- §2 of critic_obs_design.md — comparison matrix, scoring each option
+  on info sufficiency, bundling, sim2real, dim, plumbing, curriculum
+  alignment, probe-ability.
+- §3 — locked decision.
+
+----------------------------------------
+2026-05-20 — Ticket 037 §2 comparison matrix complete; scope updated
+----------------------------------------
+Done:
+- Updated ticket 037 to ADD env-param decoupling to Phase 1 scope.
+  `progress_dynamics` will be split into 8 independent curriculum
+  axes (gimbal_rate_tau, drone_controller_gains, max_lin_vel_scale,
+  camera_fov, gimbal_mech_offsets, mass_inertia, gimbal_stiff_damp,
+  target_scale). Behind `enable_axis_independence: bool = False` for
+  bit-exact t034 reproduction; new runs set independently.
+- Cfg surface designed extensible: `critic_privileged_fields: list[str]`
+  not a bool.
+- Wrote §2 of doc/critic_obs_design.md (comparison matrix):
+  * Per-agent dim counts: A=8, B=~27+3 shared, C=15, D=8.
+  * Per-axis scoring across 11 dimensions (info sufficiency, axis
+    independence, sim2real risk, dim, normalization, plumbing,
+    curriculum alignment, probe-ability, lit precedent, Phase 2
+    re-usability, training-time correlation exploit risk).
+  * Discussion of normalization (B's heterogeneous units strain
+    RunningStandardScaler), plumbing (B/D touch 6+ modules), encoder
+    correlation re-baking risk (D), Phase 2 supervision target
+    cleanliness (B/C/D well-conditioned, A inherits bundling failure).
+  * Ranking under different priorities:
+    - "Ship cheap, get V-loss signal": C > A > B > D
+    - "Set up for Phase 2 / sim2real": B > D > C > A
+    - Both converge on A and D being weak for Phase 1.
+  * Real choice: B vs C.
+- §2 ends with a PRE-DECISION ABLATION REQUEST: short A-vs-C run
+  (~few hundred k steps, V-loss curves only) to measure actual delta
+  before committing to a 24h 400k training run. Cost is small
+  relative to the commitment.
+- Tentative recommendation: start with C for Phase 1 (lower plumbing,
+  gets decoupling done as side effect), escalate to B for Phase 2
+  if aux-head benefits from physical-unit targets. C and B are not
+  exclusive across phases — Phase 2 can stack raw-params on top of
+  Phase 1's progress-axis exposure.
+
+Open factual / scoping questions noted for §3 to resolve:
+- Measurable V-loss reduction A vs C (ablation)
+- Does env-decoupling alone (no critic change) move metrics?
+- For B: how much of ~57 raw-param dims actually vary in deployment?
+  (Cross-ref dr_observability_taxonomy.md — some are calibrated at
+  deploy.)
+
+Next:
+- §3 — locked decision. Requires either (a) the pre-decision ablation
+  request, or (b) explicit user override to skip it.
+
+----------------------------------------
+2026-05-20 — Ticket 037 §3 locked on Option B; implementation slices written
+----------------------------------------
+Done:
+- User confirmed Option B (raw scalars, critic-only) after code-audit
+  finding: raw params are MORE independent than initially assumed.
+- Code audit (drone_controller.py:444-512, gimbal_randomizer.py:148-182,
+  physics_randomizer.py:100-194):
+  * Within `randomize_gains`, Kp_vel and Ki_vel share a single scale;
+    Kp_rate/Ki_rate/Kd_rate share a single scale. 5 effective scale
+    draws for the gain block (vel/att/rate/motor) + 2 zoom = 6 total.
+  * Gimbal: 3 mech offsets, 2 mass scales, 1 stiffness + 1 damping +
+    1 friction. All independent per (env, agent).
+  * Physics: mass scale OR mass addition (mode-dep), payload mass.
+  * Camera: FOV scale (1).
+  * Delay: latency, noise_std, dropout, burst_dropout — all independent
+    per (env, agent).
+  * Verdict: ~22-23 truly independent draws per agent + 2 shared.
+- Wrote §3 of doc/critic_obs_design.md:
+  * Locked decision on B with concrete 25-field spec (23/agent + 2 shared)
+    = 48 dims for A=2, 71 for A=3.
+  * Specified per-field source (getter), native range, pre-norm to
+    [-1, +1] using cfg-known ranges.
+  * Explicit exclusion list (friction, ground material, etc) with
+    rationale.
+  * Argued pre-normalize-in-env over RunningStandardScaler — bounded
+    targets from step 0; sets up Phase 2 head with tanh output.
+  * Feed UPSTREAM SCALES not derived gain values — strictly more
+    informative since derived gains live on a 5-manifold.
+- Updated ticket 037 with 11 implementation slices:
+  1. Inventory & accessor audit (½d, no code)
+  2. Cfg surface (¼d)
+  3. Accessor getters per module (1d)
+  4. Privileged obs assembly (½d)
+  5. Shared obs wiring (¼d)
+  6. SKRL preprocessor handling (¼d)
+  7. Env decoupling sub-scope (1d)
+  8. Unit tests (½d)
+  9. Training run (~24h wall-clock)
+  10. Evaluation incl. probe-036 re-run (½d)
+  11. Writeup (½d)
+  Total: ~3 engineering days + 24h train.
+- Implementation gated on Slice 1 audit confirming the field registry
+  matches actual env-side accessors. Several getters do not yet exist
+  (e.g., DroneController.get_gain_scales) — these need to be added.
+
+User's "too wide range" concern is logged as a separate sibling ticket
+candidate but does NOT gate ticket 037. Phase 1 measures the V-loss
+attribution improvement from the current randomization width; if the
+width is later narrowed, the V-loss gap shrinks but the architecture
+unchanged.
+
+User's "within-episode stationarity" point is logged as a Phase 2
+enabler: aux sysid head has a clean per-episode-constant supervision
+target, well-conditioned for regression with tanh head over the same
+48-dim space.
+
+Next:
+- Start Slice 1 (inventory audit). Output: field_registry.md table
+  or appendix in critic_obs_design.md mapping all 25 fields to their
+  canonical owner + accessor + storage shape.
+
+----------------------------------------
+2026-05-20 — Ticket 037 Slice 1 complete (inventory audit)
+----------------------------------------
+Done:
+- Inventory pass for all design-doc §3.1 fields against actual env
+  storage tensors. Written as §3.4 (field registry) in
+  doc/critic_obs_design.md.
+- TWO REVISIONS to the §3.1 field list discovered during audit:
+  * REMOVE fields #15-16 (gimbal_yaw_mass_scale / pitch_mass_scale).
+    The scale_yaw / scale_pitch draws at gimbal_randomizer.py:356-360
+    are τ scales (multiplied directly into tau_yaw_s / tau_pitch_s and
+    discarded), NOT mass scales. No mass effect exists in this
+    randomizer.
+  * EXPAND field #8 (gimbal_rate_tau_s) into two fields:
+    gimbal_rate_tau_yaw_s and gimbal_rate_tau_pitch_s, because
+    GimbalRateLoop stores _tau_yaw and _tau_pitch separately and
+    they're independently sampled.
+  * Net change: 23 - 2 + 1 = 22 per-agent fields. Total dim for A=2
+    is now 44 (not 48 — revised in doc).
+- Verified each field's:
+  * Owner module
+  * Storage attribute and shape
+  * Whether accessor exists
+  * Whether layout matches (N, A) convention or needs reshape
+- Surfaced concerns:
+  * `max_lin_vel` is stored per-env (mean over agents at
+    iris_ma_env6_test.py:2632) — broadcast to (N, A) at obs-build with
+    documented info-loss. Per-(env, agent) extension is a sub-ticket.
+  * All 6 gain scales are derived (current/nominal) at obs-build time
+    rather than caching new state.
+  * Burst dropout exact formula needs verification at
+    iris_ma_env6_test.py:1488-1496 before Slice 4.
+  * Effective τ (not nominal) is what fields 8a/8b should expose.
+  * 5 module getters need adding for Slice 3.
+  * DomainRandomizer.get_fov_scales() already exists; reuse.
+- Slice 1 verdict: NO blockers for Slice 2/3. Implementation ready.
+
+Next:
+- Slice 2 (cfg surface): add critic_privileged_fields: list[str] +
+  enable_axis_independence: bool to IrisMA6TestEnvCfg, plus the
+  _CRITIC_PRIVILEGED_FIELD_REGISTRY constant populated from §3.4
+  inventory table.
+
+----------------------------------------
+2026-05-20 — Ticket 037 Slice 2 complete (cfg surface)
+----------------------------------------
+Done:
+- Added `_CRITIC_PRIVILEGED_FIELD_REGISTRY` module-level constant in
+  iris_ma_env6_test_cfg.py with 24 entries (22 per-agent + 2 shared).
+- Added `_critic_privileged_dim_split(field_names)` helper to compute
+  per-agent and shared dim contributions from the registry.
+- Added `critic_privileged_fields: list[str] = []` cfg field with
+  extensive docstring (default empty = bit-exact t034 reproduction).
+- Extended `__post_init__` to:
+  * Validate critic_privileged_fields against the registry (unknown
+    names raise ValueError with valid-list hint).
+  * Reject duplicate field entries.
+  * Sum per-agent and shared dims into critic_extra_per_agent /
+    critic_extra_global, integrating cleanly with existing zoom and
+    gt_target tail accounting.
+- Updated state_space docstring to mention all four enable-toggle
+  paths (zoom, gt_target, gt_target_velocity, critic_privileged_fields).
+- ARITHMETIC CORRECTION: previous slice 1 notes said 44 dims for A=2;
+  verified count from registry is 46 (22 × 2 + 2). Doc updated.
+- Syntax check passes (python ast.parse).
+- DEFERRED: enable_axis_independence flag — moved to Slice 7 itself,
+  to avoid introducing a non-functional flag in Slice 2.
+
+Slice 2 verification:
+- With `critic_privileged_fields = []` (default), behavior is
+  bit-exact t034 (no code path reads/writes new state).
+- With `critic_privileged_fields = ["unknown_field"]`, __post_init__
+  raises ValueError listing valid keys.
+- With `critic_privileged_fields = ["fov_scale", "fov_scale"]`,
+  __post_init__ raises ValueError for duplicates.
+- With all 24 fields enabled, state_space increases by:
+  - per_agent contribution: 22 × num_agents (e.g. 44 for A=2)
+  - shared contribution: 2 (target_scale_xy/z)
+  - actor concat dim stays the same
+
+Next:
+- Slice 3: add accessor getters to owner modules. ~1 day. Touchpoints:
+  * DroneController: 6 derived-scale getters (vel/att/rate/motor/zoom_τ/zoom_max_rate)
+  * GimbalRateLoop: get_tau_yaw_effective, get_tau_pitch_effective,
+    plus thin (N*A) → (N, A) reshape wrappers for dead_time_seconds.
+  * ZoomController: thin reshape wrapper for dead_time_seconds.
+  * GimbalRandomizer: get_joint_offsets, get_stiffness_scales,
+    get_damping_scales.
+  * PhysicsRandomizer: mass-mode switch wrapper.
+  * IrisMA6TestEnv: get_target_scale_xy, get_target_scale_z.
+- Slice 3 is the largest of the implementation slices; will likely
+  produce several small commits.
+
+----------------------------------------
+2026-05-20 — Ticket 037 Slice 3 complete (much smaller than estimated)
+----------------------------------------
+Done:
+- Added 6 derived-scale getters to DroneController (vel/att/rate/motor/
+  zoom_tau/zoom_max_rate). Each returns (N*A,) at the batched-controller
+  layout; env-side assembly will reshape to (N, A) in Slice 4. Scales
+  computed as (current / nominal) — no new state cached. For 3-vector
+  gains (Kp_vel etc), reduce by mean since the scale was uniform across
+  axes per randomize_gains' broadcasting.
+- Added 2 effective-τ @property accessors to GimbalRateLoop:
+  tau_yaw_effective = _tau_yaw * _tau_progress_per_env (same for pitch).
+  These return what the lag actually consumes per step.
+- SURPRISE FINDING: most getters I expected to need ALREADY EXIST.
+  - GimbalRandomizer: get_yaw_offsets, get_pitch_offsets,
+    get_roll_offsets, get_stiffness_scales, get_damping_scales (all exist)
+  - PhysicsRandomizer: get_mass_scales, get_payload_masses (both exist)
+  - CameraProcessor: get_fov_scales (exists)
+  - ZoomController: dead_time_seconds @property (exists)
+  - GimbalRateLoop: dead_time_seconds, dead_time_steps @properties (exist)
+- Env-level getters NOT NEEDED: _get_states() (Slice 4) will access
+  _dr_target_scale, _max_lin_vel, _eff_progress_* directly since they're
+  on the env class itself.
+- Total new code: 8 methods (~75 LOC including docstrings).
+- Actual Slice 3 effort: ~½ hour, not 1 day. Budget recovered.
+- IDE warnings on protected-attribute access in DroneController getters
+  are consistent with existing randomize_gains pattern; not blocking,
+  documented in critic_obs_design.md.
+- Syntax check passes for all 3 modified files.
+
+Slice 3 verification:
+- All 22 per-agent fields + 2 shared fields in the registry have a
+  defined accessor path (either a new getter, an existing public
+  attribute/method, or direct env-attribute access).
+- Burst-dropout formula (field #21) still pending verification at
+  iris_ma_env6_test.py:1488-1496 in Slice 4.
+- max_lin_vel will be broadcast (per-env value applied to all agents) —
+  documented as info-loss; per-(env, agent) extension is a sub-ticket.
+
+Next:
+- Slice 4: privileged-obs assembly in _get_states(). Builds the
+  44-dim per-(env, agent) + 2-dim shared tensor with pre-normalization
+  to [-1, +1] using cfg-known ranges. Extends the existing tail
+  concatenation pattern (zoom, gt_target).
+
+----------------------------------------
+2026-05-20 — Burst-dropout formula verified; field renamed; ticket 038 opened
+----------------------------------------
+Done:
+- VERIFIED burst-dropout formula at iris_ma_env6_test.py:1494-1497:
+    p_onset_per_env_agent = (
+        self._eff_progress_burst_dropout
+        * self.cfg.delay_system_params.burst_p_onset
+    )
+  This is the Gilbert-Elliott BURST ONSET PROBABILITY in the
+  observation channel, NOT a generic per-step dropout. Independent
+  from `detection_dropout_prob` (the i.i.d. dropout, field #20).
+- RENAMED registry key `burst_dropout_prob` → `burst_p_onset` for
+  semantic accuracy. Updated:
+  * iris_ma_env6_test_cfg.py _CRITIC_PRIVILEGED_FIELD_REGISTRY
+    (with explanatory comment block on the detection-pipeline fields)
+  * doc/critic_obs_design.md §3.4 row 21
+- Also documented the detection-latency simplification: we expose
+  `_eff_progress_delay × cfg.latency_distribution.mean` (curriculum-
+  scaled expected). The per-episode actual sampled value is in
+  LatencySampler.step_values but exposing the expected approximates
+  the actual under fixed mode and matches the distribution mean under
+  random mode.
+- OPENED ticket 038 (per-agent max_lin_vel extension) as the
+  sub-ticket noted in the user's instruction. Covers:
+  * Storage extension (N,) → (N, A)
+  * Reset path: remove .mean(dim=-1) collapse
+  * Action scaling: per-agent indexing
+  * Cfg flag enable_per_agent_max_lin_vel for bit-exact t034
+  * Regression test + unit test
+  Ticket 038 is independent of 037 — when 038 lands, 037's max_lin_vel
+  privileged-obs field becomes per-agent automatically (the tensor
+  read is shape-agnostic).
+- Syntax verified on cfg after rename.
+
+Next:
+- Slice 4 of ticket 037: privileged-obs assembly in _get_states.
+
+----------------------------------------
+2026-05-20 — Ticket 037 Slice 4 complete (_get_states extension)
+----------------------------------------
+Done:
+- Imported _CRITIC_PRIVILEGED_FIELD_REGISTRY in iris_ma_env6_test.py.
+- Added `_get_critic_privileged_obs()` method to IrisMA6TestEnv:
+  * Iterates cfg.critic_privileged_fields, reads each field's accessor,
+    pre-normalizes to [-1, +1] using cfg-known native range.
+  * Per-agent fields assembled agent-major (a0's K_pa first, then a1's)
+    matching the existing zoom-tail convention at _get_states.
+  * Shared fields appended last.
+  * Returns shape (num_envs, K) with K = per_agent_dim × A + shared_dim.
+  * 22 per-agent fields + 2 shared = 46 dims for A=2 at full enablement.
+  * Each field handler: 4-7 LOC including the norm call. ~200 LOC total
+    in the dispatch _read function.
+- Extended _get_states() to call _get_critic_privileged_obs() when
+  cfg.critic_privileged_fields is non-empty. Bit-exact bypass when
+  empty (default).
+- Added _CRITIC_PRIVILEGED_FIELDS_REQUIRING_DR frozenset in cfg with
+  fail-fast validation in __post_init__: raises ValueError if any
+  DR-dependent field is requested while domain_randomization.enabled=False.
+- Pre-normalization uses inline closures (_norm, _batched_to_na) to
+  keep the dispatch clean.
+- Smoke test: ran evaluate.py against t034's agent_400000.pt with 16 envs,
+  1 episode, default critic_privileged_fields=[]. Env built, checkpoint
+  loaded, eval rollout completed (2.1 MB JSON output written). Confirms
+  bit-exact reproduction of pre-Slice-4 behavior with empty default.
+- NOT YET TESTED: non-empty critic_privileged_fields path. That's
+  Slice 8 (unit tests) — will verify dim, normalization range, and
+  per-field correctness. Could also run a quick manual test by passing
+  --env_cfg.critic_privileged_fields=[...] via Hydra overrides if
+  evaluate.py supports it (worth checking).
+
+Slice 4 status:
+- 1 new public method on IrisMA6TestEnv
+- 1 new closure-based dispatch over 22 field branches
+- 1 new validation block in cfg __post_init__
+- 1 new module-level constant (DR-required fields)
+- All syntax checks pass
+- End-to-end smoke test passes with default cfg
+
+Next:
+- Slice 5 (¼d): SKRL preprocessor handling — verify shared_observation_spaces
+  auto-derives the new dim, and that RunningStandardScaler initializes
+  with the extended dim. Add the bit-exact regression test for empty
+  list path.
+- Slice 6 (¼d): bookkeeping / preprocessor sanity test (overlaps with
+  Slice 5 — may combine).
+- Slice 7 (1d): env decoupling sub-scope. Split progress_dynamics into
+  8 independent curriculum axes.
+- Slice 8 (½d): unit tests for the privileged-obs assembly.
+- Slice 9 (~24h): training run with critic_privileged_fields=[<all>] and
+  enable_axis_independence=True.
+- Slice 10 + 11: eval + writeup.
+
+----------------------------------------
+2026-05-20 — Ticket 037 Slices 5+6+7+8 complete
+----------------------------------------
+Done:
+- Slice 5 (shared obs wiring): fixed `_asymmetric_critic_enabled` flag in
+  iris_ma_env6_test.py to include `critic_privileged_fields` — otherwise
+  state_space was extended in cfg but shared_observation_spaces wasn't
+  updated, causing tensor-size mismatch in the SKRL preprocessor.
+- Slice 6 (SKRL preprocessor): no yaml change needed — preprocessor size
+  auto-derives from env.shared_observation_spaces[possible_agents[0]] in
+  train_mappo_rnn_hydra.py:505. With the Slice 5 fix, the new dim flows
+  through correctly.
+- Slice 7 (env decoupling):
+  * Added 8 per-axis (start, end) cfg fields to curriculum_cfg.py with
+    None defaults (= inherit from dynamics_*). Each fall-back keeps
+    behavior bit-exact when per-axis cfg is unset.
+  * Added 8 get_*_progress methods on CurriculumCfg (gimbal_rate_tau,
+    drone_gains, max_lin_vel_scale, camera_fov, gimbal_mech_offsets,
+    mass_inertia, gimbal_stiff_damp, target_scale).
+  * Added `enable_axis_independence: bool = False` cfg flag on env cfg.
+  * Added 8 new `_eff_progress_*` tensors in env init + 8 scalar
+    `progress_*` attributes.
+  * Conditional sampling: when independence=True, draw 8 per-axis
+    tensors from Uniform(0, progress_*); when False, skip (RNG state
+    preserved for bit-exact t034).
+  * Added `_axis_progress(axis)` and `_axis_eff_progress(axis)`
+    dispatch helpers — fall back to `progress_dynamics` /
+    `_eff_progress_dynamics` when independence=False.
+  * Updated 8 consumer sites (gain randomization gate, randomize_gains
+    call, max_lin_vel scale, FOV, gimbal mech offsets, mass/inertia
+    apply, gimbal stiff/damp apply, target scale) plus 2
+    set_progress(gimbal_rate_loop) call sites to use the axis helpers.
+- Slice 8 (unit tests): wrote tests/test_critic_privileged_obs.py
+  with 12 tests across 3 categories. ALL 12 PASS:
+  * Category 1 (cfg-time dim accounting): 4 tests
+    - empty critic_priv → state_space=98 (matches t034 with zoom tail)
+    - non-DR subset → state_space=130 (15 per-agent + 2 shared for 17 fields)
+    - minimal subset → state_space=101 (1 per-agent + 1 shared)
+    - _critic_privileged_dim_split helper correctness
+  * Category 2 (cfg-time validation): 4 tests
+    - unknown field → ValueError with valid-keys hint
+    - duplicate field → ValueError
+    - DR-dependent field with DR disabled → ValueError
+    - enable_axis_independence default = False
+  * Category 3+4+5 (env-side, single build): 4 sub-tests
+    - priv obs shape (4, 32) for 17 non-DR fields
+    - priv obs range [-1.018, 0.0] ⊆ [-1.1, +1.1] (small compound-randomization
+      overshoot OK; bounded for critic input)
+    - axis_independence=True → per-axis tensor distinct from
+      _eff_progress_dynamics
+    - _eff_progress_gimbal_rate_tau finite
+
+Bugs fixed during Slice 8:
+- `max_lin_vel_per_env` norm range was [max_lin_vel_min, max_lin_vel * scale_hi],
+  but actual range with multiplicative scale randomization extends down to
+  max_lin_vel_min * scale_lo. Fixed to use the scale-product bound.
+- Test construction `cfg = IrisMA6TestEnvCfg(); cfg.__post_init__()` double-ran
+  __post_init__ — fixed by passing settings via constructor kwargs.
+- Test missed `cfg.seed` (ticket-034 strict-seed assertion) — added.
+- Default cfg has `domain_randomization.enabled=False` — tests adapted to use
+  only non-DR fields when DR is disabled.
+
+Verification:
+- Slice 4 + 5 default-cfg smoke (critic_privileged_fields=[]): bit-exact t034 ✓
+- Slice 7 axis-independence=False bit-exact: object-identity check that
+  _axis_eff_progress("X") returns _eff_progress_dynamics for all 8 axes ✓
+- Slice 7 axis-independence=True: per-axis tensor distinct ✓
+- 12/12 unit tests pass
+
+Hydra CLI override caveat: `++env.critic_privileged_fields=[...]` triggers
+struct-mode length-locked error (empty list default). Workaround: use
+`++env.enable_full_critic_priv_obs=true` for the full registry, or set the
+list programmatically in the experiment cfg / experiment_registry.
+
+Next:
+- Slice 9: training run @ 400k with enable_full_critic_priv_obs=True
+  and enable_axis_independence=True. ~24h wall-clock.
+- Slice 10: evaluation vs t034 baseline + re-run probe 036.
+- Slice 11: writeup.

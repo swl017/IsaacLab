@@ -263,6 +263,67 @@ class CurriculumCfg:
     """
 
     # ==========================================================================
+    # Ticket 037 Slice 7 — Per-axis decoupling of `dynamics_*`
+    #
+    # `dynamics_*` currently bundles 8 physically-independent randomization
+    # axes (gimbal τ, drone gains, max_lin_vel scale, FOV, gimbal mech
+    # offsets, mass/inertia, gimbal stiff/damp, target scale). Real hardware
+    # has no such correlation; bundling masks sim-to-real failure modes.
+    #
+    # Each axis has its own (start_step, end_step). Default `None` means
+    # "inherit from dynamics_*" — so existing experiments are bit-exact
+    # unless the cfg flag `enable_axis_independence` is True AND per-axis
+    # values are set.
+    #
+    # See doc/critic_obs_design.md §2.3 / §3 for motivation, and ticket 037
+    # for the decoupling sub-scope.
+    # ==========================================================================
+
+    gimbal_rate_tau_start_step: int | None = None
+    """Per-axis start step for gimbal rate-loop τ randomization.
+    None → inherits ``dynamics_start_step``."""
+
+    gimbal_rate_tau_end_step: int | None = None
+    """Per-axis end step for gimbal rate-loop τ randomization."""
+
+    drone_gains_start_step: int | None = None
+    """Per-axis start step for drone controller gain randomization
+    (Kp_vel/Ki_vel, Kp_att, Kp/Ki/Kd_rate, τ_motor, τ_zoom, max_zoom_rate)."""
+
+    drone_gains_end_step: int | None = None
+
+    max_lin_vel_scale_start_step: int | None = None
+    """Per-axis start step for max_lin_vel multiplicative scale
+    (±20% via gain_randomization.max_lin_vel_scale_range)."""
+
+    max_lin_vel_scale_end_step: int | None = None
+
+    camera_fov_start_step: int | None = None
+    """Per-axis start step for camera FOV scale randomization."""
+
+    camera_fov_end_step: int | None = None
+
+    gimbal_mech_offsets_start_step: int | None = None
+    """Per-axis start step for gimbal mechanical yaw/pitch/roll offsets."""
+
+    gimbal_mech_offsets_end_step: int | None = None
+
+    mass_inertia_start_step: int | None = None
+    """Per-axis start step for robot mass and inertia randomization."""
+
+    mass_inertia_end_step: int | None = None
+
+    gimbal_stiff_damp_start_step: int | None = None
+    """Per-axis start step for gimbal joint stiffness/damping randomization."""
+
+    gimbal_stiff_damp_end_step: int | None = None
+
+    target_scale_start_step: int | None = None
+    """Per-axis start step for target object xy/z scale randomization."""
+
+    target_scale_end_step: int | None = None
+
+    # ==========================================================================
     # Phase 3+: Gimbal command-to-first-move dead time (mas/036)
     #
     # Independent of `dynamics_*` so dead time and rate-loop τ can ramp on
@@ -448,6 +509,60 @@ class CurriculumCfg:
         between `dynamics_start_step` and `dynamics_end_step`.
         """
         return self.get_progress(current_step, self.dynamics_start_step, self.dynamics_end_step)
+
+    # ----------------------------------------------------------------- ticket 037
+    # Per-axis decoupling of `dynamics_*`. Each returns progress in [0, 1]
+    # using its own (start, end) if set, else inherits `dynamics_*`. When
+    # the env cfg's `enable_axis_independence=False` (default), no per-axis
+    # value is meant to be set, so all 8 methods return the same value as
+    # `get_dynamics_progress` and downstream behavior is bit-exact.
+
+    def _axis_progress(self, current_step: int, axis: str) -> float:
+        """Helper: progress for one of the 8 decoupled dynamics axes.
+
+        Resolves to ``get_progress(current_step, start, end)`` where
+        ``start = self.{axis}_start_step or self.dynamics_start_step``,
+        same for ``end``.
+        """
+        start = getattr(self, f"{axis}_start_step", None)
+        end = getattr(self, f"{axis}_end_step", None)
+        if start is None:
+            start = self.dynamics_start_step
+        if end is None:
+            end = self.dynamics_end_step
+        return self.get_progress(current_step, start, end)
+
+    def get_gimbal_rate_tau_progress(self, current_step: int) -> float:
+        """Progress for the gimbal rate-loop τ axis."""
+        return self._axis_progress(current_step, "gimbal_rate_tau")
+
+    def get_drone_gains_progress(self, current_step: int) -> float:
+        """Progress for the drone controller gain randomization axis."""
+        return self._axis_progress(current_step, "drone_gains")
+
+    def get_max_lin_vel_scale_progress(self, current_step: int) -> float:
+        """Progress for the max_lin_vel multiplicative scale axis."""
+        return self._axis_progress(current_step, "max_lin_vel_scale")
+
+    def get_camera_fov_progress(self, current_step: int) -> float:
+        """Progress for the camera FOV scale axis."""
+        return self._axis_progress(current_step, "camera_fov")
+
+    def get_gimbal_mech_offsets_progress(self, current_step: int) -> float:
+        """Progress for the gimbal mechanical offsets axis."""
+        return self._axis_progress(current_step, "gimbal_mech_offsets")
+
+    def get_mass_inertia_progress(self, current_step: int) -> float:
+        """Progress for the robot mass/inertia axis."""
+        return self._axis_progress(current_step, "mass_inertia")
+
+    def get_gimbal_stiff_damp_progress(self, current_step: int) -> float:
+        """Progress for the gimbal joint stiffness/damping axis."""
+        return self._axis_progress(current_step, "gimbal_stiff_damp")
+
+    def get_target_scale_progress(self, current_step: int) -> float:
+        """Progress for the target object scale axis."""
+        return self._axis_progress(current_step, "target_scale")
 
     def get_gimbal_dead_time_progress(self, current_step: int) -> float:
         """Get progress within the gimbal dead-time phase [0, 1] (mas/036).

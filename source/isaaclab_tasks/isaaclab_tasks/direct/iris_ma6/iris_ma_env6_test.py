@@ -37,7 +37,10 @@ from .curriculum.progress_helper import sample_per_env_progress
 from .delay_system_v3 import MultiAgentDelaySystemV3, AgentStates
 from .initial_states import InitialStates
 from .delay_system_v3.derived_field_computers import compute_combined_angular_velocity, compute_ray_directions_from_bbox
-from .iris_ma_env6_test_cfg import IrisMA6TestEnvCfg
+from .iris_ma_env6_test_cfg import (
+    _CRITIC_PRIVILEGED_FIELD_REGISTRY,
+    IrisMA6TestEnvCfg,
+)
 from .target_controller import TargetController
 from .triangulation import (
     TriangulationResult,
@@ -251,6 +254,8 @@ class IrisMA6TestEnv(DirectMARLEnv):
         _asymmetric_critic_enabled = (
             getattr(self.cfg, "enable_critic_continuous_zoom", False)
             or getattr(self.cfg, "enable_critic_gt_target", False)
+            # Ticket 037: privileged env-param tail is also asymmetric.
+            or bool(getattr(self.cfg, "critic_privileged_fields", []))
         )
         if _asymmetric_critic_enabled and self.state_space is not None:
             self.shared_observation_spaces = {
@@ -573,6 +578,18 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self.progress_delay = 0.0
         self.progress_dynamics = 0.0
         self.progress_zoom_tau = 0.0  # mas/037: decoupled from progress_dynamics
+        # Ticket 037 Slice 7 — per-axis scalar progresses (mean across (env, agent)
+        # for logging back-compat; the per-(env, agent) draws live in
+        # `_eff_progress_*` further below). Fall back to `progress_dynamics`
+        # when the per-axis curriculum (start, end) is unset.
+        self.progress_gimbal_rate_tau = 0.0
+        self.progress_drone_gains = 0.0
+        self.progress_max_lin_vel_scale = 0.0
+        self.progress_camera_fov = 0.0
+        self.progress_gimbal_mech_offsets = 0.0
+        self.progress_mass_inertia = 0.0
+        self.progress_gimbal_stiff_damp = 0.0
+        self.progress_target_scale = 0.0
         self._curriculum_noise_scale = 0.0
         self._curriculum_fp_fn_scale = 0.0
 
@@ -618,6 +635,37 @@ class IrisMA6TestEnv(DirectMARLEnv):
             self.num_envs, len(cfg.possible_agents), device=self.device
         )
         self._eff_progress_burst_dropout = torch.zeros(
+            self.num_envs, len(cfg.possible_agents), device=self.device
+        )
+        # Ticket 037 Slice 7 — per-axis decoupling of `_eff_progress_dynamics`.
+        # Each of these 8 tensors is per-(env, agent), independently sampled
+        # at reset from its own curriculum schedule. When
+        # `enable_axis_independence=False` (default), all 8 fall back to the
+        # bundled `dynamics_*` schedule (= _eff_progress_dynamics value),
+        # preserving bit-exact t034 behavior. Consumers read from these
+        # per-axis tensors instead of the old `_eff_progress_dynamics`.
+        self._eff_progress_gimbal_rate_tau = torch.zeros(
+            self.num_envs, len(cfg.possible_agents), device=self.device
+        )
+        self._eff_progress_drone_gains = torch.zeros(
+            self.num_envs, len(cfg.possible_agents), device=self.device
+        )
+        self._eff_progress_max_lin_vel_scale = torch.zeros(
+            self.num_envs, len(cfg.possible_agents), device=self.device
+        )
+        self._eff_progress_camera_fov = torch.zeros(
+            self.num_envs, len(cfg.possible_agents), device=self.device
+        )
+        self._eff_progress_gimbal_mech_offsets = torch.zeros(
+            self.num_envs, len(cfg.possible_agents), device=self.device
+        )
+        self._eff_progress_mass_inertia = torch.zeros(
+            self.num_envs, len(cfg.possible_agents), device=self.device
+        )
+        self._eff_progress_gimbal_stiff_damp = torch.zeros(
+            self.num_envs, len(cfg.possible_agents), device=self.device
+        )
+        self._eff_progress_target_scale = torch.zeros(
             self.num_envs, len(cfg.possible_agents), device=self.device
         )
 
@@ -720,6 +768,29 @@ class IrisMA6TestEnv(DirectMARLEnv):
         Layout: agent 0 → rows [0, N), agent 1 → [N, 2N), etc.
         """
         return env_ids + agent_idx * self.num_envs
+
+    # ------------------------------------------------------------------ Ticket 037
+    def _axis_progress(self, axis: str) -> float:
+        """Scalar per-axis dynamics progress; falls back to `progress_dynamics`
+        when `enable_axis_independence=False` (bit-exact t034 behavior).
+
+        ``axis`` is one of: gimbal_rate_tau, drone_gains, max_lin_vel_scale,
+        camera_fov, gimbal_mech_offsets, mass_inertia, gimbal_stiff_damp,
+        target_scale.
+        """
+        if not self.cfg.enable_axis_independence:
+            return self.progress_dynamics
+        return getattr(self, f"progress_{axis}")
+
+    def _axis_eff_progress(self, axis: str) -> torch.Tensor:
+        """Per-(env, agent) effective progress for the axis; falls back to
+        `_eff_progress_dynamics` when `enable_axis_independence=False`.
+
+        Returns ``Tensor[N, A]`` either way.
+        """
+        if not self.cfg.enable_axis_independence:
+            return self._eff_progress_dynamics
+        return getattr(self, f"_eff_progress_{axis}")
 
     def _pre_physics_step(self, actions: Dict[str, torch.Tensor]):
         """Pre-process actions for all agents before physics step.
@@ -1506,8 +1577,10 @@ class IrisMA6TestEnv(DirectMARLEnv):
         # flattened to the batched-controller layout
         # (agent_a → rows [a*N, (a+1)*N); see _batch_idx). `.t().reshape(-1)`
         # produces [agent_0_env_0, ..., agent_0_env_N-1, agent_1_env_0, ...].
+        # Ticket 037 Slice 7: read from gimbal_rate_tau axis (falls back to
+        # `_eff_progress_dynamics` when `enable_axis_independence=False`).
         self._controller.gimbal_rate_loop.set_progress(
-            self._eff_progress_dynamics.t().reshape(-1)
+            self._axis_eff_progress("gimbal_rate_tau").t().reshape(-1)
         )
 
         # mas/036: ramp gimbal command-to-first-move dead-time scale.
@@ -2189,8 +2262,10 @@ class IrisMA6TestEnv(DirectMARLEnv):
         cfg_zoom = getattr(self.cfg, "enable_critic_continuous_zoom", False)
         cfg_target = getattr(self.cfg, "enable_critic_gt_target", False)
         cfg_target_vel = getattr(self.cfg, "enable_critic_gt_target_velocity", False)
+        # Ticket 037 — privileged env-param tail.
+        cfg_priv = bool(getattr(self.cfg, "critic_privileged_fields", []))
 
-        if not (cfg_zoom or cfg_target):
+        if not (cfg_zoom or cfg_target or cfg_priv):
             # Fallback: same as DirectMARLEnv's auto-concat path.
             return torch.cat(
                 [self.obs_dict[a].reshape(self.num_envs, -1) for a in self.cfg.possible_agents],
@@ -2225,7 +2300,233 @@ class IrisMA6TestEnv(DirectMARLEnv):
             if cfg_target_vel:
                 parts.append(self.target.data.root_lin_vel_w.float())  # (N, 3)
 
+        # Ticket 037 — privileged env-param tail (cfg-driven).
+        # Per-agent fields are agent-major: all of a0's K_pa values
+        # first, then a1's, etc. Shared fields come last.
+        if cfg_priv:
+            parts.append(self._get_critic_privileged_obs())     # (N, K_priv)
+
         return torch.cat(parts, dim=-1)
+
+    def _get_critic_privileged_obs(self) -> torch.Tensor:
+        """Ticket 037 — build the privileged env-param tail for the centralized critic.
+
+        Returns shape ``(num_envs, K)`` where
+        ``K = per_agent_dim × num_agents + shared_dim``.
+
+        Per-agent fields are concatenated agent-major (a0's K_pa fields first,
+        then a1's, etc.) matching the existing zoom-tail convention; shared
+        fields (one value per env) come after. Each field is pre-normalized
+        to ``[-1, +1]`` using its cfg-known native range (linear map), so the
+        critic sees a bounded, well-conditioned input from training step 0
+        without depending on ``RunningStandardScaler`` convergence.
+
+        Setting ``cfg.critic_privileged_fields = []`` (default) bypasses this
+        method entirely via the guard in :meth:`_get_states`, so behavior is
+        bit-exact t034 in that case. See doc/critic_obs_design.md §3 for
+        field semantics and the storage map at §3.4.
+
+        Called from :meth:`_get_states` once per env.state() invocation; the
+        skrl MAPPO trainer reads it before and after each step, so it must
+        be cheap (no allocations beyond the output concat).
+        """
+        cfg = self.cfg
+        N = self.num_envs
+        A = len(cfg.possible_agents)
+
+        def _norm(x: torch.Tensor, low: float, high: float) -> torch.Tensor:
+            """Linearly map ``[low, high]`` → ``[-1, +1]`` per-element.
+
+            Degenerate range (``|high - low| ≈ 0``, e.g. randomization disabled
+            for that axis) returns zeros — the critic sees "no signal" rather
+            than NaN or div-by-zero.
+            """
+            span = high - low
+            if abs(span) < 1e-12:
+                return torch.zeros_like(x)
+            return 2.0 * (x - low) / span - 1.0
+
+        def _batched_to_na(x: torch.Tensor) -> torch.Tensor:
+            """Batched-controller layout ``(N*A,)`` → ``(N, A)`` agent-major.
+
+            The batched controllers use the convention agent_a → rows
+            ``[a*N, (a+1)*N)`` (see :meth:`_batch_idx`). ``.reshape(A, N).t()``
+            inverts that to ``(N, A)``.
+            """
+            return x.reshape(A, N).t().contiguous()
+
+        def _read(name: str) -> torch.Tensor:
+            """Read one field, return pre-normalized tensor (shape (N, A) for
+            per_agent, (N,) for shared)."""
+            # --- Drone controller gain scales (current/nominal, axis-uniform) ---
+            if name == "vel_gain_scale":
+                return _norm(
+                    _batched_to_na(self._controller.get_vel_gain_scale()),
+                    *cfg.gain_randomization.scale_range,
+                )
+            if name == "att_gain_scale":
+                return _norm(
+                    _batched_to_na(self._controller.get_att_gain_scale()),
+                    *cfg.gain_randomization.scale_range,
+                )
+            if name == "rate_gain_scale":
+                return _norm(
+                    _batched_to_na(self._controller.get_rate_gain_scale()),
+                    *cfg.gain_randomization.scale_range,
+                )
+            if name == "motor_gain_scale":
+                return _norm(
+                    _batched_to_na(self._controller.get_motor_gain_scale()),
+                    *cfg.gain_randomization.scale_range,
+                )
+            if name == "zoom_tau_scale":
+                return _norm(
+                    _batched_to_na(self._controller.get_zoom_tau_scale()),
+                    *cfg.gain_randomization.zoom_scale_range,
+                )
+            if name == "zoom_max_rate_scale":
+                return _norm(
+                    _batched_to_na(self._controller.get_zoom_max_rate_scale()),
+                    *cfg.gain_randomization.scale_range,
+                )
+
+            # --- Drone dynamics ---
+            if name == "max_lin_vel_per_env":
+                # Currently stored per-env at iris_ma_env6_test.py:2632
+                # (mean-collapsed across agents); broadcast to per-agent for
+                # the critic obs. Ticket 038 will extend _max_lin_vel to
+                # (N, A) — this code path then yields genuine per-agent signal
+                # automatically (the read becomes self._max_lin_vel directly
+                # without unsqueeze/expand).
+                #
+                # Actual range under full curriculum:
+                #   curriculum: _max_lin_vel ∈ [max_lin_vel_min, max_lin_vel]
+                #   × randomize scale ∈ [max_lin_vel_scale_range[0],
+                #                        max_lin_vel_scale_range[1]]
+                # So the bound is [min × scale_lo, max × scale_hi].
+                per_env = self._max_lin_vel  # (N,)
+                scale_lo, scale_hi = cfg.gain_randomization.max_lin_vel_scale_range
+                low = cfg.max_lin_vel_min * scale_lo
+                high = cfg.max_lin_vel * scale_hi
+                normed = _norm(per_env, low, high)
+                return normed.unsqueeze(-1).expand(N, A).contiguous()
+
+            # --- Gimbal rate-loop effective τ ---
+            if name == "gimbal_rate_tau_yaw_s":
+                grl_cfg = cfg.drone_controller.gimbal_rate_loop
+                return _norm(
+                    _batched_to_na(self._controller.gimbal_rate_loop.tau_yaw_effective),
+                    0.0,
+                    grl_cfg.tau_yaw_s * grl_cfg.tau_scale_range_yaw[1],
+                )
+            if name == "gimbal_rate_tau_pitch_s":
+                grl_cfg = cfg.drone_controller.gimbal_rate_loop
+                return _norm(
+                    _batched_to_na(self._controller.gimbal_rate_loop.tau_pitch_effective),
+                    0.0,
+                    grl_cfg.tau_pitch_s * grl_cfg.tau_scale_range_pitch[1],
+                )
+
+            # --- Dead times ---
+            if name == "gimbal_dead_time_s":
+                return _norm(
+                    _batched_to_na(self._controller.gimbal_rate_loop.dead_time_seconds),
+                    0.0,
+                    cfg.drone_controller.gimbal_rate_loop.dead_time_max_s,
+                )
+            if name == "zoom_dead_time_s":
+                return _norm(
+                    _batched_to_na(self._controller._zoom.dead_time_seconds),
+                    0.0,
+                    cfg.drone_controller.zoom.dead_time_max_s,
+                )
+
+            # --- Camera FOV ---
+            if name == "fov_scale":
+                fov_raw = self._domain_randomizer.get_fov_scales()  # (N, A)
+                return _norm(fov_raw, *cfg.domain_randomization.camera.fov_scale_range)
+
+            # --- Gimbal mechanical offsets ---
+            if name == "gimbal_yaw_offset":
+                return _norm(
+                    self._domain_randomizer.gimbal_randomizer.get_yaw_offsets(),
+                    *cfg.domain_randomization.gimbal.yaw_offset_range,
+                )
+            if name == "gimbal_pitch_offset":
+                return _norm(
+                    self._domain_randomizer.gimbal_randomizer.get_pitch_offsets(),
+                    *cfg.domain_randomization.gimbal.pitch_offset_range,
+                )
+            if name == "gimbal_roll_offset":
+                return _norm(
+                    self._domain_randomizer.gimbal_randomizer.get_roll_offsets(),
+                    *cfg.domain_randomization.gimbal.roll_offset_range,
+                )
+
+            # --- Gimbal joint dynamics ---
+            if name == "gimbal_stiffness_scale":
+                return _norm(
+                    self._domain_randomizer.gimbal_randomizer.get_stiffness_scales(),
+                    *cfg.domain_randomization.gimbal.stiffness_scale_range,
+                )
+            if name == "gimbal_damping_scale":
+                return _norm(
+                    self._domain_randomizer.gimbal_randomizer.get_damping_scales(),
+                    *cfg.domain_randomization.gimbal.damping_scale_range,
+                )
+
+            # --- Robot body mass (per-env, broadcast to agents) ---
+            if name == "body_mass_scale_or_add":
+                per_env = self._domain_randomizer.physics_randomizer.get_mass_scales()  # (N,)
+                normed = _norm(
+                    per_env,
+                    *cfg.domain_randomization.physics.mass.body_mass_scale_range,
+                )
+                return normed.unsqueeze(-1).expand(N, A).contiguous()
+
+            # --- Detection pipeline (env-derived: _eff_progress_* × cfg base) ---
+            if name == "detection_latency_s":
+                base = cfg.delay_system_params.ego_detection_latency_mean
+                return _norm(self._eff_progress_delay * base, 0.0, base)
+            if name == "bbox_noise_std":
+                base = cfg.delay_system_params.noise_bbox_std
+                return _norm(self._eff_progress_noise * base, 0.0, base)
+            if name == "detection_dropout_prob":
+                base = cfg.delay_system_params.dropout_prob
+                return _norm(self._eff_progress_dropout * base, 0.0, base)
+            if name == "burst_p_onset":
+                base = cfg.delay_system_params.burst_p_onset
+                return _norm(self._eff_progress_burst_dropout * base, 0.0, base)
+
+            # --- Target physics (shared per env) ---
+            if name == "target_scale_xy":
+                return _norm(self._dr_target_scale[:, 0, 0], *cfg.target_xy_scale_range)
+            if name == "target_scale_z":
+                return _norm(self._dr_target_scale[:, 0, 2], *cfg.target_z_scale_range)
+
+            raise ValueError(f"unknown critic_privileged_field: {name!r}")
+
+        # Split fields by scope, preserving the user's declared order
+        # within each group.
+        per_agent_fields = [
+            f for f in cfg.critic_privileged_fields
+            if _CRITIC_PRIVILEGED_FIELD_REGISTRY[f]["scope"] == "per_agent"
+        ]
+        shared_fields = [
+            f for f in cfg.critic_privileged_fields
+            if _CRITIC_PRIVILEGED_FIELD_REGISTRY[f]["scope"] == "shared"
+        ]
+
+        parts: List[torch.Tensor] = []
+        if per_agent_fields:
+            # Stack per-agent reads → (N, A, K_pa).
+            pa_stack = torch.stack([_read(f) for f in per_agent_fields], dim=-1)
+            # Agent-major flatten: a0's K_pa first, then a1's, …
+            parts.append(pa_stack.reshape(N, A * len(per_agent_fields)))
+        if shared_fields:
+            parts.append(torch.stack([_read(f) for f in shared_fields], dim=-1))
+
+        return torch.cat(parts, dim=-1) if parts else torch.empty(N, 0, device=self.device)
 
     def _get_dones(self) -> tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         """Get termination and truncation flags for all agents.
@@ -2335,6 +2636,21 @@ class IrisMA6TestEnv(DirectMARLEnv):
             current_step,
         )
 
+        # Ticket 037 Slice 7 — per-axis dynamics progresses. Each method falls
+        # back to dynamics_* if the per-axis (start, end) is None (default),
+        # so behavior is bit-exact to pre-decoupling when no per-axis cfg is
+        # set. When enable_axis_independence=True AND per-axis cfgs are set,
+        # each axis ramps on its own schedule.
+        curr = self.cfg.curriculum
+        self.progress_gimbal_rate_tau   = curr.get_gimbal_rate_tau_progress(current_step)
+        self.progress_drone_gains       = curr.get_drone_gains_progress(current_step)
+        self.progress_max_lin_vel_scale = curr.get_max_lin_vel_scale_progress(current_step)
+        self.progress_camera_fov        = curr.get_camera_fov_progress(current_step)
+        self.progress_gimbal_mech_offsets = curr.get_gimbal_mech_offsets_progress(current_step)
+        self.progress_mass_inertia      = curr.get_mass_inertia_progress(current_step)
+        self.progress_gimbal_stiff_damp = curr.get_gimbal_stiff_damp_progress(current_step)
+        self.progress_target_scale      = curr.get_target_scale_progress(current_step)
+
         # Step-at-episode-boundary: triangulation reward turns on when the env
         # starts an episode at or after coordination_start_step. Held constant
         # for the episode (no mid-episode reward-function change). The legacy
@@ -2387,10 +2703,45 @@ class IrisMA6TestEnv(DirectMARLEnv):
             global_progress=self.progress_dynamics,
             num_envs=self.num_envs,
             num_agents=len(self.cfg.possible_agents),
-            device=self.device,
             env_ids=env_ids,
+            device=self.device,
             generator=self._curriculum_generator,
         )
+
+        # Ticket 037 Slice 7 — per-axis dynamics sampling. Each draws its
+        # own (env, agent) sample from Uniform(0, progress_axis), where
+        # progress_axis falls back to progress_dynamics if the per-axis
+        # curriculum (start, end) is unset. Result: with all per-axis
+        # cfgs at default (None), these 8 tensors equal `_eff_progress_dynamics`
+        # bit-exactly under the same `_curriculum_generator` RNG state...
+        # NOT: the generator advances per call, so successive draws diverge.
+        # For bit-exact t034 reproduction, set `enable_axis_independence=False`
+        # which routes all consumers back to `_eff_progress_dynamics` and
+        # the 8 below remain unused (zero-init). See _read_axis_eff_progress
+        # for the dispatch.
+        def _sample_per_axis(global_p: float) -> torch.Tensor:
+            return sample_per_env_progress(
+                global_progress=global_p,
+                num_envs=self.num_envs,
+                num_agents=len(self.cfg.possible_agents),
+                env_ids=env_ids,
+                device=self.device,
+                generator=self._curriculum_generator,
+            )
+
+        if self.cfg.enable_axis_independence:
+            self._eff_progress_gimbal_rate_tau[env_ids]     = _sample_per_axis(self.progress_gimbal_rate_tau)
+            self._eff_progress_drone_gains[env_ids]         = _sample_per_axis(self.progress_drone_gains)
+            self._eff_progress_max_lin_vel_scale[env_ids]   = _sample_per_axis(self.progress_max_lin_vel_scale)
+            self._eff_progress_camera_fov[env_ids]          = _sample_per_axis(self.progress_camera_fov)
+            self._eff_progress_gimbal_mech_offsets[env_ids] = _sample_per_axis(self.progress_gimbal_mech_offsets)
+            self._eff_progress_mass_inertia[env_ids]        = _sample_per_axis(self.progress_mass_inertia)
+            self._eff_progress_gimbal_stiff_damp[env_ids]   = _sample_per_axis(self.progress_gimbal_stiff_damp)
+            self._eff_progress_target_scale[env_ids]        = _sample_per_axis(self.progress_target_scale)
+        # When enable_axis_independence=False, the consumer sites read from
+        # `_eff_progress_dynamics` directly via _read_axis_eff_progress;
+        # the 8 per-axis tensors remain at their zero-init values and the
+        # generator RNG state is preserved (no extra draws).
         self._eff_progress_gimbal_dead_time[env_ids] = sample_per_env_progress(
             global_progress=self.cfg.curriculum.get_gimbal_dead_time_progress(current_step),
             num_envs=self.num_envs,
@@ -2468,8 +2819,10 @@ class IrisMA6TestEnv(DirectMARLEnv):
         # hooks in _get_rewards will re-push these values every step, but
         # the reset path needs them up front. Flatten (N, A) → (N*A,) into
         # the batched-controller layout.
+        # Ticket 037 Slice 7: read from gimbal_rate_tau axis (bit-exact
+        # equal to _eff_progress_dynamics when enable_axis_independence=False).
         self._controller.gimbal_rate_loop.set_progress(
-            self._eff_progress_dynamics.t().reshape(-1)
+            self._axis_eff_progress("gimbal_rate_tau").t().reshape(-1)
         )
         self._controller.gimbal_rate_loop.set_dead_time_curriculum_scale(
             self._eff_progress_gimbal_dead_time.t().reshape(-1)
@@ -2634,15 +2987,17 @@ class IrisMA6TestEnv(DirectMARLEnv):
             self.cfg.max_lin_vel - self.cfg.max_lin_vel_min
         )
 
-        # Randomize controller gains (curriculum-gated to dynamics phase)
-        if self.progress_dynamics > 0.0:
+        # Randomize controller gains (curriculum-gated to drone-gains axis;
+        # ticket 037 Slice 7 decoupled from progress_dynamics).
+        p_drone_gains = self._axis_progress("drone_gains")
+        if p_drone_gains > 0.0:
             for idx in range(len(self.cfg.possible_agents)):
                 batch_ids = self._batch_idx(env_ids, idx)
                 self._controller.randomize_gains(
-                    batch_ids, self.progress_dynamics, self.cfg.gain_randomization,
+                    batch_ids, p_drone_gains, self.cfg.gain_randomization,
                 )
 
-            # Randomize max linear velocity (same dynamics curriculum gate).
+            # Randomize max linear velocity (decoupled axis: max_lin_vel_scale).
             # Ticket 034: composes multiplicatively with the curriculum value set
             # above, instead of replacing it. Previously this branch overwrote the
             # curriculum's `_max_lin_vel` with `cfg.max_lin_vel * Uniform(0.8, 1.2)`,
@@ -2650,9 +3005,10 @@ class IrisMA6TestEnv(DirectMARLEnv):
             # on top preserves the per-env curriculum distribution while still
             # adding the ±20 % gain-randomization spread.
             gain_cfg = self.cfg.gain_randomization
-            if gain_cfg.randomize_max_lin_vel:
-                low = 1.0 - self.progress_dynamics * (1.0 - gain_cfg.max_lin_vel_scale_range[0])
-                high = 1.0 + self.progress_dynamics * (gain_cfg.max_lin_vel_scale_range[1] - 1.0)
+            p_vel_scale = self._axis_progress("max_lin_vel_scale")
+            if gain_cfg.randomize_max_lin_vel and p_vel_scale > 0.0:
+                low = 1.0 - p_vel_scale * (1.0 - gain_cfg.max_lin_vel_scale_range[0])
+                high = 1.0 + p_vel_scale * (gain_cfg.max_lin_vel_scale_range[1] - 1.0)
                 M = len(env_ids)
                 scale = torch.empty(M, device=self.device).uniform_(low, high)
                 self._max_lin_vel[env_ids] = self._max_lin_vel[env_ids] * scale
@@ -2662,19 +3018,23 @@ class IrisMA6TestEnv(DirectMARLEnv):
             # Sample new randomized parameters for resetting envs
             self._domain_randomizer.randomize_all(env_ids)
 
-            # Camera intrinsics: FOV scale perturbation → effective focal length change
+            # Camera intrinsics: FOV scale perturbation (camera_fov axis,
+            # ticket 037 Slice 7 decoupled).
             # fov_scale < 1 means narrower FOV → larger effective focal length (1/fov_scale)
             # Curriculum gating: interpolate from 1.0 (no perturbation) to full perturbation
             fov_scales = self._domain_randomizer.get_fov_scales()  # (N, num_agents)
             raw_scale = 1.0 / fov_scales[env_ids]  # range [1.0, 2.0] for fov [0.5, 1.0]
-            self._dr_intrinsic_scale[env_ids] = 1.0 + self.progress_dynamics * (raw_scale - 1.0)
+            p_fov = self._axis_progress("camera_fov")
+            self._dr_intrinsic_scale[env_ids] = 1.0 + p_fov * (raw_scale - 1.0)
 
-            # Gimbal offsets: curriculum-gated mechanical misalignment
+            # Gimbal mechanical offsets (gimbal_mech_offsets axis, decoupled).
             # Offsets are (M, num_agents, 3) with [yaw, pitch, roll]
             gimbal_offsets = self._domain_randomizer.get_gimbal_offsets(env_ids)
-            self._dr_gimbal_offsets[env_ids] = self.progress_dynamics * gimbal_offsets
+            p_mech = self._axis_progress("gimbal_mech_offsets")
+            self._dr_gimbal_offsets[env_ids] = p_mech * gimbal_offsets
 
-            if self.progress_dynamics > 0.0:
+            # Mass/inertia (mass_inertia axis, decoupled).
+            if self._axis_progress("mass_inertia") > 0.0:
                 # Physics: apply randomized mass/inertia to simulation assets
                 # Controller retains nominal mass — intentional model mismatch for robustness
                 for agent_id in self.cfg.possible_agents:
@@ -2682,7 +3042,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
                         self._robots[agent_id], env_ids
                     )
 
-                # Gimbal dynamics: apply randomized stiffness/damping to actuators
+            # Gimbal joint dynamics (gimbal_stiff_damp axis, decoupled).
+            if self._axis_progress("gimbal_stiff_damp") > 0.0:
+                # Apply randomized stiffness/damping to actuators
                 for agent_id in self.cfg.possible_agents:
                     gimbal_joint_ids = [
                         self.gimbal_joint_idx[agent_id]["yaw"],
@@ -2694,6 +3056,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
                     )
 
             # Target scale randomization for bbox size enrichment
+            # (target_scale axis, decoupled).
             # x=y (uniform), z >= xy, curriculum-gated: 1.0 at progress=0, full at progress=1
             M = len(env_ids)
             xy_lo, xy_hi = self.cfg.target_xy_scale_range
@@ -2701,8 +3064,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
             raw_xy = torch.empty(M, device=self.device).uniform_(xy_lo, xy_hi)
             raw_z = torch.empty(M, device=self.device).uniform_(z_lo, z_hi)
             raw_z = torch.max(raw_z, raw_xy)  # z >= xy
-            gated_xy = 1.0 + self.progress_dynamics * (raw_xy - 1.0)
-            gated_z = 1.0 + self.progress_dynamics * (raw_z - 1.0)
+            p_target = self._axis_progress("target_scale")
+            gated_xy = 1.0 + p_target * (raw_xy - 1.0)
+            gated_z = 1.0 + p_target * (raw_z - 1.0)
             self._dr_target_scale[env_ids, 0, 0] = gated_xy  # x
             self._dr_target_scale[env_ids, 0, 1] = gated_xy  # y = x
             self._dr_target_scale[env_ids, 0, 2] = gated_z   # z >= xy

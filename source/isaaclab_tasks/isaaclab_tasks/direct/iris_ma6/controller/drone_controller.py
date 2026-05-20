@@ -518,3 +518,46 @@ class DroneController:
             level: Fidelity level (0-3).
         """
         self._aerodynamics.set_fidelity_level(level)
+
+    # ------------------------------------------------------------------
+    # Ticket 037 — Privileged-obs accessors (read-only).
+    # Each returns the per-row gain SCALE (current / nominal) at native
+    # batched-controller layout shape (N*A,) where the env's agent-major
+    # convention is `agent_a → rows [a*N, (a+1)*N)`. The env-side assembly
+    # reshapes to (N, A) via `.reshape(num_agents, num_envs).t()`.
+    #
+    # The 5 controller-block scales (vel, att, rate, motor, zoom_tau,
+    # zoom_max_rate — 6 total) are the upstream independent RNG draws of
+    # `randomize_gains`. We derive them at read time (current / nominal)
+    # rather than caching the scales as new state, since `_nominal_gains`
+    # is captured at construction and never mutated. For multi-axis gains
+    # (Kp_vel, Kp_att, Kp_rate are 3-vectors), the scale is uniform across
+    # axes per the broadcasting at randomize_gains() — we reduce by mean
+    # to recover the scalar.
+    #
+    # See doc/critic_obs_design.md §3.4 for field semantics.
+    # ------------------------------------------------------------------
+
+    def get_vel_gain_scale(self) -> torch.Tensor:
+        """Current velocity-controller gain scale per row. Shape (N*A,)."""
+        return (self._velocity._Kp_vel / self._nominal_gains["Kp_vel"]).mean(dim=-1)
+
+    def get_att_gain_scale(self) -> torch.Tensor:
+        """Current attitude-controller gain scale per row. Shape (N*A,)."""
+        return (self._attitude._Kp_att / self._nominal_gains["Kp_att"]).mean(dim=-1)
+
+    def get_rate_gain_scale(self) -> torch.Tensor:
+        """Current rate-controller gain scale per row. Shape (N*A,)."""
+        return (self._rate._Kp_rate / self._nominal_gains["Kp_rate"]).mean(dim=-1)
+
+    def get_motor_gain_scale(self) -> torch.Tensor:
+        """Current motor τ scale per row. Shape (N*A,)."""
+        return self._motor._tau_motor / self._nominal_gains["tau_motor"]
+
+    def get_zoom_tau_scale(self) -> torch.Tensor:
+        """Current zoom τ scale per row. Shape (N*A,)."""
+        return self._zoom._tau_zoom / self._nominal_gains["tau_zoom"]
+
+    def get_zoom_max_rate_scale(self) -> torch.Tensor:
+        """Current zoom max-rate scale per row. Shape (N*A,)."""
+        return self._zoom._max_zoom_rate / self._nominal_gains["max_zoom_rate"]
