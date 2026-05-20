@@ -98,7 +98,7 @@ agent:
   # Experiment tracking
   experiment:
     directory: iris_ma6
-    experiment_name: "cae5955af7_ticket037_critic_priv_obs_axis_indep"
+    experiment_name: "a3f94fdc8b_ticket037_critic_priv_obs_no_dr"
     write_interval: auto
     checkpoint_interval: auto
     store_separately: false
