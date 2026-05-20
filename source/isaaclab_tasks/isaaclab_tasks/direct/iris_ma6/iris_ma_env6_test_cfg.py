@@ -830,9 +830,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # ==========================================================================
 
     domain_randomization: DomainRandomizationCfg = DomainRandomizationCfg(
-        enabled=True,  # ticket 037 Phase 1: enable DR so the 7 DR-dependent
-                      # priv-obs fields (fov_scale, gimbal offsets, mass etc.)
-                      # are populated. Was False through t034.
+        enabled=False,
         mount_offset=MountOffsetRandomizationCfg(enabled=False),
     )
     """Domain randomization for sim-to-real transfer.
@@ -930,12 +928,27 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
                 critic_extra_global += 3  # GT target world linear velocity
 
         # Ticket 037 — env-param privileged tail. The convenience bool
-        # `enable_full_critic_priv_obs` expands to the full registry
-        # when set and the explicit list is empty.
+        # `enable_full_critic_priv_obs` expands to the registry when the
+        # explicit list is empty. When `domain_randomization.enabled=False`,
+        # DR-dependent fields are EXCLUDED (with a log line) since their
+        # accessors would crash; this keeps the toggle ergonomic across
+        # both DR-on and DR-off configs.
         if self.enable_full_critic_priv_obs and not self.critic_privileged_fields:
-            self.critic_privileged_fields = list(
-                _CRITIC_PRIVILEGED_FIELD_REGISTRY.keys()
-            )
+            all_fields = list(_CRITIC_PRIVILEGED_FIELD_REGISTRY.keys())
+            if self.domain_randomization.enabled:
+                self.critic_privileged_fields = all_fields
+            else:
+                self.critic_privileged_fields = [
+                    f for f in all_fields if f not in _CRITIC_PRIVILEGED_FIELDS_REQUIRING_DR
+                ]
+                dropped = sorted(set(all_fields) - set(self.critic_privileged_fields))
+                print(
+                    f"[IrisMA6TestEnvCfg] enable_full_critic_priv_obs=True with "
+                    f"domain_randomization.enabled=False — dropped {len(dropped)} "
+                    f"DR-dependent fields: {dropped}. Enabled fields: "
+                    f"{len(self.critic_privileged_fields)} non-DR.",
+                    flush=True,
+                )
         # cfg-driven by critic_privileged_fields list, validated against the registry.
         if self.critic_privileged_fields:
             unknown = (
