@@ -98,7 +98,7 @@ agent:
   # Experiment tracking
   experiment:
     directory: iris_ma6
-    experiment_name: "7fd070ee09_mappo_rnn_shared_model_scheduler_param_fix2" 
+    experiment_name: "cae5955af7_ticket037_critic_priv_obs_axis_indep"
     write_interval: auto
     checkpoint_interval: auto
     store_separately: false
