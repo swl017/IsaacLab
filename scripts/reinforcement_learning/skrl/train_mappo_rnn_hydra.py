@@ -37,7 +37,31 @@ parser = argparse.ArgumentParser(description="Train MAPPO-RNN agent with Hydra c
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
-# parser.add_argument("--experiment_name", type=str, default="", help="Custom experiment name")
+parser.add_argument("--experiment_name", type=str, default=None,
+                    help="Override agent.experiment.experiment_name in the loaded skrl cfg. "
+                         "Use to avoid run-dir collisions when iterating on the same yaml.")
+parser.add_argument("--checkpoint", type=str, default=None,
+                    help="Optional path to a skrl checkpoint .pt to warm-start training. "
+                         "Restores per-agent policy, value, state/shared-state/value preprocessors, "
+                         "and optimizer state. The trainer's timestep counter still starts at 0 — "
+                         "this is warm-start, not full resume. When set, also auto-pins the env "
+                         "curriculum to the checkpoint's training step (inferred from the filename "
+                         "agent_<N>.pt) so the fine-tune sees the same env distribution the source "
+                         "checkpoint last trained against. Override via --debug_initial_step or "
+                         "disable via --no_curriculum_pin.")
+parser.add_argument("--skip_load_optimizer", action="store_true", default=False,
+                    help="When loading --checkpoint, do NOT restore optimizer state "
+                         "(useful for transfer learning to a new env/reward).")
+parser.add_argument("--debug_initial_step", type=int, default=None,
+                    help="Override the env's debug_initial_step (the curriculum-pinned step). "
+                         "When --checkpoint is passed, auto-inferred from the checkpoint's "
+                         "filename (e.g. agent_400000.pt → 400000) unless this flag is set. "
+                         "Forces cfg.use_debug_initial_step=True. Pass 0 (or use "
+                         "--no_curriculum_pin) to skip pinning entirely.")
+parser.add_argument("--no_curriculum_pin", action="store_true", default=False,
+                    help="With --checkpoint, do NOT pin the curriculum to the checkpoint's "
+                         "training step. Useful when you actually want the fine-tune to "
+                         "re-traverse the curriculum from scratch (rare).")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
 parser.add_argument("--video_interval", type=int, default=2000, help="Interval between video recordings (in steps).")
@@ -270,6 +294,83 @@ class VideoRecordingTrainer(SequentialTrainer):
             self.video_recorder.close()
 
 
+def _infer_step_from_ckpt_filename(checkpoint_path: str) -> int | None:
+    """Best-effort parse of the training step from a checkpoint filename.
+
+    Recognizes the SKRL convention ``agent_<STEP>.pt`` (e.g. ``agent_400000.pt``).
+    Returns the integer step on match, ``None`` otherwise.
+
+    Used to auto-pin the env curriculum to the checkpoint's terminal regime
+    when --checkpoint is passed without an explicit --debug_initial_step.
+    """
+    import os, re
+    name = os.path.basename(checkpoint_path)
+    m = re.match(r"agent_(\d+)\.pt$", name)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def load_checkpoint_into_agent(agent, checkpoint_path: str, possible_agents, skip_optimizer: bool = False):
+    """Warm-start an already-initialized skrl MARL agent from a saved checkpoint.
+
+    Mirrors skrl's `MultiAgent.load()` but with two adjustments:
+    (1) up-front validation/warning when the checkpoint's agent UIDs don't
+        match the current env's `possible_agents` (skrl's stock load only
+        logs warnings deep in the loop), and
+    (2) optional skipping of the per-agent optimizer state (for transfer
+        learning where the optimizer's momentum is stale).
+
+    Loads per-uid: policy, value, state_preprocessor, shared_state_preprocessor,
+    value_preprocessor, optimizer. The trainer's timestep counter is unaffected.
+    """
+    if not os.path.isfile(checkpoint_path):
+        raise FileNotFoundError(f"--checkpoint not found: {checkpoint_path}")
+
+    print(f"[CKPT] Loading checkpoint: {checkpoint_path}")
+    modules = torch.load(checkpoint_path, map_location=agent.device, weights_only=False)
+
+    if not isinstance(modules, dict):
+        raise ValueError(
+            f"[CKPT] Unexpected checkpoint format: expected dict-of-uids, got {type(modules)}."
+        )
+
+    ckpt_agents = set(modules.keys())
+    env_agents = set(possible_agents)
+    if ckpt_agents != env_agents:
+        missing = env_agents - ckpt_agents
+        extra = ckpt_agents - env_agents
+        print(f"[CKPT][WARN] Agent-id mismatch. ckpt={sorted(ckpt_agents)}, env={sorted(env_agents)}")
+        if missing:
+            print(f"[CKPT][WARN]   Missing from ckpt (these agents start from scratch): {sorted(missing)}")
+        if extra:
+            print(f"[CKPT][WARN]   Extra in ckpt (ignored): {sorted(extra)}")
+
+    skipped_summary = []
+    for uid in possible_agents:
+        if uid not in modules:
+            continue
+        for name, data in modules[uid].items():
+            if skip_optimizer and name == "optimizer":
+                skipped_summary.append(f"{uid}:{name}")
+                continue
+            module = agent.checkpoint_modules[uid].get(name, None)
+            if module is None:
+                print(f"[CKPT][WARN]   No live module for {uid}:{name}, skipping")
+                continue
+            if not hasattr(module, "load_state_dict"):
+                print(f"[CKPT][WARN]   {uid}:{name} has no load_state_dict, skipping")
+                continue
+            module.load_state_dict(data)
+            # Note: skrl's stock load() calls module.eval() here. We don't —
+            # MAPPO_RNN.post_interaction toggles train/eval around the update
+            # step, so the effective mode is managed by the agent itself.
+
+    if skipped_summary:
+        print(f"[CKPT] Skipped optimizer state for: {skipped_summary}")
+    print(f"[CKPT] Loaded weights for agents: {sorted(env_agents & ckpt_agents)}")
+
+
 def create_models(agent_cfg: dict, env, device, is_multi_agent: bool):
     """Create policy and value models based on config."""
 
@@ -389,6 +490,68 @@ def main(env_cfg, agent_cfg: dict):
     # Set seed
     seed = agent_cfg.get("seed", 42)
     set_seed(seed)
+    # Ticket 034: env explicitly requires cfg.seed for the curriculum RNG.
+    # Propagate the agent-level seed to env_cfg so existing CLI behavior is
+    # unchanged (default agent_cfg seed: 42; --seed overrides).
+    env_cfg.seed = seed
+
+    # Optional CLI override for the skrl experiment name (avoids run-dir
+    # collisions when iterating on the same yaml). Hydra struct-mode rejects
+    # `+agent.experiment.experiment_name=...` at the command line, so the
+    # override goes through here instead.
+    if args_cli.experiment_name is not None:
+        agent_cfg.setdefault("agent", {}).setdefault("experiment", {})[
+            "experiment_name"
+        ] = args_cli.experiment_name
+
+    # Warm-start curriculum pin. When loading a checkpoint, the trainer's
+    # timestep counter starts at 0 — which would restart the env curriculum
+    # from scratch and undermine any fine-tuning ablation against the
+    # source checkpoint's terminal regime. We pin the env's curriculum step
+    # to the checkpoint's training step so the fine-tune sees the SAME env
+    # distribution the checkpoint was last trained against.
+    #
+    # Resolution order:
+    #   --no_curriculum_pin       -> skip pinning entirely (rare)
+    #   --debug_initial_step N    -> explicit override
+    #   --checkpoint <path>       -> auto-infer from filename (agent_<N>.pt)
+    #   (none)                    -> leave env_cfg untouched
+    if args_cli.checkpoint is not None and not args_cli.no_curriculum_pin:
+        pin_step = args_cli.debug_initial_step
+        if pin_step is None:
+            pin_step = _infer_step_from_ckpt_filename(args_cli.checkpoint)
+            if pin_step is None:
+                raise ValueError(
+                    f"--checkpoint passed without --debug_initial_step, and the "
+                    f"filename {os.path.basename(args_cli.checkpoint)!r} doesn't "
+                    f"match the agent_<N>.pt convention. Either pass "
+                    f"--debug_initial_step <N> explicitly, or --no_curriculum_pin "
+                    f"to skip pinning (rare; usually you want to pin)."
+                )
+        env_cfg.use_debug_initial_step = True
+        env_cfg.debug_initial_step = int(pin_step)
+        print(
+            f"[CKPT-PIN] Curriculum pinned to step {pin_step} "
+            f"(from {'--debug_initial_step' if args_cli.debug_initial_step is not None else 'checkpoint filename'}). "
+            f"Env curriculum will hold at this step regardless of trainer.timestep.",
+            flush=True,
+        )
+    elif args_cli.debug_initial_step is not None:
+        # Explicit pin without --checkpoint: rare but support it (e.g., training
+        # from scratch but skipping curriculum ramp-up for ablation purposes).
+        env_cfg.use_debug_initial_step = True
+        env_cfg.debug_initial_step = int(args_cli.debug_initial_step)
+        print(
+            f"[CKPT-PIN] Curriculum pinned to step {args_cli.debug_initial_step} "
+            f"(no checkpoint; explicit --debug_initial_step).",
+            flush=True,
+        )
+    elif args_cli.checkpoint is not None and args_cli.no_curriculum_pin:
+        print(
+            "[CKPT-PIN] --no_curriculum_pin: env curriculum starts from step 0 "
+            "despite warm-start checkpoint load. Hope you know what you're doing.",
+            flush=True,
+        )
 
     # Validate burn-in
     sequence_length = agent_cfg.get("agent", {}).get("sequence_length", 50)
@@ -521,6 +684,17 @@ def main(env_cfg, agent_cfg: dict):
         trainer = VideoRecordingTrainer(cfg=trainer_cfg, env=env, agents=agent, video_recorder=video_recorder)
     else:
         trainer = SequentialTrainer(cfg=trainer_cfg, env=env, agents=agent)
+
+    # Optional checkpoint warm-start. The SequentialTrainer's __init__ already
+    # ran agent.init(), which instantiated the preprocessors and optimizers;
+    # only at this point can we load their state_dicts.
+    if args_cli.checkpoint is not None:
+        load_checkpoint_into_agent(
+            agent,
+            args_cli.checkpoint,
+            possible_agents,
+            skip_optimizer=args_cli.skip_load_optimizer,
+        )
 
     # Print training info
     print("=" * 80)
