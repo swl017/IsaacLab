@@ -2597,3 +2597,96 @@ Next:
   and enable_axis_independence=True. ~24h wall-clock.
 - Slice 10: evaluation vs t034 baseline + re-run probe 036.
 - Slice 11: writeup.
+
+----------------------------------------
+2026-05-22 — Ticket 037 Slice 9 (training) + Slice 10 (eval) complete
+----------------------------------------
+Done:
+- Slice 9: 35-hour training run completed (400k/400k steps).
+  Commit cae5955af7 → e09e43c11b → a3f94fdc8b on iris_ma6-training.
+  Phase 1 cfg: enable_full_critic_priv_obs=True (17 non-DR fields),
+  enable_axis_independence=True, DR=False.
+  Ckpt: logs/skrl/iris_ma6/2026-05-20_21-39-19_..._no_dr/checkpoints/
+- Slice 10 eval (Phase A scalar + Phase B visibility + Phase C probe):
+  * Phase A (tensorboard): V-loss FLAT at +2% vs t034 (Phase 1 prediction
+    of ≥15% drop FAILED). σ -4%. action_sum +13%, action_delta +8%
+    (smoothness improvement as predicted). REGRESSIONS: collision_per_env
+    +95%, tracking_lost_fraction +68% — both fail ±2% bar.
+  * Phase B (matched-step visibility at {39k, 99k, 199k, 399k}): all four
+    ratios PASS the ≥0.80 bar (0.927, 0.851, 1.009, 1.000). BUT
+    collision_rate at step=39k eval: ref=0.31, postfix=1.57 (+412%) — the
+    400k policy crashes 5x more on easy-regime distribution than its
+    matched-step ref. Catastrophic forgetting of easy regime returned.
+  * Phase C (probe 036 re-run): all 3 probes ROBUST (matches t034 verdict).
+    Probe 2 R² < 0 on all axes — GRU still doesn't encode env identity.
+    Probe 3 detrended signal +0.32 nat (within ±0.5 robust threshold).
+
+KEY FINDING (root cause analysis):
+- `enable_axis_independence=True` with per-axis cfgs at None default was
+  meant to be bit-exact-equivalent to t034. WRONG: although each axis
+  inherits dynamics_progress, the 8 independent `sample_per_env_progress`
+  calls produce 8 INDEPENDENT per-(env, agent) draws. Under t034, the
+  same single draw was applied to all 8 sub-randomizations (bundled).
+  Under 037, the 8 sub-randomizations are independent per (env, agent).
+  → Probability of "all easy" envs collapses geometrically with 8 axes.
+  → Ticket 034's anti-forgetting jitter assumed bundled distribution;
+     under independent jitter the early-regime distribution shrinks.
+  → Explains the +412% step-39k collision regression.
+
+ACCEPTANCE: 2 of 6 criteria FAIL (V-loss, task-quality non-regression).
+
+Writeup: doc/experiments/2026-05-22_037_critic_priv_obs.md
+Eval artifacts: /tmp/slice10_eval/ (visibility JSONs)
+                /tmp/slice10_probe036/ (probe outputs)
+
+Next:
+- Discuss with user: which next experiment?
+  F1 (recommended): enable_axis_independence=False + critic-priv-obs ON.
+    Isolates critic-priv-obs effect; bit-exact t034 distribution.
+    If V-loss STILL doesn't drop, Phase 1 is fundamentally
+    underwhelming and we move directly to Phase 2 (aux sysid head).
+  F2: Widen randomization ranges (gain_randomization, etc.) so the
+    critic has more variance to attribute.
+
+----------------------------------------
+2026-05-22 — Ticket 039 (asymmetric PX4 z-velocity envelope) implemented
+----------------------------------------
+Done:
+- Slice 1: cfg surface added in iris_ma_env6_test_cfg.py
+  * enable_asymmetric_z_envelope: bool = False (off → bit-exact pre-ticket)
+  * max_vel_z_up: float = 3.0  (PX4 MPC_Z_VEL_MAX_UP)
+  * max_vel_z_dn: float = 1.5  (PX4 MPC_Z_VEL_MAX_DN)
+  Not randomized — calibration-set per PX4 vehicle (per ticket scope).
+- Slice 2: action-scaling branch in iris_ma_env6_test.py::_pre_physics_step
+  (around line 811). When flag=True, xy keeps the per-env curriculum+DR cap
+  (_max_lin_vel); z is multiplied by max_vel_z_up if action>=0 else
+  max_vel_z_dn (so cmd_vel ∈ [-dn, +up] for |action|<=1). When flag=False,
+  the original symmetric scaling path runs unchanged.
+- Slice 3: tests/test_asymmetric_z_envelope.py (3 tests, all PASS):
+  * cfg defaults: flag=False, z_up=3.0, z_dn=1.5
+  * symmetric default (regression): cmd_vel == action * _max_lin_vel for
+    vx=0.5, vy=-0.3, vz=-1.0 across all agents
+  * asymmetric clip: full-climb → +3.0 m/s, full-descend → -1.5 m/s,
+    mixed-sign per-env gating works, |action|<=1 uniform ⇒ vz ∈ [-1.5, +3.0]
+  Single-env design: SimulationApp is global per process, so the flag is
+  toggled at runtime on the cfg between assertions instead of rebuilding.
+
+Composes with ticket 038 (per-(env, agent) max_lin_vel) — xy scaling stays
+on _max_lin_vel so when 038 lands and that becomes Tensor[N, A], the z
+scalars remain untouched.
+
+Slice 4 (training A/B) deferred per ticket scope-boundary note ("pending
+Phase 1 + other ticket sequencing").
+
+Acceptance status:
+- enable_asymmetric_z_envelope=False bit-exact regression: PASS (test 2
+  asserts the exact pre-ticket scaling formula).
+- enable_asymmetric_z_envelope=True: cmd_vel[:, :, 2] ∈ [-1.5, +3.0]: PASS
+  (test 3 saturation check across all envs/agents).
+- Sim-to-sim PegasusSimulator validation: NOT RUN this session.
+
+Next:
+- Re-discuss Phase 2 experiment direction (F1 critic-priv-obs at
+  axis_independence=False, or F2 wider DR ranges) — independent of 039.
+- Optional: short A/B training run with enable_asymmetric_z_envelope=True
+  to confirm jerk/attitude behavior improves under realistic bounds.

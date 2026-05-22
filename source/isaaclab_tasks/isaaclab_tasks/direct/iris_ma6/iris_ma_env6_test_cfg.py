@@ -537,6 +537,28 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     max_yaw_rate: float = math.radians(45.0)
     """Maximum yaw rate (rad/s)."""
 
+    # ---- Ticket 039 — asymmetric PX4 z-velocity envelope ---------------------
+    enable_asymmetric_z_envelope: bool = True
+    """Ticket 039 — when True, scale the z action by an asymmetric envelope
+    matching PX4's ``MPC_Z_VEL_MAX_UP`` / ``MPC_Z_VEL_MAX_DN`` parameters so the
+    sim policy trains against the deployment-realistic vertical clip. When
+    False (default), z is scaled symmetrically by ``_max_lin_vel`` — bit-exact
+    t034/Phase-1 behavior.
+
+    Composes with the existing horizontal cap: xy action dims continue to be
+    scaled by ``_max_lin_vel`` (curriculum + DR-jitter); only the z action
+    changes behavior under this flag.
+    """
+
+    max_vel_z_up: float = 3.0
+    """Maximum climb rate (m/s, action[:, 2] > 0). Default matches the
+    iris_ma6 PX4 deployment vehicle's ``MPC_Z_VEL_MAX_UP``. Not randomized
+    (real-world vehicles are calibration-set; they don't drift)."""
+
+    max_vel_z_dn: float = 1.5
+    """Maximum descend rate (m/s, action[:, 2] < 0, applied to ``|action|``).
+    Default matches PX4's ``MPC_Z_VEL_MAX_DN``. Not randomized."""
+
     # ==========================================================================
     # CBF Safety Configuration
     # ==========================================================================
@@ -650,7 +672,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     """Penalty scale for total action magnitude."""
 
     # [0 vx, 1 vy, 2 vz, 3 yaw_rate, 4 gimbal_yaw_rate, 5 gimbal_pitch_rate, 6 zoom_rate]
-    action_weight: list = [1, 1, 5, 1, 1, 1, 1]
+    action_weight: list = [1, 1, 1, 1, 1, 1, 1]
     """Weights for each action dimension in penalty computation."""
 
     action_delta_weight: list = [1, 1, 1, 1, 1, 1, 1]

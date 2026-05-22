@@ -28,8 +28,8 @@ class GainRandomizationCfg:
     enabled: bool = True
     """Enable controller gain randomization."""
 
-    scale_range: tuple[float, float] = (0.8, 1.2)
-    """Multiplicative scale range at full curriculum progress (+-20%)."""
+    scale_range: tuple[float, float] = (0.95, 1.05)
+    """Multiplicative scale range at full curriculum progress (+-5%)."""
 
     randomize_velocity: bool = True
     """Randomize velocity controller gains (Kp_vel, Ki_vel)."""

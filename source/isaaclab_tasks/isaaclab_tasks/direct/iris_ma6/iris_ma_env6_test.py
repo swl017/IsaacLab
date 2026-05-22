@@ -808,7 +808,20 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
             # Scale actions from [-1, 1] to physical units
             # [0 vx, 1 vy, 2 vz, 3 yaw_rate, 4 gimbal_yaw_rate, 5 gimbal_pitch_rate, 6 zoom_rate]
-            self.cmd_vel[:, idx, 0:3] = action[:, 0:3] * self._max_lin_vel.unsqueeze(-1)
+            if self.cfg.enable_asymmetric_z_envelope:
+                # Ticket 039 — match PX4 MPC_Z_VEL_MAX_{UP,DN}. xy keeps the
+                # per-env curriculum+DR cap; z uses scalar PX4 bounds with a
+                # sign-dependent scale (action>0 climb, action<0 descend).
+                self.cmd_vel[:, idx, 0:2] = action[:, 0:2] * self._max_lin_vel.unsqueeze(-1)
+                z = action[:, 2]
+                z_scale = torch.where(
+                    z >= 0,
+                    torch.full_like(z, self.cfg.max_vel_z_up),
+                    torch.full_like(z, self.cfg.max_vel_z_dn),
+                )
+                self.cmd_vel[:, idx, 2] = z * z_scale
+            else:
+                self.cmd_vel[:, idx, 0:3] = action[:, 0:3] * self._max_lin_vel.unsqueeze(-1)
             self.cmd_vel[:, idx, 3] = action[:, 3] * self.cfg.max_yaw_rate
             # Gimbal and zoom controllers expect normalized [-1, 1] input and scale internally
             self.cmd_vel[:, idx, 4] = action[:, 4]  # Gimbal yaw rate (normalized)
