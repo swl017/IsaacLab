@@ -3081,3 +3081,93 @@ Next:
   for those channels don't change (GPS-driven channels are 0ms either way,
   attitude_pitch is consistent at 17ms across both setups).
 
+
+----------------------------------------
+2026-05-26 — Ticket 042: Per-channel ego EKF latency (Slices 1+2 landed)
+----------------------------------------
+Done:
+- Audited the draft patch from the previous session (delay_cfg_v3.py +
+  iris_ma_env6_test_cfg.py) against the live AgentStates/multi_agent_wrapper
+  field registry. Found TWO silent bugs that would have made the patch a no-op:
+    * "body_velocity_w"           → must be "body_linear_velocity_w"
+    * "body_linear_acceleration_w" → must be "body_linear_acceleration_b"
+      (the env only registers the body-frame accel field).
+  Both keys would have silently fallen through to the legacy bulk pipeline
+  with no error. This is EXACTLY the Risk #3 failure mode the ticket
+  flagged. The pre-fix patch would have looked correct in code review but
+  changed nothing at runtime.
+
+- Restructured the per-channel override block in delay_cfg_v3.py around a
+  channel→fields map so siblings sharing an IMU source receive identical
+  pipelines:
+    angular_velocity:   body_angular_velocity_w + body_angular_velocity_b
+                        + body_combined_angular_velocity_w (gyro + gimbal
+                        encoder, ~15 ms each)
+    linear_acceleration: body_linear_acceleration_b (IMU spec-force, 35 ms)
+  Without this, the body-frame ang-vel siblings would have stayed at the
+  legacy 5 ms bulk default while the world-frame copy moved to 15 ms —
+  the policy would see a mix of differently-aged copies of the same gyro.
+
+- Added Risk #3 mitigation: create_delay_cfg_from_params now imports
+  multi_agent_wrapper.BODY_FIELDS (function-local to break the cyclic
+  import) and raises ValueError when any override key is not in that set.
+  This locks in the assertion for the next time the field names drift.
+
+- Slice 1 (bit-exact regression test):
+  delay_system_v3/tests/test_per_channel_latency.py with 6 tests:
+    1. bulk mode produces pre-patch field_overrides only ({bboxes_2d})
+       and keeps the legacy 5 ms motion default — locks the rollback path
+    2. per-channel mode covers every IMU/EKF motion field + bboxes_2d
+    3. every override key resolves to a registered AgentStates field
+    4. per-channel latency means match ekf_state_lag.json (0/0/18/15/35 ms)
+    5. angular-velocity siblings share one pipeline realization
+    6. ValueError raised on drifted override field name (monkey-patches
+       BODY_FIELDS to remove body_position_w, expects assertion to fire)
+  Wired into delay_system_v3/tests/run_tests.py. Full suite: 71 tests,
+  68 pass, 3 pre-existing failures in test_reward_modes (tensor truth-value
+  bugs, unrelated to ticket 042). All 6 ticket-042 tests green.
+
+- Slice 2 (A/B experiment registration):
+  experiments/experiment_registry.py — two entries:
+    validation_obs_v2_short_baseline_bulk
+       (use_bulk_ego_motion_latency=True → post-patch code, pre-patch
+        behavior — the rollback control)
+    validation_obs_v2_short_treatment_per_channel
+       (use_bulk_ego_motion_latency=False → post-patch default —
+        the per-channel treatment)
+  Both: 200k timesteps, seed=42, same task, same curriculum. Per ticket
+  spec, decision rule is ±5% on every tracked metric.
+
+- Fixed silent override-bake bug in run_experiment.py:
+  env_cfg.__post_init__() materializes cfg.delay_system from
+  cfg.delay_system_params BEFORE apply_env_overrides runs. Any
+  experiment that overrides delay_system_params.* (the new ticket-042
+  A/B, the existing sweep_delay_*, sweep_noise_*) was silently ineffective
+  because __post_init__ had already baked the tree. Added a rebuild step
+  in run_experiment.main() that calls create_delay_cfg_from_params(...)
+  again whenever a delay_system_params.* path appears in env_overrides.
+  Confirmed via --list that the new entries register cleanly.
+
+Files modified:
+- delay_system_v3/delay_cfg_v3.py — channel→fields map + assertion
+- delay_system_v3/tests/test_per_channel_latency.py (NEW)
+- delay_system_v3/tests/run_tests.py — wired in new suite
+- experiments/experiment_registry.py — A/B entries
+- experiments/run_experiment.py — post-override delay_system rebuild
+
+Tests:
+  delay_system_v3: 68/71 pass (3 unrelated pre-existing failures)
+  ticket-042 suite (6 new tests): 6/6 pass
+
+Not done (out of session scope):
+- Slice 2 actual training run — needs ~3 wall-hours per 200k-step config
+  on the dev machine. Patch + test + experiment are ready to launch.
+- Slice 3 (optional DR FOL TC sanity) — gated on Slice 2 passing.
+- doc/experiments/<date>_ticket042_per_channel_ekf_latency.md — written
+  after Slice 2 completes.
+
+Next:
+- Launch the A/B (run_experiment.py --experiment validation_obs_v2_short_*),
+  collect TB metrics, write the experiments doc per the acceptance table.
+- If treatment within ±5% on every metric, flip the default and mark the
+  ticket DONE. Otherwise root-cause before merging.

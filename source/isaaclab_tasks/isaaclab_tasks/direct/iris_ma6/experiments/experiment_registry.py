@@ -473,6 +473,38 @@ register_experiment(ExperimentCfg(
 
 
 # ===========================================================================
+# Ticket 042: Per-channel ego-motion EKF latency A/B
+# ===========================================================================
+# Validates the per-channel EKF lag patch from ticket 041's measurement.
+# Same task, same RNG, same curriculum. Two configs only differ in whether
+# ego motion uses the legacy bulk 5±2 ms lag or the per-channel values from
+# ekf_state_lag.json (pos/vel 0 ms, orient 18 ms, ang_vel 15 ms, lin_acc 35 ms).
+# Decision rule: treatment within ±5% of baseline on every tracked metric.
+
+register_experiment(ExperimentCfg(
+    name="validation_obs_v2_short_baseline_bulk",
+    description="Ticket 042 A/B (control): legacy bulk 5±2 ms ego motion lag (post-patch code, pre-patch behavior)",
+    group="validation",
+    total_timesteps=200000,
+    seeds=[42],
+    env_overrides={
+        "delay_system_params.use_bulk_ego_motion_latency": True,
+    },
+))
+
+register_experiment(ExperimentCfg(
+    name="validation_obs_v2_short_treatment_per_channel",
+    description="Ticket 042 A/B (treatment): per-channel ego motion lag from ekf_state_lag.json (post-patch default)",
+    group="validation",
+    total_timesteps=200000,
+    seeds=[42],
+    env_overrides={
+        "delay_system_params.use_bulk_ego_motion_latency": False,
+    },
+))
+
+
+# ===========================================================================
 # Sweeps: Agent Count
 # ===========================================================================
 

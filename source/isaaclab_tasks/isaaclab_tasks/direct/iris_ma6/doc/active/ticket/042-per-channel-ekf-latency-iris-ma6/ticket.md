@@ -7,7 +7,7 @@
 **Deliverable**:
 1. The config patch (drafted, validated, committed to `delay_system_v3/delay_cfg_v3.py` + `iris_ma_env6_test_cfg.py`).
 2. A bit-exact regression test for the legacy bulk path.
-3. A short A/B training run (200k steps × 2 seeds × 2 configs) that confirms the new defaults don't degrade convergence vs. the pre-patch baseline.
+3. A short A/B training run (200k steps × 1 seed × 2 configs) that confirms the new defaults don't degrade convergence vs. the pre-patch baseline.
 4. One-page experiment writeup in `doc/experiments/`.
 
 **What**: Replace iris_ma6's bundled `5±2 ms` ego-motion latency with the per-channel values measured by [ticket 041](../041-px4-ekf-state-lag-measurement/ticket.md) — two regimes:

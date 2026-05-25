@@ -42,6 +42,7 @@ try:
     from .test_per_agent import run_per_agent_randomization_tests
     from .test_reward_modes import run_reward_mode_tests
     from .test_dual_cache import run_dual_cache_tests
+    from .test_per_channel_latency import run_per_channel_latency_tests
 except ImportError:
     # Running as script, add parent to path
     import sys as _sys
@@ -49,6 +50,7 @@ except ImportError:
     from test_per_agent import run_per_agent_randomization_tests
     from test_reward_modes import run_reward_mode_tests
     from test_dual_cache import run_dual_cache_tests
+    from test_per_channel_latency import run_per_channel_latency_tests
 
 # Output file path (same directory as this script)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1244,6 +1246,9 @@ def main():
 
             # Dual-cache regression (ticket 029 — shared-pipeline idempotency bug)
             run_dual_cache_tests(results, device, verbose)
+
+            # Per-channel ego motion latency (ticket 042)
+            run_per_channel_latency_tests(results, device, verbose)
 
             # New feature tests
             run_per_agent_randomization_tests(results, device, verbose)

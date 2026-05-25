@@ -326,6 +326,17 @@ def main(env_cfg, agent_cfg: dict):
     if exp_cfg.env_overrides:
         apply_env_overrides(env_cfg, exp_cfg.env_overrides)
         print(f"[EXPERIMENT] Applied {len(exp_cfg.env_overrides)} env overrides")
+        # __post_init__ baked env_cfg.delay_system from delay_system_params
+        # BEFORE these overrides ran. Rebuild it so any delay_system_params.*
+        # override actually takes effect downstream (ticket 042 A/B depends
+        # on this; pre-existing sweeps over other_latency_mean / noise_bbox_std
+        # also benefit).
+        if any(k.startswith("delay_system_params.") for k in exp_cfg.env_overrides):
+            from isaaclab_tasks.direct.iris_ma6.delay_system_v3 import (
+                create_delay_cfg_from_params,
+            )
+            env_cfg.delay_system = create_delay_cfg_from_params(env_cfg.delay_system_params)
+            print("[EXPERIMENT] Rebuilt env_cfg.delay_system from overridden delay_system_params")
 
     if exp_cfg.agent_overrides:
         apply_agent_overrides(agent_cfg, exp_cfg.agent_overrides)

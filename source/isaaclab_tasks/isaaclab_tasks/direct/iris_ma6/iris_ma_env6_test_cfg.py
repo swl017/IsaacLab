@@ -525,7 +525,7 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     """Drone controller configuration. PX4 SITL-matched gains from sysid replicator (ticket-008)."""
 
     # ---- Ticket 040 — Pegasus physics parity ---------------------------------
-    physics_mode: str = "default"
+    physics_mode: str = "pegasus"
     """Ticket 040 — rigid-body / motor / drag plant mode selector.
 
     ``"default"`` (default, bit-exact pre-040): racing-class numerics

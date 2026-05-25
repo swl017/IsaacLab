@@ -768,20 +768,65 @@ def create_delay_cfg_from_params(params: DelaySystemKeyParams) -> MultiAgentDela
             first_order_lag=FirstOrderLagCfg(enabled=tau_s > 0, tau=tau_s),
         )
 
+    # Channel -> (latency_s, fol_tau_s) -> list of AgentStates field names that
+    # share the same EKF/IMU source. Body-frame variants (_b) and the
+    # combined-angular-velocity field share their source with the world-frame
+    # IMU channel and therefore receive the same per-channel lag. The field
+    # names below MUST match keys in multi_agent_wrapper.BODY_FIELDS — an
+    # assertion at the bottom of this block guards against silent fall-through
+    # to the bulk default pipeline if a name drifts (ticket 042 Risk #3).
     motion_field_overrides: dict[str, DelayPipelineCfgV3] = {}
     if not params.use_bulk_ego_motion_latency:
-        motion_field_overrides = {
-            "body_position_w": _channel_motion_pipeline(
+        per_channel_pipelines = {
+            "position":            _channel_motion_pipeline(
                 params.ego_position_latency_mean_s, params.ego_position_fol_tau_s),
-            "body_velocity_w": _channel_motion_pipeline(
+            "velocity":            _channel_motion_pipeline(
                 params.ego_velocity_latency_mean_s, params.ego_velocity_fol_tau_s),
-            "body_orientation_w": _channel_motion_pipeline(
+            "orientation":         _channel_motion_pipeline(
                 params.ego_orientation_latency_mean_s, params.ego_orientation_fol_tau_s),
-            "body_angular_velocity_w": _channel_motion_pipeline(
+            "angular_velocity":    _channel_motion_pipeline(
                 params.ego_angular_velocity_latency_mean_s, params.ego_angular_velocity_fol_tau_s),
-            "body_linear_acceleration_w": _channel_motion_pipeline(
+            "linear_acceleration": _channel_motion_pipeline(
                 params.ego_linear_acceleration_latency_mean_s, params.ego_linear_acceleration_fol_tau_s),
         }
+        channel_to_fields: dict[str, tuple[str, ...]] = {
+            "position":            ("body_position_w",),
+            "velocity":            ("body_linear_velocity_w",),
+            "orientation":         ("body_orientation_w",),
+            # body_angular_velocity_b and body_combined_angular_velocity_w share
+            # the IMU gyro source (the latter just adds gimbal joint rate),
+            # so they get the same lag as the world-frame channel.
+            "angular_velocity":    (
+                "body_angular_velocity_w",
+                "body_angular_velocity_b",
+                "body_combined_angular_velocity_w",
+            ),
+            # The env only registers the body-frame linear acceleration field
+            # (see multi_agent_wrapper.BODY_FIELDS); ticket 041 measured IMU
+            # spec-force which IS body-frame, so this is the correct mapping.
+            "linear_acceleration": ("body_linear_acceleration_b",),
+        }
+        for channel, pipeline in per_channel_pipelines.items():
+            for field_name in channel_to_fields[channel]:
+                motion_field_overrides[field_name] = pipeline
+
+        # Risk #3 mitigation: validate every override key matches a registered
+        # AgentStates motion field. Without this assertion, a typo silently
+        # falls through to the legacy bulk pipeline (uniform 5 ms lag),
+        # masking the per-channel patch with no visible error.
+        # Local import to break the multi_agent_wrapper <- delay_cfg_v3 cycle.
+        from .multi_agent_wrapper import BODY_FIELDS
+
+        valid_fields = {name for name, _ in BODY_FIELDS}
+        unknown = sorted(set(motion_field_overrides) - valid_fields)
+        if unknown:
+            raise ValueError(
+                "create_delay_cfg_from_params: per-channel motion field "
+                f"overrides {unknown!r} do not match any registered ego "
+                f"motion field. Known fields: {sorted(valid_fields)!r}. "
+                "A silent fall-through to the bulk default pipeline would "
+                "result; fix channel_to_fields above or update BODY_FIELDS."
+            )
 
     # Build perspective configs
     # Ego: motion pipeline as default (legacy fallback), per-channel motion

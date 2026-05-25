@@ -6,7 +6,7 @@ Device:        cuda
 Torch version: 2.5.1+cu118
 CUDA version:  11.8
 GPU name:      NVIDIA GeForce RTX 3090
-Started:       2026-04-14 21:48:04
+Started:       2026-05-26 00:02:15
 
 ================================================================================
 Configuration Tests
@@ -76,72 +76,14 @@ Dual-Cache Regression (ticket 029)
   [PASS] shape mismatch raises ValueError
 
 ================================================================================
-Per-Agent Randomization Tests
+Per-Channel Ego Motion Latency (ticket 042)
 ================================================================================
-  [PASS] PerAgentDistributionSampler initialization
-  [PASS] Per-agent scaled sampling
-  [PASS] Per-agent selective sampling
-  [PASS] PerAgentParameterSampler per-episode behavior
-  [PASS] PerAgentLatencySampler step conversion
-  [PASS] PerAgentLatencySampler min_steps enforcement
-  [PASS] PerAgentStalenessSampler FPS to period
-  [PASS] Statistical independence between agents
-  [PASS] Curriculum scaling with per-agent sampler
-  [PASS] Per-env-reset resampling
-  [PASS] Normal distribution with clipping
-
-================================================================================
-Reward Mode Configuration Tests
-================================================================================
-  [PASS] RewardStateCfg default values
-  [PASS] Pure GT mode (use_delay=False, use_noise=False)
-  [PASS] Delayed clean mode (use_delay=True, use_noise=False)
-  [FAIL] GT with noise mode (use_delay=False, use_noise=True)
-    GT+noise mode should add noise, but max difference was 0.0
-  [PASS] Full noisy delayed mode (use_delay=True, use_noise=True)
-  [PASS] Reward states differ from observation states
-  [PASS] Noise scale affects reward noise
-  [PASS] Configuration persistence
-  [PASS] All four modes produce different outputs
-
-================================================================================
-Idempotency Tests (Multiple Calls Per Step)
-================================================================================
-  [PASS] Three calls at same t_current return identical results
-  [PASS] Effective delay matches config (not config/N)
-  [PASS] Buffer state unchanged on repeated calls
-  [PASS] FOL idempotency — multiple calls don't over-smooth
-  [PASS] Dropout consistency — same mask across calls at same t_current
-  [PASS] Reward vs obs query paths are independently consistent
-
-================================================================================
-TEST SUMMARY
-================================================================================
-Total Tests: 65
-Passed:      64 (98.5%)
-Failed:      1 (1.5%)
-Errors:      0 (0.0%)
-
---------------------------------------------------------------------------------
-FAILED TESTS:
---------------------------------------------------------------------------------
-
-Reward Mode Configuration Tests::GT with noise mode (use_delay=False, use_noise=True):
-  GT+noise mode should add noise, but max difference was 0.0
-================================================================================
-
-Results written to: /home/usrg/IsaacPX4/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/delay_system_v3/tests/test_result.txt
-rol
-
-================================================================================
-Dual-Cache Regression (ticket 029)
-================================================================================
-  [PASS] raw/noisy caches populated with shared delay
-  [PASS] idempotency guard ignores second advance this step
-  [PASS] reward-then-obs query ordering returns distinct payloads
-  [PASS] clean-only field (noisy_data=None) mirrors raw into obs cache
-  [PASS] shared dropout mask holds raw and noisy jointly
-  [PASS] shape mismatch raises ValueError
+  [PASS] bulk mode produces pre-patch field_overrides only
+  [PASS] per-channel mode covers every IMU/EKF motion field
+  [PASS] every per-channel override key matches a registered ego field
+  [PASS] per-channel latency means match ticket 041 defaults
+  [PASS] angular-velocity siblings share one pipeline realization
+  [PASS] ValueError raised on drifted override field name
 
 ================================================================================
 Per-Agent Randomization Tests
@@ -165,12 +107,14 @@ Reward Mode Configuration Tests
   [PASS] Pure GT mode (use_delay=False, use_noise=False)
   [PASS] Delayed clean mode (use_delay=True, use_noise=False)
   [FAIL] GT with noise mode (use_delay=False, use_noise=True)
-    GT+noise mode should add noise, but max difference was 0.0
+    Boolean value of Tensor with more than one value is ambiguous
   [PASS] Full noisy delayed mode (use_delay=True, use_noise=True)
   [PASS] Reward states differ from observation states
-  [PASS] Noise scale affects reward noise
+  [FAIL] Noise scale affects reward noise
+    Boolean value of Tensor with more than one value is ambiguous
   [PASS] Configuration persistence
-  [PASS] All four modes produce different outputs
+  [FAIL] All four modes produce different outputs
+    Boolean value of Tensor with more than one value is ambiguous
 
 ================================================================================
 Idempotency Tests (Multiple Calls Per Step)
@@ -185,9 +129,9 @@ Idempotency Tests (Multiple Calls Per Step)
 ================================================================================
 TEST SUMMARY
 ================================================================================
-Total Tests: 65
-Passed:      64 (98.5%)
-Failed:      1 (1.5%)
+Total Tests: 71
+Passed:      68 (95.8%)
+Failed:      3 (4.2%)
 Errors:      0 (0.0%)
 
 --------------------------------------------------------------------------------
@@ -195,7 +139,13 @@ FAILED TESTS:
 --------------------------------------------------------------------------------
 
 Reward Mode Configuration Tests::GT with noise mode (use_delay=False, use_noise=True):
-  GT+noise mode should add noise, but max difference was 0.0
+  Boolean value of Tensor with more than one value is ambiguous
+
+Reward Mode Configuration Tests::Noise scale affects reward noise:
+  Boolean value of Tensor with more than one value is ambiguous
+
+Reward Mode Configuration Tests::All four modes produce different outputs:
+  Boolean value of Tensor with more than one value is ambiguous
 ================================================================================
 
 Results written to: /home/usrg/IsaacPX4/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/delay_system_v3/tests/test_result.txt
