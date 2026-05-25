@@ -41,6 +41,12 @@ class MotorDynamics:
         self.num_envs = num_envs
         self.device = torch.device(device)
 
+        # Effective values: dispatched on cfg.model ("default" | "pegasus", ticket 040).
+        k_f_eff = cfg.get_effective_k_f()
+        k_m_eff = cfg.get_effective_k_m()
+        omega_max_eff = cfg.get_effective_omega_max()
+        tau_motor_eff = cfg.get_effective_tau_motor()
+
         # State: current rotor speeds (N, 4)
         self._omega = torch.full(
             (num_envs, 4),
@@ -52,17 +58,31 @@ class MotorDynamics:
         # Create mixer for thrust/moment aggregation
         self._mixer = MixerMatrix(
             arm_length=cfg.arm_length,
-            k_f=cfg.k_f,
-            k_m=cfg.k_m,
+            k_f=k_f_eff,
+            k_m=k_m_eff,
             device=self.device,
         )
 
         # Precompute limits
         self._omega_min = cfg.omega_min
-        self._omega_max = cfg.omega_max
+        self._omega_max = omega_max_eff
         self._tau_motor = torch.full(
-            (num_envs,), cfg.tau_motor, dtype=torch.float32, device=self.device
+            (num_envs,), tau_motor_eff, dtype=torch.float32, device=self.device
         )
+
+        # Cache effective k_f for thrust_min/thrust_max in allocate_wrench()
+        # (cfg.k_f stays bit-exact in default mode; Pegasus mode reads cfg.k_f_pegasus).
+        self._k_f_eff = k_f_eff
+        self._k_m_eff = k_m_eff
+
+        # Ticket 040 — per-env multiplicative DR scales on rotor-thrust /
+        # rotor-drag coefficients. Initialised to 1.0 (no DR). Written by
+        # ``DroneController.randomize_gains`` only when the motor cfg's
+        # ``model == "pegasus"`` AND ``GainRandomizationCfg.randomize_physics_pegasus``
+        # is True. Applied at force/moment compute time so default-mode runs
+        # observe bit-exact pre-040 wrenches.
+        self._k_f_scale = torch.ones((num_envs,), dtype=torch.float32, device=self.device)
+        self._k_m_scale = torch.ones((num_envs,), dtype=torch.float32, device=self.device)
 
     @property
     def omega(self) -> torch.Tensor:
@@ -135,7 +155,20 @@ class MotorDynamics:
         force = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
         force[:, 2] = total_thrust
 
-        return force, moments
+        # Ticket 040 — apply per-env multiplicative DR scales on k_f / k_m.
+        # F and τ_x / τ_y are linear in rotor thrust, so they scale by s_f.
+        # τ_z is the rotor reaction-torque sum, which scales by s_m
+        # independently of s_f (Q_i = k_m·ω_i² · sign, not derived from T_i).
+        # In default mode (and when DR is off) both scales stay at 1.0, so
+        # this is a bit-exact no-op.
+        s_f = self._k_f_scale.unsqueeze(-1)  # (N, 1)
+        force = force * s_f
+        moments_scaled = torch.empty_like(moments)
+        moments_scaled[:, 0] = moments[:, 0] * self._k_f_scale  # τ_x ∝ s_f
+        moments_scaled[:, 1] = moments[:, 1] * self._k_f_scale  # τ_y ∝ s_f
+        moments_scaled[:, 2] = moments[:, 2] * self._k_m_scale  # τ_z ∝ s_m
+
+        return force, moments_scaled
 
     def allocate_wrench(
         self,
@@ -151,9 +184,9 @@ class MotorDynamics:
         Returns:
             omega_cmd: (N, 4) rotor speed commands [rad/s].
         """
-        # Compute required thrusts
-        thrust_min = self.cfg.k_f * self._omega_min**2
-        thrust_max = self.cfg.k_f * self._omega_max**2
+        # Compute required thrusts (use effective k_f — Pegasus mode swaps it).
+        thrust_min = self._k_f_eff * self._omega_min**2
+        thrust_max = self._k_f_eff * self._omega_max**2
 
         thrusts = self._mixer.allocate(
             thrust_cmd=thrust_cmd,
@@ -196,7 +229,7 @@ class MotorDynamics:
         """
         import math
 
-        omega_hover = math.sqrt(mass * gravity / (4.0 * self.cfg.k_f))
+        omega_hover = math.sqrt(mass * gravity / (4.0 * self._k_f_eff))
         omega_hover = max(self._omega_min, min(omega_hover, self._omega_max))
         if env_ids is None:
             self._omega.fill_(omega_hover)

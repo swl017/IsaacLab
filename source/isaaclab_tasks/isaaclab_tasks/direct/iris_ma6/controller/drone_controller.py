@@ -76,11 +76,12 @@ class DroneController:
         self.num_envs = num_envs
         self.device = torch.device(device)
 
-        # Create mixer (shared between rate controller and motor dynamics)
+        # Create mixer (shared between rate controller and motor dynamics).
+        # Ticket 040: reads effective k_f/k_m so motor mode swap propagates here too.
         self._mixer = MixerMatrix(
             arm_length=cfg.motor.arm_length,
-            k_f=cfg.motor.k_f,
-            k_m=cfg.motor.k_m,
+            k_f=cfg.motor.get_effective_k_f(),
+            k_m=cfg.motor.get_effective_k_m(),
             device=self.device,
         )
 
@@ -510,6 +511,39 @@ class DroneController:
 
             scale2 = torch.empty(M, device=self.device).uniform_(low, high)
             self._zoom._max_zoom_rate[env_ids] = self._nominal_gains["max_zoom_rate"][env_ids] * scale2
+
+        # ------------------------------------------------------------------
+        # Ticket 040 — Pegasus-mode physics DR (k_f, k_m, drag_coefs).
+        # No-ops when motor.model == "default" OR randomize_physics_pegasus is
+        # False; each knob writes per-env multiplicative scales that the
+        # MotorDynamics / AerodynamicEffects compute paths apply at force time.
+        # All three scale ranges are curriculum-ramped through the same
+        # progress factor as the rest of randomize_gains.
+        # ------------------------------------------------------------------
+        is_pegasus_mode = self.cfg.motor.model == "pegasus"
+        if is_pegasus_mode and getattr(cfg, "randomize_physics_pegasus", False):
+            # k_f scale — per-env uniform.
+            kf_low = 1.0 - progress * (1.0 - cfg.k_f_scale_range[0])
+            kf_high = 1.0 + progress * (cfg.k_f_scale_range[1] - 1.0)
+            kf_scale = torch.empty(M, device=self.device).uniform_(kf_low, kf_high)
+            self._motor._k_f_scale[env_ids] = kf_scale
+
+            # k_m scale — per-env uniform, INDEPENDENT of k_f scale (yaw
+            # authority drifts independently of thrust authority across builds).
+            km_low = 1.0 - progress * (1.0 - cfg.k_m_scale_range[0])
+            km_high = 1.0 + progress * (cfg.k_m_scale_range[1] - 1.0)
+            km_scale = torch.empty(M, device=self.device).uniform_(km_low, km_high)
+            self._motor._k_m_scale[env_ids] = km_scale
+
+            # drag_coefs scale — one scalar per env, applied uniformly to all
+            # 3 body axes. Multiplies the constructed cfg coefs in-place.
+            d_low = 1.0 - progress * (1.0 - cfg.drag_coefs_scale_range[0])
+            d_high = 1.0 + progress * (cfg.drag_coefs_scale_range[1] - 1.0)
+            d_scale = torch.empty(M, 1, device=self.device).uniform_(d_low, d_high)
+            base_coefs = torch.tensor(
+                self.cfg.aerodynamics.drag_coefs, dtype=torch.float32, device=self.device
+            ).unsqueeze(0)  # (1, 3)
+            self._aerodynamics._drag_coefs[env_ids] = base_coefs * d_scale
 
     def set_aerodynamic_level(self, level: int):
         """Set aerodynamic fidelity level.

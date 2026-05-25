@@ -524,6 +524,27 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     drone_controller: DroneControllerCfg = PX4_MATCHED_CONTROLLER_CFG
     """Drone controller configuration. PX4 SITL-matched gains from sysid replicator (ticket-008)."""
 
+    # ---- Ticket 040 — Pegasus physics parity ---------------------------------
+    physics_mode: str = "default"
+    """Ticket 040 — rigid-body / motor / drag plant mode selector.
+
+    ``"default"`` (default, bit-exact pre-040): racing-class numerics
+    (k_f=1.2e-5, omega_max=5000, τ=10 ms, quadratic body drag, Dryden gust +
+    rotor effects at fidelity 3).
+
+    ``"pegasus"``: PegasusSimulator IrisConfig parity for sim-to-sim transfer
+    (k_f=8.54858e-6, omega_max=1100, τ≈0, linear-diagonal drag with coefs
+    (0.50, 0.30, 0.00), wind/gust/rotor-effects off). Propagated at env
+    construction into ``drone_controller.motor.model`` and
+    ``drone_controller.aerodynamics.mode``. See
+    ``doc/pegasus_physics_parity_spec.md``.
+    """
+
+    expected_body_mass: float = 1.5
+    """Expected USD body mass [kg]. Sanity-checked against the actual USD mass at
+    env reset; a > 1% divergence logs a warning (does not raise). Default 1.5 kg
+    matches PegasusSimulator IrisConfig and iris_gimbal3.usda."""
+
     # ==========================================================================
     # Motion Limits
     # ==========================================================================
@@ -581,11 +602,34 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # ==========================================================================
 
     delay_system_params: DelaySystemKeyParams = DelaySystemKeyParams(
-        # === Ego Motion Latency (proprioceptive sensing) ===
-        ego_motion_latency_enabled=True,  # Transport latency for IMU/GPS
-        ego_motion_latency_mean=0.005,    # 5ms mean transport latency
-        ego_motion_latency_std=0.002,     # 2ms std
-        ego_motion_fol_tau=0.005,          # 5ms time constant for smoothing
+        # === Ego Motion Latency — per-channel from ticket 041 (Pegasus SITL) ===
+        # Two regimes measured (see ticket 041/Results §):
+        #   GPS-fused / lag-compensated: position, velocity, attitude_yaw → 0 ms
+        #   IMU-driven (raw IMU pass-through): attitude roll/pitch, body_rate,
+        #   linear_acceleration → 15–35 ms (consistent with EKF2_PREDICT_US +
+        #   IMU integration + MAVLink hop).
+        # Orientation is a quaternion (yaw can't be split from roll/pitch at
+        # the field level), so we use 18 ms as a conservative upper bound;
+        # yaw obs is artificially aged but only used for low-bandwidth heading
+        # transforms where this is acceptable. See ticket 045 (proposed) for
+        # the architectural split.
+        # First-order lag TCs are 0 in lockstep SITL (no large fusion
+        # corrections to smooth). For real-hardware DR, raise IMU-driven
+        # channels to 0.25 s (PX4 EKF2_TAU_POS / EKF2_TAU_VEL defaults).
+        use_bulk_ego_motion_latency=False,
+        ego_position_latency_mean_s=0.000,
+        ego_velocity_latency_mean_s=0.000,
+        ego_orientation_latency_mean_s=0.018,
+        ego_angular_velocity_latency_mean_s=0.015,
+        ego_linear_acceleration_latency_mean_s=0.035,
+        ego_per_channel_latency_std_s=0.005,
+        # Legacy bulk knobs — only used when use_bulk_ego_motion_latency=True.
+        # Kept for backward-compat with any experiment configs that explicitly
+        # opt back into the bundled latency.
+        ego_motion_latency_enabled=True,
+        ego_motion_latency_mean=0.005,
+        ego_motion_latency_std=0.002,
+        ego_motion_fol_tau=0.005,
         # === Ego Detection Latency (glass -> detection output) ===
         # LOW:  0.296 / 0.022
         # MID: 	0.310 / 0.021
@@ -896,6 +940,25 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
         """Populate agent-specific fields from num_agents."""
         if self.num_agents < 2:
             raise ValueError(f"num_agents must be >= 2, got {self.num_agents}")
+
+        # Env-var-gated debug print of the load-bearing cfg fields, used to
+        # verify Hydra overrides propagated for ablation runs.
+        # Enable with `IRIS_MA6_CFG_DEBUG=1` in the shell.
+        import os as _os
+        if _os.environ.get("IRIS_MA6_CFG_DEBUG") == "1":
+            print(
+                f"[CFG-DEBUG] "
+                f"enable_full_critic_priv_obs={self.enable_full_critic_priv_obs} | "
+                f"enable_axis_independence={self.enable_axis_independence} | "
+                f"enable_asymmetric_z_envelope={getattr(self, 'enable_asymmetric_z_envelope', None)} | "
+                f"max_vel_z_up={getattr(self, 'max_vel_z_up', None)} | "
+                f"max_vel_z_dn={getattr(self, 'max_vel_z_dn', None)} | "
+                f"action_weight={self.action_weight} | "
+                f"action_delta_weight={self.action_delta_weight} | "
+                f"bbox_center_reward_scale={self.bbox_center_reward_scale} | "
+                f"bbox_size_reward_scale={self.bbox_size_reward_scale}",
+                flush=True,
+            )
 
         self.possible_agents = [f"drone_{i}" for i in range(self.num_agents)]
         self.action_spaces = {a: 7 for a in self.possible_agents}

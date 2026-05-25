@@ -305,6 +305,26 @@ class IrisMA6TestEnv(DirectMARLEnv):
         first_robot = self._robots[cfg.possible_agents[0]]
         all_masses = first_robot.root_physx_view.get_masses()
         mass = all_masses[0].sum().item()
+
+        # Ticket 040 — sanity-check USD mass against expected_body_mass.
+        # 1% tolerance; emit a warning on divergence but do not raise.
+        expected_mass = getattr(self.cfg, "expected_body_mass", 1.5)
+        if abs(mass - expected_mass) / max(expected_mass, 1e-6) > 0.01:
+            print(
+                f"[iris_ma6:040] WARNING: USD body mass {mass:.4f} kg diverges "
+                f"from expected_body_mass {expected_mass:.4f} kg by "
+                f"{100 * abs(mass - expected_mass) / expected_mass:.2f}%. "
+                f"Pegasus-mode hover init assumes 1.5 kg; consider fixing the USD."
+            )
+
+        # Ticket 040 — propagate physics_mode into the controller cfg before
+        # construction. "pegasus" engages PegasusSimulator IrisConfig parity:
+        # motor.model = "pegasus", aerodynamics.mode = "pegasus".
+        physics_mode = getattr(self.cfg, "physics_mode", "default")
+        if physics_mode == "pegasus":
+            self.cfg.drone_controller.motor.model = "pegasus"
+            self.cfg.drone_controller.aerodynamics.mode = "pegasus"
+
         self._controller = DroneController(
             cfg=self.cfg.drone_controller,
             mass=mass,

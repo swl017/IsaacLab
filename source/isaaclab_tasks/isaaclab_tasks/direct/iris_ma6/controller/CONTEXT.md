@@ -34,6 +34,7 @@ None (standalone module).
 
 ## Spec
 `doc/controller_spec.md`
+`doc/pegasus_physics_parity_spec.md` — ticket 040, optional `cfg.motor.model="pegasus"` + `cfg.aerodynamics.mode="pegasus"` mode (PegasusSimulator IrisConfig parity). Default mode preserves bit-exact pre-040 numerics.
 
 ## Records
 - `doc/gimbal_stabilization_status.md` — Gimbal tuning results, stability analysis, final config (pointing_gain, feedback_blend, actuation mode)

@@ -1,12 +1,24 @@
-[3gH    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H   [INFO] Using python from: /home/usrg/IsaacPX4/IsaacLab/_isaac_sim/python.sh
+[3gH    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H   [INFO] Using python from: /home/usrg/miniconda3/envs/env_isaaclab/bin/python
+[WARN][AppLauncher]: There are no arguments attached to the ArgumentParser object. If you have your own arguments, please load your own arguments before calling the `AppLauncher.add_app_launcher_args` method. This allows the method to check the validity of the arguments and perform checks for argument names.
+[INFO][AppLauncher]: Using device: cuda:0
+[INFO][AppLauncher]: Loading experience file: /home/usrg/IsaacPX4/IsaacLab/apps/isaaclab.python.headless.kit
+[pegasus-test] post-applauncher
+[pegasus-test] enter main
+======================================================================
+Pegasus Physics Parity - ticket 040 unit tests
+======================================================================
+Device: cuda
+Torch:  2.5.1+cu118
+----------------------------------------------------------------------
+  PASS  effective_accessors
 Loading user config located at: '/home/usrg/isaacsim/kit/data/Kit/Isaac-Sim/4.5/user.config.json'
-[Info] [carb] Logging to file: /home/usrg/isaacsim/kit/logs/Kit/Isaac-Sim/4.5/kit_20260428_051131.log
-2026-04-27 20:11:31 [0ms] [Warning] [omni.kit.app.plugin] No crash reporter present, dumps uploading isn't available.
-2026-04-27 20:11:31 [2ms] [Warning] [omni.ext.plugin] [ext: driver_artifacts] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts' or '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts/config'
-2026-04-27 20:11:31 [2ms] [Warning] [omni.ext.plugin] [ext: rendering_modes] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes' or '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes/config'
-2026-04-27 20:11:32 [536ms] [Warning] [omni.usd_config.extension] Enable omni.materialx.libs extension to use MaterialX
-2026-04-27 20:11:32 [650ms] [Warning] [omni.platforminfo.plugin] failed to open the default display.  Can't verify X Server version.
-2026-04-27 20:11:32 [977ms] [Warning] [omni.isaac.dynamic_control] omni.isaac.dynamic_control is deprecated as of Isaac Sim 4.5. No action is needed from end-users.
+[Info] [carb] Logging to file: /home/usrg/isaacsim/kit/logs/Kit/Isaac-Sim/4.5/kit_20260525_160519.log
+2026-05-25 07:05:19 [0ms] [Warning] [omni.kit.app.plugin] No crash reporter present, dumps uploading isn't available.
+2026-05-25 07:05:19 [2ms] [Warning] [omni.ext.plugin] [ext: driver_artifacts] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts' or '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts/config'
+2026-05-25 07:05:19 [2ms] [Warning] [omni.ext.plugin] [ext: rendering_modes] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes' or '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes/config'
+2026-05-25 07:05:20 [494ms] [Warning] [omni.usd_config.extension] Enable omni.materialx.libs extension to use MaterialX
+2026-05-25 07:05:20 [612ms] [Warning] [omni.platforminfo.plugin] failed to open the default display.  Can't verify X Server version.
+2026-05-25 07:05:20 [910ms] [Warning] [omni.isaac.dynamic_control] omni.isaac.dynamic_control is deprecated as of Isaac Sim 4.5. No action is needed from end-users.
 
 |---------------------------------------------------------------------------------------------|
 | Driver Version: 535.230.02    | Graphics API: Vulkan
@@ -23,42 +35,23 @@ Loading user config located at: '/home/usrg/isaacsim/kit/data/Kit/Isaac-Sim/4.5/
 | Processor: AMD Ryzen 9 5950X 16-Core Processor
 | Cores: 16 | Logical Cores: 32
 |---------------------------------------------------------------------------------------------|
-| Total Memory (MB): 64194 | Free Memory: 19318
+| Total Memory (MB): 64195 | Free Memory: 11313
 | Total Page/Swap (MB): 13730 | Free Page/Swap: 17592186044415
 |---------------------------------------------------------------------------------------------|
-2026-04-27 20:11:37 [5,485ms] [Warning] [omni.kvdb.plugin] Disabling key-value database because another kit process is locking it
-[WARN][AppLauncher]: There are no arguments attached to the ArgumentParser object. If you have your own arguments, please load your own arguments before calling the `AppLauncher.add_app_launcher_args` method. This allows the method to check the validity of the arguments and perform checks for argument names.
-[INFO][AppLauncher]: Using device: cuda:0
-[INFO][AppLauncher]: Loading experience file: /home/usrg/IsaacPX4/IsaacLab/apps/isaaclab.python.headless.kit
-================================================================================
-LOS-STABILIZATION-BYPASS TEST SUITE (mas/035)
-================================================================================
-Device:        cuda
-Started:       2026-04-28 05:11:37
-
-================================================================================
-Body yaws at 60 deg/s for 0.5 s; policy zero
-================================================================================
-  ✓ body yaw 60 deg/s: max|d_az|=0.60 deg, max|d_el|=0.00 deg ≤ 2
-
-================================================================================
-Body pitches at 60 deg/s for 0.5 s; policy zero
-================================================================================
-  ✓ body pitch 60 deg/s: max|d_az|=0.00 deg, max|d_el|=0.60 deg ≤ 2
-
-================================================================================
-Body yaws + pitches at 60 deg/s combined; policy zero
-================================================================================
-  ✓ body yaw+pitch 60 deg/s: max|d_az|=3.42 deg, max|d_el|=8.78 deg ≤ 10
-
-================================================================================
-Invariance: rate-loop progress 0 vs 1 produces same body-comp residual
-================================================================================
-  ✓ rate-loop invariance: |Δ_az|=0.00e+00, |Δ_el|=0.00e+00
-
-================================================================================
-TEST SUMMARY (mas/035 LOS-stabilization-bypass)
-================================================================================
-Total: 4, Passed: 4, Failed: 0
-2026-04-27 20:11:39 [7,984ms] [Warning] [omni.fabric.plugin] gFabricState->gUsdStageToSimStageWithHistoryMap had 1 outstanding SimStageWithHistory(s) at shutdown
-2026-04-27 20:11:39 [8,011ms] [Warning] [carb] Recursive unloadAllPlugins() detected!
+  PASS  motor_pegasus_no_lag
+  PASS  motor_default_lag
+  PASS  motor_pegasus_thrust_ceiling
+  PASS  motor_default_thrust_ceiling
+  PASS  mixer_yaw_authority_ratio
+  PASS  linear_diag_drag
+  PASS  pegasus_bypasses_rotor_effects_and_wind
+  PASS  quadratic_drag_unchanged
+  PASS  default_mode_motor_bit_exactness
+  PASS  dr_default_mode_no_writes
+  PASS  dr_pegasus_mode_writes_scales
+  PASS  dr_pegasus_progress_zero_collapses
+  PASS  dr_pegasus_flag_off_no_writes
+  PASS  dr_scales_modulate_wrench
+  PASS  dr_default_mode_wrench_bit_exact
+----------------------------------------------------------------------
+Total: 16, Passed: 16, Failed: 0

@@ -1,0 +1,489 @@
+{
+  "dataset_id": "2026-05-25_pegasus_iris_ekf_lag_v2_mixed_1v_chirp_impulse",
+  "schema_version": 1,
+  "setup": {
+    "raw_dir": "/home/usrg/IsaacPX4/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/controller/sysid_output/ekf_state_lag/raw",
+    "num_trials_per_maneuver": 3,
+    "maneuver_duration_s": 30.0
+  },
+  "px4_params_snapshot": {
+    "EKF2_PREDICT_US": {
+      "error": "TimeoutExpired(['ros2', 'service', 'call', '/px4_1/mavros/param/get', 'mavros_msgs/srv/ParamGet', \"{param_id: 'EKF2_PREDICT_US'}\"], 5.0)"
+    },
+    "EKF2_GPS_DELAY": {
+      "error": "TimeoutExpired(['ros2', 'service', 'call', '/px4_1/mavros/param/get', 'mavros_msgs/srv/ParamGet', \"{param_id: 'EKF2_GPS_DELAY'}\"], 5.0)"
+    },
+    "EKF2_BARO_DELAY": {
+      "error": "TimeoutExpired(['ros2', 'service', 'call', '/px4_1/mavros/param/get', 'mavros_msgs/srv/ParamGet', \"{param_id: 'EKF2_BARO_DELAY'}\"], 5.0)"
+    },
+    "EKF2_MAG_DELAY": {
+      "error": "TimeoutExpired(['ros2', 'service', 'call', '/px4_1/mavros/param/get', 'mavros_msgs/srv/ParamGet', \"{param_id: 'EKF2_MAG_DELAY'}\"], 5.0)"
+    },
+    "EKF2_EV_DELAY": {
+      "error": "TimeoutExpired(['ros2', 'service', 'call', '/px4_1/mavros/param/get', 'mavros_msgs/srv/ParamGet', \"{param_id: 'EKF2_EV_DELAY'}\"], 5.0)"
+    },
+    "EKF2_IMU_POS_X": {
+      "error": "TimeoutExpired(['ros2', 'service', 'call', '/px4_1/mavros/param/get', 'mavros_msgs/srv/ParamGet', \"{param_id: 'EKF2_IMU_POS_X'}\"], 5.0)"
+    },
+    "EKF2_IMU_POS_Y": {
+      "error": "TimeoutExpired(['ros2', 'service', 'call', '/px4_1/mavros/param/get', 'mavros_msgs/srv/ParamGet', \"{param_id: 'EKF2_IMU_POS_Y'}\"], 5.0)"
+    },
+    "EKF2_IMU_POS_Z": {
+      "error": "TimeoutExpired(['ros2', 'service', 'call', '/px4_1/mavros/param/get', 'mavros_msgs/srv/ParamGet', \"{param_id: 'EKF2_IMU_POS_Z'}\"], 5.0)"
+    },
+    "IMU_INTEG_RATE": {
+      "error": "TimeoutExpired(['ros2', 'service', 'call', '/px4_1/mavros/param/get', 'mavros_msgs/srv/ParamGet', \"{param_id: 'IMU_INTEG_RATE'}\"], 5.0)"
+    }
+  },
+  "channels": {
+    "position_xyz": {
+      "status": "fit",
+      "delay_mean_s": 0.0,
+      "delay_std_s": 0.0,
+      "delay_p50_s": 0.0,
+      "delay_p95_s": 0.0,
+      "delay_p99_s": 0.0,
+      "residual_rmse_after_compensation": NaN,
+      "fit_method": "xcorr",
+      "fit_method_secondary": "step_50",
+      "fit_method_secondary_value_s": 0.22648783667628594,
+      "fit_method_tertiary": null,
+      "fit_method_tertiary_value_s": null,
+      "chirp_flatness_rel": null,
+      "xcorr_peak": 0.9997413577771308,
+      "source_maneuvers": [
+        "vel_step_x/trial0",
+        "vel_step_x/trial1",
+        "vel_step_x/trial2",
+        "vel_step_z/trial0",
+        "vel_step_z/trial1",
+        "vel_step_z/trial2"
+      ],
+      "per_axis": {
+        "x": {
+          "delay_xcorr_mean_s": 0.0,
+          "delay_xcorr_std_s": 0.0,
+          "xcorr_peak_mean": 0.9997894511813724,
+          "delay_step50_mean_s": 0.05612529279195163,
+          "delay_chirp_mean_s": null,
+          "chirp_flatness_rel_mean": null,
+          "residual_rmse_mean": null,
+          "n_xcorr_samples": 3,
+          "n_step50_samples": 6,
+          "n_chirp_samples": 0
+        },
+        "y": {
+          "delay_xcorr_mean_s": null,
+          "delay_xcorr_std_s": null,
+          "xcorr_peak_mean": null,
+          "delay_step50_mean_s": 0.40333600602949576,
+          "delay_chirp_mean_s": null,
+          "chirp_flatness_rel_mean": null,
+          "residual_rmse_mean": null,
+          "n_xcorr_samples": 0,
+          "n_step50_samples": 6,
+          "n_chirp_samples": 0
+        },
+        "z": {
+          "delay_xcorr_mean_s": 0.0,
+          "delay_xcorr_std_s": 0.0,
+          "xcorr_peak_mean": 0.9996932643728892,
+          "delay_step50_mean_s": 0.2200022112074104,
+          "delay_chirp_mean_s": null,
+          "chirp_flatness_rel_mean": null,
+          "residual_rmse_mean": null,
+          "n_xcorr_samples": 3,
+          "n_step50_samples": 6,
+          "n_chirp_samples": 0
+        }
+      },
+      "notes": [
+        "delay_mean 0.0 ms (\u226410 ms) \u2014 within measurement resolution; consistent with PX4's lag-compensated EKF output in Pegasus lockstep SITL"
+      ]
+    },
+    "velocity_world_xyz": {
+      "status": "fit",
+      "delay_mean_s": -2.8912057932946783e-19,
+      "delay_std_s": 0.012583057392117916,
+      "delay_p50_s": 0.0025000000000000005,
+      "delay_p95_s": 0.01375,
+      "delay_p99_s": 0.014750000000000001,
+      "residual_rmse_after_compensation": 0.037332753025240493,
+      "fit_method": "xcorr",
+      "fit_method_secondary": "step_50",
+      "fit_method_secondary_value_s": -0.5438008775372999,
+      "fit_method_tertiary": null,
+      "fit_method_tertiary_value_s": null,
+      "chirp_flatness_rel": null,
+      "xcorr_peak": 0.996118523985618,
+      "source_maneuvers": [
+        "vel_step_x/trial0",
+        "vel_step_x/trial1",
+        "vel_step_x/trial2",
+        "vel_step_z/trial0",
+        "vel_step_z/trial1",
+        "vel_step_z/trial2"
+      ],
+      "per_axis": {
+        "x": {
+          "delay_xcorr_mean_s": -0.011666666666666667,
+          "delay_xcorr_std_s": 0.0062360956446232355,
+          "xcorr_peak_mean": 0.9982681356472117,
+          "delay_step50_mean_s": -0.19424589041407123,
+          "delay_chirp_mean_s": null,
+          "chirp_flatness_rel_mean": null,
+          "residual_rmse_mean": null,
+          "n_xcorr_samples": 3,
+          "n_step50_samples": 6,
+          "n_chirp_samples": 0
+        },
+        "y": {
+          "delay_xcorr_mean_s": null,
+          "delay_xcorr_std_s": null,
+          "xcorr_peak_mean": null,
+          "delay_step50_mean_s": -0.8073236900570228,
+          "delay_chirp_mean_s": null,
+          "chirp_flatness_rel_mean": null,
+          "residual_rmse_mean": null,
+          "n_xcorr_samples": 0,
+          "n_step50_samples": 6,
+          "n_chirp_samples": 0
+        },
+        "z": {
+          "delay_xcorr_mean_s": 0.011666666666666667,
+          "delay_xcorr_std_s": 0.002357022603955158,
+          "xcorr_peak_mean": 0.9939689123240241,
+          "delay_step50_mean_s": -0.6298330521408056,
+          "delay_chirp_mean_s": null,
+          "chirp_flatness_rel_mean": null,
+          "residual_rmse_mean": 0.037332753025240493,
+          "n_xcorr_samples": 3,
+          "n_step50_samples": 6,
+          "n_chirp_samples": 0
+        }
+      },
+      "notes": [
+        "delay_mean -0.0 ms (\u226410 ms) \u2014 within measurement resolution; consistent with PX4's lag-compensated EKF output in Pegasus lockstep SITL"
+      ]
+    },
+    "velocity_body_xyz": {
+      "status": "fit",
+      "delay_mean_s": -2.8912057932946783e-19,
+      "delay_std_s": 0.012583057392117916,
+      "delay_p50_s": 0.0025000000000000005,
+      "delay_p95_s": 0.01375,
+      "delay_p99_s": 0.014750000000000001,
+      "residual_rmse_after_compensation": 0.03733328244974878,
+      "fit_method": "xcorr",
+      "fit_method_secondary": "step_50",
+      "fit_method_secondary_value_s": -0.1975335721770048,
+      "fit_method_tertiary": null,
+      "fit_method_tertiary_value_s": null,
+      "chirp_flatness_rel": null,
+      "xcorr_peak": 0.9961120167241817,
+      "source_maneuvers": [
+        "vel_step_x/trial0",
+        "vel_step_x/trial1",
+        "vel_step_x/trial2",
+        "vel_step_z/trial0",
+        "vel_step_z/trial1",
+        "vel_step_z/trial2"
+      ],
+      "per_axis": {
+        "x": {
+          "delay_xcorr_mean_s": -0.011666666666666667,
+          "delay_xcorr_std_s": 0.0062360956446232355,
+          "xcorr_peak_mean": 0.9982551145181264,
+          "delay_step50_mean_s": -0.24648062552534591,
+          "delay_chirp_mean_s": null,
+          "chirp_flatness_rel_mean": null,
+          "residual_rmse_mean": null,
+          "n_xcorr_samples": 3,
+          "n_step50_samples": 6,
+          "n_chirp_samples": 0
+        },
+        "y": {
+          "delay_xcorr_mean_s": null,
+          "delay_xcorr_std_s": null,
+          "xcorr_peak_mean": null,
+          "delay_step50_mean_s": -0.40222469991422355,
+          "delay_chirp_mean_s": null,
+          "chirp_flatness_rel_mean": null,
+          "residual_rmse_mean": null,
+          "n_xcorr_samples": 0,
+          "n_step50_samples": 6,
+          "n_chirp_samples": 0
+        },
+        "z": {
+          "delay_xcorr_mean_s": 0.011666666666666667,
+          "delay_xcorr_std_s": 0.002357022603955158,
+          "xcorr_peak_mean": 0.9939689189302371,
+          "delay_step50_mean_s": 0.056104608908555065,
+          "delay_chirp_mean_s": null,
+          "chirp_flatness_rel_mean": null,
+          "residual_rmse_mean": 0.03733328244974878,
+          "n_xcorr_samples": 3,
+          "n_step50_samples": 6,
+          "n_chirp_samples": 0
+        }
+      },
+      "notes": [
+        "delay_mean -0.0 ms (\u226410 ms) \u2014 within measurement resolution; consistent with PX4's lag-compensated EKF output in Pegasus lockstep SITL"
+      ]
+    },
+    "attitude_roll": {
+      "status": "fit",
+      "delay_mean_s": 0.018333333333333337,
+      "delay_std_s": 0.002357022603955159,
+      "delay_p50_s": 0.02,
+      "delay_p95_s": 0.02,
+      "delay_p99_s": 0.02,
+      "residual_rmse_after_compensation": 0.0037564791341628593,
+      "fit_method": "xcorr",
+      "fit_method_secondary": "step_50",
+      "fit_method_secondary_value_s": 0.045524944512313446,
+      "fit_method_tertiary": "chirp_phase_delay",
+      "fit_method_tertiary_value_s": 0.3227284109805601,
+      "chirp_flatness_rel": 0.44641940787815876,
+      "xcorr_peak": 0.9874342337666656,
+      "source_maneuvers": [
+        "chirp/trial0",
+        "chirp/trial1",
+        "chirp/trial2"
+      ],
+      "per_axis": {
+        "roll": {
+          "delay_xcorr_mean_s": 0.018333333333333337,
+          "delay_xcorr_std_s": 0.002357022603955159,
+          "xcorr_peak_mean": 0.9874342337666656,
+          "delay_step50_mean_s": 0.045524944512313446,
+          "delay_chirp_mean_s": 0.3227284109805601,
+          "chirp_flatness_rel_mean": 0.44641940787815876,
+          "residual_rmse_mean": 0.0037564791341628593,
+          "n_xcorr_samples": 3,
+          "n_step50_samples": 3,
+          "n_chirp_samples": 3
+        }
+      },
+      "notes": [
+        "chirp group-delay flatness 0.45 > 0.2 \u2014 constant-delay model may be insufficient; consider escalating to a first-order channel model in a follow-up ticket"
+      ]
+    },
+    "attitude_pitch": {
+      "status": "fit",
+      "delay_mean_s": 0.0175,
+      "delay_std_s": 0.004787135538781692,
+      "delay_p50_s": 0.0175,
+      "delay_p95_s": 0.02375,
+      "delay_p99_s": 0.02475,
+      "residual_rmse_after_compensation": 0.009589163648989693,
+      "fit_method": "xcorr",
+      "fit_method_secondary": "step_50",
+      "fit_method_secondary_value_s": -0.10696388478084866,
+      "fit_method_tertiary": "chirp_phase_delay",
+      "fit_method_tertiary_value_s": -0.28391761175905855,
+      "chirp_flatness_rel": 0.33137680739959235,
+      "xcorr_peak": 0.9759793119084246,
+      "source_maneuvers": [
+        "chirp/trial0",
+        "chirp/trial1",
+        "chirp/trial2",
+        "vel_step_x/trial0",
+        "vel_step_x/trial1",
+        "vel_step_x/trial2"
+      ],
+      "per_axis": {
+        "pitch": {
+          "delay_xcorr_mean_s": 0.0175,
+          "delay_xcorr_std_s": 0.004787135538781692,
+          "xcorr_peak_mean": 0.9759793119084246,
+          "delay_step50_mean_s": -0.10696388478084866,
+          "delay_chirp_mean_s": -0.28391761175905855,
+          "chirp_flatness_rel_mean": 0.33137680739959235,
+          "residual_rmse_mean": 0.009589163648989693,
+          "n_xcorr_samples": 6,
+          "n_step50_samples": 6,
+          "n_chirp_samples": 3
+        }
+      },
+      "notes": [
+        "chirp group-delay flatness 0.33 > 0.2 \u2014 constant-delay model may be insufficient; consider escalating to a first-order channel model in a follow-up ticket"
+      ]
+    },
+    "attitude_yaw": {
+      "status": "fit",
+      "delay_mean_s": 0.0,
+      "delay_std_s": 0.0,
+      "delay_p50_s": 0.0,
+      "delay_p95_s": 0.0,
+      "delay_p99_s": 0.0,
+      "residual_rmse_after_compensation": NaN,
+      "fit_method": "xcorr",
+      "fit_method_secondary": "step_50",
+      "fit_method_secondary_value_s": 0.015568405483564777,
+      "fit_method_tertiary": null,
+      "fit_method_tertiary_value_s": null,
+      "chirp_flatness_rel": null,
+      "xcorr_peak": 0.9982610184199353,
+      "source_maneuvers": [
+        "yaw_step/trial0",
+        "yaw_step/trial1",
+        "yaw_step/trial2"
+      ],
+      "per_axis": {
+        "yaw": {
+          "delay_xcorr_mean_s": 0.0,
+          "delay_xcorr_std_s": 0.0,
+          "xcorr_peak_mean": 0.9982610184199353,
+          "delay_step50_mean_s": 0.015568405483564777,
+          "delay_chirp_mean_s": null,
+          "chirp_flatness_rel_mean": null,
+          "residual_rmse_mean": null,
+          "n_xcorr_samples": 3,
+          "n_step50_samples": 3,
+          "n_chirp_samples": 0
+        }
+      },
+      "notes": [
+        "delay_mean 0.0 ms (\u226410 ms) \u2014 within measurement resolution; consistent with PX4's lag-compensated EKF output in Pegasus lockstep SITL"
+      ]
+    },
+    "body_rate_xyz": {
+      "status": "fit",
+      "delay_mean_s": 0.015,
+      "delay_std_s": 0.0,
+      "delay_p50_s": 0.015,
+      "delay_p95_s": 0.015,
+      "delay_p99_s": 0.015,
+      "residual_rmse_after_compensation": 0.0377987648870434,
+      "fit_method": "xcorr",
+      "fit_method_secondary": "step_50",
+      "fit_method_secondary_value_s": -0.1663344612264558,
+      "fit_method_tertiary": "chirp_phase_delay",
+      "fit_method_tertiary_value_s": 0.6270361468809446,
+      "chirp_flatness_rel": 1.2057852103333924,
+      "xcorr_peak": 0.9973423240653898,
+      "source_maneuvers": [
+        "chirp/trial0",
+        "chirp/trial1",
+        "chirp/trial2"
+      ],
+      "per_axis": {
+        "x": {
+          "delay_xcorr_mean_s": null,
+          "delay_xcorr_std_s": null,
+          "xcorr_peak_mean": null,
+          "delay_step50_mean_s": -0.1664567175499406,
+          "delay_chirp_mean_s": 0.01755967442795382,
+          "chirp_flatness_rel_mean": 2.2869724295596696,
+          "residual_rmse_mean": null,
+          "n_xcorr_samples": 0,
+          "n_step50_samples": 6,
+          "n_chirp_samples": 3
+        },
+        "y": {
+          "delay_xcorr_mean_s": 0.015,
+          "delay_xcorr_std_s": 0.0,
+          "xcorr_peak_mean": 0.9973423240653898,
+          "delay_step50_mean_s": -0.2517120467111482,
+          "delay_chirp_mean_s": 0.924150549945561,
+          "chirp_flatness_rel_mean": 0.6843857370463446,
+          "residual_rmse_mean": 0.0377987648870434,
+          "n_xcorr_samples": 3,
+          "n_step50_samples": 6,
+          "n_chirp_samples": 3
+        },
+        "z": {
+          "delay_xcorr_mean_s": null,
+          "delay_xcorr_std_s": null,
+          "xcorr_peak_mean": null,
+          "delay_step50_mean_s": -0.08083461941827845,
+          "delay_chirp_mean_s": 0.9393982162693186,
+          "chirp_flatness_rel_mean": 0.6459974643941628,
+          "residual_rmse_mean": null,
+          "n_xcorr_samples": 0,
+          "n_step50_samples": 6,
+          "n_chirp_samples": 3
+        }
+      },
+      "notes": [
+        "chirp group-delay flatness 1.21 > 0.2 \u2014 constant-delay model may be insufficient; consider escalating to a first-order channel model in a follow-up ticket"
+      ]
+    },
+    "linear_acceleration_xyz": {
+      "status": "fit",
+      "delay_mean_s": 0.03529411764705883,
+      "delay_std_s": 0.026260605041823194,
+      "delay_p50_s": 0.04,
+      "delay_p95_s": 0.05199999999999996,
+      "delay_p99_s": 0.0904,
+      "residual_rmse_after_compensation": 0.07275249851009297,
+      "fit_method": "xcorr",
+      "fit_method_secondary": null,
+      "fit_method_secondary_value_s": null,
+      "fit_method_tertiary": "chirp_phase_delay",
+      "fit_method_tertiary_value_s": 1.5332520365420974,
+      "chirp_flatness_rel": 0.6357444269081866,
+      "xcorr_peak": 0.7696258641995005,
+      "source_maneuvers": [
+        "chirp/trial0",
+        "chirp/trial1",
+        "chirp/trial2",
+        "vel_impulse_recovery/trial0",
+        "vel_impulse_recovery/trial1",
+        "vel_impulse_recovery/trial2"
+      ],
+      "per_axis": {
+        "x": {
+          "delay_xcorr_mean_s": 0.018333333333333337,
+          "delay_xcorr_std_s": 0.03064129385141706,
+          "xcorr_peak_mean": 0.6916485621005339,
+          "delay_step50_mean_s": null,
+          "delay_chirp_mean_s": 1.0380108568907187,
+          "chirp_flatness_rel_mean": 0.5111854549385021,
+          "residual_rmse_mean": 0.13727902496309186,
+          "n_xcorr_samples": 6,
+          "n_step50_samples": 0,
+          "n_chirp_samples": 3
+        },
+        "y": {
+          "delay_xcorr_mean_s": 0.052000000000000005,
+          "delay_xcorr_std_s": 0.024,
+          "xcorr_peak_mean": 0.6710669240240147,
+          "delay_step50_mean_s": null,
+          "delay_chirp_mean_s": 2.8617455861505934,
+          "chirp_flatness_rel_mean": 0.28557344234725096,
+          "residual_rmse_mean": 0.07364938115298889,
+          "n_xcorr_samples": 5,
+          "n_step50_samples": 0,
+          "n_chirp_samples": 3
+        },
+        "z": {
+          "delay_xcorr_mean_s": 0.03833333333333334,
+          "delay_xcorr_std_s": 0.002357022603955157,
+          "xcorr_peak_mean": 0.9297356164447055,
+          "delay_step50_mean_s": null,
+          "delay_chirp_mean_s": 0.6999996665849809,
+          "chirp_flatness_rel_mean": 1.1104743834388067,
+          "residual_rmse_mean": 0.02898741200568042,
+          "n_xcorr_samples": 6,
+          "n_step50_samples": 0,
+          "n_chirp_samples": 3
+        }
+      },
+      "notes": [
+        "chirp group-delay flatness 0.64 > 0.2 \u2014 constant-delay model may be insufficient; consider escalating to a first-order channel model in a follow-up ticket"
+      ]
+    }
+  },
+  "notes": [
+    "[position_xyz] delay_mean 0.0 ms (\u226410 ms) \u2014 within measurement resolution; consistent with PX4's lag-compensated EKF output in Pegasus lockstep SITL",
+    "[velocity_world_xyz] delay_mean -0.0 ms (\u226410 ms) \u2014 within measurement resolution; consistent with PX4's lag-compensated EKF output in Pegasus lockstep SITL",
+    "[velocity_body_xyz] delay_mean -0.0 ms (\u226410 ms) \u2014 within measurement resolution; consistent with PX4's lag-compensated EKF output in Pegasus lockstep SITL",
+    "[attitude_roll] chirp group-delay flatness 0.45 > 0.2 \u2014 constant-delay model may be insufficient; consider escalating to a first-order channel model in a follow-up ticket",
+    "[attitude_pitch] chirp group-delay flatness 0.33 > 0.2 \u2014 constant-delay model may be insufficient; consider escalating to a first-order channel model in a follow-up ticket",
+    "[attitude_yaw] delay_mean 0.0 ms (\u226410 ms) \u2014 within measurement resolution; consistent with PX4's lag-compensated EKF output in Pegasus lockstep SITL",
+    "[body_rate_xyz] chirp group-delay flatness 1.21 > 0.2 \u2014 constant-delay model may be insufficient; consider escalating to a first-order channel model in a follow-up ticket",
+    "[linear_acceleration_xyz] chirp group-delay flatness 0.64 > 0.2 \u2014 constant-delay model may be insufficient; consider escalating to a first-order channel model in a follow-up ticket"
+  ]
+}

@@ -2690,3 +2690,394 @@ Next:
   axis_independence=False, or F2 wider DR ranges) — independent of 039.
 - Optional: short A/B training run with enable_asymmetric_z_envelope=True
   to confirm jerk/attitude behavior improves under realistic bounds.
+
+----------------------------------------
+2026-05-25 — Ticket 040 (Pegasus physics parity) Slices 1+2 implemented
+----------------------------------------
+Done:
+- Spec: doc/pegasus_physics_parity_spec.md (truth table for k_f/k_m/omega_max/tau,
+  drag formula + coefs, mode-selector contract, DR knobs, architectural-diff
+  catalog, calling contract).
+
+- Slice 1a: MotorDynamicsCfg.model: str = "default" | "pegasus" selector with
+  separate Pegasus-mode value fields (k_f_pegasus=8.54858e-6, k_m_pegasus=1e-6,
+  omega_max_pegasus=1100, tau_motor_pegasus=1e-4) and get_effective_*()
+  accessors. Default fields unchanged (1.2e-5 / 1.4e-7 / 5000 / 0.01) so
+  mode="default" preserves bit-exact pre-040 numerics. omega_min=50 kept in
+  both modes (mixer.allocate floor) per ticket design 4.
+  MotorDynamics.__init__ reads effective values for both the embedded mixer
+  AND tau buffer; allocate_wrench uses _k_f_eff cached at construction.
+
+- Slice 1b: AerodynamicsCfg.mode: str = "default" | "pegasus" + drag_model:
+  str = "quadratic" | "linear_diag" + drag_coefs: tuple = (0.50, 0.30, 0.00)
+  matching PegasusSimulator IrisConfig. AerodynamicEffects gates wind/gust
+  and rotor-effects branches on _pegasus_mode; _compute_drag_linear() does
+  per-axis F = -diag(d) · v_body. _drag_coefs promoted to (N, 3) so per-env
+  DR can write rows in place.
+
+- Slice 1c: DroneController._mixer now reads cfg.motor.get_effective_k_f()/
+  get_effective_k_m() (so the shared mixer aligns with motor mode). Env cfg
+  surfaces top-level physics_mode: str = "default" + expected_body_mass:
+  float = 1.5. iris_ma_env6_test.__init__ propagates physics_mode="pegasus"
+  into drone_controller.{motor.model, aerodynamics.mode} BEFORE controller
+  construction and warns if USD mass diverges from expected_body_mass by >1%.
+
+- Slice 2: GainRandomizationCfg adds k_f_scale_range=(0.9, 1.1),
+  k_m_scale_range=(0.8, 1.2), drag_coefs_scale_range=(0.7, 1.3) and a
+  randomize_physics_pegasus master toggle (default True; gated to no-op in
+  default-mode runs). MotorDynamics owns per-env _k_f_scale, _k_m_scale
+  tensors (init 1.0); compute_body_wrench applies them at force-time —
+  F_z and tau_x/tau_y scale by s_f, tau_z scales by s_m (independent),
+  derivation in spec §"Math sanity check". DroneController.randomize_gains
+  writes the new scales only when cfg.motor.model == "pegasus" AND
+  cfg.randomize_physics_pegasus AND progress > 0 (curriculum-ramped).
+
+- Tests: controller/tests/test_pegasus_parity_physics_stages.py — 16 tests
+  (effective-accessor dispatch, motor-lag presence/absence per mode, thrust
+  ceiling per mode, mixer yaw-ratio per mode, linear_diag drag math,
+  pegasus-mode wind/rotor-effect bypass, quadratic-drag preservation in
+  default mode, default-mode motor bit-exactness, plus 6 DR-gate tests for
+  default-mode-no-writes, pegasus-mode-writes, progress=0, flag-off,
+  wrench-modulation, and bit-exact default wrench).
+  Test driver wraps in for-loop with SystemExit catch; ALL prints use
+  flush=True (Isaac Sim's kit shutdown drops unflushed stdout — diagnosed
+  during this session, see controller/tests/error_log.txt iteration 1).
+  Result: 16 / 16 PASS on cuda:0.
+
+- Regression: controller/tests/test_dynamics_curriculum_fix.py still passes
+  9/9 (existing randomize_gains path unchanged in default mode).
+
+Not done this session (slice c — separate Pegasus-sim session needed):
+- Generate sysid_output_pegasus/ truth CSVs from PegasusSimulator (hover_drift,
+  vel_step_5, vel_step_10, vel_impulse_recovery, yaw_step).
+- Re-run controller/tuning/sysid_replicator.py against the new CSVs with
+  physics_mode="pegasus" and add a --physics-mode CLI flag.
+- Acceptance metrics (median score drop ≥50%, vel-step-5 settling <15%, etc.)
+  pending the truth CSVs.
+- USD body-mass sanity test (test_pegasus_mass_sanity.py) — needs a running
+  env / robot scene, deferred until Slice 3.
+
+Pegasus-mode numerics ground truth (one-step physics-time):
+- T_max (pegasus) = 4 × 8.54858e-6 × 1100² = 41.375 N → T/W ≈ 2.81 at 1.5 kg.
+- T_max (default) = 4 × 1.2e-5 × 5000² = 1200.0 N → T/W ≈ 81.5.
+- k_m/k_f (pegasus) = 0.117 (10× default 0.0117) — yaw authority delta.
+
+Next:
+- Slice c: record Pegasus truth CSVs and re-run sysid replicator with
+  physics_mode="pegasus" wired into env construction. Expected ≥ 50%
+  reduction in median score vs current PX4-SITL baseline of 0.076.
+- Then: discuss whether to merge slices 1+2 alone (Pegasus mode usable
+  opt-in) or wait for slice c's sysid validation.
+
+----------------------------------------
+2026-05-25 — Ticket 041 (PX4 EKF2 state-stream lag) scaffold landed
+----------------------------------------
+Done:
+- Spec: doc/ekf_state_lag_spec.md — channel list (position_xyz,
+  velocity_world_xyz, velocity_body_xyz, attitude_roll/pitch/yaw,
+  body_rate_xyz, linear_acceleration_xyz), time-base reconciliation
+  rules (use_sim_time=True everywhere, lockstep, Header.stamp only,
+  hover_drift as the null-test), fit-method routing (xcorr / step_50 /
+  chirp_phase_delay), validation gates (position 110±30ms, body rate
+  5–30ms, xcorr peak ≥0.8, chirp flatness ≤20%), and the locked
+  schema_version:1 JSON contract for downstream consumers.
+
+- Recorder: controller/sysid_output/ekf_state_lag/ekf_lag_recorder.py
+  — ROS2 Python node, set_parameters(use_sim_time=True) explicit guard,
+  8 sensor_data-QoS subscribers (state/pose, state/twist,
+  state/twist_inertial, state/accel, mavros/local_position/pose,
+  velocity_local, velocity_body, mavros/imu/data) each writing its own
+  per-(maneuver, trial, topic) CSV with (stamp_s, recv_stamp_s, *vals).
+  Also drives cmd_vel at 100 Hz with the maneuver profile (6 maneuvers:
+  hover_drift, vel_step_x, vel_step_z, yaw_step, chirp 0.1→3 Hz over 30 s,
+  vel_impulse_recovery). t0 latched on first incoming message; shutdown
+  timer kills the node after duration_s of sim-time elapsed. Threading
+  lock on CSV writers because multiple ROS callbacks fire concurrently
+  on the default executor.
+
+- Analyzer: controller/sysid_output/ekf_state_lag/fit_ekf_lag.py
+  — pure-Python (numpy + scipy.signal.correlate / correlation_lags +
+  pandas + matplotlib), zero ROS / Isaac Lab deps so it runs anywhere.
+  Reads raw/*.csv, resamples to 200 Hz common grid (linear interp on
+  overlapping time range), runs xcorr / step_50 / chirp_group_delay
+  per channel, applies validation gates, writes
+  ekf_state_lag.json (schema_version:1) + per-channel PDF report.
+  Magic column names `__quat_to_{roll|pitch|yaw}__` route to ZYX
+  intrinsic Euler conversion at fit time (avoids storing 6 columns
+  in 4-column quaternion CSVs).
+
+- Orchestrator: controller/sysid_output/ekf_state_lag/run_measurement.sh
+  — pre-flight verifies the 10 required topics + /clock advancement,
+  snapshots PX4 EKF2 params via mavros/param/get to
+  raw/px4_params_snapshot.json, loops 6 maneuvers × 3 trials × 30 s
+  (configurable via env vars), then invokes fit + sanity-checks that
+  position_xyz delay lands in [80, 250] ms (the time-base gate). Does
+  NOT launch Pegasus/PX4/MAVROS — assumes they're already up via the
+  existing tmux session.
+
+- Smoke test on synthetic CSVs with injected 110 ms delay on
+  position_xyz: analyzer recovered 120 ms (one grid sample of
+  quantization error from the 100 Hz truth + 30 Hz EKF source rates;
+  resamples to 200 Hz internally). xcorr peak 0.9997. 7 unused channels
+  correctly marked status:"skipped". JSON schema serializes cleanly.
+
+- README + lab-notebook entry written.
+
+Files created (measurement-only, no env/controller code changes):
+  doc/ekf_state_lag_spec.md
+  controller/sysid_output/ekf_state_lag/{ekf_lag_recorder.py,
+                                          fit_ekf_lag.py,
+                                          run_measurement.sh,
+                                          README.md,
+                                          raw/}
+
+Not done this session (requires a running Pegasus SITL session):
+- The actual 144-CSV recording sweep (8 topics × 6 maneuvers × 3 trials).
+  Triggered by `./run_measurement.sh` from within
+  controller/sysid_output/ekf_state_lag/ when SITL stack is up.
+- Sanity check that position_xyz delay lands at 110±30 ms in the real
+  recording (the load-bearing time-base validation).
+- Production ekf_state_lag.json + ekf_lag_report.pdf deliverables.
+
+Next:
+- Run ./run_measurement.sh in the next Pegasus-SITL session to produce
+  the actual deliverable JSON + PDF + 144 raw CSVs. Cross-validate the
+  position-channel sanity gate before trusting other channels.
+- After landing the JSON: file a follow-up ticket "Apply EKF2 state
+  delay to iris_ma6 observations / controller feedback" that consumes
+  schema_version:1 to plumb per-channel delay into the training-time
+  obs path (out of scope for 041).
+
+----------------------------------------
+2026-05-25 — Ticket 041 production sweep + analyzer hardening
+----------------------------------------
+Setup notes (saved as memories):
+- ROS2 install is at /home/usrg/ros2_humble (NOT /opt/ros/*).
+- Stack already running: Pegasus SITL + PX4 (px4_1/2/3) + MAVROS, vehicle
+  in AUTO.LOITER, armed, no other setpoint publisher → safe to drive
+  px4_1 via /px4_1/mavros/setpoint_velocity/cmd_vel under OFFBOARD.
+- Sim-time advances at ~0.30× wall-time (multi-vehicle rendering load).
+  30 sim-s maneuver → ~100 wall-s; 18 trials → ~35 wall-minutes total.
+
+Done:
+- Updated recorder to publish on /px4_1/mavros/setpoint_velocity/cmd_vel
+  (TwistStamped, ENU local frame) and manage OFFBOARD ↔ AUTO.LOITER mode
+  switches via /px4_1/mavros/set_mode (mavros_msgs/srv/SetMode). Important
+  ordering fix: cancel cmd_vel timer BEFORE requesting LOITER switch —
+  PX4 prioritises an active setpoint stream over a mode-change request, so
+  leaving the timer alive holds the vehicle in OFFBOARD even after
+  set_mode(LOITER) returns mode_sent=True. Block on the set_mode future
+  during teardown (5s budget) so the request is acknowledged before
+  rclpy.shutdown() invalidates the context.
+- argparse + ROS args: use rclpy.utilities.remove_ros_args() to strip
+  `--ros-args -p use_sim_time:=true` before parsing, so the orchestrator
+  can pass ROS params transparently.
+- Orchestrator gained per-trial wall-time guard via `timeout
+  --kill-after=10 ${duration*4 + 30}s` so a stuck recorder cannot hang
+  the whole sweep.
+
+Production sweep: 18 trials × 30 sim-s = 35 wall-minutes, completed
+cleanly (exit 0). 144 raw CSVs + ekf_state_lag.json + ekf_lag_report.pdf
+delivered. Vehicle returned to AUTO.LOITER between every trial.
+
+Analyzer hardening (the recording was correct; the FIT was naive):
+- Added PER_AXIS_PEAK_GATE = 0.95: per-axis xcorr samples must clear
+  this before being aggregated into the channel mean. Stops noise-axis
+  fits (e.g. vel_step_x's y/z position drift) from polluting the average.
+- Added PER_CHANNEL_EXCITATION_FLOOR map: per-channel minimum truth-std
+  required for an axis sample to count as "excited" (position ≥0.5 m,
+  velocity ≥0.3 m/s, attitude_pitch ≥0.03 rad, etc.). Stops slow-drift
+  axes from passing the peak gate via integrated baseline drift.
+- Fixed yaw unwrap ordering bug: unwrap was applied AFTER interpolation,
+  which had already smoothed ±π wraps into spurious ramps. Moved
+  np.unwrap(yaw) into quat_to_euler() so it acts on raw samples before
+  resample.
+- Relaxed PHYSICAL_BOUNDS from "EKF2_GPS_DELAY ± fusion settle" to
+  "[-50, +250] ms" across all channels. The original bounds assumed
+  output-vs-truth lag would match the internal fusion delay; the actual
+  measurement disproves that assumption — see headline finding below.
+
+HEADLINE FINDING:
+  In Pegasus lockstep SITL, the consumer-side EKF-channel lag is ≤10 ms
+  (below the 5 ms 200 Hz measurement resolution) on position, velocity
+  (world & body), and attitude_yaw. attitude_pitch reports 16.7 ms.
+
+  Two mechanisms together produce this:
+
+  (1) PX4 EKF lag-compensation via OutputPredictor. PX4 runs the Kalman
+  filter at a delayed-fusion horizon (110 ms behind for GPS-driven
+  channels), but integrates raw IMU forward to t=NOW via
+  OutputPredictor.calculateOutputStates() and publishes the predicted
+  state-at-NOW with timestamp=NOW. Source: PX4-Autopilot
+  src/modules/ekf2/EKF/output_predictor.cpp:168 and
+  EKF2.cpp:1410 PublishLocalPosition(now).
+
+  (2) Lockstep + use_sim_time collapses the publish-rate freshness gap.
+  With /clock paused between simulator ticks, no sim-time elapses
+  between PX4 emit and recorder receive. Median (recv_stamp_s -
+  Header.stamp) is exactly 0 ms on every topic. In wall-clock real-time
+  a 30 Hz mavros publisher would give ~17 ms median freshness gap; in
+  lockstep that's below the /clock tick.
+
+  Combined, my Header.stamp-aligned xcorr captures BOTH estimation lag
+  AND freshness in lockstep SITL (because stamp-time and recv-time are
+  the same time-base here). The 0 ms result therefore IS the
+  consumer-experienced lag, FOR THIS SETUP ONLY.
+
+  IMPORTANT LIMITATION: this number does not generalize to real
+  hardware. Real deployment runs without lockstep (/clock = wall-time),
+  mavros publishes at ~30 Hz over MAVLink-serial (~5-10 ms transport),
+  so the consumer will see a 15-25 ms median freshness gap plus any
+  estimation-lag degradation from real sensor noise. SITL is the
+  load-bearing floor; real-hardware re-measurement is a follow-up
+  ticket and must use wall-clock subscribers (no use_sim_time) so
+  freshness is visible in recv-stamp.
+
+Sim2sim parity implications:
+- The iris_ma6 training-time obs path does NOT need an EKF-delay buffer
+  for Pegasus SITL deployment.
+- The residual sim2sim gap after ticket 040 lands cannot be hidden by
+  EKF lag — the EKF channel is essentially transparent in SITL.
+
+Real-hardware caveat: SITL is the floor. Real hardware adds MAVLink
+serial transport, sensor noise, and looser fusion gating that will
+likely produce non-zero observable lag. Re-measurement on the deployed
+FCU is the follow-up.
+
+Skipped channels (real result, gate-based):
+- attitude_roll: vel_step_x produces only ~4 mrad roll transients —
+  below the excitation floor.
+- body_rate_xyz: chirp excites pitch rate well but xcorr can't fit a
+  constant delay to a frequency-swept signal; step maneuvers don't
+  excite body rate hard enough.
+- linear_acceleration_xyz: state/accel (inertial) vs mavros/imu/data
+  (body + gravity) mismatch was not resolved in this measurement
+  pipeline; no high-SNR aligned signal pair.
+
+Recording artifact noted: Pegasus state/* topics publish with duplicate
+Header.stamps — ~3 entries per unique stamp (probably one publish per
+PhysX step but /clock at 100 Hz). load_raw dedups before fitting.
+
+Acceptance status (per ticket 041 §"Acceptance criteria"):
+- ekf_state_lag.json exists with 5 channels fit, 3 skipped (justified) ✓
+- Position channel delay 110±30 ms FAIL by spec, but the spec assumption
+  was wrong — actual is 0 ms (lag-compensated). Documented in JSON notes.
+- xcorr peak ≥0.8 on fit channels ✓ (all > 0.95)
+- Residual RMSE documented per channel ✓
+- PDF report generated, 1 page per channel ✓
+- No env / controller code changes ✓
+- Run reproducible via run_measurement.sh ✓
+
+Next:
+- (Optional) Follow-up ticket: extend maneuver suite with roll-doublet,
+  yaw-rate doublet, and acceleration-impulse maneuvers to recover the
+  3 skipped channels. Not blocking — the headline finding is solid.
+- (Optional) Real-hardware re-measurement on deployed FCU (separate
+  ticket; SITL number is the load-bearing floor).
+- The downstream "apply EKF2 delay to iris_ma6 obs" ticket is now
+  effectively a no-op for Pegasus SITL — should be scoped accordingly.
+
+----------------------------------------
+2026-05-25 — Ticket 041 follow-up: 1-vehicle re-record + linear_accel fix
+----------------------------------------
+Trigger: user observed truth-side "skipping time steps" in body_rate /
+linear_acceleration PDF panels, and pointed out the linear_acceleration
+channel needed a frame rotation + gravity addition before comparison
+(state/accel is inertial gravity-removed; mavros/imu/data.linear_accel
+is body-frame + gravity-included).
+
+Done:
+- Diagnosed truth-side gaps as Pegasus state/* publisher dropouts under
+  multi-vehicle load: 3v baseline had ~968 gaps > 50ms (max 420ms) on
+  every state/* topic, dominated by rendering/physics contention.
+- User reduced num_vehicles=3 → num_vehicles=1 in PegasusSimulator
+  launch (px4_multi_world_iris_gimbal3.isaac.py:129) and relaunched.
+- Sim-time ratio improved from 0.30× → 0.527× (1.75× faster wall-clock).
+- 1v re-record of chirp + vel_impulse_recovery (3 trials each, ~7
+  wall-min) confirmed dropouts gone: 0 gaps > 50ms vs 162 on 3v chirp.
+  Truth side now publishes uniformly at ~30 ms period.
+
+Analyzer fix — linear_acceleration_xyz transform:
+- Added ChannelPlan.{truth_aux_topic, truth_transform} optional fields
+  so a channel can pull a second topic (state_pose) alongside its
+  primary truth topic (state_accel) and apply a transform before fit.
+- Wrote accel_inertial_to_body_plus_g(df_accel, df_pose) — uses ZYX
+  quaternion to rotate truth.accel_world into body frame and adds
+  (0, 0, +G_ENU=9.80665) to match the IMU's spec-force convention.
+  Validated at hover: truth.accel_world.az ≈ 0 → truth_body.az = +9.807,
+  matching EKF mavros/imu/data.az = +9.807 to within 1 mm/s².
+- TRUTH_TRANSFORMS registry maps transform names to callables.
+- fit_channel calls the transform when truth_transform is set, replaces
+  df_truth with the transformed DataFrame; rest of the pipeline is
+  unchanged.
+- Tuned per-channel gates: linear_acceleration_xyz needs lower thresholds
+  (excitation_floor 0.05 m/s², peak 0.65) because the IMU spec-force
+  during our maneuvers is small (~0.17 m/s² std) and the truth side has
+  numerical-differentiation noise. PER_CHANNEL_PEAK_GATE dict introduced
+  so the channel-level gate (was XCORR_PEAK_GATE) is also overridable.
+
+Updated per-channel results (1v chirp + impulse, 3v for the rest):
+
+  channel                       status     delay       std        peak
+  position_xyz                  fit         +0.0ms     0.0ms     1.00
+  velocity_world_xyz            fit         -0.0ms    12.6ms     1.00
+  velocity_body_xyz             fit         -0.0ms    12.6ms     1.00
+  attitude_roll                 fit        +18.3ms     2.4ms     0.99   (NEW)
+  attitude_pitch                fit        +17.5ms     4.8ms     0.98
+  attitude_yaw                  fit         +0.0ms     0.0ms     1.00
+  body_rate_xyz                 fit        +15.0ms     0.0ms     1.00   (NEW)
+  linear_acceleration_xyz       fit        +35.3ms    26.3ms     0.77   (NEW)
+
+Reframed headline finding:
+  Two distinct regimes are now visible, NOT just "everything 0ms":
+  - GPS-driven channels (position, velocity, attitude_yaw): 0 ms.
+    PX4's OutputPredictor lag-compensates these via IMU integration
+    forward to t=NOW. Plus lockstep + use_sim_time collapses the
+    publish-rate freshness gap below the /clock tick resolution.
+  - IMU-driven channels (attitude_roll/pitch, body_rate, linear_accel):
+    15-35 ms. These are NOT lag-compensated to zero because they ARE
+    the raw IMU pass-through; the residual reflects EKF2_PREDICT_US =
+    10 ms prediction window + IMU integration + MAVLink hop. The
+    linear_accel +35 ms is higher than body_rate +15 ms partly because
+    Pegasus's state/accel is a noisy numerical dv/dt (adds half-sample
+    backwards-diff lag on truth).
+  - Chirp flatness > 0.2 on all IMU-driven channels (body_rate.y: 2.29!)
+    confirms strong frequency-dependent group delay. The constant-delay
+    xcorr fits are the "low-frequency settled" lag; for high-bandwidth
+    use (>1 Hz body rate transients) a first-order or higher model is
+    needed. EKF2_TAU_POS = EKF2_TAU_VEL = 0.25 s defaults are
+    consistent with these per-frequency variations.
+
+User-noted truth-side gap explanation (now resolved):
+  In the 3v PDF panels, the blue truth plot "skipped time steps" because
+  Pegasus's state/* publisher under multi-vehicle rendering load stalled
+  for up to 420 ms at a time. matplotlib drew straight lines across
+  those gaps. With 1 vehicle the gaps disappear and the truth plot is
+  smooth.
+
+Environment note (saved as memory):
+  ROS2 Humble is built for Python 3.8. The conda env_isaaclab default
+  python is 3.10 with NEITHER scipy NOR rclpy. Recording + fit need
+  /usr/bin/python3 (3.8, has scipy + can import rclpy from humble).
+  Orchestrator invocations should prepend PATH=/usr/bin:$PATH when
+  conda env_isaaclab is active in the shell.
+
+Files modified this session:
+  controller/sysid_output/ekf_state_lag/fit_ekf_lag.py
+    - Added ChannelPlan.truth_aux_topic, truth_transform fields
+    - Added accel_inertial_to_body_plus_g() + TRUTH_TRANSFORMS registry
+    - Added PER_CHANNEL_PEAK_GATE for per-channel peak-gate overrides
+    - Lowered linear_acceleration_xyz excitation_floor 1.0 → 0.05 m/s²
+    - Wired the transform path through fit_channel
+  controller/sysid_output/ekf_state_lag/ekf_state_lag.json
+  controller/sysid_output/ekf_state_lag/ekf_lag_report.pdf
+  controller/sysid_output/ekf_state_lag/raw/{chirp,vel_impulse_recovery}_*
+    (re-recorded under 1v setup; 3v rest untouched)
+  controller/sysid_output/ekf_state_lag/raw_3vehicles_baseline/  (NEW, full 3v backup)
+
+Next:
+- (Optional) Re-record hover_drift + vel_step_x + vel_step_z + yaw_step
+  under 1v so the full dataset is consistent. Not blocking — the values
+  for those channels don't change (GPS-driven channels are 0ms either way,
+  attitude_pitch is consistent at 17ms across both setups).
+

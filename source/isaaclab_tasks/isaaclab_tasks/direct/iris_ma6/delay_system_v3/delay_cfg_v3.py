@@ -506,7 +506,74 @@ class DelaySystemKeyParams:
     """First-order lag time constant for ego motion fields in seconds.
 
     Applied regardless of ego_motion_latency_enabled to smooth sensor noise.
+
+    NOTE: legacy bulk knob. Only used when ``use_bulk_ego_motion_latency=True``.
+    The new default behavior uses the per-channel ``ego_*_latency_mean_s``
+    and ``ego_*_fol_tau_s`` values below, populated from ticket 041's
+    Pegasus SITL measurement of PX4 EKF2 state-stream lag.
     """
+
+    # === Per-channel ego motion latency (ticket 041, Pegasus SITL) ===
+    # PX4 EKF2 has two output regimes (see ticket 041 Results §):
+    #   - GPS-fused / lag-compensated channels: position, velocity, attitude_yaw
+    #     emit values predicted forward to t=NOW via OutputPredictor.
+    #     Observable output-vs-truth lag in lockstep SITL ≈ 0 ms.
+    #   - IMU-driven channels: attitude roll/pitch, body_rate, linear_accel
+    #     are raw IMU pass-through (EKF2_PREDICT_US + MAVLink hop ≈ 15–35 ms).
+    # The orientation channel is a quaternion that can't be split per-axis at
+    # the field level. We use the IMU-driven (roll/pitch) value 17 ms as a
+    # conservative upper bound; yaw obs is artificially aged by 17 ms but is
+    # only used for low-bandwidth heading-frame transforms where this is OK.
+    # See ticket 045 (proposed) for a possible architectural split.
+    use_bulk_ego_motion_latency: bool = False
+    """If True, all ego motion fields use the legacy bulk ``ego_motion_latency_*``
+    config. Default False uses the per-channel values below."""
+
+    ego_position_latency_mean_s: float = 0.000
+    """Position latency (m). 0 ms — PX4 lag-compensates GPS-fused output to t=NOW."""
+
+    ego_velocity_latency_mean_s: float = 0.000
+    """Velocity latency (m/s). 0 ms — lag-compensated."""
+
+    ego_orientation_latency_mean_s: float = 0.018
+    """Orientation (quaternion) latency. Conservative upper bound: roll/pitch
+    are IMU-driven at ~17 ms; yaw is mag-fused (~0 ms). See ticket 045."""
+
+    ego_angular_velocity_latency_mean_s: float = 0.015
+    """Body angular velocity latency. IMU-driven, +15 ms measured."""
+
+    ego_linear_acceleration_latency_mean_s: float = 0.035
+    """Body linear acceleration latency. IMU spec-force, +35 ms measured (higher
+    than body_rate due to the numerical-dv/dt latency on the truth side)."""
+
+    ego_per_channel_latency_std_s: float = 0.005
+    """Std dev of per-channel ego motion latency (applies to all per-channel
+    motion fields, narrower than the bulk 2 ms to reflect each channel's own
+    measurement noise, not a wide regime spread)."""
+
+    # === Per-channel ego motion first-order lag time constants ===
+    # In lockstep SITL these are quiescent (simulator-perfect IMU → no large
+    # fusion corrections for the OutputPredictor to smooth in). Defaults to 0.
+    # For real-hardware deployment domain randomization, raise IMU-driven
+    # channels to ~0.25 s (PX4 EKF2_TAU_POS / EKF2_TAU_VEL defaults).
+    ego_position_fol_tau_s: float = 0.0
+    """First-order lag TC on position. 0 ms in lockstep SITL; raise to 0.25 s
+    for real-hardware DR (PX4 EKF2_TAU_POS default)."""
+
+    ego_velocity_fol_tau_s: float = 0.0
+    """First-order lag TC on velocity. 0 ms in lockstep SITL; raise to 0.25 s
+    for real-hardware DR (PX4 EKF2_TAU_VEL default)."""
+
+    ego_orientation_fol_tau_s: float = 0.0
+    """First-order lag TC on orientation. 0 ms in lockstep SITL."""
+
+    ego_angular_velocity_fol_tau_s: float = 0.0
+    """First-order lag TC on angular velocity. 0 ms in lockstep SITL; non-zero
+    on real hardware where IMU noise drives real fusion corrections (chirp
+    flatness > 0.2 in ticket 041 already shows frequency-dependent response)."""
+
+    ego_linear_acceleration_fol_tau_s: float = 0.0
+    """First-order lag TC on linear acceleration. 0 ms in lockstep SITL."""
 
     # === Ego Detection Latency (NN inference) ===
     ego_detection_latency_mean: float = 0.05
@@ -680,13 +747,52 @@ def create_delay_cfg_from_params(params: DelaySystemKeyParams) -> MultiAgentDela
         first_order_lag=FirstOrderLagCfg(enabled=True, tau=params.ego_motion_fol_tau),
     )
 
+    # Per-channel motion pipelines — overrides the bulk ego_motion_pipeline
+    # default for each named motion field. Populated from ticket 041's
+    # Pegasus SITL measurement. Skipped (left to the bulk default) when
+    # use_bulk_ego_motion_latency=True.
+    def _channel_motion_pipeline(latency_s: float, tau_s: float) -> DelayPipelineCfgV3:
+        return DelayPipelineCfgV3(
+            latency=LatencyCfg(
+                enabled=True,
+                distribution=DistributionCfg(
+                    type="normal",
+                    mean=latency_s,
+                    std=params.ego_per_channel_latency_std_s,
+                    min_value=0.0,
+                ),
+                min_steps=params.min_latency_steps,
+            ),
+            staleness=StalenessCfg(enabled=False),
+            dropout=DropoutCfg(enabled=False),
+            first_order_lag=FirstOrderLagCfg(enabled=tau_s > 0, tau=tau_s),
+        )
+
+    motion_field_overrides: dict[str, DelayPipelineCfgV3] = {}
+    if not params.use_bulk_ego_motion_latency:
+        motion_field_overrides = {
+            "body_position_w": _channel_motion_pipeline(
+                params.ego_position_latency_mean_s, params.ego_position_fol_tau_s),
+            "body_velocity_w": _channel_motion_pipeline(
+                params.ego_velocity_latency_mean_s, params.ego_velocity_fol_tau_s),
+            "body_orientation_w": _channel_motion_pipeline(
+                params.ego_orientation_latency_mean_s, params.ego_orientation_fol_tau_s),
+            "body_angular_velocity_w": _channel_motion_pipeline(
+                params.ego_angular_velocity_latency_mean_s, params.ego_angular_velocity_fol_tau_s),
+            "body_linear_acceleration_w": _channel_motion_pipeline(
+                params.ego_linear_acceleration_latency_mean_s, params.ego_linear_acceleration_fol_tau_s),
+        }
+
     # Build perspective configs
-    # Ego: motion pipeline as default, detection (bbox) field uses override.
-    # The bbox field carries both raycaster (raw) and replicator (noisy)
-    # payloads; one pipeline applies one delay realization to both.
+    # Ego: motion pipeline as default (legacy fallback), per-channel motion
+    # overrides for each named state field, detection (bbox) field uses its
+    # own override. The bbox field carries both raycaster (raw) and
+    # replicator (noisy) payloads; one pipeline applies one delay realization
+    # to both.
     cfg.delay_cfg.ego = PerspectiveCfg(
         pipeline=ego_motion_pipeline,
         field_overrides={
+            **motion_field_overrides,
             "bboxes_2d": ego_detection_pipeline,
         },
     )

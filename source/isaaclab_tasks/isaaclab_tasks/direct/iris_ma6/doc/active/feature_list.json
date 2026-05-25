@@ -1,14 +1,14 @@
 {
   "project": "iris_ma6",
-  "last_updated": "2026-05-15",
-  "last_session_ticket": "033-mappo-shared-optimizer-ownership (validated and closed)",
+  "last_updated": "2026-05-25",
+  "last_session_ticket": "041-px4-ekf-state-lag-measurement (DONE — production sweep landed; key finding: PX4 EKF output-vs-truth lag is ≤10 ms in Pegasus SITL due to EKF lag-compensation, so iris_ma6 obs path needs no EKF-delay buffer for SITL parity)",
   "features": [
     {
       "id": "controller",
       "name": "PX4-style cascaded drone controller",
       "status": "done",
       "spec": "doc/controller_spec.md",
-      "notes": "Velocity→attitude→rate→motor cascade with gimbal and zoom control. mas/037: SIYI A8 zoom model (slew clip + dead-time buffer + integrator + first-order lag + 0.1-level publish quantization). 2026-05-07: zoom-controller bug fixes — ring buffer depth ceil(...)+1 with clamp [0, depth-1] (prevents d=depth wrap-around to 0 delay); per-call CUDA sync removed via _dead_time_all_zero Python bool cache refreshed in _refresh_dead_time_steps; env-side reset now mirrors controller._zoom.zoom (quantized published) into self.zoom_level so the first observation post-reset is consistent with subsequent steps."
+      "notes": "Velocity→attitude→rate→motor cascade with gimbal and zoom control. mas/037: SIYI A8 zoom model (slew clip + dead-time buffer + integrator + first-order lag + 0.1-level publish quantization). 2026-05-07: zoom-controller bug fixes — ring buffer depth ceil(...)+1 with clamp [0, depth-1] (prevents d=depth wrap-around to 0 delay); per-call CUDA sync removed via _dead_time_all_zero Python bool cache refreshed in _refresh_dead_time_steps; env-side reset now mirrors controller._zoom.zoom (quantized published) into self.zoom_level so the first observation post-reset is consistent with subsequent steps. Ticket 040 (2026-05-25, slices 1+2 landed; slice c — Pegasus-truth sysid CSV capture + replicator re-run — pending separate Pegasus-sim session): added PegasusSimulator-parity mode via cfg.physics_mode='pegasus' (default 'default' preserves bit-exact pre-040 numerics). Pegasus mode swaps motor k_f/k_m/omega_max/tau (8.54858e-6 / 1e-6 / 1100 / 1e-4), engages linear-diagonal drag F=-diag(0.50,0.30,0.00)·v_body, and bypasses Dryden wind + H-force + blade-flap. New GainRandomizationCfg knobs k_f_scale_range / k_m_scale_range / drag_coefs_scale_range (gated on Pegasus mode + randomize_physics_pegasus). Spec at doc/pegasus_physics_parity_spec.md; 16/16 unit tests at controller/tests/test_pegasus_parity_physics_stages.py; bit-exact default-mode regression locked in."
     },
     {
       "id": "delay-system-v3",
@@ -107,6 +107,13 @@
       "status": "done",
       "spec": null,
       "notes": "sysid_replicator.py: loads PX4 SITL CSVs, resamples 125→100 Hz, scores DroneController gain candidates via timeseries MSE (vel 60%/att 25%/rate 15%). 4 tests (hover, vel_5, impulse, yaw). 3-way PDF overlay (PX4-matched vs PX4 SITL vs current). Exports PX4_MATCHED_CONTROLLER_CFG. vel_5 settling matched to 0.7%. (2026-04-06)"
+    },
+    {
+      "id": "ekf-state-lag-characterization",
+      "name": "PX4 EKF2 state-stream lag characterization (ticket 041, SITL)",
+      "status": "done",
+      "spec": "doc/ekf_state_lag_spec.md",
+      "notes": "Measurement-only deliverable: per-channel time lag between Pegasus ground-truth state and PX4 EKF2 estimates (via MAVROS). 2026-05-25 production sweep completed: 18 trials × 30 sim-s on px4_1 in Pegasus SITL + MAVROS, 144 CSVs + ekf_state_lag.json + ekf_lag_report.pdf delivered. Recorder publishes on /px4_1/mavros/setpoint_velocity/cmd_vel (ENU local frame) and manages OFFBOARD ↔ AUTO.LOITER mode-switch via mavros/set_mode service; ordering fix: cancel cmd_vel timer BEFORE requesting LOITER, else PX4's active-setpoint priority holds it in OFFBOARD even after mode_sent=True. HEADLINE FINDING: PX4's EKF lag-compensation produces near-zero observable lag (≤10 ms — below the 5 ms 200 Hz measurement resolution) on position, velocity_world, velocity_body, attitude_yaw; attitude_pitch at 16.7 ms is the only marginal-non-zero channel (peak=0.953). Mechanism: PX4 EKF buffers delayed measurements (EKF2_GPS_DELAY=110 ms) but extrapolates forward to t=now before emit, so the *output-vs-truth* delay is ~0 even though the *internal* fusion delay is 110 ms. Spec's naive prediction of 110 ms position lag was about the wrong quantity. Implication: iris_ma6 obs path does NOT need an EKF-delay buffer for SITL parity; the residual sim2sim gap after ticket 040 cannot hide in the EKF channel. 3 channels SKIPPED (attitude_roll/body_rate_xyz/linear_acceleration_xyz) due to insufficient excitation in the existing maneuver suite — real result, gate-based, optional follow-up to add roll-doublet / rate-doublet / accel-impulse maneuvers. Analyzer hardening this session: PER_AXIS_PEAK_GATE=0.95, PER_CHANNEL_EXCITATION_FLOOR (per-channel signal-std minimum), fixed yaw unwrap to act on raw samples before resample, relaxed PHYSICAL_BOUNDS to [-50, +250] ms. Real-hardware re-measurement on deployed FCU is a separate follow-up (SITL is the load-bearing floor)."
     },
     {
       "id": "domain-randomization-integration",

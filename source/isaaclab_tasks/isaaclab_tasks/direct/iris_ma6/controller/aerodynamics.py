@@ -46,8 +46,25 @@ class AerodynamicEffects:
         self.device = torch.device(device)
         self._fidelity_level = cfg.fidelity_level
 
-        # Precompute drag factor: 0.5 * rho * Cd * A
+        # Ticket 040 — Pegasus parity mode. Force-engages linear-diag drag and
+        # bypasses wind / gust / rotor-effects branches regardless of fidelity_level.
+        self._pegasus_mode = cfg.mode == "pegasus"
+        self._drag_model = "linear_diag" if self._pegasus_mode else cfg.drag_model
+
+        # Precompute quadratic drag factor: 0.5 * rho * Cd * A
         self._drag_factor = 0.5 * cfg.rho * cfg.C_d * cfg.A
+
+        # Precompute linear-diag drag coefficients (per-env so DR knobs can write
+        # per-row scales). Used when ``_drag_model == "linear_diag"``. The (N, 3)
+        # layout broadcasts identically to the prior (3,) form for default-mode
+        # (uniform across envs); ticket-040 DR overwrites rows in-place via
+        # ``set_drag_coefs_scale``.
+        self._drag_coefs = (
+            torch.tensor(cfg.drag_coefs, dtype=torch.float32, device=self.device)
+            .unsqueeze(0)
+            .expand(num_envs, 3)
+            .clone()
+        )
 
         # Wind state (for Dryden gust model)
         self._v_wind = torch.tensor(
@@ -100,12 +117,12 @@ class AerodynamicEffects:
         F_aero = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
         tau_aero = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device)
 
-        # Level 0: No effects
-        if self._fidelity_level == 0:
+        # Level 0: No effects (default mode only — Pegasus mode always applies linear drag)
+        if self._fidelity_level == 0 and not self._pegasus_mode:
             return F_aero, tau_aero
 
-        # Compute relative velocity (body - wind)
-        if self._fidelity_level >= 2:
+        # Compute relative velocity (body - wind). Pegasus parity bypasses wind/gust.
+        if self._fidelity_level >= 2 and not self._pegasus_mode:
             # Update wind with gust model
             self._update_gust(dt)
             v_wind = self._v_wind_mean.unsqueeze(0) + self._gust
@@ -117,13 +134,17 @@ class AerodynamicEffects:
         # Transform relative velocity to body frame
         v_rel_body = quat_rotate_inverse(q_body, v_rel_world)
 
-        # Level 1+: Basic drag
-        if self._fidelity_level >= 1:
+        # Drag — Pegasus mode forces linear_diag; default mode reads cfg.drag_model.
+        if self._drag_model == "linear_diag":
+            F_drag = self._compute_drag_linear(v_rel_body)
+            F_aero = F_aero + F_drag
+        elif self._fidelity_level >= 1:
+            # Quadratic drag (default mode, fidelity ≥ 1).
             F_drag = self._compute_drag(v_rel_body)
             F_aero = F_aero + F_drag
 
-        # Level 3: Rotor effects
-        if self._fidelity_level >= 3:
+        # Level 3 rotor effects (H-force + blade flap). Pegasus parity skips them.
+        if self._fidelity_level >= 3 and not self._pegasus_mode:
             F_rotor, tau_rotor = self._compute_rotor_effects(v_rel_body, omega_rotors)
             F_aero = F_aero + F_rotor
             tau_aero = tau_aero + tau_rotor
@@ -148,6 +169,24 @@ class AerodynamicEffects:
         F_drag = -self._drag_factor * v_mag**2 * v_hat
 
         return F_drag
+
+    def _compute_drag_linear(self, v_rel_body: torch.Tensor) -> torch.Tensor:
+        """Compute linear-diagonal drag force (PegasusSimulator parity formula).
+
+        ``F = -diag(d_x, d_y, d_z) · v_body``
+
+        Source: PegasusSimulator linear_drag.py:62 with IrisConfig coefs
+        ``(0.50, 0.30, 0.00)`` (forward, lateral, vertical) [Ns/m].
+
+        Args:
+            v_rel_body: (N, 3) relative velocity in body frame [m/s].
+
+        Returns:
+            F_drag: (N, 3) drag force in body frame [N].
+        """
+        # Broadcast (3,) coefficients across the batch — element-wise on the
+        # last dim, no matmul needed.
+        return -self._drag_coefs * v_rel_body
 
     def _update_gust(self, dt: float):
         """Update gust using first-order filtered white noise (Dryden-like model).

@@ -1,0 +1,11 @@
+
+================================================================================
+ITERATION 1 - 2026-05-25 (ticket 040)
+================================================================================
+Test: test_pegasus_parity_physics_stages.py
+Error type: stdout buffering (Isaac Sim init absorbs prints w/o explicit flush)
+Symptom: tests ran but stdout buffer was dropped on simulation_app shutdown,
+         giving exit code 0 with no PASS/FAIL lines visible.
+Fix Applied: added `flush=True` to every print in main() and TestResults.
+Outcome: 16 / 16 tests pass on cuda:0.
+--------------------------------------------------------------------------------

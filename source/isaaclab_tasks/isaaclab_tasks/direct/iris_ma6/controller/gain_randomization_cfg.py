@@ -69,3 +69,28 @@ class GainRandomizationCfg:
     progress_agent_velocity). At progress_dynamics=0 the range collapses
     to (1, 1).
     """
+
+    # ---- Ticket 040 — Pegasus-mode physics DR --------------------------------
+    # These knobs are no-ops in motor.model="default" / aerodynamics.mode="default"
+    # mode; they activate only when the controller is constructed with
+    # physics_mode="pegasus" at the env level. Each is multiplicative on the
+    # configured nominal Pegasus value.
+
+    randomize_physics_pegasus: bool = True
+    """Master toggle for the ticket-040 physics DR knobs (k_f, k_m, drag_coefs).
+    Bound to a no-op in default mode regardless; this flag lets Pegasus-mode
+    runs disable physics DR for ablation without touching the per-knob ranges."""
+
+    k_f_scale_range: tuple[float, float] = (0.9, 1.1)
+    """Pegasus-mode: multiplicative scale range on rotor-thrust coefficient k_f
+    at full curriculum progress. ±10% captures build-to-build motor variation."""
+
+    k_m_scale_range: tuple[float, float] = (0.8, 1.2)
+    """Pegasus-mode: multiplicative scale range on rotor-drag coefficient k_m.
+    ±20% — looser than k_f because k_m is harder to measure and more sensitive
+    to propeller geometry tolerances."""
+
+    drag_coefs_scale_range: tuple[float, float] = (0.7, 1.3)
+    """Pegasus-mode: multiplicative scale range on linear-diagonal body drag
+    coefficients (X, Y, Z). ±30% — body drag dominates at higher speeds and
+    is sensitive to attitude / wind."""
