@@ -38,8 +38,13 @@ from .rate_controller import RateController
 from .velocity_controller import VelocityController
 from .zoom_controller import ZoomController
 
-# Tuned configurations
-from .tuning import TUNED_CONTROLLER_CFG
+# Tuned configurations (see controller/tuning/tuning_results/__init__.py for
+# the description of each constant and the plant pairing).
+from .tuning import (
+    PX4_MATCHED_CONTROLLER_CFG,
+    PX4_MATCHED_PEGASUS_CONTROLLER_CFG,
+    TUNED_CONTROLLER_CFG,
+)
 
 __all__ = [
     # Configurations
@@ -65,5 +70,7 @@ __all__ = [
     "VelocityController",
     "ZoomController",
     # Tuned configurations
+    "PX4_MATCHED_CONTROLLER_CFG",
+    "PX4_MATCHED_PEGASUS_CONTROLLER_CFG",
     "TUNED_CONTROLLER_CFG",
 ]

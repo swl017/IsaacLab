@@ -16,7 +16,16 @@ initialization during package import.
 # Don't import from auto_tune.py - it starts AppLauncher
 # Use lazy import or run auto_tune.py directly as a script
 
-# Import tuned configs (safe - no AppLauncher)
-from .tuning_results import TUNED_CONTROLLER_CFG
+# Import tuned configs (safe - no AppLauncher).
+# See ``tuning_results/__init__.py`` for the description of each constant.
+from .tuning_results import (
+    PX4_MATCHED_CONTROLLER_CFG,
+    PX4_MATCHED_PEGASUS_CONTROLLER_CFG,
+    TUNED_CONTROLLER_CFG,
+)
 
-__all__ = ["TUNED_CONTROLLER_CFG"]
+__all__ = [
+    "TUNED_CONTROLLER_CFG",
+    "PX4_MATCHED_CONTROLLER_CFG",
+    "PX4_MATCHED_PEGASUS_CONTROLLER_CFG",
+]

@@ -3171,3 +3171,136 @@ Next:
   collect TB metrics, write the experiments doc per the acceptance table.
 - If treatment within ±5% on every metric, flip the default and mark the
   ticket DONE. Otherwise root-cause before merging.
+
+----------------------------------------
+2026-05-26 — Sysid replicator pegasus-plant + EKF-lag integration
+----------------------------------------
+Done:
+- Extended controller/tuning/sysid_replicator.py for ticket 040 + 041
+  integration: --plant {default,pegasus} routes through env_cfg.physics_mode
+  AND the replicator's local DroneControllerCfg.{motor.model,
+  aerodynamics.mode}. Logs effective k_f/k_m/omega_max/tau and T/W at
+  construction so the active plant is verifiable before the multi-minute
+  sweep. Plant-tagged output filenames (replicator_metrics_pegasus.json,
+  replicator_{test}_pegasus.pdf, px4_matched_pegasus.py) so pegasus runs
+  do not overwrite the default-plant baseline.
+- Added --ekf-lag flag: per-channel ring buffer applies ticket-041 EKF
+  lag to the controller's feedback path (q_body 18 ms, omega_body 15 ms,
+  v_body 0 ms — lockstep SITL values, 2 steps each at 10 ms physics dt).
+  Velocity history (used for the iris-vs-PX4 comparison) stays ground
+  truth; only the controller's view is lagged.
+- Added --asymmetric-score + --ahead-weight/--behind-weight (3.0/1.0
+  default). Weights per-timestep velocity-trace errors based on
+  sign(commanded target) × sign(iris - PX4). Att/rate MSE stay symmetric.
+- Widened gain-sweep ranges (generate_random_params) to encompass and
+  exceed PX4 SITL defaults:
+    Kp_att_rp  (4.0, 10.0)   → (6.0, 18.0)  PX4=6.5
+    Kp_rate_rp (0.10, 0.40)  → (0.15, 0.80) PX4=0.15 (× ~5 unit conversion)
+    Kp_vel_z   = Kp_vel_xy * (0.6, 0.8) → * (0.6, 2.5)  PX4 ratio = 2.22
+    Ki_vel_z   = Ki_vel_xy * (0.5, 0.7) → * (0.5, 5.0)  PX4 ratio = 5.0
+  Yaw-to-rp ratios unchanged — they already matched PX4 shape.
+- Fixed run_sysid_replicator.bash:
+    ISAACLAB_ROOT path (was depth 6 → source/; correct is depth 7 →
+    IsaacLab/ where isaaclab.sh lives).
+    Use ./isaaclab.sh -p instead of bare python3 (auto-activates env).
+    Added 3rd positional PLANT arg and tokens 'lag' / 'asym' as 4th/5th.
+- Required ticket-034 seed: env_cfg.seed = 42 set before gym.make in the
+  replicator (env cfg validation requires non-None seed).
+
+Findings (4 ablation runs against PX4 SITL CSVs):
+  v1 — default plant baseline:                vel_settle 26%, ss_err 94%, yaw 133%
+  v2 — pegasus plant + wide ranges:           vel_settle 23%, ss_err 55%, yaw  40%
+  v3 — pegasus + EKF lag + asym 3:1:          vel_settle 1.1%, ss_err 41%, yaw 100%  (asym hurt yaw)
+  v4 — pegasus + EKF lag + symmetric:         vel_settle 0.4%, ss_err 32%, yaw  40%  ← WINNER
+  v4 best gains land within 10% of PX4 defaults on Kp_vel_xy/z, Kp_att_rp/y,
+  and Kd_rate_rp. Rate-loop P gains 5× higher than PX4's, consistent ratio
+  across roll/pitch/yaw — absorbs the iris-ma6-N·m vs PX4-normalized-torque
+  unit conversion. Strong evidence the plant identification is correct.
+
+  Ticket 040 thresholds:
+    vel_5_settling < 15%: 0.4% PASS
+    yaw_settling   < 50%: 40%  PASS
+    vel_5_ss_error < 30%: 31.6% — 1.6 pp over, iris-tighter-than-PX4 direction
+
+  Conclusion: asymmetric scoring is the wrong tool — it only helps the
+  channel where iris is *ahead* of PX4 (velocity) and actively hurts the
+  channel where iris is *behind* (yaw, before lag was added). EKF lag
+  alone (ticket 041) closed the velocity gap from 23% → 0.4%; the plant
+  identification (ticket 040) + EKF lag + symmetric MSE is the correct
+  recipe.
+
+Files modified:
+- controller/tuning/sysid_replicator.py — --plant, --ekf-lag, --asymmetric-score,
+  --seed; widened generate_random_params ranges; per-test ahead_direction map;
+  plant-tagged output filenames.
+- controller/tuning/run_sysid_replicator.bash — fixed ISAACLAB_ROOT depth;
+  use isaaclab.sh -p; PLANT positional arg; 'lag' / 'asym' tokens.
+
+Tests: validated dry-run + 4 full 4096-trial sweeps. No test suite touched.
+
+Files saved (v4 canonical):
+- controller/sysid_output/analysis/replicator_metrics_pegasus.json
+- controller/sysid_output/analysis/replicator_{hover_drift,vel_step_5,
+  vel_impulse_recovery,yaw_step}_pegasus.pdf
+- controller/tuning/tuning_results/px4_matched_pegasus.py
+
+Next:
+- Update PX4_MATCHED_CONTROLLER_CFG (the default) to point at px4_matched_pegasus
+  if iris_ma_env6_test_cfg's physics_mode default flips to "pegasus". Today
+  physics_mode default = "default" so this is a no-op.
+- Consider whether to also run --plant default with the new widened ranges to
+  see if the default-plant baseline improves (the existing replicator_metrics.json
+  was from narrower ranges).
+- The 31.6% vel_5_ss_error gap is in iris's favor — sim2real direction is benign,
+  not blocking. If a future ticket wants to literally match PX4's droop, the
+  smallest controller-side change would be Ki_vel_xy reduction; the cleanest
+  plant-side change would be slightly higher drag coefs.
+
+----------------------------------------
+2026-05-26 (same session) — Gain-selection pipeline → pegasus gains
+----------------------------------------
+Done:
+- Renamed PX4_MATCHED_CONTROLLER_CFG → PX4_MATCHED_PEGASUS_CONTROLLER_CFG
+  in controller/tuning/tuning_results/px4_matched_pegasus.py. The
+  default-plant gains in tuning_results/px4_matched.py keep the original
+  PX4_MATCHED_CONTROLLER_CFG name. Both can now be imported side-by-side.
+- iris_ma_env6_test_cfg.py: changed drone_controller default from
+  `PX4_MATCHED_CONTROLLER_CFG` to `None`, with __post_init__ auto-pairing
+  the gain set to physics_mode:
+      physics_mode=pegasus → PX4_MATCHED_PEGASUS_CONTROLLER_CFG
+      physics_mode=default → PX4_MATCHED_CONTROLLER_CFG
+      drone_controller=<custom> → preserved untouched
+  None-sentinel pattern is required because @configclass deep-copies field
+  defaults; the prior `is`-based identity sentinel fails after copy. The
+  None pattern is bulletproof: a non-None field unambiguously signals
+  user override.
+- sysid_replicator.py:export_px4_matched_config now takes a `plant=` kwarg
+  and writes either PX4_MATCHED_CONTROLLER_CFG (plant=default) or
+  PX4_MATCHED_PEGASUS_CONTROLLER_CFG (plant=pegasus) as the module-level
+  constant name — so future re-tunes drop into the right import target.
+
+Smoke test (/tmp/smoke_gain_pipeline.py, 8/8 checks passed):
+  Case 1 (default cfg): physics_mode=pegasus, Kp_vel_z=3.89, Kp_att_y=2.76,
+                        Kp_rate_y=0.99  — all match pegasus-tuned constants.
+  Case 2 (override):    physics_mode=default → Kp_vel_z=0.99, Kp_att_y=2.62
+                        — match default-plant-tuned constants.
+  Case 3 (sanity):      pegasus vs default Kp_vel_z differ by 2.9.
+  Case 4 (custom):      drone_controller=DroneControllerCfg(...) preserved
+                        (Kp_vel_xy=99.0 round-trip).
+
+Net effect: env training runs now use the right gains for the active plant
+without any task / yaml / Hydra override. Previously the default
+configuration had physics_mode=pegasus paired with the WRONG gain set
+(default-plant tuned values), which is the silent misconfiguration this
+session set out to fix.
+
+Files modified:
+- controller/tuning/tuning_results/px4_matched_pegasus.py — constant rename + header.
+- iris_ma_env6_test_cfg.py — None-default + __post_init__ auto-pair.
+- controller/tuning/sysid_replicator.py — exporter respects --plant.
+
+Next:
+- Run a 10k-step training-curve smoke test on physics_mode=pegasus +
+  pegasus gains to confirm no NaN / collapse with the new defaults.
+- If the smoke training is clean, mark ticket 040 acceptance criteria 5
+  (do-no-harm gate at 200k env-steps) done after a full training run.

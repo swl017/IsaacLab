@@ -34,8 +34,31 @@ parser.add_argument("--sysid-dir", type=str, default=_DEFAULT_SYSID_DIR,
 parser.add_argument("--output-dir", type=str, default=None, help="Output directory (default: sysid-dir/analysis)")
 parser.add_argument("--num-trials", type=int, default=1024, help="Number of random gain candidates")
 parser.add_argument("--aero-level", type=int, default=0, choices=[0, 1, 2, 3],
-                    help="Aerodynamic fidelity level")
+                    help="Aerodynamic fidelity level (default-mode only; bypassed by plant=pegasus)")
+parser.add_argument("--plant", type=str, default="default", choices=["default", "pegasus"],
+                    help="Rigid-body / motor / drag plant mode (ticket 040). "
+                         "'default' = pre-040 racing-class numerics + quadratic drag (+ optional Dryden / rotor effects via --aero-level). "
+                         "'pegasus' = PegasusSimulator IrisConfig parity (k_f=8.55e-6, omega_max=1100, tau~0, linear-diag drag (0.5, 0.3, 0), no wind/rotor effects).")
 parser.add_argument("--top-k", type=int, default=5, help="Number of top results to plot")
+parser.add_argument("--seed", type=int, default=42,
+                    help="Env seed (required by IrisMA6TestEnvCfg per ticket 034). Default 42.")
+parser.add_argument("--ekf-lag", action="store_true",
+                    help="Apply ticket-041-measured EKF state lag to the controller's "
+                         "feedback path: orientation 18 ms, angular_velocity 15 ms, "
+                         "velocity 0 ms (lockstep SITL values). Default OFF — pass to "
+                         "engage. Adds ~20 ms of phase lag on the rate/attitude inner "
+                         "loops, matching what PX4 EKF2 actually delivers.")
+parser.add_argument("--asymmetric-score", action="store_true",
+                    help="Weight per-timestep velocity-trace errors asymmetrically: "
+                         "penalize 'iris-ma6 ahead of PX4' (closer to setpoint) more "
+                         "than 'iris-ma6 behind PX4'. Direction is sign(commanded target). "
+                         "Att/rate MSE stay symmetric (derived signals).")
+parser.add_argument("--ahead-weight", type=float, default=3.0,
+                    help="Per-timestep weight when iris-ma6 trace leads PX4 toward setpoint. "
+                         "Used only when --asymmetric-score is set. Default 3.0.")
+parser.add_argument("--behind-weight", type=float, default=1.0,
+                    help="Per-timestep weight when iris-ma6 lags PX4. Used only with "
+                         "--asymmetric-score. Default 1.0.")
 parser.add_argument("--dry-run", action="store_true", help="Load targets only, skip Isaac Sim")
 parser.set_defaults(headless=True)
 args_cli = parser.parse_args()
@@ -118,33 +141,70 @@ class ParameterSet:
 
 
 def generate_random_params(num_trials: int) -> list[ParameterSet]:
-    """Generate random parameter sets (mirrored from auto_tune.py).
+    """Generate random parameter sets.
 
-    Search ranges and coupling constraints are identical to auto_tune.py.
+    Ranges widened (2026-05-25) to encompass + exceed PX4 SITL defaults so the
+    sweep optimum isn't pinned to a boundary. PX4 governs the CSV recordings;
+    its parameters live in PX4-Autopilot/src/modules/mc_{att,rate,pos}_control/
+    *_params.c. The Iris airframe (ROMFS/.../10015_gazebo-classic_iris) does
+    not override any controller gains, so the firmware defaults below apply.
+
+    PX4 Iris SITL defaults (reference values for the sweep center):
+        Velocity loop:
+            MPC_XY_VEL_P_ACC = 1.8       MPC_XY_VEL_I_ACC = 0.4
+            MPC_Z_VEL_P_ACC  = 4.0       MPC_Z_VEL_I_ACC  = 2.0
+            (Z > XY in PX4 — flipped from the prior sweep that forced Z < XY)
+        Attitude loop:
+            MC_ROLL_P / MC_PITCH_P = 6.5     MC_YAW_P = 2.8     (yaw ratio ≈ 0.43)
+            MC_YAW_WEIGHT = 0.4 (NOT modeled in iris_ma6)
+        Rate loop:
+            MC_ROLLRATE_P / MC_PITCHRATE_P = 0.15   MC_YAWRATE_P = 0.20  (yaw ratio ≈ 1.33)
+            MC_ROLLRATE_I / MC_PITCHRATE_I = 0.20   MC_YAWRATE_I = 0.10  (yaw ratio = 0.5)
+            MC_ROLLRATE_D / MC_PITCHRATE_D = 0.003  MC_YAWRATE_D = 0.0
+
+    iris_ma6 rate-loop output is physical N·m torque; PX4's is normalized
+    torque post-allocation. The empirical 2-3× scale factor between PX4 and
+    iris_ma6 rate gains absorbs this unit conversion, so the widened ranges
+    extend up to ~2× the PX4-equivalent ceiling.
     """
     params_list = []
     for _ in range(num_trials):
-        Kp_rate_rp = np.random.uniform(0.10, 0.40)
-        Ki_rate_rp = np.random.uniform(0.05, 0.30)
-        Kd_rate_rp = np.random.uniform(0.002, 0.015)
-        Kp_att_rp = np.random.uniform(4.0, 10.0)
+        # Base rate gains — widened ~2× upward from prior (0.10, 0.40) etc.
+        # to give room for iris_ma6's physical-units convention vs PX4 normalized.
+        Kp_rate_rp = np.random.uniform(0.15, 0.80)
+        Ki_rate_rp = np.random.uniform(0.10, 0.50)
+        Kd_rate_rp = np.random.uniform(0.003, 0.025)
+
+        # Base attitude gain — widened ~1.6× upward from prior (4.0, 10.0).
+        # Prior sweep's best (9.81) was pinned to the ceiling.
+        Kp_att_rp = np.random.uniform(6.0, 18.0)
+
+        # Velocity gains. The Kp_rate_rp-coupled ceiling on Kp_vel_xy is kept;
+        # it caps Kp_vel_xy at min(5.0, 2.0 + 10·Kp_rate_rp) ∈ [3.5, 5.0] now.
         Kp_vel_max = min(5.0, 2.0 + 10.0 * Kp_rate_rp)
         Kp_vel_xy = np.random.uniform(1.5, Kp_vel_max)
         Ki_vel_xy = np.random.uniform(0.3, 2.0)
 
         params = ParameterSet(
             Kp_vel_xy=Kp_vel_xy,
-            Kp_vel_z=Kp_vel_xy * np.random.uniform(0.6, 0.8),
+            # Z gain ratio widened to (0.6, 2.5) so Z can exceed XY — matches
+            # PX4's MPC_Z_VEL_P_ACC / MPC_XY_VEL_P_ACC = 4.0/1.8 = 2.22.
+            Kp_vel_z=Kp_vel_xy * np.random.uniform(0.6, 2.5),
             Ki_vel_xy=Ki_vel_xy,
-            Ki_vel_z=Ki_vel_xy * np.random.uniform(0.5, 0.7),
+            # Ki Z ratio widened to (0.5, 5.0) — PX4: 2.0/0.4 = 5.0.
+            Ki_vel_z=Ki_vel_xy * np.random.uniform(0.5, 5.0),
             Kp_att_rp=Kp_att_rp,
-            Kp_att_y=Kp_att_rp * np.random.uniform(0.35, 0.5),
+            # Yaw-to-rp ratios UNCHANGED — already match PX4 shape within range
+            # (PX4 Kp_att_y/Kp_att_rp = 2.8/6.5 = 0.43; range [0.35, 0.55]).
+            Kp_att_y=Kp_att_rp * np.random.uniform(0.35, 0.55),
             Kp_rate_rp=Kp_rate_rp,
+            # PX4: 0.20/0.15 = 1.33; range [1.0, 1.5] covers it.
             Kp_rate_y=Kp_rate_rp * np.random.uniform(1.0, 1.5),
             Ki_rate_rp=Ki_rate_rp,
+            # PX4: 0.10/0.20 = 0.5; range [0.4, 0.6] covers it.
             Ki_rate_y=Ki_rate_rp * np.random.uniform(0.4, 0.6),
             Kd_rate_rp=Kd_rate_rp,
-            Kd_rate_y=0.0,
+            Kd_rate_y=0.0,  # PX4 MC_YAWRATE_D = 0 — keep at 0.
         )
         params_list.append(params)
     return params_list
@@ -406,6 +466,12 @@ class SysidReplicator:
         aero_level: int,
         targets: dict[str, TargetTimeseries],
         weights: ReplicatorScoreWeights | None = None,
+        plant: str = "default",
+        seed: int = 42,
+        ekf_lag: bool = False,
+        asymmetric_score: bool = False,
+        ahead_weight: float = 3.0,
+        behind_weight: float = 1.0,
     ):
         import torch
 
@@ -417,11 +483,26 @@ class SysidReplicator:
         self.weights = weights or ReplicatorScoreWeights()
         self.num_envs = num_envs
         self.device = torch.device(device)
+        self.plant = plant
+        self.ekf_lag = ekf_lag
+        self.asymmetric_score = asymmetric_score
+        self.ahead_weight = ahead_weight
+        self.behind_weight = behind_weight
 
         # Create environment (same as ParallelTuner.__init__)
         print("Creating Isaac Sim environment...", flush=True)
         task_name = "Isaac-Iris-MA6-Direct-Test-v0"
         env_cfg = parse_env_cfg(task_name, device=device, num_envs=num_envs)
+        # Ticket 034: seed must be set explicitly for per-(env, agent) curriculum
+        # sampling to be reproducible. The replicator does not exercise the curriculum
+        # path (it directly commands velocity setpoints) but the env cfg validation
+        # still requires a non-None seed.
+        env_cfg.seed = seed
+        # Ticket 040: propagate plant mode into the env cfg BEFORE gym.make so the
+        # env's __init__ (which mutates cfg.drone_controller.motor.model and
+        # cfg.drone_controller.aerodynamics.mode when physics_mode == "pegasus")
+        # builds its own controller consistently with the replicator's local one.
+        env_cfg.physics_mode = plant
         self.env = gym.make(task_name, cfg=env_cfg)
         self.unwrapped = self.env.unwrapped
 
@@ -449,6 +530,32 @@ class SysidReplicator:
                 integral_limit=(8.0, 8.0, 4.0),
             ),
         )
+        # Ticket 040: propagate plant mode into the replicator's LOCAL controller cfg
+        # (the env-side propagation above only mutates the env's own controller; the
+        # replicator constructs its own DroneController below and exercises that one
+        # for the gain sweep).
+        if plant == "pegasus":
+            cfg.motor.model = "pegasus"
+            cfg.aerodynamics.mode = "pegasus"
+
+        # Log the effective plant numerics so the user can sanity-check before the
+        # multi-minute gain sweep.
+        print(
+            f"Plant mode: {plant}\n"
+            f"  motor.model      = {cfg.motor.model}\n"
+            f"  k_f (effective)  = {cfg.motor.get_effective_k_f():.4e} N/(rad/s)^2\n"
+            f"  k_m (effective)  = {cfg.motor.get_effective_k_m():.4e} Nm/(rad/s)^2\n"
+            f"  omega_max        = {cfg.motor.get_effective_omega_max():.1f} rad/s\n"
+            f"  tau_motor        = {cfg.motor.get_effective_tau_motor():.4f} s\n"
+            f"  aero.mode        = {cfg.aerodynamics.mode}\n"
+            f"  aero.drag_model  = {'linear_diag (forced)' if cfg.aerodynamics.mode == 'pegasus' else cfg.aerodynamics.drag_model}\n"
+            f"  aero.drag_coefs  = {cfg.aerodynamics.drag_coefs}",
+            flush=True,
+        )
+        # Derived T/W for the active plant — should be ~2.81 (Pegasus) or ~82 (default at 1.5 kg).
+        t_max_total = 4 * cfg.motor.get_effective_k_f() * cfg.motor.get_effective_omega_max() ** 2
+        print(f"  T_max (4 rotors) = {t_max_total:.2f} N  (T/W ≈ {t_max_total / (self.mass * 9.81):.2f} at {self.mass:.2f} kg)", flush=True)
+
         self.controller = DroneController(
             cfg=cfg,
             mass=self.mass,
@@ -457,12 +564,40 @@ class SysidReplicator:
             device=device,
         )
         self.controller.set_aerodynamic_level(aero_level)
-        if aero_level > 0:
+        if aero_level > 0 and plant == "default":
             print(f"Aerodynamics enabled: level {aero_level}", flush=True)
+        elif plant == "pegasus":
+            print(f"Aerodynamics: pegasus-mode linear-diag drag active (aero_level {aero_level} ignored)", flush=True)
 
         self._num_envs = num_envs
         self._device = self.device
         self._dt = self.dt
+
+        # Ticket 041 — EKF state lag (lockstep SITL values, mean of per-channel fits):
+        #   orientation        = 18 ms → 2 steps @ 10 ms physics dt
+        #   angular_velocity   = 15 ms → 2 steps
+        #   velocity / position = 0 ms (no buffer needed)
+        # Rounded up to integer step counts because the physics dt is 10 ms.
+        # When ekf_lag=False, depths are 0 and the buffers are passthrough.
+        self._q_lag_steps = int(round(0.018 / self._dt)) if ekf_lag else 0
+        self._omega_lag_steps = int(round(0.015 / self._dt)) if ekf_lag else 0
+        self._q_lag_buffer: list[torch.Tensor] = []
+        self._omega_lag_buffer: list[torch.Tensor] = []
+        if ekf_lag:
+            print(
+                f"EKF state lag (ticket 041): q_body delayed {self._q_lag_steps} steps "
+                f"({self._q_lag_steps * self._dt * 1000:.0f} ms), omega_body delayed "
+                f"{self._omega_lag_steps} steps "
+                f"({self._omega_lag_steps * self._dt * 1000:.0f} ms). "
+                f"v_body unlagged (lockstep SITL = 0 ms).",
+                flush=True,
+            )
+        if asymmetric_score:
+            print(
+                f"Asymmetric scoring: ahead_weight={ahead_weight}, "
+                f"behind_weight={behind_weight}. Velocity-trace only; att/rate stay symmetric.",
+                flush=True,
+            )
 
     def _reset_controller_state(self):
         """Reset DroneController for all environments."""
@@ -474,6 +609,9 @@ class SysidReplicator:
         """Reset all envs to clean hover state (level attitude, 2m height, zero velocity)."""
         self.env.reset()
         self._reset_controller_state()
+        # Clear EKF lag buffers — fresh state on each maneuver.
+        self._q_lag_buffer = []
+        self._omega_lag_buffer = []
 
         full_root_state = self.robot.data.default_root_state.clone()
         full_root_state[:, 2] = 2.0
@@ -527,9 +665,31 @@ class SysidReplicator:
         import torch
 
         N = self._num_envs
-        q_body = self.robot.data.root_quat_w[:N]
+        q_body_now = self.robot.data.root_quat_w[:N]
         v_body = self.robot.data.root_lin_vel_w[:N]
-        omega_body = self.robot.data.root_ang_vel_b[:N]
+        omega_body_now = self.robot.data.root_ang_vel_b[:N]
+
+        # Ticket 041 — apply per-channel EKF lag to the controller's feedback path.
+        # Cold-start: while buffer hasn't filled, return the current value (matches
+        # the gimbal_rate_loop cold-start rule). When ekf_lag is disabled, depths
+        # are 0 and these are bit-exact passthrough.
+        if self._q_lag_steps > 0:
+            self._q_lag_buffer.append(q_body_now.clone())
+            if len(self._q_lag_buffer) > self._q_lag_steps:
+                q_body = self._q_lag_buffer.pop(0)
+            else:
+                q_body = q_body_now
+        else:
+            q_body = q_body_now
+
+        if self._omega_lag_steps > 0:
+            self._omega_lag_buffer.append(omega_body_now.clone())
+            if len(self._omega_lag_buffer) > self._omega_lag_steps:
+                omega_body = self._omega_lag_buffer.pop(0)
+            else:
+                omega_body = omega_body_now
+        else:
+            omega_body = omega_body_now
 
         gimbal_pos = torch.zeros(N, 3, device=self._device)
         zeros_n = torch.zeros(N, device=self._device)
@@ -857,21 +1017,41 @@ class SysidReplicator:
         # Determine common length
         target_len = len(target.t)
 
-        # Velocity MSE (X-axis for velocity tests, yaw for yaw test)
+        # Per-test "ahead-direction": the sign of the commanded setpoint, used
+        # by asymmetric scoring to define what "iris-ma6 ahead of PX4" means.
+        # err = iris - PX4; "ahead" iff err * direction > 0 (iris is closer to
+        # the commanded setpoint than PX4 is, in the direction of motion).
+        # hover_drift has no commanded direction → symmetric (direction = 0).
+        ahead_direction = {
+            "vel_step_5": +1.0,         # +5 m/s forward
+            "vel_step_10": +1.0,        # +10 m/s forward
+            "vel_impulse_recovery": +1.0,  # +5 m/s then 0 — initial direction
+            "yaw_step": +1.0,           # +0.5 rad/s yaw
+            "hover_drift": 0.0,         # no excitation; stay symmetric
+        }.get(test_name, 0.0)
+
+        # Velocity MSE (X-axis for velocity tests, yaw for yaw test).
+        # When asymmetric_score is enabled, weight per-timestep errors based on
+        # whether iris-ma6 leads PX4 toward the setpoint.
         if test_name == "yaw_step":
             iris_yaw = iris_data.get("yaw_rate_history", np.zeros(1))
             T = min(len(iris_yaw), target_len)
-            vel_mse = float(np.mean((iris_yaw[:T] - target.yaw_rate[:T]) ** 2))
+            err = iris_yaw[:T] - target.yaw_rate[:T]
         elif test_name == "hover_drift":
             iris_vel = iris_data.get("vel_history", np.zeros((1, 3)))
             T = min(len(iris_vel), target_len)
-            # For hover, match vel_x only
-            vel_mse = float(np.mean((iris_vel[:T, 0] - target.vel_x[:T]) ** 2))
+            err = iris_vel[:T, 0] - target.vel_x[:T]
         else:
-            # vel_step_5, vel_step_10, vel_impulse_recovery
             iris_vx = iris_data.get("vel_x_history", np.zeros(1))
             T = min(len(iris_vx), target_len)
-            vel_mse = float(np.mean((iris_vx[:T] - target.vel_x[:T]) ** 2))
+            err = iris_vx[:T] - target.vel_x[:T]
+
+        if self.asymmetric_score and ahead_direction != 0.0:
+            ahead = (err * ahead_direction) > 0.0  # True where iris leads PX4 toward setpoint
+            w_per_step = np.where(ahead, self.ahead_weight, self.behind_weight)
+            vel_mse = float(np.mean(w_per_step * err ** 2))
+        else:
+            vel_mse = float(np.mean(err ** 2))
 
         # Attitude error MSE (3-axis)
         iris_att = iris_data.get("att_error_history", np.zeros((1, 3)))
@@ -1000,6 +1180,7 @@ def generate_comparison_plots(
     output_dir: Path,
     dt: float,
     baseline_histories: dict[str, dict] | None = None,
+    plant: str = "default",
 ):
     """Generate per-test PDF plots overlaying iris_ma6 best vs PX4 SITL.
 
@@ -1103,7 +1284,10 @@ def generate_comparison_plots(
         ax.grid(True, alpha=0.3)
 
         plt.tight_layout()
-        pdf_path = output_dir / f"replicator_{test_name}.pdf"
+        # Plant-tagged filenames so a Pegasus-plant run does not overwrite
+        # the default-plant baseline plots (or vice versa).
+        plant_suffix = "" if plant == "default" else f"_{plant}"
+        pdf_path = output_dir / f"replicator_{test_name}{plant_suffix}.pdf"
         fig.savefig(pdf_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
         print(f"  Saved: {pdf_path}", flush=True)
@@ -1126,19 +1310,31 @@ def export_px4_matched_config(
     best_params: ParameterSet,
     score: float,
     output_path: Path,
+    plant: str = "default",
 ):
-    """Write PX4_MATCHED_CONTROLLER_CFG to a Python file.
+    """Write the matched controller config to a Python file.
+
+    Constant name is plant-tagged so default-plant and pegasus-plant exports
+    can both be imported into the env cfg without collision:
+        plant="default" → PX4_MATCHED_CONTROLLER_CFG
+        plant="pegasus" → PX4_MATCHED_PEGASUS_CONTROLLER_CFG
 
     Args:
         best_params: Best-matching gain set.
         score: MSE score of the best match.
         output_path: Path to write the config file.
+        plant: Plant mode used during the sweep ("default" | "pegasus").
     """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    constant_name = (
+        "PX4_MATCHED_PEGASUS_CONTROLLER_CFG" if plant == "pegasus" else "PX4_MATCHED_CONTROLLER_CFG"
+    )
+    plant_label = "Pegasus IrisConfig plant + ticket-041 EKF lag" if plant == "pegasus" else "default-mode (racing-class) plant"
     with open(output_path, "w") as f:
         f.write(f"# PX4 SITL-matched DroneController configuration\n")
         f.write(f"# Generated by sysid_replicator.py: {timestamp}\n")
         f.write(f"# MSE score: {score:.6f}\n")
+        f.write(f"# Plant: {plant_label}\n")
         f.write(f"#\n")
         f.write(f"# Architecture: Velocity (PI) -> Attitude (P) -> Rate (PID) -> Motor\n")
         f.write(f"# Target: PX4 SITL response (hover, vel_step_5, impulse_recovery, yaw_step)\n\n")
@@ -1146,7 +1342,7 @@ def export_px4_matched_config(
         f.write("from isaaclab_tasks.direct.iris_ma6.controller.velocity_controller_cfg import VelocityControllerCfg\n")
         f.write("from isaaclab_tasks.direct.iris_ma6.controller.attitude_controller_cfg import AttitudeControllerCfg\n")
         f.write("from isaaclab_tasks.direct.iris_ma6.controller.rate_controller_cfg import RateControllerCfg\n\n")
-        f.write("PX4_MATCHED_CONTROLLER_CFG = DroneControllerCfg(\n")
+        f.write(f"{constant_name} = DroneControllerCfg(\n")
         f.write("    velocity=VelocityControllerCfg(\n")
         f.write(f"        Kp_vel=({best_params.Kp_vel_xy:.4f}, {best_params.Kp_vel_xy:.4f}, {best_params.Kp_vel_z:.4f}),\n")
         f.write(f"        Ki_vel=({best_params.Ki_vel_xy:.4f}, {best_params.Ki_vel_xy:.4f}, {best_params.Ki_vel_z:.4f}),\n")
@@ -1206,12 +1402,23 @@ def main():
     print(f"\nGenerating {num_trials} random gain candidates...", flush=True)
     params_list = generate_random_params(num_trials)
 
-    print(f"Creating SysidReplicator ({num_trials} parallel envs)...", flush=True)
+    print(
+        f"Creating SysidReplicator ({num_trials} parallel envs, plant={args_cli.plant}, "
+        f"seed={args_cli.seed}, ekf_lag={args_cli.ekf_lag}, "
+        f"asymmetric_score={args_cli.asymmetric_score})...",
+        flush=True,
+    )
     replicator = SysidReplicator(
         num_envs=num_trials,
         device="cuda:0",
         aero_level=args_cli.aero_level,
         targets=targets,
+        plant=args_cli.plant,
+        seed=args_cli.seed,
+        ekf_lag=args_cli.ekf_lag,
+        asymmetric_score=args_cli.asymmetric_score,
+        ahead_weight=args_cli.ahead_weight,
+        behind_weight=args_cli.behind_weight,
     )
 
     print(f"\nEvaluating {num_trials} candidates...", flush=True)
@@ -1292,6 +1499,11 @@ def main():
         "config": {
             "num_trials": num_trials,
             "aero_level": args_cli.aero_level,
+            "plant": args_cli.plant,
+            "ekf_lag": args_cli.ekf_lag,
+            "asymmetric_score": args_cli.asymmetric_score,
+            "ahead_weight": args_cli.ahead_weight if args_cli.asymmetric_score else None,
+            "behind_weight": args_cli.behind_weight if args_cli.asymmetric_score else None,
             "elapsed_time": elapsed,
             "weights": asdict(replicator.weights),
         },
@@ -1311,7 +1523,10 @@ def main():
         },
     }
 
-    results_file = output_dir / "replicator_metrics.json"
+    # Plant-tagged filename so a Pegasus-plant run does not overwrite the
+    # default-plant baseline (or vice versa).
+    metrics_filename = "replicator_metrics.json" if args_cli.plant == "default" else f"replicator_metrics_{args_cli.plant}.json"
+    results_file = output_dir / metrics_filename
     with open(results_file, "w") as f:
         json.dump(results_data, f, indent=2)
     print(f"\nResults saved to: {results_file}", flush=True)
@@ -1346,13 +1561,15 @@ def main():
     # Step 5: Generate comparison plots (3-way overlay)
     print("\nGenerating comparison plots...", flush=True)
     generate_comparison_plots(best_histories, targets, output_dir, replicator.dt,
-                              baseline_histories=baseline_histories)
+                              baseline_histories=baseline_histories,
+                              plant=args_cli.plant)
 
     # Step 5: Export PX4-matched config
     print("\nExporting PX4-matched config...", flush=True)
-    config_path = Path(__file__).parent / "tuning_results" / "px4_matched.py"
+    matched_filename = "px4_matched.py" if args_cli.plant == "default" else f"px4_matched_{args_cli.plant}.py"
+    config_path = Path(__file__).parent / "tuning_results" / matched_filename
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    export_px4_matched_config(best_params, best_score, config_path)
+    export_px4_matched_config(best_params, best_score, config_path, plant=args_cli.plant)
 
     print(f"\n{'=' * 80}", flush=True)
     print("REPLICATOR COMPLETE", flush=True)

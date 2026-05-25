@@ -27,6 +27,7 @@ from .cbf_safety.cbf_cfg import CPARewardShaperCfg
 from .controller import DroneControllerCfg
 from .controller.gain_randomization_cfg import GainRandomizationCfg
 from .controller.tuning.tuning_results.px4_matched import PX4_MATCHED_CONTROLLER_CFG
+from .controller.tuning.tuning_results.px4_matched_pegasus import PX4_MATCHED_PEGASUS_CONTROLLER_CFG
 from .curriculum import CurriculumCfg
 from .domain_randomization import DomainRandomizationCfg, MountOffsetRandomizationCfg
 from .delay_system_v3 import (
@@ -521,8 +522,22 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # Controller Config
     # ==========================================================================
 
-    drone_controller: DroneControllerCfg = PX4_MATCHED_CONTROLLER_CFG
-    """Drone controller configuration. PX4 SITL-matched gains from sysid replicator (ticket-008)."""
+    drone_controller: DroneControllerCfg | None = None
+    """Drone controller configuration.
+
+    Leave as ``None`` (default) to auto-select gains by ``physics_mode``:
+        ``physics_mode = "pegasus"`` → ``PX4_MATCHED_PEGASUS_CONTROLLER_CFG``
+            (Pegasus IrisConfig plant + ticket-041 EKF lag; vel_5_settling
+             gap 0.4%, yaw_settling gap 40%, score 0.0168).
+        ``physics_mode = "default"`` → ``PX4_MATCHED_CONTROLLER_CFG``
+            (pre-040 racing-class plant; preserves prior behavior).
+
+    Setting ``drone_controller`` to a custom ``DroneControllerCfg`` instance
+    bypasses the auto-selection and is used verbatim. The auto-pairing happens
+    in ``__post_init__`` so Hydra overrides on ``physics_mode`` propagate to
+    the gain set without requiring a separate ``drone_controller`` override.
+    A ``None`` default (rather than a class-level CFG constant) avoids
+    ``@configclass``'s field deep-copy obscuring the user-vs-default origin."""
 
     # ---- Ticket 040 — Pegasus physics parity ---------------------------------
     physics_mode: str = "pegasus"
@@ -940,6 +955,18 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
         """Populate agent-specific fields from num_agents."""
         if self.num_agents < 2:
             raise ValueError(f"num_agents must be >= 2, got {self.num_agents}")
+
+        # Ticket 040 — pair the controller gain set with the active plant mode.
+        # drone_controller=None (the dataclass default) means "auto-select from
+        # physics_mode". Explicit user overrides (drone_controller=<any
+        # DroneControllerCfg>) bypass the auto-selection. The None-default
+        # pattern is required because @configclass deep-copies field defaults,
+        # which breaks the older `is`-based sentinel approach.
+        if self.drone_controller is None:
+            if self.physics_mode == "pegasus":
+                self.drone_controller = PX4_MATCHED_PEGASUS_CONTROLLER_CFG
+            else:
+                self.drone_controller = PX4_MATCHED_CONTROLLER_CFG
 
         # Env-var-gated debug print of the load-bearing cfg fields, used to
         # verify Hydra overrides propagated for ablation runs.
