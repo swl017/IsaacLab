@@ -344,6 +344,36 @@ class IrisMA6TestEnv(DirectMARLEnv):
         num_agents = len(cfg.possible_agents)
         self.cmd_vel = torch.zeros(self.num_envs, num_agents, 7, device=self.device)
 
+        # ---- Ticket 043 — applied filtered command (per-channel first-order LP) -
+        # Mirrors cmd_vel after the optional LP. When enable_action_lowpass=True,
+        # written each policy step in _pre_physics_step and then copied back into
+        # cmd_vel so _apply_action consumes the filtered command. When False but
+        # enable_prev_action_obs=True, mirrored as a passthrough of cmd_vel so the
+        # obs channel reflects the actually-applied command. When both flags are
+        # False, this buffer remains zero and is unused (bit-exact pre-patch).
+        self._cmd_vel_filt = torch.zeros(
+            self.num_envs, num_agents, 7, device=self.device
+        )
+        # Per-channel alpha = 1 - exp(-dt / tau), dt = sim.dt * decimation.
+        # Exact discrete match to a continuous first-order pole. Sampling-rate
+        # invariant (changing decimation or sim.dt does not alter the
+        # continuous-time response).
+        _lp_dt = float(self.cfg.sim.dt) * int(self.cfg.decimation)
+        _lp_tau = torch.tensor(
+            [
+                self.cfg.action_lowpass_tau_vel_xy_s,
+                self.cfg.action_lowpass_tau_vel_xy_s,
+                self.cfg.action_lowpass_tau_vel_z_s,
+                self.cfg.action_lowpass_tau_yaw_rate_s,
+                self.cfg.action_lowpass_tau_gimbal_yaw_rate_s,
+                self.cfg.action_lowpass_tau_gimbal_pitch_rate_s,
+                self.cfg.action_lowpass_tau_zoom_rate_s,
+            ],
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self._lp_alpha = 1.0 - torch.exp(-_lp_dt / _lp_tau.clamp(min=1e-9))
+
         # Action smoothness tracking (per-dimension RMS of action deltas)
         num_action_dims = len(self.cfg.action_weight)
         self._action_delta_sq_acc: Dict[str, torch.Tensor] = {
@@ -847,6 +877,24 @@ class IrisMA6TestEnv(DirectMARLEnv):
             self.cmd_vel[:, idx, 4] = action[:, 4]  # Gimbal yaw rate (normalized)
             self.cmd_vel[:, idx, 5] = action[:, 5]  # Gimbal pitch rate (normalized)
             self.cmd_vel[:, idx, 6] = action[:, 6]  # Zoom rate (normalized)
+
+            # ---- Ticket 043 — per-channel first-order LP on cmd_vel ----------
+            # When enabled, ``_cmd_vel_filt`` is updated by an EMA on the raw
+            # scaled command and copied back into ``cmd_vel`` so ``_apply_action``
+            # consumes the filtered setpoint. ``_actions`` is left untouched so
+            # the ``action_delta`` reward operates on the raw policy decision.
+            # When LP is off but prev-action-obs is on, ``_cmd_vel_filt`` is
+            # mirrored as a passthrough so the obs channel still reflects the
+            # actually-applied command. When both flags are off, neither buffer
+            # is touched — bit-exact pre-patch.
+            if self.cfg.enable_action_lowpass:
+                self._cmd_vel_filt[:, idx, :] = (
+                    self._lp_alpha * self.cmd_vel[:, idx, :]
+                    + (1.0 - self._lp_alpha) * self._cmd_vel_filt[:, idx, :]
+                )
+                self.cmd_vel[:, idx, :] = self._cmd_vel_filt[:, idx, :]
+            elif self.cfg.enable_prev_action_obs:
+                self._cmd_vel_filt[:, idx, :] = self.cmd_vel[:, idx, :]
 
         self.decimated_step = 0
 
@@ -2078,25 +2126,26 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 ego_bbox_aoi = (self._sim_time - ego_data.timestamp_detection).unsqueeze(-1)
 
                 # Build ego observation (31D)
-                ego_obs = torch.cat(
-                    [
-                        ego_data.body_position_w,  # (N, 3)
-                        ego_data.body_linear_velocity_w,  # (N, 3)
-                        wrap_to_pi(torch.stack(euler_xyz_from_quat(ego_data.body_orientation_w), dim=-1)),  # (N, 3) roll, pitch, yaw in [-pi, pi]
-                        ego_data.body_angular_velocity_b,  # (N, 3) — gyro
-                        ego_data.body_linear_acceleration_b,  # (N, 3) — accelerometer
-                        ego_gimbal_yaw_body,  # (N, 1) — body-frame, 0=forward
-                        ego_gimbal_pitch_body,  # (N, 1) — body-frame
-                        ego_ray_w,  # (N, 3) — world-frame ray to target through bbox center
-                        ego_data.body_combined_angular_velocity_w,  # (N, 3) — camera sweep rate
-                        ego_bbox_aoi,  # (N, 1) — bbox age-of-information
-                        ego_data.camera_zoom_level.unsqueeze(-1),  # (N, 1)
-                        ego_data.camera_effective_hfov.unsqueeze(-1),  # (N, 1) — effective HFOV (rad)
-                        bbox,  # (N, 4) - normalized
-                        bbox_empty,  # (N, 1)
-                    ],
-                    dim=-1,
-                )
+                ego_obs_parts = [
+                    ego_data.body_position_w,  # (N, 3)
+                    ego_data.body_linear_velocity_w,  # (N, 3)
+                    wrap_to_pi(torch.stack(euler_xyz_from_quat(ego_data.body_orientation_w), dim=-1)),  # (N, 3) roll, pitch, yaw in [-pi, pi]
+                    ego_data.body_angular_velocity_b,  # (N, 3) — gyro
+                    ego_data.body_linear_acceleration_b,  # (N, 3) — accelerometer
+                    ego_gimbal_yaw_body,  # (N, 1) — body-frame, 0=forward
+                    ego_gimbal_pitch_body,  # (N, 1) — body-frame
+                    ego_ray_w,  # (N, 3) — world-frame ray to target through bbox center
+                    ego_data.body_combined_angular_velocity_w,  # (N, 3) — camera sweep rate
+                    ego_bbox_aoi,  # (N, 1) — bbox age-of-information
+                    ego_data.camera_zoom_level.unsqueeze(-1),  # (N, 1)
+                    ego_data.camera_effective_hfov.unsqueeze(-1),  # (N, 1) — effective HFOV (rad)
+                    bbox,  # (N, 4) - normalized
+                    bbox_empty,  # (N, 1)
+                ]
+                # Ticket 043 — append prev applied filtered command (7D) to ego.
+                if self.cfg.enable_prev_action_obs:
+                    ego_obs_parts.append(self._cmd_vel_filt[:, idx, :])
+                ego_obs = torch.cat(ego_obs_parts, dim=-1)
 
                 # Build inter-agent observations (13D per other agent)
                 other_obs_parts = []
@@ -2154,25 +2203,26 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 ego_ray_w = ego_gt.camera_ray_directions_w[:, 0, :]
 
                 # Ego observation (31D) — GT path: bbox AoI = 0 (no delay)
-                ego_obs = torch.cat(
-                    [
-                        self._root_pos_w[agent_id],  # (N, 3)
-                        self._root_lin_vel_w[agent_id],  # (N, 3)
-                        wrap_to_pi(torch.stack(euler_xyz_from_quat(self._root_quat_w[agent_id]), dim=-1)),  # (N, 3) roll, pitch, yaw in [-pi, pi]
-                        self._root_ang_vel_b[agent_id],  # (N, 3) — gyro
-                        self._root_lin_acc_b[agent_id],  # (N, 3) — accelerometer
-                        ego_gimbal_yaw_body,  # (N, 1) — body-frame, 0=forward
-                        ego_gimbal_pitch_body,  # (N, 1) — body-frame
-                        ego_ray_w,  # (N, 3) — world-frame ray to target through bbox center
-                        ego_gt.body_combined_angular_velocity_w,  # (N, 3) — camera sweep rate
-                        torch.zeros(self.num_envs, 1, device=self.device),  # (N, 1) — bbox AoI (GT = 0)
-                        self.zoom_level[:, idx : idx + 1],  # (N, 1)
-                        ego_gt.camera_effective_hfov.unsqueeze(-1),  # (N, 1) — effective HFOV (rad)
-                        bbox,  # (N, 4)
-                        bbox_empty,  # (N, 1)
-                    ],
-                    dim=-1,
-                )
+                ego_obs_parts = [
+                    self._root_pos_w[agent_id],  # (N, 3)
+                    self._root_lin_vel_w[agent_id],  # (N, 3)
+                    wrap_to_pi(torch.stack(euler_xyz_from_quat(self._root_quat_w[agent_id]), dim=-1)),  # (N, 3) roll, pitch, yaw in [-pi, pi]
+                    self._root_ang_vel_b[agent_id],  # (N, 3) — gyro
+                    self._root_lin_acc_b[agent_id],  # (N, 3) — accelerometer
+                    ego_gimbal_yaw_body,  # (N, 1) — body-frame, 0=forward
+                    ego_gimbal_pitch_body,  # (N, 1) — body-frame
+                    ego_ray_w,  # (N, 3) — world-frame ray to target through bbox center
+                    ego_gt.body_combined_angular_velocity_w,  # (N, 3) — camera sweep rate
+                    torch.zeros(self.num_envs, 1, device=self.device),  # (N, 1) — bbox AoI (GT = 0)
+                    self.zoom_level[:, idx : idx + 1],  # (N, 1)
+                    ego_gt.camera_effective_hfov.unsqueeze(-1),  # (N, 1) — effective HFOV (rad)
+                    bbox,  # (N, 4)
+                    bbox_empty,  # (N, 1)
+                ]
+                # Ticket 043 — append prev applied filtered command (7D) to ego.
+                if self.cfg.enable_prev_action_obs:
+                    ego_obs_parts.append(self._cmd_vel_filt[:, idx, :])
+                ego_obs = torch.cat(ego_obs_parts, dim=-1)
 
                 # Inter-agent observations (13D per other, GT = no delay, ages = 0)
                 other_obs_parts = []
@@ -2992,6 +3042,9 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         # Reset command buffers
         self.cmd_vel[env_ids] = 0.0
+        # Ticket 043 — reset the LP / prev-action buffer alongside cmd_vel so
+        # the first commanded step after reset has no carryover memory.
+        self._cmd_vel_filt[env_ids] = 0.0
         if self._initial_states is None:
             self.zoom_level[env_ids] = 1.0
         self.cmd_gimbal_yaw[env_ids] = 0.0

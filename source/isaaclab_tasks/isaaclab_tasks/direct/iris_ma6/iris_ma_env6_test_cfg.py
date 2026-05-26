@@ -595,6 +595,49 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     """Maximum descend rate (m/s, action[:, 2] < 0, applied to ``|action|``).
     Default matches PX4's ``MPC_Z_VEL_MAX_DN``. Not randomized."""
 
+    # ---- Ticket 043 — action smoothness (prev-action obs + cmd_vel LP) -------
+    enable_prev_action_obs: bool = True
+    """Ticket 043 — when True, append the previous applied filtered command
+    (7D: vx, vy, vz [m/s], yaw_rate [rad/s], gimbal_yaw_rate, gimbal_pitch_rate,
+    zoom_rate [all normalized]) to each agent's ego observation. Bumps the
+    per-agent observation dim by +7. When False (default off → opt-in to
+    pre-patch behavior), the channel is omitted and obs dim is unchanged.
+
+    Source is ``_cmd_vel_filt`` (the command actually consumed by the
+    controller after the optional first-order LP), not the raw normalized
+    action. Rationale: physical units make the channel semantically uniform
+    across the batch under per-env curriculum + DR jitter on ``_max_lin_vel``,
+    and deployment commands are issued in physical units through MAVROS."""
+
+    enable_action_lowpass: bool = True
+    """Ticket 043 — when True, apply a per-channel first-order low-pass to
+    ``cmd_vel`` before ``_apply_action`` consumes it. The raw ``_actions``
+    tensor (normalized policy output in [-1, 1]) is preserved so the
+    ``action_delta`` reward continues to penalize the policy's raw decision,
+    not the filter output. When False, ``cmd_vel`` passes through unchanged
+    (bit-exact pre-patch behavior)."""
+
+    # Per-channel time constants (seconds). Discretization:
+    #   dt = sim.dt * decimation
+    #   alpha[ch] = 1 - exp(-dt / tau[ch])
+    #   cmd_vel_filt = alpha * cmd_vel_raw + (1 - alpha) * cmd_vel_filt
+    # Sampling-rate invariant: changing decimation or sim.dt does NOT change the
+    # filter's continuous-time response.
+    action_lowpass_tau_vel_xy_s: float = 0.08
+    """LP time constant (s) for vx, vy. Default cutoff ~2 Hz."""
+    action_lowpass_tau_vel_z_s: float = 0.08
+    """LP time constant (s) for vz."""
+    action_lowpass_tau_yaw_rate_s: float = 0.08
+    """LP time constant (s) for yaw_rate."""
+    action_lowpass_tau_gimbal_yaw_rate_s: float = 0.04
+    """LP time constant (s) for gimbal yaw rate. Faster than body channels
+    since gimbal does not couple back into body attitude."""
+    action_lowpass_tau_gimbal_pitch_rate_s: float = 0.04
+    """LP time constant (s) for gimbal pitch rate."""
+    action_lowpass_tau_zoom_rate_s: float = 0.10
+    """LP time constant (s) for zoom rate. Slowest channel — visual stability
+    matters more than zoom response time."""
+
     # ==========================================================================
     # CBF Safety Configuration
     # ==========================================================================
@@ -1012,6 +1055,8 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
         obs_dim = 31 + 16 * (self.num_agents - 1)
         if self.enable_triangulation:
             obs_dim += 6  # triangulated position (3) + std_dev (3)
+        if self.enable_prev_action_obs:
+            obs_dim += 7  # ticket 043 — prev applied filtered command
         self.observation_spaces = {a: obs_dim for a in self.possible_agents}
 
         # ------------------------------------------------------------------

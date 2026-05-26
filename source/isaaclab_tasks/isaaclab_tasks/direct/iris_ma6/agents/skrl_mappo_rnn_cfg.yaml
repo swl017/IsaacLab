@@ -98,7 +98,7 @@ agent:
   # Experiment tracking
   experiment:
     directory: iris_ma6
-    experiment_name: "5e4d3f4db4_ticket040_042_pegasus_matched_params"
+    experiment_name: "02c34fe802_ticket040_042_pegasus_matched_params"
     write_interval: auto
     checkpoint_interval: auto
     store_separately: false

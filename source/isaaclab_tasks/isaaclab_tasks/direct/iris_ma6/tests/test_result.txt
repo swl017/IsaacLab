@@ -1,22 +1,32 @@
-[3gH    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H[INFO] Using python from: /home/usrg/miniconda3/envs/env_isaaclab/bin/python
+[3gH    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H   [INFO] Using python from: /home/usrg/miniconda3/envs/env_isaaclab/bin/python
 [WARN][AppLauncher]: There are no arguments attached to the ArgumentParser object. If you have your own arguments, please load your own arguments before calling the `AppLauncher.add_app_launcher_args` method. This allows the method to check the validity of the arguments and perform checks for argument names.
 [INFO][AppLauncher]: Using device: cuda:0
 [INFO][AppLauncher]: Loading experience file: /home/usrg/IsaacPX4/IsaacLab/apps/isaaclab.python.headless.kit
 ================================================================================
-TICKET 039 — ASYMMETRIC Z-VELOCITY ENVELOPE TEST SUITE
+TICKET 043 — ACTION SMOOTHNESS (prev-action obs + cmd_vel LP) TEST SUITE
 ================================================================================
 
---- Category 1 — cfg defaults (pre-build) ---
+--- Category 1 — cfg defaults / obs-dim accounting (pre-build) ---
 [IrisMA6TestEnvCfg] enable_full_critic_priv_obs=True with domain_randomization.enabled=False — dropped 7 DR-dependent fields: ['body_mass_scale_or_add', 'fov_scale', 'gimbal_damping_scale', 'gimbal_pitch_offset', 'gimbal_roll_offset', 'gimbal_stiffness_scale', 'gimbal_yaw_offset']. Enabled fields: 17 non-DR.
-  ✓ cfg defaults: flag=False, z_up=3.0, z_dn=1.5
+  ✓ cfg defaults: flags=True, τ values match ticket 043
+[IrisMA6TestEnvCfg] enable_full_critic_priv_obs=True with domain_randomization.enabled=False — dropped 7 DR-dependent fields: ['body_mass_scale_or_add', 'fov_scale', 'gimbal_damping_scale', 'gimbal_pitch_offset', 'gimbal_roll_offset', 'gimbal_stiffness_scale', 'gimbal_yaw_offset']. Enabled fields: 17 non-DR.
+[IrisMA6TestEnvCfg] enable_full_critic_priv_obs=True with domain_randomization.enabled=False — dropped 7 DR-dependent fields: ['body_mass_scale_or_add', 'fov_scale', 'gimbal_damping_scale', 'gimbal_pitch_offset', 'gimbal_roll_offset', 'gimbal_stiffness_scale', 'gimbal_yaw_offset']. Enabled fields: 17 non-DR.
+[IrisMA6TestEnvCfg] enable_full_critic_priv_obs=True with domain_randomization.enabled=False — dropped 7 DR-dependent fields: ['body_mass_scale_or_add', 'fov_scale', 'gimbal_damping_scale', 'gimbal_pitch_offset', 'gimbal_roll_offset', 'gimbal_stiffness_scale', 'gimbal_yaw_offset']. Enabled fields: 17 non-DR.
+  ✓ cfg obs_dim: prev-action-off → 47 (regression); on → 54 (+ tri = 60)
+
+--- Category 2 — pure-math LP tests (no env) ---
+  ✓ LP convergence: x→0.9817 after 4τ (8 steps) ≈ 1−e⁻⁴
+  ✓ large-τ attenuation: α=0.0392 → first step 0.0392, ~4τ converges
+  ✓ sampling-rate invariance: dt=0.04 → 0.993262, dt=0.02 → 0.993262, both = 1−exp(−t/τ)
 [IrisMA6TestEnvCfg] enable_full_critic_priv_obs=True with domain_randomization.enabled=False — dropped 7 DR-dependent fields: ['body_mass_scale_or_add', 'fov_scale', 'gimbal_damping_scale', 'gimbal_pitch_offset', 'gimbal_roll_offset', 'gimbal_stiffness_scale', 'gimbal_yaw_offset']. Enabled fields: 17 non-DR.
 Loading user config located at: '/home/usrg/isaacsim/kit/data/Kit/Isaac-Sim/4.5/user.config.json'
-[Info] [carb] Logging to file: /home/usrg/isaacsim/kit/logs/Kit/Isaac-Sim/4.5/kit_20260522_181818.log
-2026-05-22 09:18:18 [0ms] [Warning] [omni.kit.app.plugin] No crash reporter present, dumps uploading isn't available.
-2026-05-22 09:18:18 [3ms] [Warning] [omni.ext.plugin] [ext: driver_artifacts] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts' or '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts/config'
-2026-05-22 09:18:18 [3ms] [Warning] [omni.ext.plugin] [ext: rendering_modes] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes' or '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes/config'
-2026-05-22 09:18:19 [469ms] [Warning] [omni.usd_config.extension] Enable omni.materialx.libs extension to use MaterialX
-2026-05-22 09:18:19 [871ms] [Warning] [omni.isaac.dynamic_control] omni.isaac.dynamic_control is deprecated as of Isaac Sim 4.5. No action is needed from end-users.
+[Info] [carb] Logging to file: /home/usrg/isaacsim/kit/logs/Kit/Isaac-Sim/4.5/kit_20260526_215231.log
+2026-05-26 12:52:31 [0ms] [Warning] [omni.kit.app.plugin] No crash reporter present, dumps uploading isn't available.
+2026-05-26 12:52:31 [2ms] [Warning] [omni.ext.plugin] [ext: driver_artifacts] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts' or '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts/config'
+2026-05-26 12:52:31 [2ms] [Warning] [omni.ext.plugin] [ext: rendering_modes] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes' or '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes/config'
+2026-05-26 12:52:32 [461ms] [Warning] [omni.usd_config.extension] Enable omni.materialx.libs extension to use MaterialX
+2026-05-26 12:52:32 [568ms] [Warning] [omni.platforminfo.plugin] failed to open the default display.  Can't verify X Server version.
+2026-05-26 12:52:32 [857ms] [Warning] [omni.isaac.dynamic_control] omni.isaac.dynamic_control is deprecated as of Isaac Sim 4.5. No action is needed from end-users.
 
 |---------------------------------------------------------------------------------------------|
 | Driver Version: 535.230.02    | Graphics API: Vulkan
@@ -30,13 +40,13 @@ Loading user config located at: '/home/usrg/isaacsim/kit/data/Kit/Isaac-Sim/4.5/
 |     |                                  |        |     |            | 9         |            |
 |=============================================================================================|
 | OS: 20.04.6 LTS (Focal Fossa) ubuntu, Version: 20.04.6, Kernel: 5.15.0-139-generic
-| XServer Vendor: The X.Org Foundation, XServer Version: 12013000 (1.20.13.0)
 | Processor: AMD Ryzen 9 5950X 16-Core Processor
 | Cores: 16 | Logical Cores: 32
 |---------------------------------------------------------------------------------------------|
-| Total Memory (MB): 64195 | Free Memory: 14144
+| Total Memory (MB): 64195 | Free Memory: 7638
 | Total Page/Swap (MB): 13730 | Free Page/Swap: 17592186044415
 |---------------------------------------------------------------------------------------------|
+2026-05-26 12:52:36 [4,711ms] [Warning] [omni.kvdb.plugin] Disabling key-value database because another kit process is locking it
 Warning: Debug draw module not available. Disabling debug visualization.
 Setting seed: 42
 [INFO]: Base environment:
@@ -45,7 +55,7 @@ Setting seed: 42
 	Physics step-size     : 0.01
 	Rendering step-size   : 0.04
 	Environment step-size : 0.04
-[INFO]: Time taken for scene creation : 0.966321 seconds
+[INFO]: Time taken for scene creation : 1.091050 seconds
 [INFO]: Scene manager:  <class InteractiveScene>
 	Number of environments: 4
 	Environment spacing   : 200.0
@@ -53,17 +63,31 @@ Setting seed: 42
 	Global prim paths     : ['/World/ground']
 	Replicate physics     : True
 [INFO]: Starting the simulation. This may take a few seconds. Please wait...
-[INFO]: Time taken for simulation start : 1.898477 seconds
+[INFO]: Time taken for simulation start : 2.415851 seconds
 [INFO]: Completed setting up the environment...
+[iris_ma6:040] WARNING: USD body mass 1.6216 kg diverges from expected_body_mass 1.5000 kg by 8.11%. Pegasus-mode hover init assumes 1.5 kg; consider fixing the USD.
 
---- Category 2 — symmetric default (regression) ---
-  ✓ symmetric default: cmd_vel matches action * _max_lin_vel
+--- Category 3a — env buffers / α derivation ---
+  ✓ buffers + α: _cmd_vel_filt=(4, 2, 7), α=[0.39346933364868164, 0.39346933364868164, 0.39346933364868164, 0.39346933364868164, 0.6321204900741577, 0.6321204900741577, 0.3296799063682556]
 
---- Category 3 — asymmetric clip ---
-  ✓ asymmetric clip: vz ∈ [-1.5, +3.0] under uniform action; sign-dependent scaling correct
+--- Category 3b — flags OFF regression (cmd_vel = action*scale) ---
+  ✓ flags-off regression: cmd_vel matches action*scale; _cmd_vel_filt untouched
+
+--- Category 3c — LP runtime semantics ---
+  ✓ LP first step: cmd_vel == α × cmd_vel_raw, _cmd_vel_filt mirrors
+  ✓ LP convergence (12 steps): cmd_vx ≥ 0.95 × target across envs/agents
+
+--- Category 3d — prev-action concat into ego obs ---
+  ✓ prev-action in obs: ego[31:38] == _cmd_vel_filt for all agents
+
+--- Category 3e — LP-off passthrough into _cmd_vel_filt ---
+  ✓ LP off + prev-action on: _cmd_vel_filt mirrors cmd_vel (passthrough)
+
+--- Category 3f — reset clears filter state ---
+  ✓ reset zeros _cmd_vel_filt for reset envs only
 
 ================================================================================
 TEST SUMMARY
 ================================================================================
-Total: 3 | Passed: 3 | Failed: 0
+Total: 12 | Passed: 12 | Failed: 0
 ================================================================================

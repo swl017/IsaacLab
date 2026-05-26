@@ -3304,3 +3304,62 @@ Next:
   pegasus gains to confirm no NaN / collapse with the new defaults.
 - If the smoke training is clean, mark ticket 040 acceptance criteria 5
   (do-no-harm gate at 200k env-steps) done after a full training run.
+
+----------------------------------------
+2026-05-26 — Ticket 043 Slice 1 landed (prev-action obs + cmd_vel LP)
+----------------------------------------
+Done:
+- iris_ma_env6_test_cfg.py: added enable_prev_action_obs (default True),
+  enable_action_lowpass (default True), and six per-channel τ defaults
+  (vel_xy/z/yaw_rate = 0.08 s; gimbal yaw/pitch_rate = 0.04 s; zoom_rate
+  = 0.10 s). __post_init__ bumps obs_dim by +7 when prev-action is on.
+- iris_ma_env6_test.py:
+  • __init__: _cmd_vel_filt (N, A, 7) buffer + _lp_alpha (7,) precomputed
+    as 1 - exp(-dt / τ), dt = sim.dt * decimation = 0.04 s.
+  • _pre_physics_step: LP branch overwrites cmd_vel with filtered command
+    so _apply_action consumes the filtered setpoint; _actions left raw so
+    the action_delta reward stays on the policy's raw output. When LP off
+    but prev-action on, _cmd_vel_filt mirrors cmd_vel (passthrough). When
+    both off, neither buffer touched — bit-exact pre-patch.
+  • _get_observations (both delay and GT paths): prev-action tail (7D)
+    appended to ego_obs before inter-agent concat, gated on flag.
+  • _reset_idx: _cmd_vel_filt[env_ids] = 0 next to cmd_vel reset.
+- tests/test_action_smoothness_v1.py: 12 checks, 12/12 pass on first run.
+  Covers cfg defaults, obs-dim accounting (47/54/60), pure-math LP
+  convergence + large-τ attenuation + sampling-rate invariance (exact to
+  1e-12), env buffer/α derivation, flags-off bit-exact cmd_vel = action*
+  scale, LP first-step EMA, 12-step convergence, prev-action concat into
+  ego[31:38], LP-off passthrough, and per-env reset clearing.
+- experiments/experiment_registry.py: registered three Slice-2
+  experiments (validation_action_smoothness_short_baseline /
+  _prev_action_only / _full). 200k steps each, seed=42.
+- doc/experiments/2026-05-26_ticket043_prev_action_lowpass.md: writeup
+  covering patch summary, Slice-1 results, Slice-2 plan, risks/coupling.
+
+Slice 1 test transcript saved to tests/test_result.txt. Sampling-rate
+invariance: at τ=0.08 and same physical t=0.4 s, dt=0.04 and dt=0.02
+both produce 0.993262 = 1 − exp(−5) (the closed-form pole). This
+confirms 1 − exp(−dt/τ) is the exact discretization, not Euler.
+
+Files modified:
+- source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/iris_ma_env6_test_cfg.py
+- source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/iris_ma_env6_test.py
+- source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/experiments/experiment_registry.py
+
+Files added:
+- source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/tests/test_action_smoothness_v1.py
+- source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/doc/experiments/2026-05-26_ticket043_prev_action_lowpass.md
+
+Next:
+- Launch Slice-2: three 200k runs (baseline / prev_action_only / full)
+  branched from 02c34fe802, seed=42. ~24 wall-h each. Pull TB at
+  40k/80k/120k/200k for early-stop on obvious regression.
+- Decision rule on cmd_vel_delta ≥ 30% reduction (full vs baseline) and
+  task-quality within ±5%. If full passes cleanly, mark ticket 043
+  acceptance criterion complete and update feature_list. If full is
+  directionally correct but insufficient, kick off Slice-3 τ sweep
+  (τ_vel ∈ {0.04, 0.08, 0.16}).
+- Pre-043 checkpoints (e.g., t034 agent_400000.pt) cannot be loaded
+  with default cfg (obs_dim mismatch). Use --env.enable_prev_action_obs=False
+  override if loading them, or treat as fresh-init runs (standard for
+  architectural change).

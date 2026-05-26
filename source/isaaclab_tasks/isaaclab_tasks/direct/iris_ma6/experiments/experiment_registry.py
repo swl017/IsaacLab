@@ -505,6 +505,52 @@ register_experiment(ExperimentCfg(
 
 
 # ===========================================================================
+# Ticket 043: prev-action obs + first-order LP on cmd_vel A/B
+# ===========================================================================
+# Three-way A/B comparing the architectural smoothness intervention against
+# the pre-patch baseline. Same task, same RNG, same curriculum. Configs only
+# differ in the two feature flags (enable_prev_action_obs / enable_action_lowpass).
+# Acceptance: full ≥ 30% cmd_vel_delta reduction vs baseline at 200k, task
+# quality within ±5%.
+
+register_experiment(ExperimentCfg(
+    name="validation_action_smoothness_short_baseline",
+    description="Ticket 043 A/B (control): pre-patch behavior (no prev-action obs, no cmd_vel LP)",
+    group="validation",
+    total_timesteps=200000,
+    seeds=[42],
+    env_overrides={
+        "enable_prev_action_obs": False,
+        "enable_action_lowpass": False,
+    },
+))
+
+register_experiment(ExperimentCfg(
+    name="validation_action_smoothness_short_prev_action_only",
+    description="Ticket 043 A/B (diagnostic): prev-action obs ON, cmd_vel LP OFF — isolates the obs-channel contribution",
+    group="validation",
+    total_timesteps=200000,
+    seeds=[42],
+    env_overrides={
+        "enable_prev_action_obs": True,
+        "enable_action_lowpass": False,
+    },
+))
+
+register_experiment(ExperimentCfg(
+    name="validation_action_smoothness_short_full",
+    description="Ticket 043 A/B (treatment): prev-action obs + cmd_vel LP both ON — the shipping candidate",
+    group="validation",
+    total_timesteps=200000,
+    seeds=[42],
+    env_overrides={
+        "enable_prev_action_obs": True,
+        "enable_action_lowpass": True,
+    },
+))
+
+
+# ===========================================================================
 # Sweeps: Agent Count
 # ===========================================================================
 
