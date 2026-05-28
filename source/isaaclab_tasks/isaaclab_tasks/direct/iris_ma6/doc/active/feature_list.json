@@ -1,7 +1,7 @@
 {
   "project": "iris_ma6",
-  "last_updated": "2026-05-26",
-  "last_session_ticket": "043-prev-action-obs-and-action-low-pass (Slice 1 DONE: cfg flags + LP buffer + prev-action concat + reset clearing landed behind enable_prev_action_obs / enable_action_lowpass (both default True). 12/12 unit tests pass including bit-exact flags-off regression and exact sampling-rate invariance. Three Slice-2 experiments registered. Slice 2 (3 × 200k A/B runs) not yet launched.)",
+  "last_updated": "2026-05-28",
+  "last_session_ticket": "044-action-slew-rate-clip (Slice 0 + Slice 1 DONE: empirical |Δa| probe shows trained policy operates 9-15× over PX4-strict on velocity channels; slew clip patch landed with PX4-strict defaults behind enable_action_slew_clip (default True); pre-existing _last_actions[env_ids].zero_() reset bug fixed; cmd_vel_delta + slew_saturation_frac trackers added; 8/8 unit tests pass; two Slice-2 experiments registered. Decision: ship PX4-strict and lower task difficulty after Slice 2 surfaces the regression. Ticket 043 wrap: LP+obs FAILED catastrophically (-40% reward at 296k), prev_action_only ships as default (enable_action_lowpass=False).)",
   "features": [
     {
       "id": "controller",

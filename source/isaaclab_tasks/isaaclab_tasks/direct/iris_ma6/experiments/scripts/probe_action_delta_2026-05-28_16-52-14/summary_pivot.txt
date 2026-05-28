@@ -1,0 +1,38 @@
+Ticket 044 Slice-0 - per-channel p90 of |delta_action|, max over agents
+====================================================================================================
+channel              checkpoint                      39k       79k      119k      199k    PX4-strict
+----------------------------------------------------------------------------------------------------
+gimbal_pitch_rate    agent_120000.pt                   -         -    0.1305         -        0.4000
+gimbal_pitch_rate    agent_200000.pt              0.1292    0.1466    0.1440    0.1452        0.4000
+gimbal_pitch_rate    agent_40000.pt               0.0771         -         -         -        0.4000
+gimbal_pitch_rate    agent_80000.pt                    -    0.1599         -         -        0.4000
+gimbal_yaw_rate      agent_120000.pt                   -         -    0.1283         -        0.4000
+gimbal_yaw_rate      agent_200000.pt              0.1120    0.1284    0.1299    0.1660        0.4000
+gimbal_yaw_rate      agent_40000.pt               0.0640         -         -         -        0.4000
+gimbal_yaw_rate      agent_80000.pt                    -    0.1279         -         -        0.4000
+vx                   agent_120000.pt                   -         -    0.1153         -        0.0200
+vx                   agent_200000.pt              0.1836    0.2016    0.2037    0.2243        0.0200
+vx                   agent_40000.pt               0.0569         -         -         -        0.0200
+vx                   agent_80000.pt                    -    0.1182         -         -        0.0200
+vy                   agent_120000.pt                   -         -    0.1078         -        0.0200
+vy                   agent_200000.pt              0.2629    0.2854    0.2857    0.2947        0.0200
+vy                   agent_40000.pt               0.0696         -         -         -        0.0200
+vy                   agent_80000.pt                    -    0.1144         -         -        0.0200
+vz                   agent_120000.pt                   -         -    0.1417         -        0.0530
+vz                   agent_200000.pt              0.1592    0.1862    0.1873    0.2219        0.0530
+vz                   agent_40000.pt               0.0745         -         -         -        0.0530
+vz                   agent_80000.pt                    -    0.1382         -         -        0.0530
+yaw_rate             agent_120000.pt                   -         -    0.0805         -        0.3000
+yaw_rate             agent_200000.pt              0.1208    0.1398    0.1404    0.1590        0.3000
+yaw_rate             agent_40000.pt               0.0681         -         -         -        0.3000
+yaw_rate             agent_80000.pt                    -    0.1224         -         -        0.3000
+zoom_rate            agent_120000.pt                   -         -    0.1104         -        0.2000
+zoom_rate            agent_200000.pt              0.1901    0.2216    0.2235    0.2308        0.2000
+zoom_rate            agent_40000.pt               0.0777         -         -         -        0.2000
+zoom_rate            agent_80000.pt                    -    0.1134         -         -        0.2000
+====================================================================================================
+
+Interpretation:
+  - p90 <= PX4-strict      -> Case A (ship strict)
+  - p90 >  PX4-strict      -> Case B (loosen or accept regression)
+  - p90 << PX4-strict      -> Case C (slew clip is a guardrail only)

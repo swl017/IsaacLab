@@ -27,7 +27,10 @@
 # Stdout/stderr captured per-ablation in /tmp/ablation_<name>.log.
 # TensorBoard logs land in logs/skrl/iris_ma6/<timestamp>_<experiment_name>/.
 
-set -euo pipefail
+# NB: `-u` (nounset) is intentionally omitted — Isaac Sim's setup_conda_env.sh
+# references unbound vars (e.g. ZSH_VERSION) and would abort the script before
+# the first ablation. `-e` + pipefail are kept.
+set -eo pipefail
 
 # ---------------------------------------------------------------------------
 # Config (edit values here if needed)
@@ -47,6 +50,7 @@ TRAIN_SCRIPT="scripts/reinforcement_learning/skrl/train_mappo_rnn_hydra.py"
 # - Enable the asymmetric z envelope (the new feature under test, ticket 039).
 COMMON_FLAGS=(
     --disable_phase1_priv_obs
+    --disable_prev_action_obs
     --enable_asymmetric_z
     --timesteps "$TIMESTEPS"
 )

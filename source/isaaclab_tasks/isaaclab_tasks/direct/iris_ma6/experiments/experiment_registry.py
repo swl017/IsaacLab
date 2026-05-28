@@ -551,6 +551,43 @@ register_experiment(ExperimentCfg(
 
 
 # ===========================================================================
+# Ticket 044: per-channel slew-rate clip on raw actions (PX4-aligned) A/B
+# ===========================================================================
+# Two-way A/B against the post-043 default (prev_action_only). Same task, same
+# RNG, same curriculum. PX4-strict δ defaults (vel_xy=0.020, vel_z=0.053, ...)
+# baked into IrisMA6TestEnvCfg per Slice-0 decision. Treatment is expected to
+# fail the task-quality bar (Slice-0 evidence shows trained policy at 9-15×
+# the PX4 envelope on velocity); the regression triggers the Slice-4
+# task-difficulty calibration follow-up.
+
+register_experiment(ExperimentCfg(
+    name="validation_action_slew_short_baseline",
+    description="Ticket 044 A/B (control): slew clip OFF, prev-action obs ON (post-043 default)",
+    group="validation",
+    total_timesteps=200000,
+    seeds=[42],
+    env_overrides={
+        "enable_action_slew_clip": False,
+        "enable_prev_action_obs": True,
+        "enable_action_lowpass": False,
+    },
+))
+
+register_experiment(ExperimentCfg(
+    name="validation_action_slew_short_treatment",
+    description="Ticket 044 A/B (treatment): slew clip ON (PX4-strict δ), prev-action obs ON",
+    group="validation",
+    total_timesteps=200000,
+    seeds=[42],
+    env_overrides={
+        "enable_action_slew_clip": True,
+        "enable_prev_action_obs": True,
+        "enable_action_lowpass": False,
+    },
+))
+
+
+# ===========================================================================
 # Sweeps: Agent Count
 # ===========================================================================
 

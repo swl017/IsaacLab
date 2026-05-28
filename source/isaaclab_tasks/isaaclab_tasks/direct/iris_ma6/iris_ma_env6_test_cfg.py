@@ -609,13 +609,28 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     across the batch under per-env curriculum + DR jitter on ``_max_lin_vel``,
     and deployment commands are issued in physical units through MAVROS."""
 
-    enable_action_lowpass: bool = True
+    enable_action_lowpass: bool = False
     """Ticket 043 — when True, apply a per-channel first-order low-pass to
     ``cmd_vel`` before ``_apply_action`` consumes it. The raw ``_actions``
     tensor (normalized policy output in [-1, 1]) is preserved so the
     ``action_delta`` reward continues to penalize the policy's raw decision,
     not the filter output. When False, ``cmd_vel`` passes through unchanged
-    (bit-exact pre-patch behavior)."""
+    (bit-exact pre-patch behavior).
+
+    **Default flipped to False on 2026-05-27** after the 200k A/B
+    (validation_action_smoothness_short_full vs _prev_action_only) showed
+    the LP+obs configuration failed the task-quality bar (-40% reward,
+    -31% bbox_center at step 296k vs the t040/042 baseline), driven by
+    over-aggressive τ=0.08s introducing too much applied-command lag for
+    agile bbox tracking AND the perverse incentive of action_delta reward
+    operating on raw _actions while the LP attenuates downstream. The
+    `prev_action_only` configuration (obs ON, LP OFF) is the new shipping
+    default; it gives clear task-quality gains (+9% bbox_center, -44%
+    tracking_lost at 200k vs baseline) with smoothness essentially flat
+    (≈-2%, within seed noise). See doc/experiments/2026-05-26_ticket043_
+    prev_action_lowpass.md and ticket 044 for the architectural follow-up
+    (per-channel slew-rate clip on raw actions, replacing the LP as the
+    smoothness mechanism)."""
 
     # Per-channel time constants (seconds). Discretization:
     #   dt = sim.dt * decimation
@@ -637,6 +652,41 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     action_lowpass_tau_zoom_rate_s: float = 0.10
     """LP time constant (s) for zoom rate. Slowest channel — visual stability
     matters more than zoom response time."""
+
+    # ---- Ticket 044 — per-channel slew-rate clip on raw actions (PX4-aligned)
+    enable_action_slew_clip: bool = True
+    """Ticket 044 — when True, hard-clip per-channel Δaction = action[t] -
+    _last_actions[t-1] to ±``action_slew_*`` per channel, applied *before*
+    ``_actions`` is assigned in ``_pre_physics_step``. Constrains Δa ≤ δ_max
+    by construction; ``action_delta`` reward + prev-action obs see the same
+    constrained signal (no LP-style raw/applied misalignment). Flag-off path
+    is bit-exact to pre-patch."""
+
+    # Per-channel slew limits in action units [-1, 1] per policy step.
+    # PX4-derived defaults assuming dt = sim.dt × decimation = 0.04 s.
+    # Slice-0 empirical evidence (2026-05-28) showed the trained policy operates
+    # 9–15× over these limits on velocity channels — Slice 2 is expected to
+    # show catastrophic task regression under PX4-strict, which is the trigger
+    # for the Slice-4 task-difficulty calibration follow-up.
+    action_slew_vel_xy: float = 0.020
+    """δ_max for vx, vy. Derived from MPC_ACC_HOR_MAX = 5 m/s² × 0.04 s / 10 m/s.
+    Bounds horizontal accel to PX4's position-controller envelope."""
+    action_slew_vel_z: float = 0.053
+    """δ_max for vz. Derived from MPC_ACC_UP_MAX = 4 m/s² × 0.04 s / 3 m/s
+    (worst-case scaling at sign-flip transitions under asymmetric z envelope)."""
+    action_slew_yaw_rate: float = 0.30
+    """δ_max for yaw_rate. No clean PX4 acceleration analog (PX4 limits the
+    rate, not the rate-of-rate); picked to allow full-range reversal in
+    ~3 policy steps. Slice-0 empirical p90 = 0.16, well within."""
+    action_slew_gimbal_yaw_rate: float = 0.40
+    """δ_max for gimbal yaw rate. Gimbal is not PX4-controlled (SIYI A8 has
+    its own rate limits). Slice-0 empirical p90 = 0.17, well within."""
+    action_slew_gimbal_pitch_rate: float = 0.40
+    """δ_max for gimbal pitch rate. Slice-0 empirical p90 = 0.15, well within."""
+    action_slew_zoom_rate: float = 0.20
+    """δ_max for zoom rate. Visual stability matters more than zoom response
+    time. Slice-0 empirical p90 = 0.23 (1.15× over) — expect some saturation
+    on this channel, acceptable for a slow visual control."""
 
     # ==========================================================================
     # CBF Safety Configuration

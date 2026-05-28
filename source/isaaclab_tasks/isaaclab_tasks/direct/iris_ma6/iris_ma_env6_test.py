@@ -374,6 +374,38 @@ class IrisMA6TestEnv(DirectMARLEnv):
         )
         self._lp_alpha = 1.0 - torch.exp(-_lp_dt / _lp_tau.clamp(min=1e-9))
 
+        # ---- Ticket 044 — per-channel slew-rate clip on raw actions ---------
+        # δ_max per channel, in action units [-1, 1] per policy step. PX4-derived
+        # at the cfg defaults; gated by ``enable_action_slew_clip`` at use-site.
+        self._action_slew_max = torch.tensor(
+            [
+                self.cfg.action_slew_vel_xy,           # vx
+                self.cfg.action_slew_vel_xy,           # vy
+                self.cfg.action_slew_vel_z,            # vz
+                self.cfg.action_slew_yaw_rate,         # yaw_rate
+                self.cfg.action_slew_gimbal_yaw_rate,
+                self.cfg.action_slew_gimbal_pitch_rate,
+                self.cfg.action_slew_zoom_rate,
+            ],
+            dtype=torch.float32,
+            device=self.device,
+        )
+        # Saturation accumulator (per (env, channel) — counts policy steps where
+        # the slew clip moved the action). Per-channel rather than total because
+        # different channels saturate at very different rates (Slice-0: vel ~90%,
+        # gimbal <5%). Logged as fraction-of-steps in _reset_idx; reused
+        # _action_smoothness_steps as the denominator.
+        _slew_n_dims = len(self.cfg.action_weight)
+        self._slew_saturation_acc: Dict[str, torch.Tensor] = {
+            agent_id: torch.zeros(self.num_envs, _slew_n_dims, device=self.device)
+            for agent_id in cfg.possible_agents
+        }
+        # cmd_vel delta tracker (the t043-deferred metric). Mean |Δ cmd_vel|
+        # per policy step accumulated over the episode → logged at reset.
+        # Shape (N, A, 7); the average over A is logged per-agent.
+        self._cmd_vel_prev = torch.zeros(self.num_envs, num_agents, 7, device=self.device)
+        self._cmd_vel_delta_acc = torch.zeros(self.num_envs, num_agents, 7, device=self.device)
+
         # Action smoothness tracking (per-dimension RMS of action deltas)
         num_action_dims = len(self.cfg.action_weight)
         self._action_delta_sq_acc: Dict[str, torch.Tensor] = {
@@ -854,6 +886,25 @@ class IrisMA6TestEnv(DirectMARLEnv):
             # Clip and store actions
             action = actions[agent_id]
             action = torch.clamp(action, min=-1.0, max=1.0)
+
+            # ---- Ticket 044 — per-channel slew-rate clip ---------------------
+            # Apply BEFORE _actions assignment so action_delta reward,
+            # action_sum reward, and the prev-action obs channel all see the
+            # constrained signal. ‖Δa‖_∞ ≤ δ_max by construction once the
+            # clip is on. The flag-off path is bit-exact to pre-patch.
+            #
+            # Saturation tracking: count per-channel policy steps where the
+            # clip actually moved the action. Reset bug-fix (line ~3119) is
+            # load-bearing here — without it _last_actions retains the
+            # previous episode's tail and post-reset clipping is incorrect.
+            if self.cfg.enable_action_slew_clip:
+                action_pre_slew = action
+                lo = self._last_actions[agent_id] - self._action_slew_max
+                hi = self._last_actions[agent_id] + self._action_slew_max
+                action = torch.clamp(action, min=lo, max=hi)
+                # (N, 7) bool → float, per-channel saturation indicator
+                self._slew_saturation_acc[agent_id] += (action != action_pre_slew).float()
+
             self._actions[agent_id] = action.clone()
 
             # Scale actions from [-1, 1] to physical units
@@ -895,6 +946,13 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 self.cmd_vel[:, idx, :] = self._cmd_vel_filt[:, idx, :]
             elif self.cfg.enable_prev_action_obs:
                 self._cmd_vel_filt[:, idx, :] = self.cmd_vel[:, idx, :]
+
+        # ---- Ticket 044 — cmd_vel_delta metric (the t043-deferred logger) ---
+        # |Δ cmd_vel| per agent per channel per step, accumulated for episodic
+        # mean. Measures the *applied* command's jerk (post-LP, post-slew).
+        # Logged in _reset_idx alongside the existing action_delta RMS metric.
+        self._cmd_vel_delta_acc += (self.cmd_vel - self._cmd_vel_prev).abs()
+        self._cmd_vel_prev = self.cmd_vel.clone()
 
         self.decimated_step = 0
 
@@ -3165,7 +3223,15 @@ class IrisMA6TestEnv(DirectMARLEnv):
         # Log episode reward sums and reset tracking
         all_extras = {}
         for agent_id in self.cfg.possible_agents:
-            self._last_actions[agent_id][env_ids].zero_()
+            # Ticket 044 — bug fix: `tensor[long_tensor].zero_()` operates on an
+            # advanced-index *copy*, not the underlying buffer (`tensor[long_tensor]`
+            # returns a copy). Use assignment (which uses __setitem__, in-place)
+            # so the reset actually zeros _last_actions for the reset envs.
+            # Benign for action_delta reward (cross-episode delta is meaningless),
+            # but load-bearing for the ticket-044 slew clip — without this fix
+            # the first action after reset would be pinned near the previous
+            # episode's tail.
+            self._last_actions[agent_id][env_ids] = 0.0
             for key, value in self._episode_sums[agent_id].items():
                 episodic_sum_avg = torch.mean(value[env_ids])
                 all_extras[f"Episode_Reward/{agent_id}_{key}"] = (
@@ -3185,6 +3251,35 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 torch.norm(per_dim_rms, dim=-1)
             )
             self._action_delta_sq_acc[agent_id][env_ids] = 0.0
+
+        # ---- Ticket 044 — cmd_vel_delta + slew_saturation_frac metrics ------
+        # cmd_vel_delta: mean |Δ cmd_vel| per policy step over the episode,
+        # averaged across channels for the per-agent scalar log. Falsifies any
+        # smoothness claim on the *applied* command (the raw-action RMS is no
+        # longer a good yardstick once the slew clip or LP is in play).
+        # slew_saturation_frac: per-channel fraction of policy steps where the
+        # clip moved the action. Diagnostic for over-tight δ_max (>0.5 on any
+        # channel → loosen) and under-tight (≈ 0 → guardrail-only).
+        for agent_id_idx, agent_id in enumerate(self.cfg.possible_agents):
+            mean_cmd_vel_delta = torch.mean(
+                self._cmd_vel_delta_acc[env_ids, agent_id_idx, :]
+                / smoothness_steps.unsqueeze(-1),
+                dim=-1,
+            )  # (len(env_ids),)
+            all_extras[f"Action_Smoothness/cmd_vel_delta_{agent_id}"] = torch.mean(mean_cmd_vel_delta)
+            self._cmd_vel_delta_acc[env_ids, agent_id_idx, :] = 0.0
+
+            sat_frac = self._slew_saturation_acc[agent_id][env_ids] / smoothness_steps.unsqueeze(-1)
+            # Log per-channel saturation fraction (means over reset envs)
+            CH_NAMES = ["vx", "vy", "vz", "yaw_rate", "gim_yaw", "gim_pitch", "zoom"]
+            for ch, ch_name in enumerate(CH_NAMES):
+                all_extras[f"Action_Smoothness/slew_sat_{agent_id}_{ch_name}"] = torch.mean(sat_frac[:, ch])
+            self._slew_saturation_acc[agent_id][env_ids] = 0.0
+
+        # Also reset cmd_vel_prev for the reset envs so the next step's
+        # |Δ cmd_vel| isn't biased by carryover from the previous episode.
+        self._cmd_vel_prev[env_ids] = 0.0
+
         self._action_smoothness_steps[env_ids] = 0.0
 
         # Log detection dropout statistics

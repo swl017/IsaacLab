@@ -3363,3 +3363,94 @@ Next:
   with default cfg (obs_dim mismatch). Use --env.enable_prev_action_obs=False
   override if loading them, or treat as fresh-init runs (standard for
   architectural change).
+
+----------------------------------------
+2026-05-28 — Ticket 043 wrap + Ticket 044 Slice 0/1 landed
+----------------------------------------
+Ticket 043 wrap:
+- t043_full 200k A/B (LP+obs ON) failed catastrophically: -40% reward,
+  -31% bbox_center, -20% triangulation at step 296k vs t040/042 baseline.
+  Two failure modes confirmed:
+  (a) τ=0.08s LP introduces too much applied-command lag for agile bbox
+      tracking (250k+ steps before the policy adapts to the filter).
+  (b) action_delta reward operates on raw _actions while LP attenuates
+      downstream → perverse incentive (policy issues larger raw commands
+      to drive the filter; action_sum -29 vs baseline -12.7 at 296k).
+- t043_prev_action_only @ 200k: +9% bbox_center, -44% tracking_lost vs
+  baseline, smoothness essentially flat (~2% within seed noise).
+- Default flipped: enable_action_lowpass=False in IrisMA6TestEnvCfg.
+  prev_action_only is the new shipping config; LP code paths preserved
+  behind the flag for future τ-sweep experiments.
+
+Ticket 044 Slice 0 (empirical |Δa| probe):
+- Built probe_action_delta_distribution.py + run_action_delta_probe.bash
+  under experiments/scripts/. 7 calls (4 curriculum points × dual ckpts
+  except 199k single-ckpt), 10 episodes × 1024 envs each.
+- Sweep completed in ~1 wall-hour. 5.12M Δa samples per channel per call.
+- HEADLINE: trained policy operates 9-15× over PX4-strict on vel
+  channels. vy p90 @ 199k = 0.295 vs δ_xy = 0.020 (14.8×). vx 11×, vz 4×.
+  Yaw/gimbal channels well within PX4-strict (0.37-0.53×); zoom 1.15×
+  (borderline). Result: Case B (mixed) with severe vel mismatch.
+- Developmental trajectory (dual-ckpt payoff): late-stage policy 2-4×
+  jerkier than early-stage at same curriculum point. Quantitative
+  confirmation of the t037 action_delta-grows-more-negative hypothesis.
+- Decision: ship B1 (PX4-strict) anyway. Rationale: if the policy can't
+  be smooth enough to match PX4 envelopes, the task is asking for behavior
+  that won't transfer to PX4-flown hardware → lower task difficulty after
+  Slice 2 surfaces the regression magnitude.
+- Probe output saved at experiments/scripts/probe_action_delta_2026-05-28_
+  16-52-14/{summary.csv, summary_pivot.txt}.
+
+Ticket 044 Slice 1 (patch + bit-exact unit test):
+- iris_ma_env6_test_cfg.py: added enable_action_slew_clip (default True),
+  and six per-channel action_slew_* knobs with PX4-strict defaults
+  (vel_xy=0.020, vel_z=0.053, yaw=0.30, gimbal=0.40, zoom=0.20).
+- iris_ma_env6_test.py:
+  • __init__ adds _action_slew_max (7,) precomputed from cfg,
+    _slew_saturation_acc (per-agent per-channel), _cmd_vel_prev, and
+    _cmd_vel_delta_acc buffers.
+  • _pre_physics_step: slew clip inserted between [-1, 1] clamp and
+    _actions assignment, gated on enable_action_slew_clip. Per-channel
+    saturation accumulator updated. cmd_vel_delta accumulator updated at
+    end of the agent loop (after optional LP, mirrors the applied cmd_vel).
+  • _reset_idx: FIXED pre-existing _last_actions[env_ids].zero_() no-op
+    bug (advanced-index copy → assignment). Zeros _cmd_vel_prev,
+    _cmd_vel_delta_acc, _slew_saturation_acc per-reset.
+  • _reset_idx logs new metrics: Action_Smoothness/cmd_vel_delta_drone_X
+    (per-agent mean |Δcmd_vel|) and Action_Smoothness/slew_sat_drone_X_chN
+    (per-channel saturation fraction).
+- tests/test_action_slew_clip_v1.py: 8/8 pass first try. Categories: cfg
+  defaults (PX4-strict B1), env buffer shape, bit-exact flag-off regression,
+  Δa ≤ δ_max enforcement under 5 random steps, [-1,1]/slew composition
+  at the boundary, post-reset first-action bounded (validates the bug fix),
+  per-channel saturation metric, cmd_vel_delta accumulator correctness.
+
+Ticket 044 Slice 2 registration:
+- experiments/experiment_registry.py: added validation_action_slew_short_
+  baseline (slew off, prev-action on = current default) and _treatment
+  (slew on, PX4-strict δ, prev-action on). 200k × seed=42 each.
+
+Files modified:
+- source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/iris_ma_env6_test_cfg.py
+- source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/iris_ma_env6_test.py
+- source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/experiments/experiment_registry.py
+
+Files added:
+- source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/doc/active/ticket/044-action-slew-rate-clip/ticket.md
+- source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/experiments/scripts/probe_action_delta_distribution.py
+- source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/experiments/scripts/run_action_delta_probe.bash
+- source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/tests/test_action_slew_clip_v1.py
+
+Next:
+- Launch Slice-2 A/B (~24 wall-h each, 2 runs). Watch collision_fraction
+  as the load-bearing safety gate (PX4-strict δ_xy limits emergency-
+  braking authority; 2× baseline is the hard ceiling). Watch
+  slew_sat_drone_X_vx/vy/vz — expect 90%+ saturation on vel channels
+  given Slice-0 evidence, which is the diagnostic for "task is too hard
+  for the trained policy under PX4-strict".
+- If Slice 2 confirms task-quality regression: spawn Slice-4 task-
+  difficulty calibration ticket (lower max_lin_vel, soften bbox rewards,
+  slow target motion curriculum). The slew clip is correct; the task is
+  asking for behavior that can't transfer.
+- Write Slice-2 writeup at doc/experiments/<date>_ticket044_action_slew_
+  clip.md after the runs land.
