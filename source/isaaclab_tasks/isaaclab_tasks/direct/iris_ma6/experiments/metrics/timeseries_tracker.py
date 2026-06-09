@@ -59,6 +59,14 @@ class TimeseriesTracker:
             self._sum[m] = torch.zeros(max_episode_steps, dtype=torch.float64)
             self._sumsq[m] = torch.zeros(max_episode_steps, dtype=torch.float64)
 
+        # Retain per-(timestep, env) samples so compute_timeseries can emit robust
+        # per-step quantiles (median, p25, p75) in addition to mean/std. RMSE and
+        # sqrt_trace are heavy-tailed across envs, so the mean misrepresents the
+        # typical case; the median does not. Stored as lists of 1-D arrays, one per
+        # step() call, concatenated lazily at compute time.
+        self._sample_t: Dict[str, list] = {m: [] for m in _ALL_METRICS}
+        self._sample_v: Dict[str, list] = {m: [] for m in _ALL_METRICS}
+
     def step(
         self,
         rmse: torch.Tensor,
@@ -96,10 +104,13 @@ class TimeseriesTracker:
             "viewing_angle": viewing_angle.float().cpu()[active],
             "cbf_penalty": cbf_penalty.float().cpu()[active] if cbf_penalty is not None else torch.zeros(n_active),
         }
+        t_active_np = t_active.numpy()
         for name in _ALWAYS_METRICS:
             v = vals_cpu[name].double()
             self._sum[name].scatter_add_(0, t_active, v)
             self._sumsq[name].scatter_add_(0, t_active, v * v)
+            self._sample_t[name].append(t_active_np.copy())
+            self._sample_v[name].append(vals_cpu[name].numpy().astype(np.float32))
 
         if tri_valid_mask is not None:
             valid = tri_valid_mask.cpu()[active]
@@ -111,13 +122,19 @@ class TimeseriesTracker:
             valid_ones = torch.ones(t_valid.numel(), dtype=torch.long)
             self._valid_count.scatter_add_(0, t_valid, valid_ones)
 
+            t_valid_np = t_valid.numpy()
+
             rmse_v = rmse.float().cpu()[active][valid].double()
             self._sum["triangulation_rmse"].scatter_add_(0, t_valid, rmse_v)
             self._sumsq["triangulation_rmse"].scatter_add_(0, t_valid, rmse_v * rmse_v)
+            self._sample_t["triangulation_rmse"].append(t_valid_np.copy())
+            self._sample_v["triangulation_rmse"].append(rmse_v.numpy().astype(np.float32))
 
             st_v = sqrt_trace.float().cpu()[active][valid].double()
             self._sum["sqrt_trace_sigma"].scatter_add_(0, t_valid, st_v)
             self._sumsq["sqrt_trace_sigma"].scatter_add_(0, t_valid, st_v * st_v)
+            self._sample_t["sqrt_trace_sigma"].append(t_valid_np.copy())
+            self._sample_v["sqrt_trace_sigma"].append(st_v.numpy().astype(np.float32))
 
         if active_mask is not None:
             self.env_step[active_mask] += 1
@@ -155,10 +172,38 @@ class TimeseriesTracker:
             var = sq / c_safe - mean * mean
             std = np.sqrt(np.maximum(var, 0.0))
 
+            median, p25, p75 = self._quantiles(name, max_t)
+
             result[name] = {
                 "mean": mean.tolist(),
                 "std": std.tolist(),
+                "median": median.tolist(),
+                "p25": p25.tolist(),
+                "p75": p75.tolist(),
                 "count": c.astype(int).tolist(),
             }
 
         return result
+
+    def _quantiles(self, name: str, max_t: int):
+        """Per-timestep median / p25 / p75 across all (env, episode) samples."""
+        median = np.zeros(max_t, dtype=np.float64)
+        p25 = np.zeros(max_t, dtype=np.float64)
+        p75 = np.zeros(max_t, dtype=np.float64)
+        if not self._sample_t[name]:
+            return median, p25, p75
+
+        t_all = np.concatenate(self._sample_t[name])
+        v_all = np.concatenate(self._sample_v[name]).astype(np.float64)
+        # Group by timestep via a stable sort, then slice contiguous segments.
+        order = np.argsort(t_all, kind="stable")
+        t_sorted = t_all[order]
+        v_sorted = v_all[order]
+        starts = np.searchsorted(t_sorted, np.arange(max_t), side="left")
+        ends = np.searchsorted(t_sorted, np.arange(max_t), side="right")
+        for tt in range(max_t):
+            seg = v_sorted[starts[tt]:ends[tt]]
+            if seg.size:
+                median[tt] = np.median(seg)
+                p25[tt], p75[tt] = np.percentile(seg, (25.0, 75.0))
+        return median, p25, p75

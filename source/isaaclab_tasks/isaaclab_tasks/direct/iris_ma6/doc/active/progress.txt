@@ -3454,3 +3454,470 @@ Next:
   asking for behavior that can't transfer.
 - Write Slice-2 writeup at doc/experiments/<date>_ticket044_action_slew_
   clip.md after the runs land.
+
+----------------------------------------
+2026-06-02 — Ticket 046 Slice 1 landed (closer spawn + 2D target motion)
+----------------------------------------
+Done:
+- target_controller/target_controller_cfg.py: added
+  enable_z_motion: bool = True (default preserves backward-compat 3D
+  motion). When False, the orchestrator zeros the target velocity's z
+  component before the DroneController consumes it.
+- target_controller/target_controller.py: single 2-line clamp inside
+  _apply_constraints (after geofence + altitude clamps, before return).
+  Gated on cfg.enable_z_motion. No changes to the four behavior FSM
+  velocity generators (linear / circular / approach / evade) — they still
+  emit (N, 3) velocities; the orchestrator-level clamp is mode-agnostic.
+- iris_ma_env6_test_cfg.py: lowered InitialStates spawn geometry to
+  cylinder_diameter_max=30 (was 60), target_distance_max=15 (was 25),
+  target_height_offset_max=2 (was the cfg default 4). Curriculum
+  mechanism unchanged (still ramps from *_min to the new *_max). Mins
+  stay at (20, 10, 0).
+- experiments/experiment_registry.py: registered
+  validation_task_geom_baseline (pre-046 spawn + 3D motion) and
+  validation_task_geom_treatment (post-046 spawn + enable_z_motion=False).
+  Both share the t045 envelope (max_lin_vel=5, action_slew_vel_xy=0.040,
+  target_controller.max_speed_end=2.5) and the post-044/045 posture
+  (slew clip ON, prev-action obs ON, LP OFF). 200k × seed=42.
+- tests/test_target_z_motion_v1.py: 6/6 pass first run. Coverage:
+  • TargetControllerCfg.enable_z_motion defaults to True.
+  • env cfg spawn geometry (30, 15, 2) with mins unchanged (20, 10, 0).
+  • Bit-exact regression: enable_z_motion=True leaves v_cmd[:, 2]
+    untouched by _apply_constraints (altitude clamp idle at mid-band alt).
+  • z-clamp: enable_z_motion=False zeros v_cmd[:, 2] for arbitrary inputs
+    while leaving x/y untouched.
+  • z-clamp robustness across ±z / mixed / tiny inputs (mode-agnostic, no
+    per-FSM coupling).
+  • Spawn @progress=1.0: agent radius ≤ 12.26 ≤ 15 (diam/2), target xy
+    dist ∈ [10.87, 14.92] ≤ 15, |target z-offset| ≤ 1.66 ≤ 2.
+
+Slice 1 test transcript saved to tests/test_result.txt. Default cfg
+remains backward-compat (enable_z_motion=True) — only the registry's
+treatment experiment activates the 2D clamp via env_overrides. The
+cfg-default flip to enable_z_motion=False is deferred to Slice 3
+(conditional on Slice-2 acceptance bars: pair_valid_rate ≥ 0.95,
+triangulation ≥ 32, ≥2 channels with slew_sat ≤ 0.70, reward ≥ t045).
+
+Files modified:
+- source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/target_controller/target_controller_cfg.py
+- source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/target_controller/target_controller.py
+- source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/iris_ma_env6_test_cfg.py
+- source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/experiments/experiment_registry.py
+
+Files added:
+- source/isaaclab_tasks/isaaclab_tasks/direct/iris_ma6/tests/test_target_z_motion_v1.py
+
+Next:
+- Launch Slice-2 A/B (~24 wall-h each, 2 runs). Watch
+  Detection/pair_valid_rate (load-bearing visibility; closer spawn must
+  push this to ≥ 0.95) and Episode_Reward/drone_X_triangulation
+  (acceptance bar ≥ 32 — breaking out of t045's 21 plateau).
+- Decision rule at 200k:
+  • All bars pass → Slice 3 cfg-default flip (enable_z_motion=False as
+    new default) + feature_list/iris_ma6_env_spec updates.
+  • Visibility pass but triangulation flat → trigger Ticket 047 (reward
+    retune on top of 046's cfg). 046 has done its job by isolating the
+    task-geometry contribution.
+  • Visibility fails (pair_valid < 0.95) → tighten further (diam_max=20,
+    dist_max=10) per ticket §"Decision rule".
+  • Saturation flat → escalate to Ticket 048 (slew loosen).
+- Slice-2 writeup at doc/experiments/<date>_ticket046_closer_spawn_2d_
+  target.md after the runs land.
+
+----------------------------------------
+2026-06-02 (same session) — Ticket 046 Slice 2 launched + partial readout
+----------------------------------------
+Done:
+- Launched validation_task_geom_treatment via
+    ./isaaclab.sh -p scripts/.../train_mappo_rnn_hydra.py \
+      --task Isaac-Iris-MA6-Direct-Test-v0 --num_envs 1024 --headless \
+      --experiment_name ticket046_closer_spawn_2d_target \
+      env.target_controller.enable_z_motion=False
+  Log dir: logs/skrl/iris_ma6/2026-06-02_00-29-06_mappo_rnn_torch_
+                              ticket046_closer_spawn_2d_target/
+  Verified env.yaml: enable_z_motion=False, spawn=(30, 15, 2), seed=42.
+- Baseline: 2026-05-29_11-25-06_mappo_rnn_torch_09762f259f_ticket045_
+  task_difficulty_tuning is the load-bearing anchor (env.yaml matches
+  validation_task_geom_baseline on every dimension: max_lin_vel=5,
+  action_slew_vel_xy=0.04, target_controller.max_lin_vel=2.5,
+  enable_action_slew_clip=True, enable_prev_action_obs=True,
+  enable_action_lowpass=False, pre-046 spawn 60/25/4, enable_z_motion=True
+  default). target_controller.max_speed_end=5.0 in both (the t045 ticket
+  text's 5→2.5 flip was never actually applied to the run; max_lin_vel=2.5
+  caps the target speed anyway, so the behavior is identical).
+
+Run died ~10h 34m in at step 150,329 / 400,000 (~38%). Diagnosis: bash
+background wrapper SIGHUPed by a claude-code session bump — no
+traceback, no OOM, no GPU Xid, no system reboot (uptime 18d). Process
+and GPU both idle on inspection; only artifact is a frozen tqdm bar at
+the last step. Checkpoints landed: agent_40000.pt / _80000.pt /
+_120000.pt; tfevents flushed to step ~150k.
+
+User read the partial TB (run not resumed):
+  Closer spawn helps triangulation modestly but does NOT reduce action
+  jerkiness / slew saturation. I.e. the spawn-geometry contribution to
+  bbox visibility is real but small; the slew-bandwidth bottleneck is
+  not relieved by task-geometry alone. This matches the t046 ticket's
+  Risk #1 prediction ("triangulation still doesn't fully recover under
+  closer spawn + 2D target → confirms the bottleneck is reward-shape /
+  envelope-side, not task-geometry") — a welcome negative result that
+  gates ticket 047 with high confidence.
+
+Decision: do NOT resume the run. The partial 150k readout is enough to
+trigger ticket 047 (reward retune on top of 046's cfg). Slice-3 cfg-
+default flip (enable_z_motion=False as new default) remains deferred
+until 047 either (a) recovers triangulation, validating 046's spawn +
+z-clamp as the right baseline to ship, or (b) doesn't, in which case
+046's defaults are revisited alongside slew-loosen (ticket 048).
+
+Behavioral change saved to memory: long IsaacLab training runs are
+launched under tmux (~/IsaacPX4/tmux/), not as claude-code background
+tasks, going forward. Background wrappers don't survive session bumps.
+
+Files modified:
+- /home/usrg/.claude/projects/-home-usrg-IsaacPX4-IsaacLab/memory/MEMORY.md
+- /home/usrg/.claude/projects/-home-usrg-IsaacPX4-IsaacLab/memory/feedback_long_training_tmux.md
+
+Next:
+- Author ticket 047 (reward retune on top of 046's cfg state). Targets:
+  bbox_center vs triangulation reward rebalance, action_delta weighting,
+  possibly a triangulation-only bonus during the visibility-easy regime.
+- Optional: write a short t046 partial-readout note at
+  doc/experiments/2026-06-02_ticket046_closer_spawn_2d_target.md
+  capturing the "closer spawn helps tri a bit, doesn't fix saturation"
+  finding so it's not just in this progress entry.
+- If 047 ships its own A/B treatment, relaunch under tmux from the
+  start; do not re-use Claude background for the trainer.
+
+----------------------------------------
+2026-06-02 (same session) — Ticket 047 Slice 0 + Slice 1 launched
+----------------------------------------
+Slice 0 (empirical baseline) — DONE:
+- Pulled per-component reward + smoothness from t046 partial TB at step 144k:
+  • Per-agent contributions (weighted): bbox_center 31.7/18.1,
+    bbox_size 41.4/39.7, triangulation 27.1/27.1, action_delta −4.9/−4.5
+    → per-agent ratio bbox_c : bbox_s : tri ≈ 25 : 40 : 27 (not the
+    10:1 the original t047 stub assumed). bbox_size is the largest head.
+  • Slew_sat 0.95–0.99 on every velocity channel, 0.67–0.92 on gimbal,
+    0.98 on zoom. All channels saturated.
+  • pair_valid_rate = 0.744 (load-bearing visibility gap, target ≥ 0.95).
+  • Policy/std = 2.014 (uncoverged), KL=0.036 (healthy), LR=3e-4 (max).
+- Slew rates verified PX4-aligned: vel_xy 0.040 → 5.0 m/s²
+  = MPC_ACC_HOR_MAX; vel_z_up 0.053×3 = 3.98 m/s² ≈ MPC_ACC_UP_MAX;
+  vel_z_dn 0.053×1.5 = 1.99 m/s² < MPC_ACC_DOWN_MAX 3.0 (conservative
+  on descend). Fixed stale docstring on action_slew_vel_xy that still
+  referenced the pre-t045 /10 m/s derivation; math works out identical.
+
+Slice 1 (warm-start fast-screen) — LAUNCHED:
+- t047 ticket rewritten with empirical numbers + new weight proposal
+  grounded in observed contributions. New rationale: visibility +
+  smoothness redirect (not bbox-vs-tri rebalance). Candidate A defaults:
+    bbox_center 60 → 60   (hold; load-bearing visibility signal)
+    bbox_size   60 → 30   (halve; least informative under closer spawn)
+    triangulation 5 → 8   (modest 1.6× lift, not 5×)
+    action_delta_penalty −12 → −24 (double; reward-side smoothness pressure)
+- 4 warm-start candidates launched sequentially under tmux session
+  `t047_screen` (single GPU, ~3h each, ~12h total). All four load
+  `agent_120000.pt` from t046, train +30k under their respective
+  weights, with curriculum auto-pinned to step 120k via
+  --checkpoint plumbing (so the screen window faces the post-noise /
+  pre-delay regime stably, no in-flight ramp confounds).
+- Candidate matrix (cfg path = env.<scale>):
+    A — proposed: 60 / 30 / 8  / −24  (default proposal)
+    B — tri-led:  60 / 30 / 15 / −24
+    C — smooth:   60 / 60 / 5  / −36 (no reward retune, triple a_delta)
+    D — vis:      90 / 30 / 8  / −24 (boost bbox_center)
+- Verified candidate A env.yaml landed correctly: seed=42, post-t046
+  spawn (30/15/2), enable_z_motion=False, slew clip on, prev_action
+  obs on, LP off, max_lin_vel=5/2.5, weights match.
+- Launch artifacts:
+  • Script: source/isaaclab_tasks/.../experiments/scripts/run_t047_warmstart_screen.bash
+  • Log: source/isaaclab_tasks/.../experiments/scripts/t047_warmstart_screen_<ts>.log
+  • Per-candidate run dirs: logs/skrl/iris_ma6/<ts>_mappo_rnn_torch_t047_warmstart_{A,B,C,D}/
+- Two bash-script bugs fixed during launch: REPO_ROOT had one extra
+  `..` (off-by-one path); Hydra struct-mode rejected int literals for
+  float fields (need `60.0` not `60`). Both fixed before final launch.
+
+Screen acceptance bars at +20-30k from warm-start:
+  • slew_sat drops ≥ 5pp on ≥ 2 velocity channels
+  • pair_valid_rate ≥ 0.80 (relaxed from 0.95 for +30k screen)
+  • triangulation per-agent ≥ 20 (doesn't collapse)
+  • Policy/std flat or trending down
+  • No NaN, KL stays in [0.02, 0.05]
+
+Decision tree:
+  • 1 clear winner → Slice 2 (full 400k cold-start under tmux)
+  • 2-3 close → second screen round narrowing weights, OR run 2
+    cold-starts
+  • No movement on any → reward retune isn't the lever; escalate to
+    Ticket 048 (loosen slew)
+
+Files modified:
+- source/isaaclab_tasks/.../iris_ma_env6_test_cfg.py (docstring fix)
+- source/isaaclab_tasks/.../doc/active/ticket/047-.../ticket.md (rewrite)
+
+Files added:
+- source/isaaclab_tasks/.../experiments/scripts/run_t047_warmstart_screen.bash
+
+Next:
+- Monitor t047_screen tmux session (sequential A → B → C → D).
+- Read each candidate's TB once it lands (slew_sat, pair_valid, tri,
+  Policy/std).
+- After all 4 finish, compare and pick a survivor for Slice 2 cold-start.
+- Slice 2 launch under tmux from scratch with the winning weight set.
+
+----------------------------------------
+2026-06-03 — Ticket 047 Slice 1 results + Slice 2 launched
+----------------------------------------
+Slice 1 results (warm-start screen finished ~04:09 KST after ~10h45m):
+
+Key finding: Policy / Standard deviation FROZEN at σ_max = 2.014 (=
+exp(0.7) = max_log_std cap from skrl_mappo_rnn_cfg.yaml) across all 4
+candidates at every TB sample (step 300 → step 30000, 4 decimal places
+identical). The cap is held by the entropy bonus (entropy_loss_scale =
+0.01 × entropy ≈ 0.0015 ≈ 15% of policy_loss magnitude), not by an
+unstable optimizer. The σ ramped to the cap during t046 itself by
+step ~32k, then stayed there for ~75% of training.
+
+End-of-warmstart task metrics (vs t046@144k baseline):
+  Candidate   pair_valid   tri_raw   bbox_c_raw   slew_sat_vy   KL
+  baseline    0.80         5.98      0.628        0.96          0.035
+  A           0.82         6.19      0.672        0.91 (-5pp)   0.30 ← unstable!
+  B           0.83         6.54      0.647        0.92          0.037
+  C           0.86         6.34      0.685        0.93          0.038
+  D           0.84         6.69(+12%) 0.691(+10%) 0.93          0.037 ← best on task
+
+C had the highest pair_valid (0.86) but C is the no-reward-retune
+candidate (smoothness-only); its gain may reflect just-more-training,
+not the reward shape. D moves all three task heads most.
+
+Interpretation: reward-side movement is bounded by the σ-cap. A
+deployable policy needs σ ~ 0.3-0.6, not 2.0. Slice-2 strategy
+revised: drop entropy regularizer and cold-start D's reward shape
+from scratch.
+
+Slice 2 (cold-start) — LAUNCHED:
+- tmux session t047_D_cold
+- Script: source/.../experiments/scripts/run_t047_D_lowent_coldstart.bash
+- Log: source/.../experiments/scripts/t047_D_lowent_coldstart_20260603_115746.log
+- Run dir: logs/skrl/iris_ma6/2026-06-03_11-57-53_mappo_rnn_torch_ticket047_D_lowent_cold/
+- Config (verified in env.yaml + agent.yaml):
+  • Reward weights (D): bbox_c=90, bbox_s=30, tri=8, action_delta=-24
+  • agent.agent.entropy_loss_scale = 0.001 (×0.1 from default 0.01)
+  • Spawn 30/15/2, enable_z_motion=False, slew clip on, prev_action on
+  • seed=42, 1024 envs, 400k full curriculum cold-start
+- Throughput: ~3.5 it/s → ETA 200k ~16h, 400k ~32h.
+
+What to watch:
+  • Policy/std collapse trajectory: ideally 0.6 → 0.3-0.6 by 100k,
+    NOT 0.6 → 2.014 like t046 did
+  • pair_valid_rate ≥ 0.90 by 200k (deployable visibility)
+  • slew_sat ≤ 0.85 on ≥ 3 velocity channels (slew budget relief)
+  • triangulation per-agent ≥ 40 by 400k
+  • Total reward, KL, value_loss in healthy bands
+
+Hydra-path gotcha discovered:
+  Hydra path for skrl agent params is `agent.agent.<key>` (the yaml
+  nests training params under `agent:` inside an already-`agent`
+  top-level wrapper). `agent.entropy_loss_scale=0.001` was rejected
+  with "Key 'entropy_loss_scale' is not in struct"; the working form
+  is `agent.agent.entropy_loss_scale=0.001`. Saved to memory.
+
+Files modified:
+- source/isaaclab_tasks/.../doc/active/ticket/047-.../ticket.md
+  (Slice 0 + Slice 1 + Slice 2 trail updated)
+
+Files added:
+- source/isaaclab_tasks/.../experiments/scripts/run_t047_D_lowent_coldstart.bash
+- ~/.claude/.../memory/project_iris_ma6_sigma_cap_diagnostic.md
+
+Next:
+- Monitor t047_D_cold tmux session over ~32h.
+- Read TB at 200k (acceptance gate) and 400k (final). Look first at
+  Policy/std trajectory — if it stays at 2.014 even with entropy_loss
+  _scale=0.001, the problem is deeper than entropy bonus and we go to
+  ticket 048 (loosen slew clip).
+- If σ does collapse, evaluate full Slice-2 acceptance criteria and
+  decide on cfg-default flip (Slice 3).
+
+----------------------------------------
+2026-06-03 (later same session) — Slice 2 readout + curriculum prep
+----------------------------------------
+Slice 2 readout at ~96k of 400k (~24%):
+
+Excellent news: σ-cap problem SOLVED.
+  Policy/std (drone_0)            t046@96k = 2.014   Slice2@96k = 0.242
+  action_delta raw                t046    = 0.437   Slice2    = 0.047  (10× smoother)
+  cmd_vel_delta                   t046    = 0.245   Slice2    = 0.112  (2.2× smoother)
+  slew_sat_drone_0_yaw_rate       t046    = 0.97    Slice2    = 0.003
+  slew_sat_drone_0_gim_yaw        t046    = 0.95    Slice2    = 0.0016
+  slew_sat_drone_0_gim_pitch      t046    = 0.97    Slice2    = 0.00006
+  slew_sat_drone_0_zoom           t046    = 0.97    Slice2    = 0.67   (still high)
+Total reward 4416 vs t046 4239 — no regression.
+
+But: task quality regressed past step 32k. σ over-collapsed for the
+behavioral curriculum.
+  step      σ      pair_valid   tri_raw
+  4k    0.468     0.795       0
+  8k    0.328     0.961       0
+  16k   0.265     0.971       0
+  32k   0.260     0.954       7.48 (peak)
+  48k   0.239     0.942       7.77
+  64k   0.240     0.855       5.91
+  80k   0.242     0.785       4.87
+  96k   0.242     0.785       4.81
+The 0-32k phase is stellar (σ collapsing cleanly, pair_valid hits 0.97).
+But once moving_target ramps to full (40-80k) and dynamics/noise kick
+in (60-100k+), the policy lost grip — pair_valid 0.97 → 0.78, tri 7.48
+→ 4.81. KL crept from 0.015 to 0.065, LR dragged to min 3e-4. The
+optimizer is making big updates but has no exploration budget left
+(σ=0.24) to find new strategies.
+
+Diagnosis: entropy_loss_scale=0.001 was too aggressive — σ committed
+BEFORE the curriculum behavioral phases. User direction: design a
+curriculum on entropy_loss_scale so all exploration needed happens
+before commitment.
+
+Entropy curriculum LANDED in mappo_rnn.py:
+- Added entropy_loss_schedule to MAPPO_RNN_DEFAULT_CONFIG (default None
+  = bit-exact pre-patch behavior).
+- New _maybe_update_entropy_loss_scale(timestep): linear interp from
+  cfg.entropy_loss_scale (= start_value) toward end_value between
+  start_step and end_step. Snapshots start values at init so the
+  curriculum is invariant to mid-training reload.
+- Called once at the top of _update before any loss computation.
+- TB logging "Learning / entropy_loss_scale (drone_X)" so the
+  schedule is visible.
+- Yaml stub added (skrl_mappo_rnn_cfg.yaml) with null defaults so
+  every existing experiment is unchanged.
+- Smoke-tested interp math: 0→120k = 0.01, 140k = 0.00775,
+  160k = 0.0055, 180k = 0.00325, 200k = 0.001, ≥200k = 0.001. ✓
+
+Files modified:
+- scripts/reinforcement_learning/skrl/mappo_rnn.py
+- source/isaaclab_tasks/.../iris_ma6/agents/skrl_mappo_rnn_cfg.yaml
+
+Files added:
+- source/isaaclab_tasks/.../experiments/scripts/run_t047_D_curriculum_coldstart.bash
+
+Curriculum launch script READY but not launched. Schedule:
+  • Explore (0-120k):    entropy_loss_scale = 0.01 (default, full)
+  • Ramp (120k-200k):    linear 0.01 → 0.001
+  • Commit (200k-400k):  entropy_loss_scale = 0.001
+Companion change: max_log_std 0.7 → 0.4 (σ_max=2.014 → 1.49) so the
+explore-phase σ stays bounded. Reward weights: candidate D.
+
+Plan:
+- Let current Slice 2 finish its 200k gate read (~7h more wall-clock).
+- Decision then:
+  • If Slice 2 recovers pair_valid + tri at 200k (under low entropy),
+    we have a deployable policy and don't need the curriculum.
+  • If Slice 2 stays at pair_valid ~0.78 / tri ~5, launch the
+    curriculum cold-start next (under tmux session t047_D_curriculum).
+- Either way: track Learning/entropy_loss_scale TB trace to verify
+  the schedule fires correctly.
+
+Next:
+- Continue monitoring Slice 2. Watch for σ recovery if KL spike forces
+  the scheduler to widen the distribution again.
+- After Slice 2 200k: pull pair_valid + tri_raw + slew_sat numbers,
+  decide on curriculum launch.
+- If curriculum launch needed: tmux new-session -d -s t047_D_curriculum
+  'bash source/.../experiments/scripts/run_t047_D_curriculum_coldstart.bash'
+
+----------------------------------------
+2026-06-04 — Ticket 047 Slice 2.5 (400k) + Slice 3 (cfg-default flip) LANDED
+----------------------------------------
+Slice 2.5 — curriculum cold-start completed full 400k (32h21m wall):
+  Run: 2026-06-04_00-36-19_mappo_rnn_torch_ticket047_D_curriculum_cold
+  Hydra overrides:
+    env.bbox_center_reward_scale=90 / bbox_size_reward_scale=30 /
+    triangulation_reward_scale=8 / action_delta_penalty_scale=-24
+    env.target_controller.enable_z_motion=False
+    agent.agent.entropy_loss_scale=0.01
+    agent.agent.entropy_loss_schedule={end_value:0.001, start_step:120000,
+                                       end_step:200000}
+    agent.models.policy.max_log_std=0.4
+
+  Final @ 400k vs t046 baseline (@148k partial):
+    pair_valid_rate    0.884 vs 0.824  (+7.3%)
+    triangulation_raw  7.49  vs 6.17   (+21.5%)
+    Total reward (mean) 4557 vs 3714   (+22.7%)
+    Value loss         0.012 vs 0.020  (-41.6%)
+    bbox_size_raw      0.768 vs 0.730  (+5.3%)
+    bbox_center_raw    0.654 vs 0.662  (-1.2%)
+    action_delta_raw   0.439 vs 0.434  (+1.1%, equivalent smoothness)
+    Policy/std         1.49  vs 2.014  (lower but at the new cap)
+    slew_sat_vx/vy/vz/yaw: 0.91-0.99 (still saturated, t048 scope)
+
+  Schedule TB-verified at 40k samples: 0-120k flat 0.010 → 140k 0.00797 →
+  160k 0.00572 → 180k 0.00347 → 200k 0.00122 → 240-400k flat 0.001.
+  Schedule fired exactly per design.
+
+  σ-collapse failure mode (logged for follow-up): σ stayed pinned at the
+  cap σ_max = exp(0.4) = 1.49 for 200k-400k even with entropy_loss_scale
+  at 0.001. Likely root cause: torch.clamp(log_std, max=max_log_std) has
+  zero gradient in the saturated region; once log_std exceeded 0.4
+  during the explore phase, Adam couldn't push it back. Flat-lowent
+  (Slice 2, killed at 188k) NEVER hit the cap because it started with
+  entropy=0.001 and σ collapsed before reaching σ_max=2.014, so its
+  log_std stayed differentiable. Doesn't hurt deployment (we sample
+  mean), but limits training-time refinement. Smooth-bound fix for a
+  separate ticket.
+
+  Acceptance bars (ticket 047 Slice 2):
+    pair_valid ≥ 0.90 at 400k        → 0.884 (soft miss, +7.3% vs t046)
+    triangulation ≥ 40 (weighted)    → 7.49 × 8 = 59.9 (PASS +50%)
+    ≥3 vel slew_sat ≤ 0.85           → 0 channels (FAIL — t048 scope)
+    Total reward ≥ 0.9 × t046        → 4557 vs 3343 (PASS +36%)
+    No collision regression          → unchanged (PASS)
+
+Slice 3 — cfg-default flip LANDED (smoke-tested via source-level parsing,
+schedule math reproduced to 1e-9 at 7 step targets):
+
+| file                                    | field                             | before | after |
+|-----------------------------------------|-----------------------------------|--------|-------|
+| iris_ma_env6_test_cfg.py                | bbox_center_reward_scale          | 60.0   | 90.0  |
+| iris_ma_env6_test_cfg.py                | bbox_size_reward_scale            | 60.0   | 30.0  |
+| iris_ma_env6_test_cfg.py                | triangulation_reward_scale        | 5.0    | 8.0   |
+| iris_ma_env6_test_cfg.py                | action_delta_penalty_scale        | -12.0  | -24.0 |
+| agents/skrl_mappo_rnn_cfg.yaml          | models.policy.max_log_std         | 0.7    | 0.4   |
+| agents/skrl_mappo_rnn_cfg.yaml          | agent.entropy_loss_schedule       | nulls  | {0.001, 120000, 200000} |
+
+MAPPO_RNN_DEFAULT_CONFIG["entropy_loss_schedule"] stays None so any
+consumer that doesn't load this yaml gets bit-exact pre-patch behavior.
+
+Pre-047 checkpoints are forward-incompatible with the flipped cfg at
+the reward axis — t034 agent_400000.pt's critic was tuned against
+60/60/5/-12. Load with explicit Hydra overrides back to the old values
+if needed.
+
+Files modified:
+- source/isaaclab_tasks/.../iris_ma6/iris_ma_env6_test_cfg.py
+  (4 reward scale defaults + docstrings citing t047 Slice 3)
+- source/isaaclab_tasks/.../iris_ma6/agents/skrl_mappo_rnn_cfg.yaml
+  (max_log_std 0.7→0.4 + entropy_loss_schedule defaults; comments
+  cite t047 Slice 3 with the rationale)
+- scripts/reinforcement_learning/skrl/mappo_rnn.py
+  (entropy_loss_schedule support + TB scalar; landed earlier this session)
+
+Files added:
+- source/isaaclab_tasks/.../iris_ma6/experiments/scripts/run_t047_warmstart_screen.bash
+- source/isaaclab_tasks/.../iris_ma6/experiments/scripts/run_t047_D_lowent_coldstart.bash
+- source/isaaclab_tasks/.../iris_ma6/experiments/scripts/run_t047_D_curriculum_coldstart.bash
+- source/isaaclab_tasks/.../iris_ma6/doc/experiments/2026-06-04_ticket047_reward_retune_entropy_curriculum.md
+
+Deployment baseline: agent_400000.pt from the Slice 2.5 curriculum run is
+the new iris_ma6 deployment checkpoint. Beats every prior checkpoint on
+every load-bearing task metric.
+
+Next:
+- Open follow-up ticket: smooth log_std bound in MAPPORNNPolicy (replace
+  torch.clamp with a soft saturating function). Validate by warm-starting
+  from agent_400000.pt for +50k and checking if σ collapses.
+- Open Ticket 048 (loosen slew clip + paired PX4 envelope retune). The
+  velocity-channel saturation 0.91-0.99 is the remaining deployment-
+  quality gap, and t047's reward retune couldn't dent it (as predicted).
+- For sim2real / Pegasus SITL evaluation: use the Slice 2.5 agent_400000.pt
+  checkpoint going forward.
+

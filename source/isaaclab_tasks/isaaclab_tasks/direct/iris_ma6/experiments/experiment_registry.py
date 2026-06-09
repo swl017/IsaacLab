@@ -588,6 +588,113 @@ register_experiment(ExperimentCfg(
 
 
 # ===========================================================================
+# Ticket 045: task-difficulty calibration to match PX4-strict slew envelope
+# ===========================================================================
+# Coordinated downshift of the velocity envelope so the PX4-strict slew clip
+# from ticket 044 becomes achievable for the multi-agent triangulation task.
+# Three knobs scale together:
+#   - max_lin_vel:                10 → 5 m/s  (×0.5)
+#   - action_slew_vel_xy:         0.020 → 0.040  (×2.0; holds physical accel
+#                                              constant at MPC_ACC_HOR_MAX = 5 m/s²)
+#   - target_controller.max_speed_end: 5.0 → 2.5 m/s  (×0.5; preserves 2:1
+#                                              agent-vs-target speed ratio)
+# t044 result anchor: at the original envelope, the slew clip won the
+# smoothness battle (-69% action_delta) but cratered triangulation (-49%),
+# tracking_lost (+253%), and collision_fraction (+122%). All 7 channels
+# saturated at 92-99% — cross-channel adaptation under velocity starvation.
+# Hypothesis: a coordinated downshift gives the policy headroom for
+# bearing-change maneuvers within the slew bandwidth budget.
+
+register_experiment(ExperimentCfg(
+    name="validation_task_difficulty_baseline",
+    description="Ticket 045 A/B (control): t044 cfg unchanged (max_lin_vel=10, slew δ_xy=0.020). The t044 in-flight run's TB IS this data through 204k; this entry exists for reproducibility, not as a launch target",
+    group="validation",
+    total_timesteps=200000,
+    seeds=[42],
+    env_overrides={
+        "enable_action_slew_clip": True,
+        "enable_prev_action_obs": True,
+        "enable_action_lowpass": False,
+        # max_lin_vel + action_slew_vel_xy + target_controller.max_speed_end
+        # all at cfg defaults (10 / 0.020 / 5.0).
+    },
+))
+
+register_experiment(ExperimentCfg(
+    name="validation_task_difficulty_treatment",
+    description="Ticket 045 A/B (treatment): coordinated envelope downshift — max_lin_vel=5, slew δ_xy=0.040 (physical PX4-strict preserved), target max_speed_end=2.5 (preserves 2:1 ratio)",
+    group="validation",
+    total_timesteps=400000,
+    seeds=[42],
+    env_overrides={
+        "enable_action_slew_clip": True,
+        "enable_prev_action_obs": True,
+        "enable_action_lowpass": False,
+        "max_lin_vel": 5.0,
+        "action_slew_vel_xy": 0.040,
+        "target_controller.max_speed_end": 2.5,
+    },
+))
+
+
+# ===========================================================================
+# Ticket 046: closer spawn + 2D target motion (task-difficulty reduction P1)
+# ===========================================================================
+# Two-way A/B on the t045 envelope (max_lin_vel=5 + slew δ_xy=0.040). Both
+# share the post-t044/045 slew clip + prev-action obs posture. Baseline
+# restores the pre-046 spawn geometry (cylinder_diameter_max=60,
+# target_distance_max=25, target_height_offset_max=4) and 3D target motion;
+# treatment uses the new lower cfg defaults (30/15/2) and clamps the target
+# velocity to the horizontal plane via enable_z_motion=False. Acceptance:
+# pair_valid_rate ≥ 0.95, triangulation ≥ 32, ≥2 channels with slew_sat ≤ 0.70,
+# reward ≥ t045 reward at 200k.
+
+register_experiment(ExperimentCfg(
+    name="validation_task_geom_baseline",
+    description="Ticket 046 A/B (control): pre-046 spawn geometry (diam=60, dist=25, h_off=4) + 3D target motion",
+    group="validation",
+    total_timesteps=200000,
+    seeds=[42],
+    env_overrides={
+        "enable_action_slew_clip": True,
+        "enable_prev_action_obs": True,
+        "enable_action_lowpass": False,
+        "max_lin_vel": 5.0,
+        "action_slew_vel_xy": 0.040,
+        "target_controller.max_speed_end": 2.5,
+        # Restore pre-046 spawn geometry (env-cfg state before this ticket).
+        "initial_states.cylinder_diameter_max": 60.0,
+        "initial_states.target_distance_max": 25.0,
+        "initial_states.target_height_offset_max": 4.0,
+        # 3D target motion (default).
+        "target_controller.enable_z_motion": True,
+    },
+))
+
+register_experiment(ExperimentCfg(
+    name="validation_task_geom_treatment",
+    description="Ticket 046 A/B (treatment): closer spawn (diam=30, dist=15, h_off=2) + 2D target motion (enable_z_motion=False)",
+    group="validation",
+    total_timesteps=200000,
+    seeds=[42],
+    env_overrides={
+        "enable_action_slew_clip": True,
+        "enable_prev_action_obs": True,
+        "enable_action_lowpass": False,
+        "max_lin_vel": 5.0,
+        "action_slew_vel_xy": 0.040,
+        "target_controller.max_speed_end": 2.5,
+        # Closer spawn (already the new cfg defaults; restated for explicitness).
+        "initial_states.cylinder_diameter_max": 30.0,
+        "initial_states.target_distance_max": 15.0,
+        "initial_states.target_height_offset_max": 2.0,
+        # 2D target motion (the load-bearing flag for the treatment).
+        "target_controller.enable_z_motion": False,
+    },
+))
+
+
+# ===========================================================================
 # Sweeps: Agent Count
 # ===========================================================================
 

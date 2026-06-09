@@ -3,21 +3,22 @@
 [INFO][AppLauncher]: Using device: cuda:0
 [INFO][AppLauncher]: Loading experience file: /home/usrg/IsaacPX4/IsaacLab/apps/isaaclab.python.headless.kit
 ================================================================================
-TICKET 044 — PER-CHANNEL SLEW-RATE CLIP TEST SUITE
+TICKET 046 — CLOSER SPAWN + 2D TARGET MOTION TEST SUITE
 ================================================================================
 
 --- Category 1 — cfg defaults (no env) ---
+  ✓ TargetControllerCfg.enable_z_motion defaults to True
 [IrisMA6TestEnvCfg] enable_full_critic_priv_obs=True with domain_randomization.enabled=False — dropped 7 DR-dependent fields: ['body_mass_scale_or_add', 'fov_scale', 'gimbal_damping_scale', 'gimbal_pitch_offset', 'gimbal_roll_offset', 'gimbal_stiffness_scale', 'gimbal_yaw_offset']. Enabled fields: 17 non-DR.
-  ✓ cfg defaults: enable=True, PX4-strict δ values match B1
+  ✓ env cfg spawn geometry: diameter_max=30, distance_max=15, h_offset_max=2 (mins unchanged)
 [IrisMA6TestEnvCfg] enable_full_critic_priv_obs=True with domain_randomization.enabled=False — dropped 7 DR-dependent fields: ['body_mass_scale_or_add', 'fov_scale', 'gimbal_damping_scale', 'gimbal_pitch_offset', 'gimbal_roll_offset', 'gimbal_stiffness_scale', 'gimbal_yaw_offset']. Enabled fields: 17 non-DR.
 Loading user config located at: '/home/usrg/isaacsim/kit/data/Kit/Isaac-Sim/4.5/user.config.json'
-[Info] [carb] Logging to file: /home/usrg/isaacsim/kit/logs/Kit/Isaac-Sim/4.5/kit_20260528_183659.log
-2026-05-28 09:36:59 [0ms] [Warning] [omni.kit.app.plugin] No crash reporter present, dumps uploading isn't available.
-2026-05-28 09:36:59 [10ms] [Warning] [omni.ext.plugin] [ext: driver_artifacts] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts' or '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts/config'
-2026-05-28 09:36:59 [10ms] [Warning] [omni.ext.plugin] [ext: rendering_modes] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes' or '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes/config'
-2026-05-28 09:36:59 [491ms] [Warning] [omni.usd_config.extension] Enable omni.materialx.libs extension to use MaterialX
-2026-05-28 09:36:59 [603ms] [Warning] [omni.platforminfo.plugin] failed to open the default display.  Can't verify X Server version.
-2026-05-28 09:37:00 [921ms] [Warning] [omni.isaac.dynamic_control] omni.isaac.dynamic_control is deprecated as of Isaac Sim 4.5. No action is needed from end-users.
+[Info] [carb] Logging to file: /home/usrg/isaacsim/kit/logs/Kit/Isaac-Sim/4.5/kit_20260602_001716.log
+2026-06-01 15:17:16 [0ms] [Warning] [omni.kit.app.plugin] No crash reporter present, dumps uploading isn't available.
+2026-06-01 15:17:16 [3ms] [Warning] [omni.ext.plugin] [ext: driver_artifacts] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts' or '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts/config'
+2026-06-01 15:17:16 [3ms] [Warning] [omni.ext.plugin] [ext: rendering_modes] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes' or '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes/config'
+2026-06-01 15:17:17 [519ms] [Warning] [omni.usd_config.extension] Enable omni.materialx.libs extension to use MaterialX
+2026-06-01 15:17:17 [627ms] [Warning] [omni.platforminfo.plugin] failed to open the default display.  Can't verify X Server version.
+2026-06-01 15:17:17 [931ms] [Warning] [omni.isaac.dynamic_control] omni.isaac.dynamic_control is deprecated as of Isaac Sim 4.5. No action is needed from end-users.
 
 |---------------------------------------------------------------------------------------------|
 | Driver Version: 535.230.02    | Graphics API: Vulkan
@@ -34,9 +35,10 @@ Loading user config located at: '/home/usrg/isaacsim/kit/data/Kit/Isaac-Sim/4.5/
 | Processor: AMD Ryzen 9 5950X 16-Core Processor
 | Cores: 16 | Logical Cores: 32
 |---------------------------------------------------------------------------------------------|
-| Total Memory (MB): 64195 | Free Memory: 16422
+| Total Memory (MB): 64195 | Free Memory: 7413
 | Total Page/Swap (MB): 13730 | Free Page/Swap: 17592186044415
 |---------------------------------------------------------------------------------------------|
+2026-06-01 15:17:21 [4,697ms] [Warning] [omni.kvdb.plugin] Disabling key-value database because another kit process is locking it
 Warning: Debug draw module not available. Disabling debug visualization.
 Setting seed: 42
 [INFO]: Base environment:
@@ -45,7 +47,7 @@ Setting seed: 42
 	Physics step-size     : 0.01
 	Rendering step-size   : 0.04
 	Environment step-size : 0.04
-[INFO]: Time taken for scene creation : 1.133831 seconds
+[INFO]: Time taken for scene creation : 0.991300 seconds
 [INFO]: Scene manager:  <class InteractiveScene>
 	Number of environments: 4
 	Environment spacing   : 200.0
@@ -53,33 +55,24 @@ Setting seed: 42
 	Global prim paths     : ['/World/ground']
 	Replicate physics     : True
 [INFO]: Starting the simulation. This may take a few seconds. Please wait...
-[INFO]: Time taken for simulation start : 2.510339 seconds
+[INFO]: Time taken for simulation start : 2.586775 seconds
 [INFO]: Completed setting up the environment...
 [iris_ma6:040] WARNING: USD body mass 1.6216 kg diverges from expected_body_mass 1.5000 kg by 8.11%. Pegasus-mode hover init assumes 1.5 kg; consider fixing the USD.
 
---- Category 2a — env buffer ---
-  ✓ _action_slew_max buffer: shape (7,), values [0.019999999552965164, 0.019999999552965164, 0.05299999937415123, 0.30000001192092896, 0.4000000059604645, 0.4000000059604645, 0.20000000298023224]
+--- Category 2a — z-passthrough (enable_z_motion=True) ---
+  ✓ enable_z_motion=True: _apply_constraints preserves v_cmd[:, 2] (no altitude clamp)
 
---- Category 2b — flag-off bit-exact regression ---
-  ✓ flag-off bit-exact: _actions = clamp(action, -1, 1) ± δ ignored
+--- Category 2b — z-clamp (enable_z_motion=False) ---
+  ✓ enable_z_motion=False: v_cmd[:, 2] == 0 (x/y untouched)
 
---- Category 2c — slew enforcement (random sequence) ---
-  ✓ slew enforcement: ‖Δa‖_∞ ≤ δ_max over 5 random steps
+--- Category 2c — z-clamp robustness (mode-agnostic inputs) ---
+  ✓ z-clamp robust to ±z / mixed / near-zero inputs (mode-agnostic)
 
---- Category 2d — clamp composition at the boundary ---
-  ✓ clamp composition: [-1, 1] dominates the slew bound at the boundary
-
---- Category 2e — post-reset first-action bounded (validates bug fix) ---
-  ✓ post-reset first action bounded to ±δ_max (validates _last_actions reset fix)
-
---- Category 2f — slew saturation metric ---
-  ✓ slew_saturation_acc: per-channel correctness on a known input
-
---- Category 2g — cmd_vel_delta metric ---
-  ✓ cmd_vel_delta_acc: |Δ cmd_vel| accumulation correct over 2 steps
+--- Category 3 — spawn geometry @progress=1.0 ---
+  ✓ spawn @progress=1.0: target dist xy ∈ [10.87, 14.92] ≤ 15.0, |z_off| ≤ 1.66 ≤ 2.0, agent radius ≤ 12.26 ≤ 15.0
 
 ================================================================================
 TEST SUMMARY
 ================================================================================
-Total: 8 | Passed: 8 | Failed: 0
+Total: 6 | Passed: 6 | Failed: 0
 ================================================================================

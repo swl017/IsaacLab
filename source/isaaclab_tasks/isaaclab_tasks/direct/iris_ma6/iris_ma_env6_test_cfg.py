@@ -564,10 +564,10 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # Motion Limits
     # ==========================================================================
 
-    max_lin_vel: float = 10.0
+    max_lin_vel: float = 5.0
     """Maximum linear velocity (m/s) at full curriculum."""
 
-    max_lin_vel_min: float = 3.0
+    max_lin_vel_min: float = 5.0
     """Minimum linear velocity (m/s) at curriculum progress=0. Ramps to max_lin_vel with agent velocity curriculum."""
 
     max_yaw_rate: float = math.radians(45.0)
@@ -668,12 +668,16 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # 9–15× over these limits on velocity channels — Slice 2 is expected to
     # show catastrophic task regression under PX4-strict, which is the trigger
     # for the Slice-4 task-difficulty calibration follow-up.
-    action_slew_vel_xy: float = 0.020
-    """δ_max for vx, vy. Derived from MPC_ACC_HOR_MAX = 5 m/s² × 0.04 s / 10 m/s.
-    Bounds horizontal accel to PX4's position-controller envelope."""
+    action_slew_vel_xy: float = 0.040
+    """δ_max for vx, vy. Post-t045: MPC_ACC_HOR_MAX (5 m/s²) × dt (0.04 s) / max_lin_vel (5 m/s) = 0.040.
+    Pre-t045 the derivation used max_lin_vel=10 with δ=0.020; both produce the
+    same physical 5 m/s² bound. Bounds horizontal accel to PX4's position-
+    controller envelope."""
     action_slew_vel_z: float = 0.053
-    """δ_max for vz. Derived from MPC_ACC_UP_MAX = 4 m/s² × 0.04 s / 3 m/s
-    (worst-case scaling at sign-flip transitions under asymmetric z envelope)."""
+    """δ_max for vz. Derived from MPC_ACC_UP_MAX (4 m/s²) × dt (0.04 s) / max_vel_z_up (3 m/s) = 0.0533.
+    Under the asymmetric z envelope, descend-side physical limit is
+    0.053 × max_vel_z_dn (1.5) / dt = 1.99 m/s² < MPC_ACC_DOWN_MAX (3.0) —
+    deliberately more conservative than PX4 on descend."""
     action_slew_yaw_rate: float = 0.30
     """δ_max for yaw_rate. No clean PX4 acceleration analog (PX4 limits the
     rate, not the rate-of-rate); picked to allow full-range reversal in
@@ -813,8 +817,12 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     ellipsoid in viz). Reward-side triangulation (_triangulation_result_gt / _tri_result_l2 /
     _tri_result_l3) is always computed, independent of this flag."""
 
-    triangulation_reward_scale: float = 5.0
-    """Scale factor for triangulation quality reward (analytical mode: 1/sqrt(trace))."""
+    triangulation_reward_scale: float = 8.0
+    """Scale factor for triangulation quality reward (analytical mode: 1/sqrt(trace)).
+    Ticket 047 Slice 3 (2026-06-04): lifted 5.0 → 8.0 alongside the bbox rebalance
+    (candidate D, visibility-first) to lead the task heads while staying within
+    the curriculum-safe range. Validated by `2026-06-04_..._ticket047_D_curriculum_cold`
+    @ 400k: +21.5% triangulation_raw vs t046 baseline."""
 
     # ==========================================================================
     # Reward Scales (migrated from iris_ma5)
@@ -830,14 +838,28 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     action_delta_weight: list = [1, 1, 1, 1, 1, 1, 1]
     """Weights for action delta (smoothness) penalty."""
 
-    action_delta_penalty_scale: float = -12.0
-    """Penalty scale for action changes (smoothness)."""
+    action_delta_penalty_scale: float = -24.0
+    """Penalty scale for action changes (smoothness).
+    Ticket 047 Slice 3 (2026-06-04): doubled from −12.0 → −24.0 so reward-side
+    smoothness pressure is comparable in magnitude to the policy gradient
+    (contribution was ~4% of total reward at −12; ~8% at −24). Validated by
+    `2026-06-04_..._ticket047_D_curriculum_cold` @ 400k: action_delta_raw and
+    cmd_vel_delta remained equivalent to t046 baseline, no over-smoothing."""
 
-    bbox_center_reward_scale: float = 60.0
-    """Reward scale for centering target in image."""
+    bbox_center_reward_scale: float = 90.0
+    """Reward scale for centering target in image.
+    Ticket 047 Slice 3 (2026-06-04): lifted 60 → 90 to strengthen the visibility
+    signal that gates pair_valid_rate under the t046 closer-spawn + 2D-target
+    regime. Validated by `2026-06-04_..._ticket047_D_curriculum_cold` @ 400k:
+    pair_valid_rate 0.884 (+7.3% vs t046)."""
 
-    bbox_size_reward_scale: float = 60.0
-    """Reward scale for appropriate bbox size (~20% of image area)."""
+    bbox_size_reward_scale: float = 30.0
+    """Reward scale for appropriate bbox size (~20% of image area).
+    Ticket 047 Slice 3 (2026-06-04): halved 60 → 30. Under t046's closer spawn,
+    bbox_size was the dominant task head at t046 step 144k (per-agent contribution
+    40 vs bbox_center 25 and triangulation 27) but carries the least marginal info
+    once the target is reliably in frame. Halving freed slew budget for the more
+    informative heads. Validated by the t047 curriculum run."""
 
     collision_penalty_scale: float = -100.0
     """Penalty applied at the moment of collision (sharp spike).
@@ -938,8 +960,12 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
         # agent_velocity_scale_max=0.0,
         # target_velocity_scale_max=0.0,
         # max_yaw_rate=0.0,
-        cylinder_diameter_max=60.0,
-        target_distance_max=25.0,
+        # Ticket 046 — closer spawn (task-difficulty reduction). Keeps the target
+        # near-permanently in view so slew bandwidth is available for cooperative
+        # bearing maneuvers. Curriculum still ramps from *_min to the new *_max.
+        cylinder_diameter_max=30.0,
+        target_distance_max=15.0,
+        target_height_offset_max=2.0,
     )
     """Initial states configuration for reset randomization.
 
@@ -966,7 +992,9 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     # Target Controller Configuration
     # ==========================================================================
 
-    target_controller: TargetControllerCfg = TargetControllerCfg()
+    target_controller: TargetControllerCfg = TargetControllerCfg(
+        max_lin_vel=2.5,
+    )
     """Target controller configuration for physics-based target movement.
 
     Uses DroneController architecture to generate forces/torques for targets

@@ -92,6 +92,11 @@ parser.add_argument("--record-action-trace", action=argparse.BooleanOptionalActi
 # Video recording
 parser.add_argument("--record-video", type=str, default=None,
                     help="Output path for video (e.g., demo.mp4)")
+parser.add_argument("--record-video-scene", type=str, default=None,
+                    help="Output dir for a wide-shot SCENE video via the standard "
+                         "gymnasium RecordVideo path (renders env_cfg.viewer, no "
+                         "replicator annotator — reliable headless). Frames all "
+                         "agents + target from a fixed isometric view of env 0.")
 parser.add_argument("--camera-mode", type=str, default="overhead",
                     choices=["overhead", "chase", "side", "orbit",
                              "formation", "closeup", "wide", "isometric"],
@@ -186,6 +191,19 @@ def _collect_step_metrics(
     tri_gt = env._triangulation_result_gt
     # Triangulation results from obs path (for RMSE — midpoint estimate)
     tri_obs = env._triangulation_result_obs
+    # Policies trained without the triangulation obs-tail (cfg.enable_triangulation=False,
+    # e.g. the t047 checkpoints) never populate the obs-path result during _get_observations.
+    # Compute it here for metrics ONLY — this mirrors the env's own obs-path call
+    # (iris_ma_env6_test.py:2319-2332) and does not touch the observation vector, so it is
+    # safe for checkpoints whose obs_dim excludes the triangulation tail.
+    if tri_obs is None:
+        if env._delay_system is not None:
+            _tri_states = env._delay_system.get_all_states_for_observations(
+                ego_agent_id=env.cfg.possible_agents[0]
+            )
+        else:
+            _tri_states = env._build_gt_states()
+        tri_obs = env._compute_triangulation(states=_tri_states, use_gt_target=False)
 
     if tri_gt is not None:
         cov = tri_gt.covariance[:, 0, :, :]  # (N, 3, 3)
@@ -585,7 +603,29 @@ def main(env_cfg, agent_cfg: dict):
         env_cfg.curriculum.agent_velocity_end_step = 0
 
     # Create environment
-    env = gym.make(args_cli.task, cfg=env_cfg)
+    _scene_video = args_cli.record_video_scene is not None
+    if _scene_video:
+        # Wide isometric framing of env 0 so all agents + target stay in shot.
+        env_cfg.viewer.origin_type = "env"
+        env_cfg.viewer.env_index = 0
+        env_cfg.viewer.eye = (34.0, -34.0, 30.0)
+        env_cfg.viewer.lookat = (0.0, 0.0, 8.0)
+        env_cfg.viewer.resolution = tuple(args_cli.video_resolution)
+        env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
+        _max_ep = int(round(env_cfg.episode_length_s / (env_cfg.sim.dt * env_cfg.decimation)))
+        os.makedirs(args_cli.record_video_scene, exist_ok=True)
+        env = gym.wrappers.RecordVideo(
+            env,
+            video_folder=args_cli.record_video_scene,
+            step_trigger=lambda s: s == 0,
+            video_length=_max_ep,
+            name_prefix="t047_episode",
+            disable_logger=True,
+        )
+        print(f"[EVAL] Scene video (RecordVideo) -> {args_cli.record_video_scene} "
+              f"({_max_ep} frames, isometric view of env 0)")
+    else:
+        env = gym.make(args_cli.task, cfg=env_cfg)
     env_wrapped = SkrlVecEnvWrapper(env)
     unwrapped = env.unwrapped
 

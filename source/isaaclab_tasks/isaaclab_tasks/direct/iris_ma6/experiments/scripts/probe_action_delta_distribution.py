@@ -50,6 +50,10 @@ parser.add_argument("--seed", type=int, default=42, help="Seed")
 parser.add_argument("--disable_fabric", action="store_true", default=False)
 parser.add_argument("--ml_framework", type=str, default="torch",
                     choices=["torch", "jax", "jax-numpy"])
+parser.add_argument("--cfg_override", action="append", default=[],
+                    help="Repeatable env_cfg override of the form 'key.path=value' "
+                         "(e.g. 'max_lin_vel=5.0'). Applied after parse_env_cfg, before "
+                         "gym.make. Strips an optional leading 'env.' prefix.")
 AppLauncher.add_app_launcher_args(parser)
 parser.set_defaults(headless=True)
 args_cli, _cfg_overrides = parser.parse_known_args()
@@ -184,6 +188,52 @@ CHANNEL_LABELS = ["vx", "vy", "vz", "yaw_rate", "gimbal_yaw_rate", "gimbal_pitch
 PERCENTILES = [0.50, 0.90, 0.95, 0.99]
 
 
+def _coerce(val: str):
+    lo = val.lower()
+    if lo in ("true", "false"):
+        return lo == "true"
+    if lo == "none":
+        return None
+    try:
+        i = int(val)
+        if str(i) == val:
+            return i
+    except ValueError:
+        pass
+    try:
+        return float(val)
+    except ValueError:
+        return val
+
+
+def _apply_overrides(env_cfg, overrides):
+    """Apply Hydra-style `key.path=value` overrides to env_cfg in place."""
+    if not overrides:
+        return
+    print(f"[probe] applying {len(overrides)} cfg override(s):")
+    for ov in overrides:
+        if "=" not in ov:
+            print(f"  [WARN] '{ov}' has no '=', skipping")
+            continue
+        key, _, val = ov.partition("=")
+        if key.startswith("env."):
+            key = key[len("env."):]
+        parts = key.split(".")
+        target = env_cfg
+        try:
+            for p in parts[:-1]:
+                target = getattr(target, p)
+            leaf = parts[-1]
+            if not hasattr(target, leaf):
+                print(f"  [WARN] no attr '{key}', skipping")
+                continue
+            new_val = _coerce(val)
+            setattr(target, leaf, new_val)
+            print(f"  {key} = {new_val!r}")
+        except AttributeError as e:
+            print(f"  [WARN] failed to walk '{key}': {e}")
+
+
 def build_env(args):
     """Build the iris_ma6 env with debug_initial_step pinning the curriculum."""
     env_cfg = parse_env_cfg(
@@ -198,6 +248,9 @@ def build_env(args):
     env_cfg.use_debug_initial_step = True
     env_cfg.debug_initial_step = int(args.debug_step)
     env_cfg.seed = args.seed
+    # Apply cfg overrides so the probe matches the training-time env (esp.
+    # max_lin_vel + action_slew_* + target_controller.* for the t045 run).
+    _apply_overrides(env_cfg, args.cfg_override)
     torch.manual_seed(args.seed)
     print(f"[probe] task={args.task} num_envs={args.num_envs} debug_step={args.debug_step}")
     env = gym.make(args.task, cfg=env_cfg)

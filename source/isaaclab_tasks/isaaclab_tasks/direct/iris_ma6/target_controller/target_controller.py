@@ -440,6 +440,12 @@ class TargetController:
         # Apply altitude constraint
         v_cmd = self._apply_altitude_constraint(v_cmd, pos_flat, origins_expanded)
 
+        # Ticket 046 — 2D motion clamp. When enable_z_motion is False, the target
+        # moves in the horizontal plane only; the four behavior FSMs continue to
+        # emit (N, 3) velocities and the orchestrator zeros the z component here.
+        if not self.cfg.enable_z_motion:
+            v_cmd[:, 2] = 0.0
+
         return v_cmd
 
     def _apply_geofence_constraint(

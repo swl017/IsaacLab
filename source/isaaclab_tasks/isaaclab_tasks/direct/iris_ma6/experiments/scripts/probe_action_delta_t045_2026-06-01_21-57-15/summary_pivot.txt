@@ -1,0 +1,46 @@
+Ticket 045 post-training - per-channel p90 of |delta_action|, max over agents
+Probed under t045 cfg: max_lin_vel=5.0, action_slew_vel_xy=0.040, target.max_lin_vel=2.5
+==============================================================================================================
+channel              checkpoint                      39k       79k      119k      199k      399k    t045 delta
+--------------------------------------------------------------------------------------------------------------
+gimbal_pitch_rate    agent_120000.pt                   -         -    0.4000         -         -        0.4000
+gimbal_pitch_rate    agent_200000.pt                   -         -         -    0.4000         -        0.4000
+gimbal_pitch_rate    agent_40000.pt               0.4000         -         -         -         -        0.4000
+gimbal_pitch_rate    agent_400000.pt              0.4000    0.4000    0.4000    0.4000    0.4000        0.4000
+gimbal_pitch_rate    agent_80000.pt                    -    0.4000         -         -         -        0.4000
+gimbal_yaw_rate      agent_120000.pt                   -         -    0.4000         -         -        0.4000
+gimbal_yaw_rate      agent_200000.pt                   -         -         -    0.4000         -        0.4000
+gimbal_yaw_rate      agent_40000.pt               0.4000         -         -         -         -        0.4000
+gimbal_yaw_rate      agent_400000.pt              0.4000    0.4000    0.4000    0.4000    0.4000        0.4000
+gimbal_yaw_rate      agent_80000.pt                    -    0.4000         -         -         -        0.4000
+vx                   agent_120000.pt                   -         -    0.0400         -         -        0.0400
+vx                   agent_200000.pt                   -         -         -    0.0400         -        0.0400
+vx                   agent_40000.pt               0.0400         -         -         -         -        0.0400
+vx                   agent_400000.pt              0.0400    0.0400    0.0400    0.0400    0.0400        0.0400
+vx                   agent_80000.pt                    -    0.0400         -         -         -        0.0400
+vy                   agent_120000.pt                   -         -    0.0400         -         -        0.0400
+vy                   agent_200000.pt                   -         -         -    0.0400         -        0.0400
+vy                   agent_40000.pt               0.0400         -         -         -         -        0.0400
+vy                   agent_400000.pt              0.0400    0.0400    0.0400    0.0400    0.0400        0.0400
+vy                   agent_80000.pt                    -    0.0400         -         -         -        0.0400
+vz                   agent_120000.pt                   -         -    0.0530         -         -        0.0530
+vz                   agent_200000.pt                   -         -         -    0.0530         -        0.0530
+vz                   agent_40000.pt               0.0530         -         -         -         -        0.0530
+vz                   agent_400000.pt              0.0530    0.0530    0.0530    0.0530    0.0530        0.0530
+vz                   agent_80000.pt                    -    0.0530         -         -         -        0.0530
+yaw_rate             agent_120000.pt                   -         -    0.3000         -         -        0.3000
+yaw_rate             agent_200000.pt                   -         -         -    0.3000         -        0.3000
+yaw_rate             agent_40000.pt               0.3000         -         -         -         -        0.3000
+yaw_rate             agent_400000.pt              0.3000    0.3000    0.3000    0.3000    0.3000        0.3000
+yaw_rate             agent_80000.pt                    -    0.3000         -         -         -        0.3000
+zoom_rate            agent_120000.pt                   -         -    0.2000         -         -        0.2000
+zoom_rate            agent_200000.pt                   -         -         -    0.2000         -        0.2000
+zoom_rate            agent_40000.pt               0.2000         -         -         -         -        0.2000
+zoom_rate            agent_400000.pt              0.2000    0.2000    0.2000    0.2000    0.2000        0.2000
+zoom_rate            agent_80000.pt                    -    0.2000         -         -         -        0.2000
+==============================================================================================================
+
+Interpretation (per ticket 045 acceptance bar):
+  - p90 >= delta on a channel  -> policy SATURATING that channel (clip is binding)
+  - p90 << delta on a channel  -> policy has slack on that channel
+  - Compare across checkpoints to see if late-stage policy uses more or less of the bandwidth than early-stage at the same curriculum.

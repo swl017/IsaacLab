@@ -12,7 +12,17 @@ models:
     gru_hidden_size: 64
     initial_log_std: -0.5  # σ ≈ 0.6
     min_log_std: -5.0      # σ_min ≈ 0.007, prevents collapse
-    max_log_std: 0.7       # σ_max ≈ 2.0, caps exploration
+    max_log_std: 0.4       # σ_max ≈ 1.49, caps exploration
+                           # Ticket 047 Slice 3 (2026-06-04): tightened 0.7 → 0.4.
+                           # The 0.7 cap let σ blow to 2.014 by ~32k of training,
+                           # locking the policy at max exploration and starving
+                           # reward-shape gradient. With 0.4, σ saturates at 1.49
+                           # — bounded but still wide enough for the explore-phase
+                           # curriculum (see entropy_loss_schedule below).
+                           # Note: torch.clamp has zero gradient in the saturated
+                           # region, so log_std doesn't tighten back from the cap
+                           # even when entropy bonus is small. Smooth-bound fix
+                           # is logged as a follow-up ticket.
 
   value:
     class_name: mappo_rnn  # Will use MAPPORNNValue
@@ -52,8 +62,25 @@ agent:
   clip_predicted_values: true
 
   # Loss scales
-  entropy_loss_scale: 0.01   # Entropy loss scaling
+  entropy_loss_scale: 0.01   # Entropy loss scaling (= start_value when schedule below is active)
   value_loss_scale: 1.0      # Value loss scaling
+
+  # Ticket 047 — linear curriculum on entropy_loss_scale.
+  # When all three fields are non-null, entropy_loss_scale linearly interpolates
+  # from the value above (= start_value) toward end_value between start_step and
+  # end_step (clamped on both ends). To disable, set end_value: null.
+  #
+  # Slice 3 defaults (2026-06-04): keep entropy_loss_scale=0.01 (full exploration)
+  # through 0-120k while the env's behavioral curriculum (tracking, safety,
+  # moving_target, dynamics, noise) ramps up; ramp to 0.001 over 120k-200k as
+  # the delay / dropout perception phases land; hold at 0.001 for the final
+  # 200k-400k commitment regime. Validated by `2026-06-04_..._ticket047_D_curriculum_cold`
+  # @ 400k: +7.3% pair_valid_rate, +21.5% triangulation, +22.7% total reward vs
+  # t046 baseline; the policy survived the delay-onset cliff and recovered.
+  entropy_loss_schedule:
+    end_value: 0.001    # final value; null ⇒ schedule disabled
+    start_step: 120000  # timestep at which the ramp begins
+    end_step: 200000    # timestep at which the ramp completes
 
   # KL divergence — PPO early-stop threshold.
   # Keep this aligned with KLAdaptiveLR's high band so PPO early-stop and
@@ -98,7 +125,7 @@ agent:
   # Experiment tracking
   experiment:
     directory: iris_ma6
-    experiment_name: "78038af2c2_ticket043_prev_action_obs_true_action_lowpass_true"
+    experiment_name: "09762f259f_ticket045_task_difficulty_tuning"
     write_interval: auto
     checkpoint_interval: auto
     store_separately: false
