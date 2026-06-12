@@ -1,0 +1,12 @@
+{
+  "ticket_slug": "050-slice-a-scenario-trigger",
+  "parent_ticket": "050-cooperative-track-reacquisition",
+  "current_stage": "Y",
+  "last_approved_stage": "P",
+  "next_action": "All 4 slices done + GATE VERIFIED via eval on t048 wide policy: track_loss_event_rate=2.05 (>=0.5 PASS), C2 reacq_success_rate=0.385 baseline. Ready for Stage PR (engineer code-review + merge). Slice B (team/difference reward) is the next child ticket.",
+  "slices_completed": [1, 2, 3, 4],
+  "gate_verified": true,
+  "slices_total": 4,
+  "created": "2026-06-12",
+  "updated": "2026-06-12"
+}

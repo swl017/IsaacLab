@@ -1,0 +1,30 @@
+================================================================================
+ITERATION 1 - 2026-06-12 (Slice 1, ticket 050)
+================================================================================
+Code: ReacquisitionTracker passed all 12 tests on the first logic iteration.
+
+Harness issue (not a code bug):
+  When stdout is redirected to a file, Python block-buffers stdout. Isaac Sim's
+  simulation_app.close() hard-exits the process before the buffer flushes, so the
+  test summary was lost from test_result.txt even though the suite ran (exit 0 was
+  therefore not trustworthy as a pass signal).
+  Fix: run with PYTHONUNBUFFERED=1 (and CPU-only CUDA_VISIBLE_DEVICES="" to avoid
+  contending with the GPU training run in tmux). Output then captured correctly.
+
+Result: Total 12, Passed 12, Failed 0, Errors 0.
+--------------------------------------------------------------------------------
+
+================================================================================
+ITERATION 2 - 2026-06-12 (Slice 1 review fix, ticket 050)
+================================================================================
+Review feedback (engineer): bearing-alignment diagnostic should align to ANY of the
+peers' bearings, not a single pre-selected peer.
+
+Change: `_bearing_alignment(agent_bearing_w, d)` now reduces max cosine over all valid
+peers (j != i, d_j=True); `update` takes one `agent_bearing_w` instead of ego/peer split.
+Also moved the diagnostic sample to the re-acquisition instant (DEFICIT->HOLD) via pending
+buffers, committed on hold-confirm; bearing-align mean now divided by a dedicated
+align-count (only successes that had a valid peer). Added test 13.
+
+Result: Total 13, Passed 13, Failed 0, Errors 0.
+--------------------------------------------------------------------------------

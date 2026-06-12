@@ -41,6 +41,7 @@ from .iris_ma_env6_test_cfg import (
     _CRITIC_PRIVILEGED_FIELD_REGISTRY,
     IrisMA6TestEnvCfg,
 )
+from .cooperation_metrics import ReacquisitionTracker
 from .target_controller import TargetController
 from .triangulation import (
     TriangulationResult,
@@ -233,6 +234,13 @@ class IrisMA6TestEnv(DirectMARLEnv):
                 camera_cfg = copy.deepcopy(cfg.camera)
                 camera_cfg.prim_path = camera_cfg.prim_path.format(robot_name=robot_name)
                 self.agent_camera_cfgs[agent_id] = camera_cfg
+
+        # Ticket 050, Slice A — apply the cooperation-trigger scenario overlay here, AFTER the cfg
+        # is finalized (Hydra `from_dict` does not re-run cfg.__post_init__) and BEFORE
+        # super().__init__() builds the scene / runs the first reset. Ceiling-only; flag-off is a
+        # bit-exact baseline (the method is not called at all).
+        if cfg.enable_track_loss_scenario:
+            cfg.apply_track_loss_scenario_overlay()
 
         # Call parent constructor
         super().__init__(cfg, render_mode, **kwargs)
@@ -792,6 +800,21 @@ class IrisMA6TestEnv(DirectMARLEnv):
             )
         else:
             self._target_controller = None
+
+        # Cooperative re-acquisition instrumentation (ticket 050, Slice A). Default-off.
+        if self.cfg.cooperation_metrics.enable:
+            self._reacq_tracker = ReacquisitionTracker(
+                cfg=self.cfg.cooperation_metrics,
+                num_envs=self.num_envs,
+                num_agents=self.cfg.num_agents,
+                device=self.device,
+                step_dt=self.cfg.sim.dt * self.cfg.decimation,
+            )
+        else:
+            self._reacq_tracker = None
+        # Eval-only: per-env episode values stashed at reset (drained by experiments/evaluate.py).
+        # Gated by cfg so training never grows this buffer.
+        self._reacq_episode_buffer: list = []
 
         # Facility position for approach mode (at each environment's origin)
         # Clone env_origins so targets approach their local environment center
@@ -1669,6 +1692,43 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         return result
 
+    def _gather_reacq_signals(self, reward_states) -> dict:
+        """Assemble the per-step inputs for the re-acquisition tracker (ticket 050, Slice A).
+
+        All quantities are [N, A] (or [N, A, 3]); ``target_range`` uses privileged GT range
+        (metric-only). v_max is the curriculum max target speed (scalar, broadcast over envs).
+        """
+        N = self.num_envs
+        A = self.cfg.num_agents
+        dev = self.device
+        bbox_age = torch.zeros(N, A, device=dev)
+        target_range = torch.zeros(N, A, device=dev)
+        fov_eff_half = torch.zeros(N, A, device=dev)
+        agent_pos_w = torch.zeros(N, A, 3, device=dev)
+        agent_bearing_w = torch.zeros(N, A, 3, device=dev)
+        for ai, aid in enumerate(self.cfg.possible_agents):
+            data = reward_states[aid].data
+            if self._delay_system is not None:
+                bbox_age[:, ai] = self._delay_system.get_detection_aoi(aid, aid)
+            pos = self._root_pos_w[aid]  # [N, 3]
+            agent_pos_w[:, ai, :] = pos
+            target_range[:, ai] = (self._target_pos_w - pos).norm(dim=-1)
+            fov_eff_half[:, ai] = data.camera_effective_hfov.reshape(N) * 0.5
+            agent_bearing_w[:, ai, :] = data.camera_ray_directions_w[:, 0, :]
+        tc = self.cfg.target_controller
+        vmax_scalar = tc.max_speed_start + float(self.progress_moving_target) * (
+            tc.max_speed_end - tc.max_speed_start
+        )
+        v_max = torch.full((N,), vmax_scalar, device=dev)
+        return dict(
+            bbox_age=bbox_age,
+            target_range=target_range,
+            fov_eff_half=fov_eff_half,
+            v_max=v_max,
+            agent_pos_w=agent_pos_w,
+            agent_bearing_w=agent_bearing_w,
+        )
+
     def _get_rewards(self) -> Dict[str, torch.Tensor]:
         """Get rewards for all agents.
 
@@ -1811,6 +1871,15 @@ class IrisMA6TestEnv(DirectMARLEnv):
         self._detection_stats["total_steps"] += 1.0
         self._detection_stats["invalid_all_agents"] += (num_valid_detections == 0).float()
         self._detection_stats["pair_valid_count"] += (num_valid_detections >= 2).float()
+
+        # Cooperative track-loss / re-acquisition instrumentation (ticket 050, Slice A).
+        # WRITE, once per step; measurement-only (does not affect rewards). Default-off.
+        if self._reacq_tracker is not None:
+            self._reacq_tracker.update(
+                detected_nonempty=per_agent_nonempty,
+                t=float(self._sim_time[0].item()),
+                **self._gather_reacq_signals(reward_states),
+            )
 
         # Compute triangulation for all active task reward levels
         # (reward-only; obs tail is gated separately by cfg.enable_triangulation)
@@ -3343,6 +3412,15 @@ class IrisMA6TestEnv(DirectMARLEnv):
         all_extras["Termination/tracking_lost_fraction"] = torch.mean(
             self._tracking_lost_count[env_ids].clamp(max=1.0)
         )
+
+        # Cooperative re-acquisition metrics (ticket 050, Slice A): summarize, optionally stash
+        # per-env values for eval-time aggregation, then reset.
+        if self._reacq_tracker is not None:
+            all_extras.update(self._reacq_tracker.episode_summary(env_ids))
+            if self.cfg.cooperation_metrics.collect_episode_values:
+                vals = self._reacq_tracker.episode_values(env_ids)
+                self._reacq_episode_buffer.append({k: v.detach().cpu() for k, v in vals.items()})
+            self._reacq_tracker.reset(env_ids)
 
         # Reset detection stats, collision count, and tracking-lost counter
         for key in self._detection_stats:

@@ -107,7 +107,9 @@ _reset_idx(env_ids)
 
 **Standalone** (no iris_ma6 internal dependencies):
 controller, delay_system_v3, cbf_safety, triangulation, bbox_raycaster_v2,
-initial_states, domain_randomization, visualization, curriculum, asset
+initial_states, domain_randomization, visualization, curriculum, asset,
+cooperation_metrics (ticket 050 Slice A — ReacquisitionTracker; consumed by env
+`_get_rewards`/`_reset_idx` when `cooperation_metrics.enable`, and by experiments/evaluate.py)
 
 **Has dependencies**:
 target_controller → controller

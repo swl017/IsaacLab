@@ -4163,3 +4163,40 @@ Next:
 - Start t050 Slice A: occlusion/hand-off scenario design + track-loss instrumentation
   (manufacture the single-agent-loss-while-peer-sees event; composes with the
   t045/t046 difficulty-revert). Sysid envelope stays LOCKED.
+
+--- 2026-06-12 ---
+QRISPY state saved for 050-slice-a-scenario-trigger at Stage I (Q+R complete, design in progress)
+
+----------------------------------------
+2026-06-12 — Ticket 050 Slice A: cooperation trigger + re-acquisition instrumentation (QRISPY complete, gate VERIFIED)
+----------------------------------------
+Done:
+- Full QRISPY (Q→R→I→S→P→Y×4→PR) for ticket 050 Slice A (child: 050-slice-a-scenario-trigger).
+- NEW module cooperation_metrics/: ReacquisitionTracker (per-(env,agent) IDLE/DEFICIT/HOLD
+  state machine). Effective-track = reachable-set-within-FOV gate (v_max*bbox_age < k*R*tan(fov_half))
+  — no arbitrary staleness constant; unifies FOV-exit + dropout-staleness loss. Emits Coop/* episode
+  scalars + episode_values() per-env raw counts. 14/14 unit tests pass.
+- R finding (corrects parent ticket): peer bearing is ALREADY in obs as other_ray_w (16D peer block,
+  not 14D gimbal — docstring stale); single-agent loss does NOT NaN (tri tail zeroed + -1.0 sentinel).
+- Wired into env (default-off): cooperation_metrics cfg field; _gather_reacq_signals(); update() in
+  _get_rewards; episode_summary→extras["log"] + reset in _reset_idx. Flag-off = bit-exact.
+- NEW track_loss_scenario_cfg.py + enable_track_loss_scenario: ceiling-only overlay (target_distance
+  15→40, cylinder_diam 30→40, max_speed_end 5→8, zoom_end 4→6, dropout window 40k-120k @ prob 0.15).
+  Applied in env __init__ BEFORE super() — NOT __post_init__ (Hydra from_dict bypasses it; new memory).
+  Floors untouched (t034 anti-forgetting preserved). This IS the t045/t046 difficulty-revert.
+- Eval side: evaluate.py --coop_metrics/--track_loss_scenario; per-episode buffer →
+  results["reacquisition"]. Files: iris_ma_env6_test{,_cfg}.py, experiments/evaluate.py.
+- GATE VERIFIED (eval on t048 wide agent_drone_0_final.pt, 256 envs, --step 400000, 601 episodes):
+  track_loss_event_rate=2.05 (≥0.5 PASS, 4x over); C2 baseline reacq_success_rate=0.385;
+  team_track_maintenance=0.53; losses ≈ all FOV-exit (dropout 0.018). Diagnostics confirm Q#13:
+  naive re-point emerges (bearing_align=0.80) but close-in does NOT (dist_delta=-0.09).
+- Conda path fix: this box uses ~/miniconda3 (NOT ~/anaconda3); silenced bad source → numpy ABI crash.
+
+Next:
+- Ticket 050 Slice B (new child ticket): team/difference reward (−trace(Σ) / +logdet FIM, per-agent
+  counterfactual on the centralized critic) to lift reacq_success_rate above the 0.385 C2 baseline and
+  incentivize the close-in geometry. Warm-start from t048 wide under enable_track_loss_scenario=True.
+  Multi-seed (≥3) for any headline claim. Sysid envelope LOCKED.
+- Optional Slice-A follow-ups: feed target_pixel_inbounds for far/edge cause split (currently all fov);
+  raise dropout_prob to exercise the dropout sub-mode.
+- Commit/PR Slice A when ready (not yet committed).

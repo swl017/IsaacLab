@@ -24,6 +24,7 @@ from isaaclab_assets import IRIS_GIMBAL3_CFG
 from .bbox_raycaster_v2 import BBoxRayCasterV2Cfg, DetectorReplicatorCfg
 from .cbf_safety import CBFManagerCfg
 from .cbf_safety.cbf_cfg import CPARewardShaperCfg
+from .cooperation_metrics import ReacquisitionTrackerCfg
 from .controller import DroneControllerCfg
 from .controller.gain_randomization_cfg import GainRandomizationCfg
 from .controller.tuning.tuning_results.px4_matched import PX4_MATCHED_CONTROLLER_CFG
@@ -37,6 +38,7 @@ from .delay_system_v3 import (
 )
 from .initial_states import InitialStatesCfg
 from .target_controller import TargetControllerCfg
+from .track_loss_scenario_cfg import TrackLossScenarioCfg
 from .triangulation import TriangulationCfg
 
 
@@ -812,6 +814,22 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     triangulation: TriangulationCfg = TriangulationCfg()
     """Triangulation module configuration for multi-camera target localization."""
 
+    # ==========================================================================
+    # Cooperative re-acquisition instrumentation (ticket 050, Slice A)
+    # ==========================================================================
+
+    cooperation_metrics: ReacquisitionTrackerCfg = ReacquisitionTrackerCfg()
+    """Track-loss / re-acquisition instrumentation. Default-off (enable=False) keeps the env
+    bit-exact with the baseline; measurement-only (no obs/reward/dynamics change)."""
+
+    enable_track_loss_scenario: bool = False
+    """When True, overlay the ``track_loss_scenario`` ceiling-raise onto initial_states /
+    target_controller / curriculum / delay-dropout in __post_init__ to manufacture single-agent
+    track-loss events (ticket 050, Slice A). Default False = bit-exact baseline."""
+
+    track_loss_scenario: TrackLossScenarioCfg = TrackLossScenarioCfg()
+    """Ceiling-only override values applied iff ``enable_track_loss_scenario``."""
+
     enable_triangulation: bool = False
     """Append triangulation tail to the actor observation (and draw the observed-triangulation
     ellipsoid in viz). Reward-side triangulation (_triangulation_result_gt / _tri_result_l2 /
@@ -1071,6 +1089,31 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     debug_initial_step: int = 400000
     """If > 0, initializes the environment at the specified training step for debugging."""
 
+
+    def apply_track_loss_scenario_overlay(self):
+        """Overlay the Slice-A cooperation-trigger ceiling raise (ticket 050).
+
+        Called once from the env ``__init__`` BEFORE ``super().__init__()`` — i.e. after the cfg
+        is fully finalized (including Hydra ``from_dict`` overrides, which do NOT re-run
+        ``__post_init__``) and before the scene / sub-modules are built. Ceiling-only: floors
+        (``*_min`` / ``*_start``) are untouched. Rebuilds the delay cfg so the raised
+        ``dropout_prob`` propagates to the built ``DropoutCfg`` as well as the runtime
+        ``set_dropout_rate`` path.
+        """
+        s = self.track_loss_scenario
+        # Far sub-mode (initial conditions)
+        self.initial_states.target_distance_max = s.target_distance_max
+        self.initial_states.zoom_initial_max_end = s.zoom_initial_max_end
+        self.initial_states.cylinder_diameter_max = s.cylinder_diameter_max
+        # Edge sub-mode (target behaviour)
+        self.target_controller.max_speed_end = s.target_max_speed_end
+        self.target_controller.update_interval_min_end = s.target_update_interval_min_end
+        self.target_controller.update_interval_max_end = s.target_update_interval_max_end
+        # Dropout sub-mode (independent per-(env, agent); curriculum window + ceiling)
+        self.curriculum.dropout_start_step = s.dropout_start_step
+        self.curriculum.dropout_end_step = s.dropout_end_step
+        self.delay_system_params.dropout_prob = s.dropout_prob
+        self.delay_system = create_delay_cfg_from_params(self.delay_system_params)
 
     def __post_init__(self):
         """Populate agent-specific fields from num_agents."""

@@ -57,6 +57,12 @@ parser.add_argument("--task", type=str, default="Isaac-Iris-MA6-Direct-Test-v0",
 parser.add_argument("--output", type=str, default=None, help="Output JSON path")
 parser.add_argument("--headless", action="store_true", default=False)
 parser.add_argument("--enable_cameras", action="store_true", default=False)
+# Ticket 050 (cooperative track re-acquisition) — Slice A eval
+parser.add_argument("--coop_metrics", action="store_true", default=False,
+                    help="Enable cooperative track-loss / re-acquisition metrics (ticket 050).")
+parser.add_argument("--track_loss_scenario", action="store_true", default=False,
+                    help="Enable the track-loss scenario ceiling raise (ticket 050, Slice A). "
+                         "Implies --coop_metrics. Use with --step past the dropout window.")
 # Runtime parameter overrides
 parser.add_argument("--delay-override", type=float, default=None,
                     help="Override detection latency in seconds")
@@ -663,6 +669,15 @@ def main(env_cfg, agent_cfg: dict):
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.episode_length_s = 20.0
 
+    # Ticket 050, Slice A — cooperative re-acquisition eval. The scenario flag implies the metrics.
+    if args_cli.track_loss_scenario:
+        env_cfg.enable_track_loss_scenario = True
+    if args_cli.track_loss_scenario or args_cli.coop_metrics:
+        env_cfg.cooperation_metrics.enable = True
+        env_cfg.cooperation_metrics.collect_episode_values = True
+        print("[EVAL] Cooperative re-acquisition metrics enabled "
+              f"(scenario={args_cli.track_loss_scenario})")
+
     if args_cli.step is not None:
         # Pin curriculum to a specific training step (more intuitive than zeroing
         # start/end steps). The env reads debug_initial_step in place of
@@ -1017,6 +1032,36 @@ def main(env_cfg, agent_cfg: dict):
 
     # Compute final results
     results = tracker.compute_final_metrics()
+
+    # Ticket 050, Slice A — aggregate the per-episode re-acquisition buffer (ratios computed from
+    # summed raw counts across all completed episodes, so weighting is exact).
+    _reacq_buf = getattr(unwrapped, "_reacq_episode_buffer", None)
+    if _reacq_buf:
+        import torch as _torch
+        cat = {k: _torch.cat([b[k] for b in _reacq_buf]) for k in _reacq_buf[0]}
+        num_ep = max(1, cat["ep_steps"].numel())
+        step_dt = float(unwrapped.step_dt)
+
+        def _safe(n, d):
+            d = float(d)
+            return float(n) / d if d > 0 else 0.0
+
+        results["reacquisition"] = {
+            "num_episodes": int(num_ep),
+            "track_loss_event_rate": float(cat["mid_events"].sum()) / num_ep,
+            "cold_deficit_rate": float(cat["cold_events"].sum()) / num_ep,
+            "reacq_success_rate": _safe(cat["success"].sum(), cat["qual_total"].sum()),
+            "time_to_reacq_s": _safe(cat["reacq_step_sum"].sum(), cat["success"].sum()) * step_dt,
+            "team_track_maintenance": _safe(cat["team_track_steps"].sum(), cat["ep_steps"].sum()),
+            "event_rate_far": float(cat["far"].sum()) / num_ep,
+            "event_rate_edge": float(cat["edge"].sum()) / num_ep,
+            "event_rate_dropout": float(cat["dropout"].sum()) / num_ep,
+            "event_rate_fov": float(cat["fov"].sum()) / num_ep,
+            "reacq_dist_delta_mean": _safe(cat["recov_dist_delta_sum"].sum(), cat["recov_count"].sum()),
+            "reacq_bearing_align_mean": _safe(cat["recov_align_sum"].sum(), cat["recov_align_count"].sum()),
+        }
+        print(f"[EVAL] reacquisition metrics: {results['reacquisition']}")
+
     if ts_tracker is not None:
         ts_data = ts_tracker.compute_timeseries()
         ts_data["step_dt_seconds"] = float(unwrapped.step_dt)

@@ -1,6 +1,6 @@
 {
   "project": "iris_ma6",
-  "last_updated": "2026-06-04",
+  "last_updated": "2026-06-12",
   "last_session_ticket": "047-reward-retune-bbox-vs-triangulation (Slice 1+2+2.5+3 ALL DONE: warm-start screen found σ-cap diagnostic (all 4 candidates pinned at σ_max=2.014); flat-low-entropy cold-start over-collapsed σ to 0.24 by step 16k and bled task quality (killed at 188k); entropy curriculum cold-start (entropy_loss_scale schedule 0.01→0.001 over 120k-200k + max_log_std 0.7→0.4) completed full 400k and delivered the new deployment baseline. Final @400k vs t046: pair_valid_rate +7.3% (0.884), triangulation +21.5%, total reward +22.7%, equivalent smoothness. 6 cfg defaults flipped: bbox_center 60→90, bbox_size 60→30, triangulation 5→8, action_delta_penalty -12→-24, max_log_std 0.7→0.4, entropy_loss_schedule defaults {end_value:0.001, start_step:120000, end_step:200000}. Acceptance: 2 PASS / 2 soft miss (pair_valid 0.884 vs 0.90 target; vel slew_sat 0.91-0.99 unchanged — t048 scope). σ-stuck-at-cap failure (torch.clamp zero-gradient region) logged for follow-up. agent_400000.pt is the new iris_ma6 deployment checkpoint.)",
   "features": [
     {
@@ -121,6 +121,13 @@
       "status": "done",
       "spec": null,
       "notes": "Integrated: DomainRandomizer instantiated in __init__, randomize_all() called in _reset_idx, curriculum-gated by progress_dynamics (180k-200k). Camera FOV→intrinsic scale flows to bbox raycaster + delay system. Physics mass/inertia written to sim assets (controller keeps nominal mass for model mismatch). Gimbal offsets added to joint position targets. Gimbal dynamics (stiffness/damping) applied to actuators. Mount offset enabled. (2026-04-06)"
+    },
+    {
+      "id": "cooperation-metrics",
+      "name": "Cooperative track-loss / re-acquisition instrumentation (ticket 050 Slice A)",
+      "status": "done",
+      "spec": null,
+      "notes": "Ticket 050 Slice A (2026-06-12): NEW module cooperation_metrics/ — ReacquisitionTracker, per-(env,agent) IDLE/DEFICIT/HOLD state machine that detects single-agent PEER-ASSISTED track-loss (agent i loses target while a peer still holds it) and re-acquisition. Effective-track = reachable-set-within-FOV validation gate: d_i = (bbox nonempty) AND (v_max*bbox_age < k_fov*range*tan(fov_eff_half)) — NO arbitrary staleness time; at AoI=0 reduces to in-frame, unifies FOV-exit and dropout-staleness loss. Onset tagged cold|far|edge|dropout; flicker-filtered by tau_min/tau_hold. Emits Coop/* (track_loss_event_rate=GATE, reacq_success_rate, time_to_reacq, team_track_maintenance, per-cause, recovery diagnostics: inter-agent dist delta + bearing alignment-to-any-peer). Wired into env (default-off cooperation_metrics.enable): update() in _get_rewards, episode_summary→extras['log'] + reset in _reset_idx; signals via _gather_reacq_signals (GT range privileged/metric-only). Scenario trigger: track_loss_scenario_cfg.py + enable_track_loss_scenario flag, ceiling-only overlay (target_distance 15→40, cylinder_diam 30→40, max_speed_end 5→8, zoom_end 4→6, dropout window 40k-120k @ prob 0.15) applied in env __init__ BEFORE super() (NOT __post_init__ — Hydra from_dict bypasses it); floors untouched = t034 anti-forgetting preserved; this IS the t045/t046 difficulty-revert. Eval: evaluate.py --track_loss_scenario/--coop_metrics → results['reacquisition'] via collect_episode_values buffer. 14/14 unit tests + 2 env smokes pass. GATE VERIFIED on t048 wide policy (256 envs): track_loss_event_rate=2.05 (>=0.5 PASS), C2 baseline reacq_success_rate=0.385, team_track_maintenance=0.53; diagnostics confirm naive re-point emerges (bearing_align=0.80) but close-in does NOT (dist_delta=-0.09). NOT committed yet. Next: Slice B team/difference (covariance/FIM) reward."
     }
   ]
 }
