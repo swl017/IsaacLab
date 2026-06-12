@@ -7,9 +7,18 @@ seed: 42
 models:
   policy:
     class_name: mappo_rnn  # Will use MAPPORNNPolicy from scripts/reinforcement_learning/skrl/mappo_rnn.py
-    hidden_size: 64
-    gru_num_layers: 1      # Tune it for robust final policy later. May take longer to train.
-    gru_hidden_size: 64
+    hidden_size: 256       # Ticket 048 (2026-06-12): flipped 64 → 256 (wide).
+    gru_num_layers: 1      # Width sweep 64/128/256 @ 200k seed=42: aggregate task
+    gru_hidden_size: 256   # quality flat, but at DEPLOY (Pegasus+PX4 SITL) wide is the
+                           # calmest, most sim2real-robust policy — lowest body speed
+                           # (0.62 vs 1.29 m/s) + wander (1.69 vs 4.58 m), gimbal yaw
+                           # std halved (5.7° vs 10.7°), estimation tied with baseline.
+                           # mid disqualified (degenerate close-in strategy + KL=0.81
+                           # blowup). Width is ~free here (env-sim-bound, ~1.0× wall).
+                           # gru_num_layers held at 1 (depth is a separate axis).
+                           # See doc/experiments/2026-06-11_ticket048_network_width_sweep.md.
+                           # Single-seed; 2–3-seed baseline-vs-wide re-run is the
+                           # confirmation follow-up if needed.
     initial_log_std: -0.5  # σ ≈ 0.6
     min_log_std: -5.0      # σ_min ≈ 0.007, prevents collapse
     max_log_std: 0.4       # σ_max ≈ 1.49, caps exploration
@@ -26,9 +35,9 @@ models:
 
   value:
     class_name: mappo_rnn  # Will use MAPPORNNValue
-    hidden_size: 64
+    hidden_size: 256       # Ticket 048: flipped 64 → 256 (wide), mirrors policy.
     gru_num_layers: 1
-    gru_hidden_size: 64
+    gru_hidden_size: 256
 
 # Agent configuration
 agent:

@@ -103,6 +103,18 @@ class GimbalController:
         self._pitch_limits = cfg.pitch_limits
         self._roll_limits = cfg.roll_limits
 
+        # Ticket 049 diagnostic capture (opt-in, off by default).
+        # When True, compute_control() stashes the intermediate body-rejection
+        # signals into _diag_* tensors for the gimbal oscillation recorder.
+        # This is a read-only snapshot of values the control law already
+        # computes; it never feeds back, so default-path output stays
+        # bit-exact when _diag_capture is False.
+        self._diag_capture = False
+        self._diag_omega_cmd: torch.Tensor | None = None
+        self._diag_omega_combined: torch.Tensor | None = None
+        self._diag_qdot_ref: torch.Tensor | None = None
+        self._diag_att_error: torch.Tensor | None = None
+
     @property
     def yaw(self) -> torch.Tensor:
         return self._yaw
@@ -212,6 +224,14 @@ class GimbalController:
         qdot_ref = self._compute_jacobian_inverse_times_omega(
             omega_combined, actual_yaw, actual_roll
         )
+
+        # Ticket 049: snapshot body-rejection intermediates for the diagnostic
+        # recorder (opt-in). Cloned so later in-place ops cannot alias them.
+        if self._diag_capture:
+            self._diag_omega_cmd = omega_cmd.detach().clone()
+            self._diag_omega_combined = omega_combined.detach().clone()
+            self._diag_qdot_ref = qdot_ref.detach().clone()
+            self._diag_att_error = att_error.detach().clone()
 
         # -- 8. Position targets = actual + joint rates * dt --
         self._yaw = actual_yaw + qdot_ref[:, 0] * dt

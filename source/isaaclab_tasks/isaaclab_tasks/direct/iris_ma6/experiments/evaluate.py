@@ -93,10 +93,12 @@ parser.add_argument("--record-action-trace", action=argparse.BooleanOptionalActi
 parser.add_argument("--record-video", type=str, default=None,
                     help="Output path for video (e.g., demo.mp4)")
 parser.add_argument("--record-video-scene", type=str, default=None,
-                    help="Output dir for a wide-shot SCENE video via the standard "
-                         "gymnasium RecordVideo path (renders env_cfg.viewer, no "
-                         "replicator annotator — reliable headless). Frames all "
-                         "agents + target from a fixed isometric view of env 0.")
+                    help="Output .mp4 path for a wide-shot RTX SCENE video. Renders "
+                         "env_cfg.viewer (isometric view of env 0) to rgb_array and "
+                         "writes every frame manually in the rollout loop (not "
+                         "gymnasium RecordVideo, which stops on the vec-env done). "
+                         "Shows the drone USD models + scene visuals. Needs the warp "
+                         "'owner' shim (auto-applied) for replicator RGB capture.")
 parser.add_argument("--camera-mode", type=str, default="overhead",
                     choices=["overhead", "chase", "side", "orbit",
                              "formation", "closeup", "wide", "isometric"],
@@ -126,6 +128,9 @@ _enable_cameras = args_cli.enable_cameras
 if _headless_video and not _enable_cameras:
     _enable_cameras = True
     print("[EVAL] Auto-enabling cameras for headless video recording")
+if args_cli.record_video_scene is not None and not _enable_cameras:
+    _enable_cameras = True
+    print("[EVAL] Auto-enabling cameras for scene video (RecordVideo) recording")
 if args_cli.record_video is not None:
     if _headless_video:
         print("[EVAL] Video recording: using offscreen camera (headless mode)")
@@ -140,6 +145,28 @@ app_args = argparse.Namespace(
 )
 app_launcher = AppLauncher(app_args)
 simulation_app = app_launcher.app
+
+# --- warp <-> replicator compatibility shim (for RTX rgb_array capture) ---
+# Isaac Sim's bundled omni.replicator (annotator_utils._reshape_output_ptr) builds
+# the RGB buffer with wp.types.array(..., owner=False, ...), but warp>=1.x removed
+# the `owner` kwarg (replaced by `deleter`). owner=False == a non-owning view, which
+# is exactly the default when no deleter is supplied — so we just drop the kwarg.
+# Without this, EVERY rgb_array render raises:
+#   TypeError: array.__init__() got an unexpected keyword argument 'owner'
+# Applied only when a video is requested, so non-video eval is byte-for-byte unchanged.
+if args_cli.record_video is not None or args_cli.record_video_scene is not None:
+    try:
+        import inspect as _inspect
+        import warp as _wp
+        if "owner" not in _inspect.signature(_wp.types.array.__init__).parameters:
+            _orig_wp_array_init = _wp.types.array.__init__
+            def _wp_array_init_compat(self, *a, **kw):
+                kw.pop("owner", None)
+                return _orig_wp_array_init(self, *a, **kw)
+            _wp.types.array.__init__ = _wp_array_init_compat
+            print("[EVAL] Applied warp 'owner'-kwarg compat shim for replicator RGB capture")
+    except Exception as _e:
+        print(f"[EVAL] WARNING: warp compat shim not applied ({_e}); RTX capture may fail")
 
 """Rest follows after Isaac Sim is initialized."""
 
@@ -174,6 +201,71 @@ _skrl_scripts_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", ".
                                   "scripts", "reinforcement_learning", "skrl")
 _skrl_scripts_dir = os.path.normpath(_skrl_scripts_dir)
 sys.path.insert(0, _skrl_scripts_dir)
+
+
+def _create_video_camera(prim_path):
+    """Create a UsdGeom.Camera stage prim we can drive per-frame (wide FOV)."""
+    try:
+        import omni.usd
+        from pxr import UsdGeom, Gf
+        stage = omni.usd.get_context().get_stage()
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim.IsValid():
+            prim = stage.DefinePrim(prim_path, "Camera")
+        cam = UsdGeom.Camera(prim)
+        cam.GetFocalLengthAttr().Set(16.0)              # wide-ish FOV to fit 3 agents
+        cam.GetHorizontalApertureAttr().Set(20.955)
+        cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.1, 100000.0))
+    except Exception as _e:
+        print(f"[EVAL] WARNING: could not create video camera: {_e}")
+
+
+def _aim_camera_prim(prim_path, eye, lookat):
+    """Set a USD camera prim's transform from eye/lookat (world coords).
+
+    Bypasses sim.set_camera_view, which is a no-op in headless configs. Mirrors
+    the look-at math in iris_ma5 video_recording/video_recorder.py.
+    """
+    try:
+        import numpy as _np
+        import omni.usd
+        from pxr import UsdGeom, Gf
+        stage = omni.usd.get_context().get_stage()
+        cam = stage.GetPrimAtPath(prim_path)
+        if not cam.IsValid():
+            return
+        eye = _np.asarray(eye, dtype=float)
+        fwd = _np.asarray(lookat, dtype=float) - eye
+        fwd = fwd / (_np.linalg.norm(fwd) + 1e-8)
+        up_w = _np.array([0.0, 0.0, 1.0])
+        right = _np.cross(fwd, up_w)
+        if _np.linalg.norm(right) < 1e-6:
+            up_w = _np.array([0.0, 1.0, 0.0])
+            right = _np.cross(fwd, up_w)
+        right = right / (_np.linalg.norm(right) + 1e-8)
+        up = _np.cross(right, fwd)
+        up = up / (_np.linalg.norm(up) + 1e-8)
+        R = _np.eye(3)
+        R[:, 0] = right
+        R[:, 1] = up
+        R[:, 2] = -fwd  # camera looks along -Z
+        gf_rot = Gf.Matrix3d(
+            Gf.Vec3d(float(R[0, 0]), float(R[1, 0]), float(R[2, 0])),
+            Gf.Vec3d(float(R[0, 1]), float(R[1, 1]), float(R[2, 1])),
+            Gf.Vec3d(float(R[0, 2]), float(R[1, 2]), float(R[2, 2])),
+        )
+        T = Gf.Matrix4d()
+        T.SetRotate(gf_rot)
+        T.SetTranslateOnly(Gf.Vec3d(float(eye[0]), float(eye[1]), float(eye[2])))
+        xf = UsdGeom.Xformable(cam)
+        ops = xf.GetOrderedXformOps()
+        if ops:
+            ops[0].Set(T)
+        else:
+            xf.ClearXformOpOrder()
+            xf.AddTransformOp().Set(T)
+    except Exception:
+        pass
 
 
 def _collect_step_metrics(
@@ -603,27 +695,27 @@ def main(env_cfg, agent_cfg: dict):
         env_cfg.curriculum.agent_velocity_end_step = 0
 
     # Create environment
+    # Scene video: render the env's own viewport (env_cfg.viewer) to rgb_array and
+    # write frames MANUALLY in the rollout loop. We do NOT use gymnasium RecordVideo
+    # here — it is a single-env wrapper that stops the moment the vectorized env
+    # signals done (it captured only 2 warmup-black frames). Manual capture of
+    # unwrapped.render() uses the env's own render product (which works once the
+    # warp 'owner' shim is applied) and grabs every frame regardless of episode.
     _scene_video = args_cli.record_video_scene is not None
     if _scene_video:
-        # Wide isometric framing of env 0 so all agents + target stay in shot.
-        env_cfg.viewer.origin_type = "env"
-        env_cfg.viewer.env_index = 0
-        env_cfg.viewer.eye = (34.0, -34.0, 30.0)
-        env_cfg.viewer.lookat = (0.0, 0.0, 8.0)
+        # Render from a camera WE create (/World/VideoCam). The default
+        # /OmniverseKit_Persp is a Kit-managed viewport camera whose transform we
+        # cannot move headless (USD writes ignored, set_camera_view guarded off), so
+        # we point env.render()'s render product at our own stage-prim camera, which
+        # we then drive per-frame. Force the camera-frustum debug visuals on.
+        env_cfg.viewer.origin_type = "world"
+        env_cfg.viewer.cam_prim_path = "/World/VideoCam"
+        if hasattr(env_cfg, "debug_vis"):
+            env_cfg.debug_vis = True
         env_cfg.viewer.resolution = tuple(args_cli.video_resolution)
         env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
-        _max_ep = int(round(env_cfg.episode_length_s / (env_cfg.sim.dt * env_cfg.decimation)))
-        os.makedirs(args_cli.record_video_scene, exist_ok=True)
-        env = gym.wrappers.RecordVideo(
-            env,
-            video_folder=args_cli.record_video_scene,
-            step_trigger=lambda s: s == 0,
-            video_length=_max_ep,
-            name_prefix="t047_episode",
-            disable_logger=True,
-        )
-        print(f"[EVAL] Scene video (RecordVideo) -> {args_cli.record_video_scene} "
-              f"({_max_ep} frames, isometric view of env 0)")
+        print(f"[EVAL] Scene video (manual env.render capture) -> "
+              f"{args_cli.record_video_scene} (isometric view of env 0)")
     else:
         env = gym.make(args_cli.task, cfg=env_cfg)
     env_wrapped = SkrlVecEnvWrapper(env)
@@ -720,6 +812,32 @@ def main(env_cfg, agent_cfg: dict):
     total_target = args_cli.num_episodes * args_cli.num_envs
     obs, info = env_wrapped.reset()
 
+    # Scene-video writer (manual capture of env.render()). record_video_scene is a
+    # file path (.mp4). Warm up the RTX renderer first — the first frames are black
+    # until the path tracer converges.
+    _scene_writer = None
+    if _scene_video:
+        import cv2 as _cv2
+        _scene_w, _scene_h = tuple(args_cli.video_resolution)
+        _sv_dir = os.path.dirname(os.path.abspath(args_cli.record_video_scene))
+        if _sv_dir:
+            os.makedirs(_sv_dir, exist_ok=True)
+        _scene_writer = _cv2.VideoWriter(
+            args_cli.record_video_scene, _cv2.VideoWriter_fourcc(*"mp4v"),
+            float(args_cli.video_fps), (_scene_w, _scene_h))
+        # Create our own camera prim (env.render() will render from it) and aim it
+        # at env 0 before the render product is created on the first render() call.
+        _cam_path = "/World/VideoCam"
+        _scene_origin = unwrapped.scene.env_origins[0].detach().cpu().numpy()
+        _create_video_camera(_cam_path)
+        _aim_camera_prim(_cam_path, _scene_origin + np.array([16.0, -28.0, 44.0]),
+                         _scene_origin + np.array([-2.0, 2.0, 21.0]))
+        print("[EVAL] Warming up RTX renderer for scene video ...")
+        for _ in range(40):
+            unwrapped.sim.render()
+            unwrapped.render()
+        print(f"[EVAL] Scene writer ready ({_scene_w}x{_scene_h} @ {args_cli.video_fps}fps)")
+
     print(f"[EVAL] Starting: {args_cli.num_episodes} ep/env x {args_cli.num_envs} envs = {total_target} total")
 
     step_count = 0
@@ -766,6 +884,32 @@ def main(env_cfg, agent_cfg: dict):
                 _eye, _lookat = smooth_camera.get_current_pose()
                 video_recorder.set_camera_pose(_eye, _lookat)
             video_recorder.capture_frame(unwrapped)
+
+        # Scene video: follow the agents+target centroid (zoom-to-fit) by driving our
+        # own /World/VideoCam prim, then capture — drone USD models + frustum visuals.
+        if _scene_writer is not None:
+            _pts = torch.stack(
+                [unwrapped._root_pos_w[aid][0, :3] for aid in possible_agents]
+                + [unwrapped.target.data.root_pos_w[0, :3]], dim=0)
+            _origin = unwrapped.scene.env_origins[0].detach().cpu().numpy()
+            _loc = (_pts - unwrapped.scene.env_origins[0]).detach().cpu().numpy()
+            _c = _loc.mean(axis=0)
+            _radius = float(np.linalg.norm(_loc - _c, axis=1).max())
+            _dist = max(16.0, _radius * 1.8 + 8.0)
+            _dir = np.array([0.78, -0.6, 0.18]); _dir = _dir / np.linalg.norm(_dir)
+            _aim_camera_prim("/World/VideoCam", _origin + _c + _dir * _dist, _origin + _c)
+            # iris_ma6 has RTX sensors, so unwrapped.render() does NOT call sim.render()
+            # (it assumes the step already rendered) — our camera move would be ignored.
+            # Force a re-render at the new pose before reading the annotator.
+            unwrapped.sim.render()
+            _frame = unwrapped.render()
+            if _frame is not None:
+                _frame = np.asarray(_frame)
+                if _frame.ndim == 3 and _frame.shape[2] >= 3:
+                    _bgr = _cv2.cvtColor(_frame[..., :3].astype(np.uint8), _cv2.COLOR_RGB2BGR)
+                    if (_bgr.shape[1], _bgr.shape[0]) != (_scene_w, _scene_h):
+                        _bgr = _cv2.resize(_bgr, (_scene_w, _scene_h))
+                    _scene_writer.write(_bgr)
 
         # Detect done envs
         first_agent = possible_agents[0]
@@ -830,6 +974,15 @@ def main(env_cfg, agent_cfg: dict):
             }
             _traj_target_vel = unwrapped.target.data.root_lin_vel_w[:, :3]
 
+            # Target position in each camera's image: normalized (u,v) center in
+            # [0,1] (0.5,0.5 = centered, matches the bbox_center reward) + validity.
+            _traj_target_bbox = {}
+            for _i, aid in enumerate(possible_agents):
+                _bb_px = unwrapped.bbox_raycaster_v2.data.bboxes[:, _i, 0, :]  # (N,4) cx,cy,w,h px
+                _uv = _bb_px[:, 0:2] / unwrapped._img_dims                      # (N,2) normalized
+                _bvalid = (_bb_px.abs().sum(dim=-1) > 1e-6).float().unsqueeze(-1)
+                _traj_target_bbox[aid] = torch.cat([_uv, _bvalid], dim=-1)      # (N,3)
+
             traj_recorder.step(
                 agent_positions=_traj_agent_pos,
                 target_pos=_traj_target_pos,
@@ -842,6 +995,7 @@ def main(env_cfg, agent_cfg: dict):
                 zoom_levels=_traj_zoom_levels,
                 agent_velocities=_traj_agent_vel,
                 target_vel=_traj_target_vel,
+                target_bbox=_traj_target_bbox,
             )
 
         # Handle episode completions
@@ -897,6 +1051,10 @@ def main(env_cfg, agent_cfg: dict):
     if video_recorder is not None:
         video_recorder.stop()
         print(f"Video saved to: {args_cli.record_video}")
+
+    if _scene_writer is not None:
+        _scene_writer.release()
+        print(f"Scene video saved to: {args_cli.record_video_scene}")
 
     env.close()
     simulation_app.close()

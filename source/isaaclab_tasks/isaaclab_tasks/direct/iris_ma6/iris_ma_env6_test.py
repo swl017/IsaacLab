@@ -333,6 +333,27 @@ class IrisMA6TestEnv(DirectMARLEnv):
             device=self.device,
         )
 
+        # Ticket 049 — opt-in gimbal oscillation recorder (env-var gated).
+        # Default path (env-var unset) is bit-exact pre-049: no recorder, no
+        # controller diag capture. See doc/gimbal_oscillation_diagnosis_spec.md.
+        self._gimbal_diag_recorder = None
+        try:
+            from .controller.sysid_output.gimbal.oscillation_diagnosis import (
+                train_recorder as _gimbal_diag,
+            )
+            if _gimbal_diag.is_enabled():
+                import atexit
+                self._gimbal_diag_recorder = _gimbal_diag.GimbalDiagRecorder.from_env()
+                self._controller._gimbal._diag_capture = True
+                atexit.register(self._gimbal_diag_recorder.flush)
+                print(f"[ticket049] gimbal diag recorder ON → "
+                      f"{self._gimbal_diag_recorder.path} (agent "
+                      f"{self._gimbal_diag_recorder.agent_index}, "
+                      f"max_steps={self._gimbal_diag_recorder.max_steps})")
+        except Exception as _e:  # never let diagnostics break a normal run
+            print(f"[ticket049] gimbal diag recorder disabled (init error: {_e})")
+            self._gimbal_diag_recorder = None
+
         # Action buffers
         self._actions: Dict[str, torch.Tensor] = {}
         self._last_actions: Dict[str, torch.Tensor] = {
@@ -1017,6 +1038,27 @@ class IrisMA6TestEnv(DirectMARLEnv):
         # Unpack batched gimbal outputs — each is (N*A,)
         gimbal_yaw_all, gimbal_roll_all, gimbal_pitch_all = gimbal_pos_batch
         gimbal_yaw_vel_all, gimbal_roll_vel_all, gimbal_pitch_vel_all = gimbal_vel_batch
+
+        # Ticket 049 — record one gimbal-chain row per sim step (opt-in).
+        if self._gimbal_diag_recorder is not None and not self._gimbal_diag_recorder.done:
+            bi = self._gimbal_diag_recorder.agent_index * N  # env 0 of that agent
+            self._gimbal_diag_recorder.record_step(
+                control_dt=float(self.cfg.sim.dt),
+                batch_index=bi,
+                policy_cmd_yaw_rate=gimbal_yaw_rate_batch,
+                policy_cmd_pitch_rate=gimbal_pitch_rate_batch,
+                omega_body=omega_batch,
+                joint_pos_actual=gimbal_jp_batch,
+                q_body=q_batch,
+                gimbal=self._controller._gimbal,
+                rate_loop=self._controller.gimbal_rate_loop,
+                joint_cmd_yaw=gimbal_yaw_all,
+                joint_cmd_roll=gimbal_roll_all,
+                joint_cmd_pitch=gimbal_pitch_all,
+            )
+            if self._gimbal_diag_recorder.done:
+                p = self._gimbal_diag_recorder.flush()
+                print(f"[ticket049] gimbal diag recorder reached step cap → flushed {p}")
 
         # --- Scatter outputs back per-agent (Isaac Sim API requires per-Articulation calls) ---
         for idx, agent_id in agents:

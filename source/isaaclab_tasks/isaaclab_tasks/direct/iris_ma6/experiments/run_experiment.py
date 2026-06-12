@@ -346,6 +346,10 @@ def main(env_cfg, agent_cfg: dict):
     num_envs = args_cli.num_envs if args_cli.num_envs is not None else exp_cfg.num_envs
     env_cfg.scene.num_envs = num_envs
     agent_cfg["seed"] = seed
+    # ticket-034 requires env_cfg.seed set explicitly for reproducible per-(env, agent)
+    # curriculum sampling (the env __init__ asserts on this). Mirror the hydra trainer
+    # (train_mappo_rnn_hydra.py) which sets env_cfg.seed = seed.
+    env_cfg.seed = seed
     set_seed(seed)
 
     if args_cli.checkpoint:

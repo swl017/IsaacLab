@@ -1,6 +1,6 @@
 ## Ticket 048 — Network width sweep (MLP encoder + GRU hidden, MAPPO-RNN)
 
-**Status**: Proposed (queued, no scheduling commitment — see §Method for sequencing options).
+**Status**: COMPLETE (2026-06-12). Slices 1+2 done; deploy comparison done; **cfg default flipped to wide (256/256)**. Capacity hypothesis rejected on *training* aggregates (triangulation flat 51.9/51.3/51.0, slew saturation unchanged) — but the **deploy** stack (Pegasus+PX4 SITL bags) revealed wide is the calmest, most sim2real-robust policy (½ body speed, ⅓ wander, gimbal yaw std halved, estimation tied to baseline), while mid is a degenerate close-in tracker (cov 15× worse) + KL-unstable. Width is ~free on this GPU. Flip landed in `skrl_mappo_rnn_cfg.yaml`. Single-seed; optional 2–3-seed baseline-vs-wide confirm. Saturation ceiling remains demand-side → Ticket 049. See [writeup](../../../experiments/2026-06-11_ticket048_network_width_sweep.md).
 **Created**: 2026-06-02
 **Type**: Agent-cfg sweep + A/B validation. No env-side code changes.
 **Target setup**: iris_ma6 training, post-046/047 cfg state if scheduled after those; otherwise post-045. Pegasus SITL + PX4 SITL transfer remains the load-bearing case.
@@ -99,15 +99,15 @@ Run sequence (whichever option is chosen):
 
 | Criterion | Result |
 |---|---|
-| Three registry entries land + AST clean | pending |
-| Smoke run: all three configs build the env + load the model without error | pending |
-| Slice-2 sweep completed (3 × 200k @ seed=42) | tensorboard |
-| At least one widened config shows `triangulation ≥ 32` at 200k | tensorboard |
-| Widened config(s) preserve smoothness (`total_rms` within ±10% of baseline width) | tensorboard |
-| `collision_fraction ≤ 2× t043 baseline` on all three runs | tensorboard |
-| Wall-time / step on the chosen Pareto winner ≤ 2.5× baseline | event-file analysis |
-| `doc/experiments/<date>_ticket048_network_width_sweep.md` writeup landed with the Pareto comparison | written |
-| Cfg-default flip applied (if Pareto winner is mid or wide) | pending |
+| Three registry entries land + AST clean | ✅ done (2026-06-09) — `validation_net_width_{baseline,mid,wide}`, py_compile + import + register clean |
+| Smoke run: all three configs build the env + load the model without error | ✅ done (2026-06-09) — all 3 reach `MAPPO-RNN Training:` marker @ num_envs=64; combined policy+value scalar params 71,567 / 257,807 / 974,351 (1.0× / 3.6× / 13.6×) confirm widths applied |
+| Slice-2 sweep completed (3 × 200k @ seed=42) | ✅ done (2026-06-11) — all 3 ran full 200k; ~14.5h each |
+| At least one widened config shows `triangulation ≥ 32` at 200k | ⚠️ numerically met (51 ≥ 32) but **NOT attributable to width** — triangulation flat across width (51.9 / 51.3 / 51.0); the ~51 is from the post-047 reward retune. Capacity hypothesis REJECTED |
+| Widened config(s) preserve smoothness (`total_rms` within ±10% of baseline width) | ✅ mid −4.1%, wide +0.3% |
+| `collision_fraction ≤ 2× t043 baseline` on all three runs | ✅ all negligible (0.0013 / 0.0024 / 0.0028) |
+| Wall-time / step on the chosen Pareto winner ≤ 2.5× baseline | ✅ ≈1.0× — width is free here (env-sim-bound, not GRU-bound); wide even 0.96× |
+| `doc/experiments/<date>_ticket048_network_width_sweep.md` writeup landed with the Pareto comparison | ✅ [2026-06-11_ticket048_network_width_sweep.md](../../../experiments/2026-06-11_ticket048_network_width_sweep.md) |
+| Cfg-default flip applied (if Pareto winner is mid or wide) | ✅ flipped to **wide (256/256)** (2026-06-12) — decided on the **deploy** evidence (Pegasus+PX4 SITL bags): wide is the calmest, most sim2real-robust policy (½ body speed, ⅓ wander, gimbal yaw std halved) with estimation tied to baseline; mid disqualified (degenerate close-in strategy, cov 15× worse, KL=0.81 blowup). Width ~free here. Single-seed; 2–3-seed confirm is an optional follow-up. |
 
 ### Scope boundary
 
@@ -147,7 +147,8 @@ Low to medium.
 ### Affected files
 
 **Edits (Slice 1)**:
-- [experiments/experiment_registry.py](../../../experiments/experiment_registry.py) — register `validation_net_width_{baseline, mid, wide}`.
+- [experiments/experiment_registry.py](../../../experiments/experiment_registry.py) — register `validation_net_width_{baseline, mid, wide}` (landed 2026-06-09).
+- [experiments/run_experiment.py](../../../experiments/run_experiment.py) — **infra fix (landed 2026-06-09)**: added `env_cfg.seed = seed` after the seed resolution. The runner set `agent_cfg["seed"]` + `set_seed()` but never set `env_cfg.seed`, which the env asserts on (ticket-034 reproducible per-(env,agent) curriculum sampling). Pre-existing latent bug surfaced by the smoke test; mirrors `train_mappo_rnn_hydra.py:518`. Blocks any registry launch via `run_experiment.py`, not just this ticket.
 
 **Edits (Slice 3, conditional cfg-default flip)**:
 - [agents/skrl_mappo_rnn_cfg.yaml](../../../agents/skrl_mappo_rnn_cfg.yaml) — flip `models.policy.hidden_size` and `models.policy.gru_hidden_size` (and matching `models.value.*`) to the Pareto winner. Remove or update the "Tune it for robust final policy later" comment that motivated this ticket.

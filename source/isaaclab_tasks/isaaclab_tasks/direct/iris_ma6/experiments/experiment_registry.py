@@ -695,6 +695,66 @@ register_experiment(ExperimentCfg(
 
 
 # ===========================================================================
+# Ticket 048: network width sweep (MLP encoder + GRU hidden, MAPPO-RNN)
+# ===========================================================================
+# Agent-cfg-only sweep. Varies hidden_size and gru_hidden_size jointly at a
+# 1:1 ratio across three scales; gru_num_layers held at 1. No env-side change:
+# slew clip, prev-action obs, spawn geometry, reward weights, EKF lag all stay
+# at the current shipping cfg defaults (post-045/046/047). The only variable is
+# policy/value capacity. Mirrors policy overrides onto value so the encoder and
+# GRU scale together and neither becomes a bottleneck.
+#
+# Hydra override paths follow the existing sweep_agents_n* convention
+# (models.policy.hidden_size / models.policy.gru_hidden_size, mirrored to value).
+# Sequential A/B at 200k x seed=42 per config (~24 wall-h each, ~72h total),
+# single GPU. Acceptance: at least one widened config reaches triangulation >= 32
+# at 200k, smoothness (total_rms) within +-10% of baseline width, collision_fraction
+# <= 2x t043 baseline, wall-time/step on the Pareto winner <= 2.5x baseline.
+
+register_experiment(ExperimentCfg(
+    name="validation_net_width_baseline",
+    description="Ticket 048 (control): current shipping width — hidden_size=64, gru_hidden_size=64, gru_num_layers=1 (policy + value)",
+    group="validation",
+    total_timesteps=200000,
+    seeds=[42],
+    agent_overrides={
+        "models.policy.hidden_size": 64,
+        "models.policy.gru_hidden_size": 64,
+        "models.value.hidden_size": 64,
+        "models.value.gru_hidden_size": 64,
+    },
+))
+
+register_experiment(ExperimentCfg(
+    name="validation_net_width_mid",
+    description="Ticket 048 (treatment): mid width — hidden_size=128, gru_hidden_size=128, gru_num_layers=1 (policy + value), ~3.7x params",
+    group="validation",
+    total_timesteps=200000,
+    seeds=[42],
+    agent_overrides={
+        "models.policy.hidden_size": 128,
+        "models.policy.gru_hidden_size": 128,
+        "models.value.hidden_size": 128,
+        "models.value.gru_hidden_size": 128,
+    },
+))
+
+register_experiment(ExperimentCfg(
+    name="validation_net_width_wide",
+    description="Ticket 048 (treatment): wide width — hidden_size=256, gru_hidden_size=256, gru_num_layers=1 (policy + value), ~14.5x params",
+    group="validation",
+    total_timesteps=200000,
+    seeds=[42],
+    agent_overrides={
+        "models.policy.hidden_size": 256,
+        "models.policy.gru_hidden_size": 256,
+        "models.value.hidden_size": 256,
+        "models.value.gru_hidden_size": 256,
+    },
+))
+
+
+# ===========================================================================
 # Sweeps: Agent Count
 # ===========================================================================
 

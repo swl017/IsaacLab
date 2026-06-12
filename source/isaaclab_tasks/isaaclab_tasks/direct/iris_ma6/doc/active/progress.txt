@@ -3921,3 +3921,245 @@ Next:
 - For sim2real / Pegasus SITL evaluation: use the Slice 2.5 agent_400000.pt
   checkpoint going forward.
 
+
+----------------------------------------
+2026-06-09 — Ticket 048 Slice 1 (network width sweep registration)
+----------------------------------------
+Note: Ticket 048 is the MAPPO-RNN *network-width* sweep (hidden_size +
+gru_hidden_size jointly, 64/128/256 at 1:1 ratio, gru_num_layers=1).
+The slew-loosen idea in the prior session's "Next" is actually Ticket 049.
+
+Done (Slice 1 — agent-cfg-only, no env-side changes):
+- Registered three experiments in experiments/experiment_registry.py:
+    validation_net_width_baseline  (64/64, current shipping default)
+    validation_net_width_mid       (128/128, ~3.6x params)
+    validation_net_width_wide      (256/256, ~13.6x params)
+  Each: group=validation, seeds=[42], total_timesteps=200000,
+  agent_overrides on models.{policy,value}.{hidden_size,gru_hidden_size}.
+  Hydra paths confirmed to plumb into MAPPORNNPolicy/Value via
+  run_experiment.py:240-255 (policy_cfg/value_cfg.get).
+- AST clean (py_compile) + import/register clean (68 experiments total).
+- Smoke run (num_envs=64, seed=42): all three reach the
+  "MAPPO-RNN Training:" marker. Combined policy+value scalar params
+  71,567 / 257,807 / 974,351 confirm the width override actually took
+  effect (1.0x / 3.6x / 13.6x, matching the ticket's ~3.7x/~14.5x estimate).
+- INFRA FIX: run_experiment.py never set env_cfg.seed (only agent_cfg["seed"]
+  + set_seed). The env asserts on env_cfg.seed (ticket-034 reproducible
+  per-(env,agent) curriculum). Added `env_cfg.seed = seed`, mirroring
+  train_mappo_rnn_hydra.py:518. This was blocking ALL registry launches via
+  run_experiment.py, not just t048.
+
+Slice 2 LAUNCHED (2026-06-09 23:48): sequential sweep baseline->mid->wide,
+3 x 200k @ seed=42, num_envs=1024, on the 64GB GPU. Running in tmux
+`t048_net_width` via experiments/scripts/run_t048_net_width_sweep.bash
+(launches train_mappo_rnn_hydra.py with width hydra overrides — the proven
+t04x path, NOT run_experiment.py). Env = bare cfg defaults (post-045/046/047);
+width is the only variable. Note: enable_z_motion defaults to True (3D target
+motion) — t046's 2D treatment was never adopted as the cfg default, so the
+sweep runs 3D; the 64/64 baseline run is the matched internal control.
+Baseline confirmed training at ~6.12 it/s (~9h ETA, total likely <72h).
+Console logs: experiments/scripts/t048_sweep_logs/ticket048_net_width_*.log
+
+Next:
+- Monitor the sweep: KL band (kill a run if kl > 0.04 sustained > 20k),
+  reward-curve slope at 40k/80k/120k, slew_sat_* per channel. If wide is
+  still climbing strongly at 200k, consider extending to 400k for it only.
+- Slice 3 (conditional, after sweep): Pareto analysis ->
+  flip skrl_mappo_rnn_cfg.yaml width default to the winner (gated; if
+  baseline wins, no flip — documented negative result strengthens t049) +
+  write doc/experiments/<date>_ticket048_network_width_sweep.md.
+
+----------------------------------------
+2026-06-11 — Ticket 049 (gimbal oscillation diagnosis): instrumentation + analysis harness LANDED
+----------------------------------------
+Started ticket 049 while GPU held by ticket-048 net-width WIDE run
+(2026-06-11_05-17-30, at 181.7k/200k, ETA ~19:37). Built all code/spec
+deliverables that don't need the simulator so the 6 scenarios can run the
+moment the GPU + deploy stack are up.
+
+Done (no live data yet):
+- Spec: doc/gimbal_oscillation_diagnosis_spec.md — signal contract (canonical
+  CSV schema shared by both recorders), 6 scenarios, time-alignment +
+  divergence-localization algorithm, §0 pre-flight config audit, §4.4 calling
+  contract (WRITE/READ + idempotency per method).
+- Train instrumentation (all env-var IRIS_MA6_GIMBAL_DIAG gated, default-off
+  = bit-exact pre-049):
+  • controller/gimbal_controller_jacobian.py: added _diag_capture flag +
+    _diag_{omega_cmd,omega_combined,qdot_ref,att_error} snapshot under
+    `if self._diag_capture` after qdot_ref.
+  • iris_ma_env6_test.py: __init__ creates GimbalDiagRecorder + sets the flag +
+    atexit flush when enabled; _apply_action records one row/step (derives a
+    true per-control-step clock from row count × sim.dt, since _sim_time only
+    advances per decimated policy step).
+  • controller/sysid_output/gimbal/oscillation_diagnosis/train_recorder.py.
+  • Added empty __init__.py to sysid_output/{,gimbal/,oscillation_diagnosis/}.
+- Deploy instrumentation (all `diagnostic_publish` ROS2 param gated, default
+  False = bit-exact, zero overhead):
+  • ros2_ws/.../los_rate_controller.py: param + 8 gimbal_diag/* publishers
+    (omega_cmd_b, omega_body_b, omega_combined_b, qdot_ref_pre_clip,
+    qdot_ref_post_clip, az_el_world[+blend residual], rateloop_rate, control_dt),
+    emitted AFTER the joint command (Risk #1), BEST_EFFORT depth-1. Snapshots
+    stashed in _run_jacobian_ik / _run_control.
+  • .../oscillation_diagnosis/deploy_recorder.py: ROS2 node, sim-time, one CSV
+    per vehicle per scenario, row-per-control-step triggered on omega_combined,
+    optional gimbal-cmd driver (hover/sinusoid/step) for S1/S2/S4.
+- Analysis: .../oscillation_diagnosis/compare_oscillation.py (pure
+  numpy/matplotlib): align (scale-free xcorr on policy cmd) → per-signal
+  residual + 3σ noise floor → first-divergence localization → (α,τ) fit per
+  chain link per side → H7 5–20 Hz band power → JSON + multi-page PDF.
+  SMOKE-TESTED end-to-end with a synthetic H1/H7 trace: localized divergence
+  to omega_body, f_osc=8.0 Hz, voted H1, wrote JSON + PDF. ✓
+- run_all_scenarios.sh + README.md.
+
+Static findings (spec §0; from as-shipped los_rate_config.yaml + code):
+- H4 STATICALLY DISPROVEN: feedback_blend=0.05 declared in yaml but UNUSED in
+  los_rate_controller.py (integrator corrected only by anti-windup).
+- H1 RESHAPED: imu_source="state" ⇒ omega_body = Pegasus state/twist ground
+  truth (sim-time), not mavros/EKF-lagged. (recorder logs mavros in aux cols.)
+- H3 RESHAPED: control_trigger="clock", not joint_states.
+- H5 τ in sync (0.0995/0.0954); max_gimbal_rate differs (π train vs 1.28
+  deploy) but unexercised at "pointing". H8 unlikely (servo_rate_limit now 56.5).
+- ⇒ re-weighted toward H2 (deploy articulation PD lag absent in train) and H7
+  (PX4 attitude limit-cycle in state/twist). Live data decides.
+
+Files modified: controller/gimbal_controller_jacobian.py, iris_ma_env6_test.py,
+ros2_ws/src/gimbal_stabilizer/gimbal_stabilizer/los_rate_controller.py.
+Files added: doc/gimbal_oscillation_diagnosis_spec.md, controller/sysid_output/
+gimbal/oscillation_diagnosis/{train_recorder.py, deploy_recorder.py,
+compare_oscillation.py, run_all_scenarios.sh, README.md, __init__.py} (+ pkg
+__init__.py up the path).
+
+Next (needs GPU free + deploy stack):
+- Bring up Pegasus + PX4 SITL + mas; launch los_rate_controller with
+  diagnostic_publish:=true; verify `ros2 topic list | grep gimbal_diag` (7).
+- Run S1–S4 both sides via run_all_scenarios.sh; record S3 as natural-osc
+  fallback (Risk #2); then S5/S6 train-side replays (small replay driver TBD).
+- Read JSON first_divergence_signal + fitted_links → match hypothesis table →
+  write one-page root-cause md → open follow-up fix ticket.
+- Sanity at record start: yaw vehicle, expect omega_body_z > 0 (Risk #3).
+
+----------------------------------------
+2026-06-11 (cont.) — Ticket 049: rosbag path validated; oscillation does NOT reproduce
+----------------------------------------
+User provided recorded rosbags (/home/usrg/mas/bag/bag_20260611_*_t048_net_width_*)
+and asked whether they suffice. Pivoted deploy data source to offline bag
+processing (more robust than live capture; no controller rebuild needed).
+
+Done:
+- NEW controller/sysid_output/gimbal/oscillation_diagnosis/bag_to_csv.py:
+  rosbag2 .db3 -> canonical-schema deploy CSV. Reads observable signals;
+  RECOMPUTES internal-only signals (omega_cmd/omega_combined/qdot_ref) offline
+  via ros2_los_math.py from recorded inputs. Validated vs recorded
+  isaac_joint_commands.velocity: mean|Δ| 0.011–0.081 rad/s (faithful).
+  control_dt from gimbal_state_rpy_deg publish-stamp deltas.
+- Processed wide bag, 3 vehicles -> raw/S0_wide_deploy_px4_{1,2,3}.csv
+  (kept as current stability baseline).
+- README updated: bag_to_csv documented as the PREFERRED deploy path.
+
+Findings:
+- NO divergence in current config. Gimbal bounded: px4_1 pitch std 4.0->6.6 deg
+  over 25s at ~0.3-0.5 Hz (tracking band, not 5-20 Hz). px4_2/3 flat/decaying;
+  omega_body stable. Original growing oscillation NOT present.
+- Likely mitigated by ticket-047/048 policy command smoothing (action_delta
+  -12->-24 + slew clip => ~10x smoother action_delta), NOT the servo clip
+  (now 56.5, looser than old 6.0). Matches user's "slew clip helped".
+- H3 confirmed latent: deploy control ~50 Hz with ~18% dt jitter (med 20ms,
+  std 3.7ms, max 30ms) vs train fixed 100 Hz. Real sim2sim gap, benign now.
+- H4 confirmed dead: feedback_blend_residual ~ 0, no drift.
+- NO deploy behavior change from this ticket: diag publishers gated
+  (diagnostic_publish=false) and never built into the recording node.
+
+Decision (user): KEEP THE HARNESS, leave 049 OPEN pending divergence-containing
+data. Harness (train_recorder, bag_to_csv, deploy_recorder, compare_oscillation,
+gated los_rate_controller diag publishers, gated env hooks) is landed + validated.
+
+Next (when a pre-047 / pre-mitigation divergence bag exists):
+- bag_to_csv.py --bag <that_bag> --ns px4_1 --scenario S1 ; pair with a train
+  CSV; compare_oscillation.py -> localize original root cause -> follow-up fix.
+
+----------------------------------------
+2026-06-12 — Ticket 048 COMPLETE (deploy comparison + cfg flip to wide)
+----------------------------------------
+Done:
+- Deploy comparison of all 3 checkpoints on Pegasus+PX4 SITL rosbags
+  (observers px4_1/px4_2 -> target px4_3). Extractor + JSON:
+  experiments/outputs/t048_netwidth/deploy_tracking_compare.{py,json}.
+  Window 10-24s, obs-avg:
+    baseline: roams (wander 4.58m, 1.29 m/s, dist 17.5m); best raw est 0.73m/cov 0.17
+    mid:      close-in 7.3m BUT degenerate — est 1.61m, cov 3.42 (~15x worse),
+              worst gimbal yaw; matches its training KL=0.81 blowup
+    wide:     most stationary (0.62 m/s, wander 1.69m), gimbal yaw std halved
+              (5.7 vs 10.7 deg), estimation tied baseline (0.84m/cov 0.23)
+  Sim-eval JSONs ({baseline,mid,wide}.json) flat in aggregate but SAME ranking
+  (mid worst on tri_rmse / track_loss / convergence). Two datasets agree.
+  Gimbal >2Hz osc identical (~1.1 deg) all widths => t049 limit-cycle absent.
+- CFG DEFAULT FLIPPED to wide: skrl_mappo_rnn_cfg.yaml models.policy/value
+  hidden_size + gru_hidden_size 64 -> 256 (gru_num_layers held at 1). Removed
+  the stale "Tune it for robust final policy later" comment. YAML re-parsed OK.
+  Decision driven by DEPLOY robustness (calm body = less body-rejection-loop
+  excitation = the t049 sim2real concern), not sim aggregates (which are flat).
+- Writeup updated with the deploy section:
+  doc/experiments/2026-06-11_ticket048_network_width_sweep.md
+
+Next:
+- Optional: 2-3-seed baseline-vs-wide re-run to confirm (single-seed caveat).
+  New runs now inherit 256/256 by default; to run the 64-baseline control,
+  override agent.models.{policy,value}.{hidden_size,gru_hidden_size}=64.
+- Ticket 049: saturation ceiling is demand-side; gimbal limit-cycle needs a
+  pre-mitigation (pre-047) bag to localize the original root cause.
+
+----------------------------------------
+2026-06-12 (cont.) — t048 wide seed-confirm launched + t050 research ticket
+----------------------------------------
+Done:
+- Launched wide seed-CONFIRM run (seed=123) to de-risk the single-seed flip:
+  tmux `t048_wide_confirm` via experiments/scripts/run_t048_wide_seed_confirm.bash.
+  Width NOT overridden — inherits the now-default 256/256 (also confirms the
+  cfg flip is wired; expect 974,351 params). num_envs=1024, 200k, else bare
+  defaults. Freed the GPU first (killed isaac_sim + t047 tmux per user OK, and
+  reaped orphaned num_envs=64 smoke procs holding ~3.5GB).
+  Follow-up after it finishes: deploy-bag the ckpt, re-run
+  experiments/outputs/t048_netwidth/deploy_tracking_compare.py, check wide@123
+  reproduces wide@42's calm-tracker + estimation profile.
+- Opened Ticket 050 (cooperative track RE-ACQUISITION) — the MARL/journal
+  contribution. Diagnosis C1 (task too easy = no track-loss events), C2 (reward
+  selfish bbox90 vs tri8 + fused channel NaN at loss), C3 (peer signal is gimbal
+  proxy, not bearing/estimate). Slices A(scenario)->B(team/diff reward, FIM/cov)
+  ->C(peer-bearing channel + ablation = paper claim)->D(arch last). Slice A ==
+  the t045/t046 difficulty-revert (sysid envelope stays LOCKED).
+
+Next:
+- Monitor wide@123 (KL band, reward curve); seed-confirm verdict.
+- Draft t050 Slice-A child ticket (occlusion/hand-off scenario + track-loss
+  instrumentation) when ready.
+
+----------------------------------------
+2026-06-12 (cont.) — t048 wide seed-confirm: within-noise; wide KEPT as lead → on to t050
+----------------------------------------
+Done:
+- Seed-confirmed wide via deploy bag (bag_20260612_163429_..._wide_seed123) +
+  sim-eval. Behaviour (calm: low speed/wander, gimbal yaw std ~5.8 deg) REPRODUCED
+  across seeds; task QUALITY did not.
+- Sim-eval decomposition (1024 envs, seed-42 scenarios, step 200k; isolated the
+  180k-vs-200k checkpoint confound):
+    checkpoint effect (wide@42 200k->180k): task_success 0.571->0.537 (-6%)
+    seed effect (180k, wide@42->wide@123):  task_success 0.537->0.372 (-31%),
+                                            tri_rmse_med 1.335->1.758 (+32%)
+  => seed noise (~0.17 on task_success) ~5x the between-width spread (0.033).
+  The t048 "wide best" was within seed noise; stronger negative result =
+  width has NO task-quality effect distinguishable from seed noise.
+- Decision (user): DO NOT revert the flip. Keep wide (256/256) as a *behavioural
+  lead* — wide@42 showed distinctive calm/stationary tracking no other model
+  found — not as a proven win. Lead ckpt: 2026-06-11_05-17-30_..._net_width_wide.
+- Eval JSONs: outputs/t048_netwidth/{wide_seed123,wide_at180k}.json;
+  deploy_tracking_seed_confirm.json. Writeup updated with the seed-confirm section.
+
+Carry-forward to t050 (cooperative re-acquisition):
+- Build on the wide@42 lead checkpoint.
+- METHODOLOGY: single-seed claims are unreliable here; t050 headlines need >=3 seeds.
+- t051 (smooth sigma-bound + LR anneal) drafted, independent, optional.
+
+Next:
+- Start t050 Slice A: occlusion/hand-off scenario design + track-loss instrumentation
+  (manufacture the single-agent-loss-while-peer-sees event; composes with the
+  t045/t046 difficulty-revert). Sysid envelope stays LOCKED.

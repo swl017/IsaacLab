@@ -262,15 +262,57 @@ Two paired 3×2 figures (read panel-against-panel at matching color = dual-step 
 - **Figure A — snapshots at matched difficulty**: `40k@39k, 80k@79k, 120k@119k, 160k@159k, 200k@199k, 400k@400k` (training trajectory).
 - **Figure B — final policy across difficulties**: `400k@{39k,79k,119k,159k,199k,399k}` (robustness of the converged policy).
 
-Eval fidelity: 1024 envs × 1 ep, deterministic (policy-mean) rollout, env =
-`validation_task_geom_treatment` (t047 deploy dynamics: closer spawn + 2D target +
-t045 envelope + slew clip + prev-action obs). t047's reward-scale/entropy Hydra
-overrides do not affect a deterministic rollout, so they are not replicated.
+Eval fidelity: 1024 envs × **3 seeds** (42/123/2024) × 1 ep, deterministic (policy-mean)
+rollout, env = `validation_task_geom_treatment` (t047 deploy dynamics: closer spawn +
+2D target + t045 envelope + slew clip + prev-action obs). t047's reward-scale/entropy
+Hydra overrides do not affect a deterministic rollout, so they are not replicated.
+
+RMSE is summarized by per-step **median across envs** (heavy-tailed — σ/mean ≈ 1.1–1.9,
+mean ≫ median), with an across-seed min–max band (reproducibility).
+
+### Multi-seed result (corrected — supersedes any single-seed read)
+
+Converged-phase median triangulation RMSE, snapshot vs final-400k at matched step:
+
+| step | snapshot [seed range] | final-400k [seed range] | verdict |
+|---:|---|---|---|
+| 39k | 0.013 m | 0.017–0.018 m | separated → snapshot slightly better |
+| 79k | 0.017 m | 0.020 m | separated → snapshot slightly better |
+| 119k | 0.106–0.144 m | 0.101–0.154 m | **overlap → not significant** |
+| 159k | 0.69–0.77 m | 0.45–0.54 m | separated → **final better** |
+| 199k | 0.57–0.67 m | 0.39–0.54 m | separated → **final better** |
+
+The final policy is robustly better **only at the hard delay/dropout regimes (159k, 199k)**;
+at easy regimes the contemporaneous snapshot is marginally better, 119k is a wash. The
+single-seed "final beats every snapshot" read does not survive. Caveat: only one *training*
+seed exists, so this is IC-sampling robustness, not training-seed — the mm-scale easy-regime
+gaps could be a training-seed artifact; the ~0.2 m hard-regime gaps are large enough to trust.
+
+Figure B's RMSE rise with difficulty is a **confound**: viewing-angle/distance are flat across
+difficulties — the rise is the perception pipeline (noise@100k, delay@120k, dropout@160k)
+degrading the triangulation *inputs*, not the policy's geometry.
 
 ### Tooling
 
-- [experiments/scripts/run_t047_dualstep_eval.bash](../../experiments/scripts/run_t047_dualstep_eval.bash) — driver (12 `evaluate.py` runs; `smoke` arg runs only config #1). Outputs JSONs to `experiments/outputs/t047_dualstep/`.
-- [experiments/scripts/plot_t047_dualstep.py](../../experiments/scripts/plot_t047_dualstep.py) — renders `timeseries_t047_snapshots.pdf` + `timeseries_t047_final_sweep.pdf`.
+- [experiments/scripts/run_t047_dualstep_eval.bash](../../experiments/scripts/run_t047_dualstep_eval.bash) — driver (12 configs × `SEEDS=(42 123 2024)` = 36 `evaluate.py` runs; `smoke` arg runs only config #1). Outputs JSONs to `experiments/outputs/t047_dualstep/`.
+- [experiments/scripts/plot_t047_dualstep.py](../../experiments/scripts/plot_t047_dualstep.py) — across-seed aggregation → `timeseries_t047_snapshots.pdf` + `timeseries_t047_final_sweep.pdf`.
+- [experiments/metrics/timeseries_tracker.py](../../experiments/metrics/timeseries_tracker.py) — now also emits per-step median/p25/p75 (additive; mean/std unchanged).
+- [experiments/scripts/animate_t047_episode.py](../../experiments/scripts/animate_t047_episode.py) — data-driven 3D episode animation from a `--record-trajectory` JSON: drone glyphs + **camera frustum cones** (FOV from zoom, aimed at the tracked target — shows the two-view triangulation geometry) + **per-camera image panels** (target's normalized (u,v) position in each drone's image, 0.5,0.5=centered, with an off-center readout = the bbox_center tracking error) + speed-vs-time strip (jerkiness). Output `t047_episode_3d.mp4`. No Isaac Sim render. The bbox (u,v,valid) is captured per agent by `TrajectoryRecorder.step(target_bbox=...)` from `bbox_raycaster_v2.data.bboxes / _img_dims` in evaluate.py.
+
+### RTX video — warp shim + headless camera limitation
+
+[evaluate.py](../../experiments/evaluate.py) gained `--record-video-scene` (manual `env.render()`
+capture). Getting RTX capture to work at all required a **warp↔replicator compat shim**: Isaac
+Sim's bundled replicator calls `wp.types.array(..., owner=False)`, but warp 1.8.0 removed the
+`owner` kwarg → `TypeError: ... unexpected keyword argument 'owner'` on every `rgb_array` render.
+The shim (auto-applied in evaluate.py when a video is requested) strips the dead kwarg (`owner=False`
+== a non-owning view == the modern default). After that, RTX renders — BUT in this **headless**
+install the offscreen render camera **cannot be aimed**: `set_camera_view` is guarded off, the
+Kit `/OmniverseKit_Persp` ignores USD writes, and even a self-created `/World/VideoCam` driven
+per-frame (with `sim.render()`/`app.update()` flushes) stays pinned to its creation-time pose. So
+the photoreal scene render frames uncontrollably and the small low-flying drones are not legible.
+The data-driven animation above is the working substitute; a true USD render would need a GUI/
+non-headless session (where `set_camera_view` works) or a repaired render stack.
 
 ### Eval-harness fix (load-bearing)
 

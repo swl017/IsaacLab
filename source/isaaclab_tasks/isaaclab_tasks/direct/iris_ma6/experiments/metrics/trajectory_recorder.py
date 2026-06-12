@@ -45,7 +45,10 @@ class TrajectoryRecorder:
             self._data[eid] = {
                 "agents": {
                     aid: {"x": [], "y": [], "z": [], "vx": [], "vy": [], "vz": [],
-                          "gimbal_yaw": [], "gimbal_pitch": [], "zoom": []}
+                          "gimbal_yaw": [], "gimbal_pitch": [], "zoom": [],
+                          # target position in this camera's image: (u,v) normalized
+                          # [0,1] with (0.5,0.5)=centered, plus detection validity.
+                          "bbox_u": [], "bbox_v": [], "bbox_valid": []}
                     for aid in self.agent_ids
                 },
                 "target": {"x": [], "y": [], "z": [], "vx": [], "vy": [], "vz": []},
@@ -68,6 +71,7 @@ class TrajectoryRecorder:
         zoom_levels: Dict[str, torch.Tensor] | None = None,
         agent_velocities: Dict[str, torch.Tensor] | None = None,
         target_vel: torch.Tensor | None = None,
+        target_bbox: Dict[str, torch.Tensor] | None = None,
     ) -> None:
         """Record one simulation step for all active sampled environments.
 
@@ -111,6 +115,11 @@ class TrajectoryRecorder:
                     d["agents"][aid]["vx"].append(float(vel[0]))
                     d["agents"][aid]["vy"].append(float(vel[1]))
                     d["agents"][aid]["vz"].append(float(vel[2]))
+                if target_bbox is not None and aid in target_bbox:
+                    bb = target_bbox[aid][eid]  # (3,): u, v, valid
+                    d["agents"][aid]["bbox_u"].append(float(bb[0]))
+                    d["agents"][aid]["bbox_v"].append(float(bb[1]))
+                    d["agents"][aid]["bbox_valid"].append(float(bb[2]))
 
             tgt_local = target_pos[eid] - origin
             d["target"]["x"].append(float(tgt_local[0]))
