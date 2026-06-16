@@ -1,0 +1,58 @@
+H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H   [INFO] Using python from: /home/usrg/miniconda3/envs/env_isaaclab/bin/python
+[WARN][AppLauncher]: There are no arguments attached to the ArgumentParser object. If you have your own arguments, please load your own arguments before calling the `AppLauncher.add_app_launcher_args` method. This allows the method to check the validity of the arguments and perform checks for argument names.
+[INFO][AppLauncher]: Using device: cuda:0
+[INFO][AppLauncher]: Loading experience file: /home/usrg/IsaacPX4/IsaacLab/apps/isaaclab.python.headless.kit
+Loading user config located at: '/home/usrg/isaacsim/kit/data/Kit/Isaac-Sim/4.5/user.config.json'
+[Info] [carb] Logging to file: /home/usrg/isaacsim/kit/logs/Kit/Isaac-Sim/4.5/kit_20260613_011525.log
+2026-06-12 16:15:25 [0ms] [Warning] [omni.kit.app.plugin] No crash reporter present, dumps uploading isn't available.
+2026-06-12 16:15:25 [2ms] [Warning] [omni.ext.plugin] [ext: driver_artifacts] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts' or '/home/usrg/IsaacPX4/IsaacLab/source/driver_artifacts/config'
+2026-06-12 16:15:25 [2ms] [Warning] [omni.ext.plugin] [ext: rendering_modes] Extensions config 'extension.toml' doesn't exist '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes' or '/home/usrg/IsaacPX4/IsaacLab/apps/rendering_modes/config'
+2026-06-12 16:15:25 [481ms] [Warning] [omni.usd_config.extension] Enable omni.materialx.libs extension to use MaterialX
+2026-06-12 16:15:25 [574ms] [Warning] [omni.platforminfo.plugin] failed to open the default display.  Can't verify X Server version.
+2026-06-12 16:15:25 [834ms] [Warning] [omni.isaac.dynamic_control] omni.isaac.dynamic_control is deprecated as of Isaac Sim 4.5. No action is needed from end-users.
+2026-06-12 16:15:29 [4,376ms] [Warning] [gpu.foundation.plugin] Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA GeForce RTX 3090
+2026-06-12 16:15:29 [4,376ms] [Warning] [gpu.foundation.plugin] Please restart your system if CUDA is known to work in your system.
+2026-06-12 16:15:29 [4,376ms] [Warning] [gpu.foundation.plugin] Skipping NVIDIA GPU due CUDA being in bad state: NVIDIA GeForce RTX 3090
+2026-06-12 16:15:29 [4,376ms] [Warning] [gpu.foundation.plugin] Please restart your system if CUDA is known to work in your system.
+
+|---------------------------------------------------------------------------------------------|
+| Driver Version: 535.230.02    | Graphics API: Vulkan
+|=============================================================================================|
+| GPU | Name                             | Active | LDA | GPU Memory | Vendor-ID | LUID       |
+|     |                                  |        |     |            | Device-ID | UUID       |
+|     |                                  |        |     |            | Bus-ID    |            |
+|---------------------------------------------------------------------------------------------|
+| 0   | NVIDIA GeForce RTX 3090          |        |     | 24822   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2204      | 7116df58.. |
+|     |                                  |        |     |            | 9         |            |
+|=============================================================================================|
+| OS: 20.04.6 LTS (Focal Fossa) ubuntu, Version: 20.04.6, Kernel: 5.15.0-139-generic
+| Processor: AMD Ryzen 9 5950X 16-Core Processor
+| Cores: 16 | Logical Cores: 32
+|---------------------------------------------------------------------------------------------|
+| Total Memory (MB): 64195 | Free Memory: 18207
+| Total Page/Swap (MB): 13730 | Free Page/Swap: 17592186044415
+|---------------------------------------------------------------------------------------------|
+2026-06-12 16:15:29 [4,459ms] [Warning] [omni.physx.foundation.plugin] PhysXFoundation: Couldn't get driver version, failed to getDeviceInfo
+2026-06-12 16:15:29 [4,459ms] [Warning] [omni.physx.foundation.plugin] PhysXFoundation: Unable to get IGpuFoundation, GpuDevices or Graphics!
+================================================================================
+INFORMATION_REWARD TEST SUITE
+================================================================================
+Device: cpu  Time: 2026-06-13 01:15:29
+
+================================================================================
+Testing InformationReward
+================================================================================
+  ✓ 0 valid bearings: defined, r_diff=0
+  ✓ 1 valid bearing: quality rises, r_diff only for valid
+  ✓ 2 well-separated bearings collapse Sigma
+  ✓ 2 collinear bearings ~ 1 bearing (GDOP)
+  ✓ r_diff ranks by marginal info (orthogonal > redundant)
+  ✓ in_plane_only mode: finite at 0/1/2 bearings
+  ✓ invalid mask ignores bearing
+  ✓ batched multi-env, finite, correct shapes
+  ✓ Near-target geometry: no singular FIM, finite outputs
+
+================================================================================
+Total: 9  Passed: 9  Failed: 0
+================================================================================

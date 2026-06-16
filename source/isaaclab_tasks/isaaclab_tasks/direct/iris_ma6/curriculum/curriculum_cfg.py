@@ -182,6 +182,17 @@ class CurriculumCfg:
     burst_dropout_end_step: int = 220000
     """Step when burst dropout onset probability reaches target value."""
 
+    # ==========================================================================
+    # Phase: Reward rebalance (ticket 050 Slice B) — bbox -> team information reward
+    # ==========================================================================
+
+    reward_rebalance_start_step: int = 80000
+    """Step to start shifting reward weight from individual bbox to the team/difference
+    information reward. Before this, the policy bootstraps single-agent tracking with bbox."""
+
+    reward_rebalance_end_step: int = 200000
+    """Step when the rebalance completes (full team-reward strength; bbox at its team-phase floor)."""
+
     # Legacy alias for backward compatibility
     delay_start_step: int = 120000
     """[DEPRECATED] Use noise_start_step, fixed_delay_start_step, etc."""
@@ -499,6 +510,12 @@ class CurriculumCfg:
         Used to ramp burst onset probability (p_onset) from 0 to target value.
         """
         return self.get_progress(current_step, self.burst_dropout_start_step, self.burst_dropout_end_step)
+
+    def get_reward_rebalance_progress(self, current_step: int) -> float:
+        """Get progress within the bbox->team reward-rebalance phase [0, 1] (ticket 050 Slice B)."""
+        return self.get_progress(
+            current_step, self.reward_rebalance_start_step, self.reward_rebalance_end_step
+        )
 
     def get_dynamics_progress(self, current_step: int) -> float:
         """Get progress within the dynamics-randomization phase [0, 1].

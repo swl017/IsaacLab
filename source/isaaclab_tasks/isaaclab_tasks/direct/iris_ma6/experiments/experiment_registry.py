@@ -883,6 +883,45 @@ register_experiment(ExperimentCfg(
 
 
 # ===========================================================================
+# T050B: Cooperative track re-acquisition — Slice B (team / difference reward)
+# ===========================================================================
+# A/B both run under the same track-loss scenario + cooperation metrics + the existing
+# enable_full_critic_priv_obs critic (identical, correctly-sized); only `information_reward.enabled`
+# differs, isolating the per-agent difference reward's effect on reacq_success_rate vs the
+# shared-trace baseline (C2 ~ 0.385 from Slice A).
+# Launch with warm-start from the t048 wide lead, e.g.:
+#   train_mappo_rnn_hydra.py --experiment b050_team_reward \
+#     --checkpoint logs/skrl/iris_ma6/2026-06-11_05-17-30_..._net_width_wide/agent_drone_0_final.pt
+# sigma_theta left at cfg default (0.005); intrinsics-implied ~0.0036 at zoom — override per regime.
+# NOTE: enable_critic_gt_target (GT target -> critic) is intentionally NOT set here — it sizes
+# state_space in __post_init__, so setting it via an override (experiment/Hydra from_dict) lands too
+# late and would mismatch the critic. It is an optional follow-up needing a state_space re-finalize
+# at env __init__ (cf. ticket 050 R gap #5 / the Slice-A Hydra-bypass lesson).
+
+register_experiment(ExperimentCfg(
+    name="t050b_team_reward",
+    description="Ticket 050 Slice B: per-agent difference (information) reward + bbox->team rebalance",
+    group="T050B",
+    env_overrides={
+        "information_reward.enabled": True,
+        "enable_track_loss_scenario": True,
+        "cooperation_metrics.enable": True,
+    },
+))
+
+register_experiment(ExperimentCfg(
+    name="t050b_baseline_no_info",
+    description="Ticket 050 Slice B control: same scenario/metrics/critic, shared-trace reward (info off)",
+    group="T050B",
+    env_overrides={
+        "information_reward.enabled": False,
+        "enable_track_loss_scenario": True,
+        "cooperation_metrics.enable": True,
+    },
+))
+
+
+# ===========================================================================
 # Experiment Suites
 # ===========================================================================
 

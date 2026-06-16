@@ -42,6 +42,7 @@ from .iris_ma_env6_test_cfg import (
     IrisMA6TestEnvCfg,
 )
 from .cooperation_metrics import ReacquisitionTracker
+from .information_reward import InformationReward
 from .target_controller import TargetController
 from .triangulation import (
     TriangulationResult,
@@ -815,6 +816,21 @@ class IrisMA6TestEnv(DirectMARLEnv):
         # Eval-only: per-env episode values stashed at reset (drained by experiments/evaluate.py).
         # Gated by cfg so training never grows this buffer.
         self._reacq_episode_buffer: list = []
+
+        # Team / difference information reward (ticket 050, Slice B). Default-off.
+        if self.cfg.information_reward.enabled:
+            self._info_reward = InformationReward(
+                cfg=self.cfg.information_reward,
+                num_envs=self.num_envs,
+                num_agents=self.cfg.num_agents,
+                device=self.device,
+            )
+        else:
+            self._info_reward = None
+        # Reward-rebalance curriculum progress (bbox -> team). 1.0 = full team strength
+        # (Slice 3 drives this from the curriculum; Slice 2 runs at full strength).
+        self.progress_rebalance: float = 1.0
+        self._info_sigma_theta_logged = False
 
         # Facility position for approach mode (at each environment's origin)
         # Clone env_origins so targets approach their local environment center
@@ -1729,6 +1745,43 @@ class IrisMA6TestEnv(DirectMARLEnv):
             agent_bearing_w=agent_bearing_w,
         )
 
+    def _gather_info_signals(self, reward_states):
+        """Per-agent bearings, camera positions, and validity for the information reward (Slice B).
+
+        Returns (bearings_w[N,A,3], cam_pos_w[N,A,3], valid[N,A]); pairs with self._target_pos_w
+        (privileged GT, reward-side only).
+        """
+        N = self.num_envs
+        A = self.cfg.num_agents
+        dev = self.device
+        bearings_w = torch.zeros(N, A, 3, device=dev)
+        cam_pos_w = torch.zeros(N, A, 3, device=dev)
+        for ai, aid in enumerate(self.cfg.possible_agents):
+            bearings_w[:, ai, :] = reward_states[aid].data.camera_ray_directions_w[:, 0, :]
+            cam_pos_w[:, ai, :] = self._root_pos_w[aid]
+        return bearings_w, cam_pos_w, self._per_agent_bbox_nonempty
+
+    def _log_info_sigma_theta(self, reward_states):
+        """One-time diagnostic: the intrinsics-implied bearing noise sigma_theta = sigma_pix / f_eff.
+
+        Surfaced (not auto-applied) so the engineer can set cfg.information_reward.sigma_theta — a
+        load-bearing estimation constant — deliberately rather than silently.
+        """
+        img_w = float(self.cfg.camera.width)
+        sigma_pix = float(self.cfg.delay_system_params.noise_bbox_std)
+        hfovs = torch.stack(
+            [reward_states[a].data.camera_effective_hfov.reshape(-1) for a in self.cfg.possible_agents]
+        )
+        hfov_med = float(hfovs.median().item())
+        f_eff = img_w / (2.0 * float(torch.tan(torch.tensor(hfov_med / 2.0))))
+        implied = sigma_pix / max(f_eff, 1e-6)
+        print(
+            f"[INFO-REWARD] intrinsics-implied sigma_theta ~= {implied:.5f} rad "
+            f"(img_w={img_w:.0f}, hfov_eff_med={hfov_med:.4f}, sigma_pix={sigma_pix:.1f}); "
+            f"cfg.sigma_theta={self.cfg.information_reward.sigma_theta:.5f}",
+            flush=True,
+        )
+
     def _get_rewards(self) -> Dict[str, torch.Tensor]:
         """Get rewards for all agents.
 
@@ -1750,7 +1803,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         # Update curriculum progress
         # current_step = self.common_step_counter if not DEBUG_DRAW else self.cfg.debug_initial_step
-        current_step = self.cfg.debug_initial_step if self.cfg.use_debug_initial_step else self.common_step_counter
+        current_step = self.common_step_counter + self.cfg.debug_initial_step if self.cfg.use_debug_initial_step else self.common_step_counter
         # current_step = self.common_step_counter
         curr = self.cfg.curriculum
         # Reward-gating curriculum signals (progress_coord, progress_safety) and
@@ -1948,6 +2001,29 @@ class IrisMA6TestEnv(DirectMARLEnv):
             dt=dt,
         )  # (E,)
 
+        # Ticket 050 Slice B: team / difference information reward (per-agent marginal info).
+        # Computed ONCE before the agent loop; r_diff[:, i] feeds the triangulation slot.
+        if self._info_reward is not None:
+            _info_bearings, _info_campos, _info_valid = self._gather_info_signals(reward_states)
+            _info_r_diff = self._info_reward.compute(
+                _info_bearings, _info_campos, self._target_pos_w, _info_valid
+            )["r_diff"]
+            # Slice 3: bbox -> team reward rebalance progress (bootstrap tracking first, then team).
+            self.progress_rebalance = self.cfg.curriculum.get_reward_rebalance_progress(current_step)
+            if not self._info_sigma_theta_logged:
+                self._log_info_sigma_theta(reward_states)
+                self._info_sigma_theta_logged = True
+
+        # bbox reward scales: curriculum-interpolated 90/30 -> team-phase 30/20 by progress_rebalance
+        # (no-op when the information reward is off -> p_rebal contribution is 0, scales unchanged).
+        _p_rebal = self.progress_rebalance if self._info_reward is not None else 0.0
+        bbox_center_scale = self.cfg.bbox_center_reward_scale + _p_rebal * (
+            self.cfg.bbox_center_reward_scale_team - self.cfg.bbox_center_reward_scale
+        )
+        bbox_size_scale = self.cfg.bbox_size_reward_scale + _p_rebal * (
+            self.cfg.bbox_size_reward_scale_team - self.cfg.bbox_size_reward_scale
+        )
+
         # Compute rewards for each agent
         for i, agent_id in enumerate(self.cfg.possible_agents):
             delayed_state = reward_states[agent_id]
@@ -2055,17 +2131,28 @@ class IrisMA6TestEnv(DirectMARLEnv):
             )
 
             step_dt = self.cfg.sim.dt * self.cfg.decimation
+
+            # Ticket 050 Slice B: blend the shared trace quality (bootstrap) with the per-agent
+            # marginal-info difference reward (team) by the rebalance progress. p_rebal=0 -> pure
+            # trace (baseline-equivalent); p_rebal=1 -> pure difference reward.
+            if self._info_reward is not None:
+                tri_reward_val = (
+                    (1.0 - self.progress_rebalance)
+                    * triangulation_quality
+                    * self.cfg.triangulation_reward_scale
+                    + self.progress_rebalance
+                    * _info_r_diff[:, i]
+                    * self.cfg.information_reward.info_scale_max
+                )
+            else:
+                tri_reward_val = triangulation_quality * self.cfg.triangulation_reward_scale
+
             rewards = {
                 "action_sum": action_sum * self.cfg.action_sum_penalty_scale * step_dt,
                 "action_delta": action_delta * self.cfg.action_delta_penalty_scale * step_dt,
-                "bbox_center": bbox_center_mapped * self.cfg.bbox_center_reward_scale * step_dt,
-                "bbox_size": bbox_size_mapped * self.cfg.bbox_size_reward_scale * step_dt,
-                "triangulation": (
-                    triangulation_quality
-                    * self.cfg.triangulation_reward_scale
-                    * step_dt
-                    * self.progress_coord
-                ),
+                "bbox_center": bbox_center_mapped * bbox_center_scale * step_dt,
+                "bbox_size": bbox_size_mapped * bbox_size_scale * step_dt,
+                "triangulation": tri_reward_val * step_dt * self.progress_coord,
                 "cbf_penalty": (
                     -self.cbf_manager.lambda_cbf
                     * cbf_penalty_all
@@ -2872,7 +2959,7 @@ class IrisMA6TestEnv(DirectMARLEnv):
 
         num_reset = len(env_ids)
 
-        current_step = self.cfg.debug_initial_step if self.cfg.use_debug_initial_step else self.common_step_counter
+        current_step = self.common_step_counter + self.cfg.debug_initial_step if self.cfg.use_debug_initial_step else self.common_step_counter
         self.progress_dynamics = self._linear_progress(
             self.cfg.curriculum.dynamics_start_step,
             self.cfg.curriculum.dynamics_end_step,

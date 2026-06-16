@@ -25,6 +25,7 @@ from .bbox_raycaster_v2 import BBoxRayCasterV2Cfg, DetectorReplicatorCfg
 from .cbf_safety import CBFManagerCfg
 from .cbf_safety.cbf_cfg import CPARewardShaperCfg
 from .cooperation_metrics import ReacquisitionTrackerCfg
+from .information_reward import InformationRewardCfg
 from .controller import DroneControllerCfg
 from .controller.gain_randomization_cfg import GainRandomizationCfg
 from .controller.tuning.tuning_results.px4_matched import PX4_MATCHED_CONTROLLER_CFG
@@ -830,6 +831,11 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     track_loss_scenario: TrackLossScenarioCfg = TrackLossScenarioCfg()
     """Ceiling-only override values applied iff ``enable_track_loss_scenario``."""
 
+    information_reward: InformationRewardCfg = InformationRewardCfg()
+    """Team / difference (counterfactual) information reward (ticket 050, Slice B). Default-off
+    (enable=False) keeps the env bit-exact; when enabled it replaces the shared trace reward in the
+    `triangulation` slot with the per-agent marginal-information difference reward."""
+
     enable_triangulation: bool = False
     """Append triangulation tail to the actor observation (and draw the observed-triangulation
     ellipsoid in viz). Reward-side triangulation (_triangulation_result_gt / _tri_result_l2 /
@@ -870,6 +876,13 @@ class IrisMA6TestEnvCfg(DirectMARLEnvCfg):
     signal that gates pair_valid_rate under the t046 closer-spawn + 2D-target
     regime. Validated by `2026-06-04_..._ticket047_D_curriculum_cold` @ 400k:
     pair_valid_rate 0.884 (+7.3% vs t046)."""
+
+    bbox_center_reward_scale_team: float = 30.0
+    """Ticket 050 Slice B: bbox_center scale at full team-reward strength. The reward-rebalance
+    curriculum interpolates bbox_center 90 → this as the information reward ramps in."""
+
+    bbox_size_reward_scale_team: float = 20.0
+    """Ticket 050 Slice B: bbox_size scale at full team-reward strength (rebalance ramp target)."""
 
     bbox_size_reward_scale: float = 30.0
     """Reward scale for appropriate bbox size (~20% of image area).

@@ -1,0 +1,14 @@
+{
+  "ticket_slug": "050-slice-b-team-reward",
+  "parent_ticket": "050-cooperative-track-reacquisition",
+  "predecessor": "050-slice-a-scenario-trigger",
+  "current_stage": "Y",
+  "last_approved_stage": "P",
+  "next_action": "FIXES (2026-06-14): (1) entropy-schedule warm-start offset (entropy_loss_schedule.step_offset=debug_initial_step in train_mappo_rnn_hydra + mappo_rnn) so schedule continues from ckpt step (entropy 0.001 not re-injected 0.01). (2) SMOOTH log_std bound in MAPPORNNPolicy (clip_log_std=False + softplus upper bound, log_std_softness=4.0) so gradient flows at the cap — escapes the σ-stuck-at-1.49 zero-gradient trap; verified σ@2000=1.25 (off cap), entropy@2000=0.001. Used by train/eval/play (all import MAPPORNNPolicy). t050b RELAUNCHED with both fixes, healthy. CONCURRENT A/B is NEGATIVE-SUM on the 3090 (2.33 vs 3.6 it/s) -> baseline killed, SEQUENTIAL queue set up (tmux t050b_queue auto-launches t050b_baseline_no_info when team reaches 199800/200000). ETA team ~15h, baseline ~+15h. Then eval both vs C2 0.385. --- Earlier BUGFIX (2026-06-13): information_reward.compute had a singular-FIM crash — leave-one-out by subtraction + float32 inv of an ill-conditioned (near-target, huge w) FIM. Fixed: masked-sum LOO (no subtraction) + float64 inverse + reg + r floor 0.5m; test 9 added, 9/9 pass. Run RELAUNCHED, healthy past step 315. --- All 4 slices done. WARM-START RUN IN FLIGHT (tmux t050b, log /tmp/t050b_train.log): agent_200000.pt warm-start, info reward + scenario + cooperation_metrics ON, --timesteps 200000. Engineer changed current_step to FLOW (= common_step_counter + debug_initial_step) at both _get_rewards:1806 and _reset_idx:2962, so curriculum advances from 200k (burst-dropout + dead-times ramp over first ~20k fine-tune steps then hold). Rebalance window 80-200k already complete at current_step=200k -> full team reward from step 0 (bbox->30). FN-miss DEFERRED (reward/metric use delayed-clean bbox; misses only hit obs -> would need perception-based reward to count; revisit later). TODO: launch t050b_baseline_no_info control arm; on completion eval both vs C2 0.385; then Stage PR.",
+  "slices_total": 4,
+  "slices_completed": [1, 2, 3, 4],
+  "slices_completed": [],
+  "slices_total": null,
+  "created": "2026-06-12",
+  "updated": "2026-06-12"
+}

@@ -1,0 +1,70 @@
+================================================================================
+ITERATION 1 - 2026-06-12 (Slice B / Slice 1, ticket 050)
+================================================================================
+InformationReward implemented; 7/8 passed first run.
+
+Failure: "2 collinear bearings ~ 1 bearing (GDOP)" — assertion abs(q2col-q1)/q1 < 0.5.
+  Got collinear=0.131 vs 1-bearing=0.082 (59% higher). NOT a module bug: the test's
+  "collinear" cameras [30,0,5]/[40,0,6] are not exactly parallel — the small angular
+  difference genuinely adds ~59% information over a single bearing. The GDOP assertion
+  (collinear << well-separated) passed correctly.
+Fix: use an exactly-degenerate geometry — perp=[[30,0,0],[0,30,0]] (bearings -x,-y),
+  collin=[[30,0,0],[60,0,0]] (both bearings exactly -x). Then collinear ≈ 1-bearing (<1%).
+
+Result: Total 8, Passed 8, Failed 0.
+--------------------------------------------------------------------------------
+
+================================================================================
+ITERATION 2 - 2026-06-12 (Slice B / Slice 2: env integration)
+================================================================================
+Wired InformationReward into iris_ma_env6_test{,_cfg}.py (default-off). _get_rewards computes
+r_diff once before the agent loop; triangulation slot = r_diff[:,i]*info_scale_max (full strength;
+Slice 3 adds the rebalance ramp). _gather_info_signals helper; one-time sigma_theta diagnostic.
+bbox_*_reward_scale_team targets added. enable_critic_gt_target verified pre-construction.
+
+Smoke (smoke_env_wiring.py, 8 envs, scenario on, debug_initial_step=300k): PASS —
+info reward instantiated, critic state_space set, triangulation term finite + active (per-agent
+r_diff nonzero). Intrinsics-implied sigma_theta ~= 0.00359 rad (cfg default 0.005). Off-path
+bit-exact (tri_reward_val off = triangulation_quality*triangulation_reward_scale, unchanged).
+--------------------------------------------------------------------------------
+
+================================================================================
+ITERATION 3 - 2026-06-13 (Slice B / Slice 3: rebalance curriculum)
+================================================================================
+Added curriculum.reward_rebalance_{start,end}_step (80k/200k) + get_reward_rebalance_progress.
+_get_rewards: progress_rebalance set from curriculum; triangulation term = (1-p)*trace*scale +
+p*r_diff*info_scale_max; bbox_center/size scales interpolate 90/30 -> 30/20 by p_rebal.
+Off-path bit-exact (p_rebal contributes 0 when info disabled).
+
+Smoke (smoke_env_wiring.py): PASS — rebalance progress 0/140k/300k == 0/0.5/1.0; bbox_center
+interpolates to 60 at mid; env progress_rebalance==1.0 at step 300k; info+critic+tri term active.
+--------------------------------------------------------------------------------
+
+================================================================================
+ITERATION 4 - 2026-06-13 (Slice B / Slice 4: experiment entries)
+================================================================================
+Added b050_team_reward + b050_baseline_no_info to experiment_registry.py (group B050).
+DEVIATION from Stage-I design: dropped enable_critic_gt_target from the overrides. It sizes
+state_space in __post_init__, so an override (experiment/Hydra from_dict) lands after sizing and
+would mismatch the critic (the GT target is NOT in the existing priv-obs registry, so it's a real
++3). Both arms share the existing enable_full_critic_priv_obs critic (identical, correctly sized),
+so the A/B stays clean. Privileged GT-target critic = optional follow-up needing a state_space
+re-finalize at env __init__.
+
+Smoke (smoke_experiment_entries.py): PASS — both entries list under B050; env_overrides resolve
+(information_reward.enabled True/False, enable_track_loss_scenario, cooperation_metrics.enable).
+The full warm-start A/B training is the engineer's run.
+--------------------------------------------------------------------------------
+
+================================================================================
+ITERATION 5 - 2026-06-13 (Slice B: singular-FIM crash in live training)
+================================================================================
+t050b training crashed at step ~60: torch.linalg.inv (batch 826) singular at sigma_minus.
+Root cause (two parts): (1) leave-one-out via SUBTRACTION (fim - info_terms[i]) caused float
+cancellation when an agent is near the target (w huge ~1e10) -> prior lost -> singular;
+(2) even with masked-sum LOO, a near-target bearing makes the FIM PD but ill-conditioned
+(~w/prior ≈ 1e8) which float32 inv reports singular.
+Fix: (a) leave-one-out via masked SUM of other agents' terms (no subtraction);
+(b) invert in float64 (cast .double() -> inv -> back); (c) reg=1e-6*I; (d) r floor 1e-3->0.5m.
+Added test 9 (near-target degenerate geometry). Result: 9/9 pass.
+--------------------------------------------------------------------------------
